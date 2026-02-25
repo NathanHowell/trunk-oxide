@@ -1,13 +1,17 @@
 use std::f32::consts::PI;
+use std::time::Duration;
 
-// Window/hop sizes in seconds
-const WINDOW_S: f32 = 0.040; // 40ms
-const HOP_S: f32 = 0.020; // 20ms
+// Window/hop sizes
+const WINDOW_MS: usize = 40;
+const HOP_MS: usize = 20;
+const HOP_S: f32 = 0.020;
+const MILLIS_PER_SECOND: usize = 1000;
+const NANOS_PER_SECOND: u128 = Duration::from_secs(1).as_nanos();
 
 // Broadband frequency bank
-const BANK_START_HZ: f32 = 250.0;
-const BANK_END_HZ: f32 = 3500.0;
-const BANK_STEP_HZ: f32 = 25.0;
+const BANK_START_HZ: u16 = 250;
+const BANK_END_HZ: u16 = 3500;
+const BANK_STEP_HZ: u16 = 25;
 
 // DTMF frequencies
 const DTMF_LOW: [f32; 4] = [697.0, 770.0, 852.0, 941.0];
@@ -27,18 +31,54 @@ const CTCSS_FREQS: [f32; 38] = [
 ];
 
 // CTCSS analysis uses longer windows for adequate frequency resolution
-const CTCSS_WINDOW_S: f32 = 0.200; // 200ms → 5 Hz bin spacing at 16 kHz
-const CTCSS_HOP_S: f32 = 0.100; // 100ms hop
+const CTCSS_WINDOW_MS: usize = 200; // 200ms → 5 Hz bin spacing at 16 kHz
+const CTCSS_HOP_MS: usize = 100; // 100ms hop
 
 // CTCSS detection thresholds
 const CTCSS_PEAK_TO_NOISE_RATIO: f32 = 8.0;
-const CTCSS_DOMINANCE_RATIO: f32 = 0.5;
-
+const CTCSS_DOMINANCE_NUMERATOR: usize = 1;
+const CTCSS_DOMINANCE_DENOMINATOR: usize = 2; // > 1/2 means "dominant"
 // Detection thresholds
 const FREQ_TOLERANCE_HZ: f32 = 50.0;
 const PEAK_TO_MEAN_RATIO: f32 = 10.0;
 const DTMF_THRESHOLD_RATIO: f32 = 5.0;
 const DTMF_MIN_WINDOWS: usize = 2;
+const WARBLE_MIN_TRANSITIONS: usize = 4;
+const WARBLE_MIN_TRANSITIONS_PER_SEC: usize = 4;
+
+const fn inclusive_steps(start: u16, end: u16, step: u16) -> u16 {
+    ((end - start) / step) + 1
+}
+
+const BANK_BINS: u16 = inclusive_steps(BANK_START_HZ, BANK_END_HZ, BANK_STEP_HZ);
+
+fn mean(values: &[f32]) -> Option<f32> {
+    if values.is_empty() {
+        return None;
+    }
+    let (sum, count) = values.iter().fold((0.0_f32, 0.0_f32), |(sum, count), &v| {
+        (sum + v, count + 1.0)
+    });
+    Some(sum / count)
+}
+
+fn windows_to_seconds(window_count: usize, hop_s: f32) -> f32 {
+    let mut duration_s = 0.0_f32;
+    for _ in 0..window_count {
+        duration_s += hop_s;
+    }
+    duration_s
+}
+
+fn max_samples_for_duration(sample_rate: u32, max_duration_s: f32) -> usize {
+    if !max_duration_s.is_finite() || max_duration_s <= 0.0 {
+        return 0;
+    }
+    let duration = Duration::from_secs_f32(max_duration_s);
+    let samples_u128 =
+        u128::from(sample_rate).saturating_mul(duration.as_nanos()) / NANOS_PER_SECOND;
+    usize::try_from(samples_u128).unwrap_or(usize::MAX)
+}
 
 // --- Public types ---
 
@@ -95,19 +135,14 @@ fn goertzel_mag_sq(samples: &[f32], target_freq: f32, sample_rate: f32) -> f32 {
 
 // --- Window analysis ---
 
-#[allow(clippy::cast_precision_loss)]
 fn extract_dominant_freq(magnitudes: &[f32], bank_freqs: &[f32]) -> Option<f32> {
-    if magnitudes.is_empty() {
-        return None;
-    }
-
     let (peak_idx, &peak_mag) = magnitudes
         .iter()
         .enumerate()
         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
         .unwrap();
 
-    let mean_mag = magnitudes.iter().sum::<f32>() / magnitudes.len() as f32;
+    let mean_mag = mean(magnitudes)?;
 
     if mean_mag <= 0.0 || peak_mag < PEAK_TO_MEAN_RATIO * mean_mag {
         return None;
@@ -121,7 +156,7 @@ fn extract_dominant_freq(magnitudes: &[f32], bank_freqs: &[f32]) -> Option<f32> 
         let denom = 2.0f32.mul_add(-m0, m1) + m2;
         if denom.abs() > f32::EPSILON {
             let delta = 0.5 * (m1 - m2) / denom;
-            return Some(bank_freqs[peak_idx] + delta * BANK_STEP_HZ);
+            return Some(bank_freqs[peak_idx] + delta * f32::from(BANK_STEP_HZ));
         }
     }
 
@@ -176,7 +211,6 @@ fn detect_dtmf_window(samples: &[f32], sample_rate: f32) -> Option<char> {
     None
 }
 
-#[allow(clippy::cast_precision_loss)]
 fn detect_ctcss_window(samples: &[f32], sample_rate: f32) -> Option<usize> {
     let mags: Vec<f32> = CTCSS_FREQS
         .iter()
@@ -189,7 +223,7 @@ fn detect_ctcss_window(samples: &[f32], sample_rate: f32) -> Option<usize> {
         .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
         .unwrap();
 
-    let mean_mag = mags.iter().sum::<f32>() / mags.len() as f32;
+    let mean_mag = mean(&mags)?;
 
     if mean_mag > 0.0 && peak_mag > CTCSS_PEAK_TO_NOISE_RATIO * mean_mag {
         Some(peak_idx)
@@ -207,13 +241,11 @@ struct ToneSegment {
 }
 
 impl ToneSegment {
-    #[allow(clippy::cast_precision_loss)]
     fn duration_s(&self, hop_s: f32) -> f32 {
-        (self.end_window - self.start_window) as f32 * hop_s
+        windows_to_seconds(self.end_window - self.start_window, hop_s)
     }
 }
 
-#[allow(clippy::cast_precision_loss)]
 fn extract_segments(window_freqs: &[Option<f32>]) -> Vec<ToneSegment> {
     let mut segments = Vec::new();
     let mut i = 0;
@@ -222,14 +254,14 @@ fn extract_segments(window_freqs: &[Option<f32>]) -> Vec<ToneSegment> {
         if let Some(freq) = window_freqs[i] {
             let start = i;
             let mut sum = freq;
-            let mut count = 1usize;
+            let mut count_f32 = 1.0_f32;
             i += 1;
 
             while i < window_freqs.len() {
                 if let Some(f) = window_freqs[i] {
-                    if (f - sum / count as f32).abs() < FREQ_TOLERANCE_HZ {
+                    if (f - sum / count_f32).abs() < FREQ_TOLERANCE_HZ {
                         sum += f;
-                        count += 1;
+                        count_f32 += 1.0;
                         i += 1;
                     } else {
                         break;
@@ -240,7 +272,7 @@ fn extract_segments(window_freqs: &[Option<f32>]) -> Vec<ToneSegment> {
             }
 
             segments.push(ToneSegment {
-                freq: sum / count as f32,
+                freq: sum / count_f32,
                 start_window: start,
                 end_window: i,
             });
@@ -300,7 +332,6 @@ fn detect_long_tone(segments: &[ToneSegment], hop_s: f32) -> Option<(DetectedTon
     None
 }
 
-#[allow(clippy::cast_precision_loss)]
 fn detect_warble(window_freqs: &[Option<f32>], hop_s: f32) -> Option<(DetectedTone, usize)> {
     let tone_windows: Vec<(usize, f32)> = window_freqs
         .iter()
@@ -345,13 +376,17 @@ fn detect_warble(window_freqs: &[Option<f32>], hop_s: f32) -> Option<(DetectedTo
     }
 
     let fb = freq_b?;
-    let duration_s = (end - start + 1) as f32 * hop_s;
+    let duration_windows = end - start + 1;
+    let duration_s = windows_to_seconds(duration_windows, hop_s);
     if duration_s <= 0.0 {
         return None;
     }
-    let transitions_per_s = transitions as f32 / duration_s;
 
-    if transitions_per_s > 4.0 && transitions >= 4 {
+    // Compare transitions/window against threshold without float casts.
+    let transitions_fast_enough = transitions
+        .saturating_mul(HOP_MS.saturating_mul(WARBLE_MIN_TRANSITIONS_PER_SEC))
+        > duration_windows.saturating_mul(MILLIS_PER_SECOND);
+    if transitions_fast_enough && transitions >= WARBLE_MIN_TRANSITIONS {
         let (hi, lo) = if freq_a > fb {
             (freq_a, fb)
         } else {
@@ -424,23 +459,22 @@ impl ToneDetector {
         Self::with_ctcss(sample_rate, max_duration_s, false)
     }
 
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss
-    )]
     pub fn with_ctcss(sample_rate: u32, max_duration_s: f32, detect_ctcss: bool) -> Self {
-        let window_size = (sample_rate as f32 * WINDOW_S) as usize;
-        let hop_size = (sample_rate as f32 * HOP_S) as usize;
-        let max_samples = (sample_rate as f32 * max_duration_s) as usize;
+        let sample_rate_usize = usize::try_from(sample_rate).unwrap_or(usize::MAX);
+        let window_size = sample_rate_usize.saturating_mul(WINDOW_MS) / MILLIS_PER_SECOND;
+        let hop_size = sample_rate_usize.saturating_mul(HOP_MS) / MILLIS_PER_SECOND;
+        let max_samples = max_samples_for_duration(sample_rate, max_duration_s);
 
-        let bank_bins = ((BANK_END_HZ - BANK_START_HZ) / BANK_STEP_HZ).floor() as usize + 1;
-        let bank_freqs = (0..bank_bins)
-            .map(|idx| BANK_START_HZ + idx as f32 * BANK_STEP_HZ)
-            .collect();
+        let mut bank_freqs = Vec::with_capacity(usize::from(BANK_BINS));
+        let mut freq = f32::from(BANK_START_HZ);
+        for _ in 0..BANK_BINS {
+            bank_freqs.push(freq);
+            freq += f32::from(BANK_STEP_HZ);
+        }
 
-        let ctcss_window_size = (sample_rate as f32 * CTCSS_WINDOW_S) as usize;
-        let ctcss_hop_size = (sample_rate as f32 * CTCSS_HOP_S) as usize;
+        let ctcss_window_size =
+            sample_rate_usize.saturating_mul(CTCSS_WINDOW_MS) / MILLIS_PER_SECOND;
+        let ctcss_hop_size = sample_rate_usize.saturating_mul(CTCSS_HOP_MS) / MILLIS_PER_SECOND;
 
         Self {
             sample_rate,
@@ -507,7 +541,6 @@ impl ToneDetector {
         self.complete
     }
 
-    #[allow(clippy::cast_precision_loss)]
     pub fn finish(self) -> ToneDetectorResult {
         let hop_s = HOP_S;
         let segments = extract_segments(&self.window_freqs);
@@ -551,7 +584,9 @@ impl ToneDetector {
             if present > 0 {
                 let (best_idx, &best_count) =
                     counts.iter().enumerate().max_by_key(|&(_, c)| *c).unwrap();
-                if best_count as f32 / present as f32 > CTCSS_DOMINANCE_RATIO {
+                if best_count.saturating_mul(CTCSS_DOMINANCE_DENOMINATOR)
+                    > present.saturating_mul(CTCSS_DOMINANCE_NUMERATOR)
+                {
                     tones.push(DetectedTone::Ctcss {
                         freq: CTCSS_FREQS[best_idx],
                     });

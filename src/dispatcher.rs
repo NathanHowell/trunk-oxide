@@ -23,6 +23,8 @@ pub struct Dispatcher {
     aggregator: Arc<Aggregator>,
     buffer_duration_ms: u64,
     channel_id: u64,
+    tone_detection: bool,
+    tone_detection_duration_s: f32,
 }
 
 impl Dispatcher {
@@ -32,6 +34,8 @@ impl Dispatcher {
         aggregator: Arc<Aggregator>,
         buffer_duration_ms: u64,
         channel_id: u64,
+        tone_detection: bool,
+        tone_detection_duration_s: f32,
     ) -> Self {
         Self {
             calls: RwLock::new(HashMap::new()),
@@ -40,6 +44,8 @@ impl Dispatcher {
             aggregator,
             buffer_duration_ms,
             channel_id,
+            tone_detection,
+            tone_detection_duration_s,
         }
     }
 
@@ -120,6 +126,8 @@ impl Dispatcher {
             Arc::clone(&self.discord),
             self.buffer_duration_ms,
             self.channel_id,
+            self.tone_detection,
+            self.tone_detection_duration_s,
         );
 
         tokio::spawn(handler.run());

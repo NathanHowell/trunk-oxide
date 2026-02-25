@@ -5,6 +5,7 @@ mod discord;
 mod dispatcher;
 mod grpc;
 mod resampler;
+mod tone_detect;
 mod transcriber;
 
 use std::sync::Arc;
@@ -34,6 +35,8 @@ async fn main() -> Result<()> {
         aggregator,
         config.audio.buffer_duration_ms,
         config.discord.channel_id,
+        config.audio.tone_detection,
+        config.audio.tone_detection_duration_s,
     ));
 
     let addr = config.grpc.listen_addr.parse()?;

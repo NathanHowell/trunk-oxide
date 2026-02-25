@@ -39,12 +39,18 @@ pub struct WhisperConfig {
 pub struct AudioConfig {
     #[serde(default = "default_buffer_duration_ms")]
     pub buffer_duration_ms: u64,
+    #[serde(default = "default_tone_detection")]
+    pub tone_detection: bool,
+    #[serde(default = "default_tone_detection_duration_s")]
+    pub tone_detection_duration_s: f32,
 }
 
 impl Default for AudioConfig {
     fn default() -> Self {
         Self {
             buffer_duration_ms: default_buffer_duration_ms(),
+            tone_detection: default_tone_detection(),
+            tone_detection_duration_s: default_tone_detection_duration_s(),
         }
     }
 }
@@ -63,6 +69,12 @@ fn default_language() -> String {
 }
 fn default_buffer_duration_ms() -> u64 {
     10000
+}
+fn default_tone_detection() -> bool {
+    true
+}
+fn default_tone_detection_duration_s() -> f32 {
+    5.0
 }
 
 impl Config {

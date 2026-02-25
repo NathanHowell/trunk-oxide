@@ -9,6 +9,7 @@ use crate::discord::DiscordClient;
 use crate::dispatcher::CallKey;
 use crate::proto;
 use crate::resampler::Resampler;
+use crate::tone_detect::ToneDetector;
 use crate::transcriber::Transcriber;
 
 pub enum CallMessage {
@@ -30,6 +31,7 @@ pub struct CallHandler {
     channel_id: u64,
     audio_buffer: Vec<f32>,
     resampler: Option<Resampler>,
+    tone_detector: Option<ToneDetector>,
     thread_id: Option<ChannelId>,
     current_message_id: Option<MessageId>,
     current_message_text: String,
@@ -44,7 +46,15 @@ impl CallHandler {
         discord: Arc<DiscordClient>,
         buffer_duration_ms: u64,
         channel_id: u64,
+        tone_detection: bool,
+        tone_detection_duration_s: f32,
     ) -> Self {
+        let tone_detector = if tone_detection {
+            Some(ToneDetector::new(16000, tone_detection_duration_s))
+        } else {
+            None
+        };
+
         Self {
             key,
             call_info,
@@ -55,6 +65,7 @@ impl CallHandler {
             channel_id,
             audio_buffer: Vec::new(),
             resampler: None,
+            tone_detector,
             thread_id: None,
             current_message_id: None,
             current_message_text: String::new(),
@@ -175,12 +186,52 @@ impl CallHandler {
             resampler.process(&decoded)?
         };
 
+        if let Some(detector) = &mut self.tone_detector {
+            detector.process(&samples);
+        }
+
         self.audio_buffer.extend_from_slice(&samples);
+
+        if self
+            .tone_detector
+            .as_ref()
+            .is_some_and(|d| d.is_complete())
+        {
+            self.finish_tone_detection().await?;
+        }
 
         let buffer_threshold = (self.buffer_duration_ms as usize * 16000) / 1000;
         if self.audio_buffer.len() >= buffer_threshold {
             let audio: Vec<f32> = self.audio_buffer.drain(..).collect();
             self.transcribe_and_post(audio).await?;
+        }
+
+        Ok(())
+    }
+
+    async fn finish_tone_detection(&mut self) -> Result<()> {
+        let Some(detector) = self.tone_detector.take() else {
+            return Ok(());
+        };
+
+        let result = detector.finish();
+
+        if !result.tones.is_empty() {
+            if let Some(thread_id) = self.thread_id {
+                let msg = result
+                    .tones
+                    .iter()
+                    .map(|t| format!("**{}**", t))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                self.discord.send_message(thread_id, &msg).await?;
+            }
+
+            // Strip tone samples from the front of the audio buffer
+            let strip = result.tone_end_sample.min(self.audio_buffer.len());
+            if strip > 0 {
+                self.audio_buffer.drain(..strip);
+            }
         }
 
         Ok(())
@@ -261,6 +312,11 @@ impl CallHandler {
         if let Some(resampler) = &mut self.resampler {
             let flushed = resampler.flush()?;
             self.audio_buffer.extend_from_slice(&flushed);
+        }
+
+        // Force-finish tone detection if still active (short call)
+        if self.tone_detector.is_some() {
+            self.finish_tone_detection().await?;
         }
 
         // Transcribe remaining audio

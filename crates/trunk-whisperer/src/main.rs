@@ -49,9 +49,7 @@ async fn main() -> Result<()> {
     tracing::info!(path = %listen_path, "trunk-whisperer listening");
 
     tonic::transport::Server::builder()
-        .add_service(
-            proto::trunk_recorder_plugin_server::TrunkRecorderPluginServer::new(service),
-        )
+        .add_service(proto::trunk_recorder_plugin_server::TrunkRecorderPluginServer::new(service))
         .serve_with_incoming_shutdown(incoming, shutdown_signal())
         .await?;
 

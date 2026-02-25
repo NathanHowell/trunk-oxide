@@ -14,11 +14,7 @@ impl DiscordClient {
         }
     }
 
-    pub async fn create_call_thread(
-        &self,
-        channel_id: u64,
-        name: &str,
-    ) -> Result<ChannelId> {
+    pub async fn create_call_thread(&self, channel_id: u64, name: &str) -> Result<ChannelId> {
         let channel = ChannelId::new(channel_id);
         let thread = channel
             .create_thread(
@@ -31,11 +27,7 @@ impl DiscordClient {
         Ok(thread.id)
     }
 
-    pub async fn send_message(
-        &self,
-        channel_id: ChannelId,
-        text: &str,
-    ) -> Result<MessageId> {
+    pub async fn send_message(&self, channel_id: ChannelId, text: &str) -> Result<MessageId> {
         let msg = channel_id
             .send_message(&self.http, CreateMessage::new().content(text))
             .await?;

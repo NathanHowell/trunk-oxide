@@ -311,8 +311,14 @@ pub mod ffi {
         fn rust_plugin_calls_active(plugin: &mut RustPluginBox, calls: &[*const TrCall]) -> i32;
         fn rust_plugin_setup_recorder(plugin: &mut RustPluginBox, recorder: &TrRecorder) -> i32;
         fn rust_plugin_setup_system(plugin: &mut RustPluginBox, system: &TrSystem) -> i32;
-        fn rust_plugin_setup_systems(plugin: &mut RustPluginBox, systems: &[*const TrSystem]) -> i32;
-        fn rust_plugin_setup_sources(plugin: &mut RustPluginBox, sources: &[*const TrSource]) -> i32;
+        fn rust_plugin_setup_systems(
+            plugin: &mut RustPluginBox,
+            systems: &[*const TrSystem],
+        ) -> i32;
+        fn rust_plugin_setup_sources(
+            plugin: &mut RustPluginBox,
+            sources: &[*const TrSource],
+        ) -> i32;
         fn rust_plugin_setup_config(
             plugin: &mut RustPluginBox,
             sources: &[*const TrSource],
@@ -416,11 +422,7 @@ pub trait RustPluginCallbacks: Send {
         sources: &[*const ffi::TrSource],
         systems: &[*const ffi::TrSystem],
     ) -> i32;
-    fn trunk_message(
-        &mut self,
-        messages: &[ffi::TrTrunkMessage],
-        system: &ffi::TrSystem,
-    ) -> i32;
+    fn trunk_message(&mut self, messages: &[ffi::TrTrunkMessage], system: &ffi::TrSystem) -> i32;
     fn system_rates(&mut self, systems: &[*const ffi::TrSystem], time_diff: f32) -> i32;
     fn unit_registration(&mut self, system: &ffi::TrSystem, source_id: i64) -> i32;
     fn unit_deregistration(&mut self, system: &ffi::TrSystem, source_id: i64) -> i32;
@@ -438,12 +440,7 @@ pub trait RustPluginCallbacks: Send {
         source_id: i64,
         talkgroup: i64,
     ) -> i32;
-    fn unit_location(
-        &mut self,
-        system: &ffi::TrSystem,
-        source_id: i64,
-        talkgroup: i64,
-    ) -> i32;
+    fn unit_location(&mut self, system: &ffi::TrSystem, source_id: i64, talkgroup: i64) -> i32;
 }
 
 // ── Trampoline functions from C++ → Rust via cxx ──
@@ -507,17 +504,11 @@ fn rust_plugin_setup_system(plugin: &mut RustPluginBox, system: &ffi::TrSystem) 
     plugin.inner.setup_system(system)
 }
 
-fn rust_plugin_setup_systems(
-    plugin: &mut RustPluginBox,
-    systems: &[*const ffi::TrSystem],
-) -> i32 {
+fn rust_plugin_setup_systems(plugin: &mut RustPluginBox, systems: &[*const ffi::TrSystem]) -> i32 {
     plugin.inner.setup_systems(systems)
 }
 
-fn rust_plugin_setup_sources(
-    plugin: &mut RustPluginBox,
-    sources: &[*const ffi::TrSource],
-) -> i32 {
+fn rust_plugin_setup_sources(plugin: &mut RustPluginBox, sources: &[*const ffi::TrSource]) -> i32 {
     plugin.inner.setup_sources(sources)
 }
 

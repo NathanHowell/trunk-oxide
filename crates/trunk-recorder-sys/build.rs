@@ -15,7 +15,10 @@ fn main() {
 
     // Compute GNURADIO_VERSION hex from pkg-config version (e.g. "3.10.12")
     let gnuradio_version_hex = compute_gnuradio_version(&gnuradio_runtime.version);
-    println!("cargo:warning=Using GNURADIO_VERSION=0x{gnuradio_version_hex:06x} ({})", gnuradio_runtime.version);
+    println!(
+        "cargo:warning=Using GNURADIO_VERSION=0x{gnuradio_version_hex:06x} ({})",
+        gnuradio_runtime.version
+    );
 
     // Required gnuradio subpackages
     let required_gr_packages = [
@@ -55,7 +58,10 @@ fn main() {
     build.file("cpp/bridge.cpp").std("c++17");
 
     // Define GNURADIO_VERSION so trunk-recorder headers use correct conditionals
-    build.define("GNURADIO_VERSION", format!("0x{gnuradio_version_hex:06x}").as_str());
+    build.define(
+        "GNURADIO_VERSION",
+        format!("0x{gnuradio_version_hex:06x}").as_str(),
+    );
 
     // trunk-recorder headers
     build.include(&trunk_recorder_dir);
@@ -148,10 +154,9 @@ fn find_boost_include() -> Option<PathBuf> {
 /// the real headers will be found first via the earlier include paths.
 fn generate_compat_stubs(compat_dir: &std::path::Path, trunk_recorder_dir: &std::path::Path) {
     // Check which optional headers are missing by testing if the compiler can find them
-    let stubs: &[(&str, &str)] = &[
-        (
-            "osmosdr/source.h",
-            r#"#pragma once
+    let stubs: &[(&str, &str)] = &[(
+        "osmosdr/source.h",
+        r#"#pragma once
 // Stub: osmosdr not available on this system.
 // The real header is only needed for Source's osmosdr::source member,
 // which we never instantiate from the plugin bridge.
@@ -184,8 +189,7 @@ public:
 };
 } // namespace osmosdr
 "#,
-        ),
-    ];
+    )];
 
     // Only write stubs for headers that can't be found in the real include paths
     for (header, content) in stubs {

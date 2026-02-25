@@ -1,7 +1,6 @@
 use anyhow::Result;
 use rubato::{
-    Resampler as _, SincFixedIn, SincInterpolationParameters, SincInterpolationType,
-    WindowFunction,
+    Resampler as _, SincFixedIn, SincInterpolationParameters, SincInterpolationType, WindowFunction,
 };
 
 const OUTPUT_RATE: u32 = 16000;

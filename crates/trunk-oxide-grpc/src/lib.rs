@@ -1,5 +1,5 @@
 use tokio::sync::mpsc;
-use tonic::transport::Channel;
+use tonic::transport::Endpoint;
 use trunk_recorder_plugin::{
     Plugin, Result, SignalEvent, TrCall, TrCallData, TrRecorder, TrSystem, TrTrunkMessage,
 };
@@ -269,9 +269,18 @@ fn convert_trunk_messages(messages: &[TrTrunkMessage]) -> Vec<proto::TrunkMessag
 
 // ── Plugin implementation ──
 
-#[derive(Default)]
+const DEFAULT_SOCKET_PATH: &str = "/var/run/trunk-oxide/trunk-oxide.sock";
+
 struct GrpcConfig {
-    server_address: String,
+    socket_path: String,
+}
+
+impl Default for GrpcConfig {
+    fn default() -> Self {
+        Self {
+            socket_path: DEFAULT_SOCKET_PATH.to_string(),
+        }
+    }
 }
 
 struct GrpcPlugin {
@@ -318,10 +327,10 @@ impl GrpcPlugin {
 
 impl Plugin for GrpcPlugin {
     fn parse_config(&mut self, config: &serde_json::Value) -> Result {
-        self.config.server_address = config
-            .get("server")
+        self.config.socket_path = config
+            .get("socket")
             .and_then(|v| v.as_str())
-            .unwrap_or("http://127.0.0.1:50051")
+            .unwrap_or(DEFAULT_SOCKET_PATH)
             .to_string();
         Ok(())
     }
@@ -335,10 +344,10 @@ impl Plugin for GrpcPlugin {
         let (audio_tx, audio_rx) = mpsc::channel::<proto::AudioSample>(4096);
         let (event_tx, event_rx) = mpsc::channel::<proto::PluginEvent>(4096);
 
-        let addr = self.config.server_address.clone();
+        let socket_path = self.config.socket_path.clone();
 
         rt.spawn(async move {
-            if let Err(e) = run_streams(addr, audio_rx, event_rx).await {
+            if let Err(e) = run_streams(socket_path, audio_rx, event_rx).await {
                 tracing::error!("gRPC stream error: {e}");
             }
         });
@@ -554,11 +563,20 @@ impl Plugin for GrpcPlugin {
 
 #[allow(clippy::significant_drop_tightening)]
 async fn run_streams(
-    addr: String,
+    socket_path: String,
     audio_rx: mpsc::Receiver<proto::AudioSample>,
     event_rx: mpsc::Receiver<proto::PluginEvent>,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    let channel = Channel::from_shared(addr)?.connect().await?;
+    // The URI is unused for UDS but tonic requires a valid one.
+    let channel = Endpoint::try_from("http://[::]:50051")?
+        .connect_with_connector(tower::service_fn(move |_| {
+            let path = socket_path.clone();
+            async move {
+                let stream = tokio::net::UnixStream::connect(path).await?;
+                Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(stream))
+            }
+        }))
+        .await?;
     let audio_handle = {
         let mut audio_client = TrunkRecorderPluginClient::new(channel.clone());
         tokio::spawn(async move {

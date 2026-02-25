@@ -2342,6 +2342,7 @@ dependencies = [
 name = "trunk-oxide-grpc"
 version = "0.1.0"
 dependencies = [
+ "hyper-util",
  "prost",
  "prost-types",
  "serde_json",
@@ -2349,6 +2350,7 @@ dependencies = [
  "tokio-stream",
  "tonic",
  "tonic-build",
+ "tower 0.4.13",
  "tracing",
  "trunk-recorder-plugin",
  "trunk-recorder-sys",

@@ -44,6 +44,6 @@ RUN cargo build --release -p trunk-whisperer
 # Runtime — distroless for minimal attack surface
 FROM gcr.io/distroless/cc-debian13:nonroot
 
-COPY --from=builder /build/target/release/trunk-whisperer /usr/local/bin/trunk-whisperer
+COPY --from=builder /build/target/release/trunk-whisperer /bin/trunk-whisperer
 
-ENTRYPOINT ["trunk-whisperer"]
+ENTRYPOINT ["/bin/trunk-whisperer"]

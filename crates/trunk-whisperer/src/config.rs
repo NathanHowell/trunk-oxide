@@ -12,7 +12,12 @@ pub struct Config {
 
 #[derive(Debug, Deserialize)]
 pub struct GrpcConfig {
+    #[serde(default = "default_listen_path")]
     pub listen_path: String,
+}
+
+fn default_listen_path() -> String {
+    "/var/run/trunk-oxide/trunk-oxide.sock".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -79,7 +84,7 @@ const fn default_tone_detection_duration_s() -> f32 {
 
 impl Config {
     pub fn load() -> Result<Self> {
-        let content = std::fs::read_to_string("config.toml")?;
+        let content = std::fs::read_to_string("/etc/trunk-whisperer/config.toml")?;
         let mut config: Self = toml::from_str(&content)?;
 
         if let Ok(token) = std::env::var("DISCORD_TOKEN") {

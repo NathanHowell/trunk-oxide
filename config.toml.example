@@ -1,0 +1,9 @@
+[grpc]
+listen_path = "/var/run/trunk-oxide/trunk-oxide.sock"
+
+[discord]
+bot_token = ""
+channel_id = 0
+
+[whisper]
+model_path = "/models/ggml-base.en.bin"

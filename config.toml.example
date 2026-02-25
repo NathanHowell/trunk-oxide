@@ -1,0 +1,16 @@
+[grpc]
+listen_addr = "0.0.0.0:50051"
+
+[discord]
+bot_token = ""  # Override via DISCORD_TOKEN env var
+channel_id = 1234567890123456789
+
+[whisper]
+model_path = "models/ggml-large-v3.bin"
+gpu_count = 2
+max_concurrent = 4
+flash_attn = true
+language = "en"
+
+[audio]
+buffer_duration_ms = 10000

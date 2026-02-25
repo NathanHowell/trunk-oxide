@@ -3,10 +3,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let target_os = std::env::var("CARGO_CFG_TARGET_OS").unwrap();
 
-    // Allow undefined symbols in the cdylib. Source and Recorder have non-virtual
-    // methods (get_num, get_driver, etc.) defined in trunk-recorder's binary.
-    // Since we're a plugin loaded via dlopen, these symbols resolve at load time
-    // from the host process.
+    // Allow undefined symbols in the cdylib. The plugin is loaded via dlopen
+    // into trunk-recorder, so any remaining undefined symbols resolve from the
+    // host process at load time.
     if target_os == "macos" {
         println!("cargo:rustc-cdylib-link-arg=-Wl,-undefined,dynamic_lookup");
     } else if target_os == "linux" {
@@ -20,6 +19,14 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rustc-cdylib-link-arg=-Wl,-exported_symbol,_create_plugin");
     } else if target_os == "linux" {
         println!("cargo:rustc-cdylib-link-arg=-Wl,--require-defined=create_plugin");
+
+        // Rust's cdylib uses a version script with `local: *` that hides all
+        // non-Rust symbols. Add a supplementary version script to export
+        // create_plugin to the dynamic symbol table.
+        let out_dir = std::env::var("OUT_DIR")?;
+        let ver_script = format!("{out_dir}/export_create_plugin.ver");
+        std::fs::write(&ver_script, "{ global: create_plugin; };\n")?;
+        println!("cargo:rustc-cdylib-link-arg=-Wl,--version-script={ver_script}");
     }
 
     Ok(())

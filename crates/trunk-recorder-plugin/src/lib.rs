@@ -1,7 +1,7 @@
 pub use trunk_recorder_sys::ffi::{
     TrCall, TrCallData, TrCallDataStatus, TrCallError, TrCallSource, TrMessageType,
-    TrMonitoringState, TrPatchData, TrRecorder, TrSignalType, TrSource, TrState, TrSystem,
-    TrTransmission, TrTrunkMessage,
+    TrMonitoringState, TrPatchData, TrRecorder, TrSignalType, TrState, TrSystem, TrTransmission,
+    TrTrunkMessage,
 };
 
 // Re-export sys crate for use by the export macro
@@ -61,10 +61,10 @@ pub trait Plugin: Send {
     fn setup_systems(&mut self, _systems: &[&TrSystem]) -> Result {
         Ok(())
     }
-    fn setup_sources(&mut self, _sources: &[&TrSource]) -> Result {
+    fn setup_sources(&mut self) -> Result {
         Ok(())
     }
-    fn setup_config(&mut self, _sources: &[&TrSource], _systems: &[&TrSystem]) -> Result {
+    fn setup_config(&mut self, _systems: &[&TrSystem]) -> Result {
         Ok(())
     }
     fn trunk_message(&mut self, _messages: &[TrTrunkMessage], _system: &TrSystem) -> Result {
@@ -273,9 +273,8 @@ impl<P: Plugin> trunk_recorder_sys::RustPluginCallbacks for PluginAdapter<P> {
         }
     }
 
-    fn setup_sources(&mut self, sources: &[*const TrSource]) -> i32 {
-        let refs = Self::ptr_slice_to_refs(sources);
-        match self.inner.setup_sources(&refs) {
+    fn setup_sources(&mut self) -> i32 {
+        match self.inner.setup_sources() {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("trunk-oxide plugin setup_sources error: {e}");
@@ -284,10 +283,9 @@ impl<P: Plugin> trunk_recorder_sys::RustPluginCallbacks for PluginAdapter<P> {
         }
     }
 
-    fn setup_config(&mut self, sources: &[*const TrSource], systems: &[*const TrSystem]) -> i32 {
-        let src_refs = Self::ptr_slice_to_refs(sources);
+    fn setup_config(&mut self, systems: &[*const TrSystem]) -> i32 {
         let sys_refs = Self::ptr_slice_to_refs(systems);
-        match self.inner.setup_config(&src_refs, &sys_refs) {
+        match self.inner.setup_config(&sys_refs) {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("trunk-oxide plugin setup_config error: {e}");

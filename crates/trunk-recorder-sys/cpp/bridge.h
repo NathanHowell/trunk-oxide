@@ -6,7 +6,7 @@
 // trunk-recorder headers — these provide the real type definitions.
 // Include paths are set by build.rs (gnuradio, boost, op25_repeater, etc.)
 #include "trunk-recorder/plugin_manager/plugin_api.h"
-#include "trunk-recorder/source.h"
+#include "trunk-recorder/recorders/recorder.h"
 
 namespace trunk_oxide {
 
@@ -40,11 +40,6 @@ struct TrSystem final {
 struct TrRecorder final {
     Recorder *ptr;
     explicit TrRecorder(Recorder *p) : ptr(p) {}
-};
-
-struct TrSource final {
-    Source *ptr;
-    explicit TrSource(Source *p) : ptr(p) {}
 };
 
 // ── Call accessor wrappers ──
@@ -95,7 +90,6 @@ int32_t system_get_decode_rate(const TrSystem &sys);
 
 // ── Recorder accessor wrappers ──
 int32_t recorder_get_num(const TrRecorder &rec);
-rust::String recorder_get_type_string(const TrRecorder &rec);
 double recorder_get_freq(const TrRecorder &rec);
 int32_t recorder_get_freq_error(const TrRecorder &rec);
 int64_t recorder_get_talkgroup(const TrRecorder &rec);
@@ -105,24 +99,5 @@ bool recorder_is_conventional(const TrRecorder &rec);
 bool recorder_is_active(const TrRecorder &rec);
 bool recorder_is_idle(const TrRecorder &rec);
 double recorder_get_current_length(const TrRecorder &rec);
-
-// ── Source accessor wrappers ──
-int32_t source_get_num(const TrSource &src);
-double source_get_center(const TrSource &src);
-double source_get_rate(const TrSource &src);
-double source_get_min_hz(const TrSource &src);
-double source_get_max_hz(const TrSource &src);
-rust::String source_get_driver(const TrSource &src);
-rust::String source_get_device(const TrSource &src);
-rust::String source_get_antenna(const TrSource &src);
-double source_get_if_gain(const TrSource &src);
-double source_get_lna_gain(const TrSource &src);
-double source_get_pga_gain(const TrSource &src);
-double source_get_vga1_gain(const TrSource &src);
-double source_get_vga2_gain(const TrSource &src);
-int32_t source_get_analog_recorder_count(const TrSource &src);
-int32_t source_get_digital_recorder_count(const TrSource &src);
-int32_t source_get_debug_recorder_count(const TrSource &src);
-int32_t source_get_sigmf_recorder_count(const TrSource &src);
 
 } // namespace trunk_oxide

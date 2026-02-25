@@ -1,7 +1,7 @@
 use tokio::sync::mpsc;
 use tonic::transport::Channel;
 use trunk_recorder_plugin::{
-    Plugin, Result, SignalEvent, TrCall, TrCallData, TrRecorder, TrSource, TrSystem, TrTrunkMessage,
+    Plugin, Result, SignalEvent, TrCall, TrCallData, TrRecorder, TrSystem, TrTrunkMessage,
 };
 
 mod proto {
@@ -83,12 +83,12 @@ fn system_info(sys: &TrSystem) -> proto::SystemInfo {
 fn recorder_info(rec: &TrRecorder) -> proto::RecorderInfo {
     use trunk_recorder_sys::ffi::{
         recorder_get_current_length, recorder_get_freq, recorder_get_freq_error, recorder_get_num,
-        recorder_get_talkgroup, recorder_get_type_string, recorder_get_wav_hz, recorder_is_active,
-        recorder_is_analog, recorder_is_conventional, recorder_is_idle,
+        recorder_get_talkgroup, recorder_get_wav_hz, recorder_is_active, recorder_is_analog,
+        recorder_is_conventional, recorder_is_idle,
     };
     proto::RecorderInfo {
         id: recorder_get_num(rec),
-        r#type: recorder_get_type_string(rec),
+        r#type: String::new(),
         freq: recorder_get_freq(rec),
         freq_error: recorder_get_freq_error(rec),
         talkgroup: recorder_get_talkgroup(rec),
@@ -98,35 +98,6 @@ fn recorder_info(rec: &TrRecorder) -> proto::RecorderInfo {
         is_active: recorder_is_active(rec),
         is_idle: recorder_is_idle(rec),
         current_length: recorder_get_current_length(rec),
-    }
-}
-
-fn source_info(src: &TrSource) -> proto::SourceInfo {
-    use trunk_recorder_sys::ffi::{
-        source_get_analog_recorder_count, source_get_antenna, source_get_center,
-        source_get_debug_recorder_count, source_get_device, source_get_digital_recorder_count,
-        source_get_driver, source_get_if_gain, source_get_lna_gain, source_get_max_hz,
-        source_get_min_hz, source_get_num, source_get_pga_gain, source_get_rate,
-        source_get_sigmf_recorder_count, source_get_vga1_gain, source_get_vga2_gain,
-    };
-    proto::SourceInfo {
-        src_num: source_get_num(src),
-        center_freq: source_get_center(src),
-        rate: source_get_rate(src),
-        min_hz: source_get_min_hz(src),
-        max_hz: source_get_max_hz(src),
-        driver: source_get_driver(src),
-        device: source_get_device(src),
-        antenna: source_get_antenna(src),
-        if_gain: source_get_if_gain(src),
-        lna_gain: source_get_lna_gain(src),
-        pga_gain: source_get_pga_gain(src),
-        vga1_gain: source_get_vga1_gain(src),
-        vga2_gain: source_get_vga2_gain(src),
-        analog_recorders: source_get_analog_recorder_count(src),
-        digital_recorders: source_get_digital_recorder_count(src),
-        debug_recorders: source_get_debug_recorder_count(src),
-        sigmf_recorders: source_get_sigmf_recorder_count(src),
     }
 }
 
@@ -484,19 +455,19 @@ impl Plugin for GrpcPlugin {
         Ok(())
     }
 
-    fn setup_sources(&mut self, sources: &[&TrSource]) -> Result {
+    fn setup_sources(&mut self) -> Result {
         self.send_event(proto::plugin_event::Event::SetupSources(
             proto::SetupSourcesEvent {
-                sources: sources.iter().map(|s| source_info(s)).collect(),
+                sources: vec![],
             },
         ));
         Ok(())
     }
 
-    fn setup_config(&mut self, sources: &[&TrSource], systems: &[&TrSystem]) -> Result {
+    fn setup_config(&mut self, systems: &[&TrSystem]) -> Result {
         self.send_event(proto::plugin_event::Event::SetupConfig(
             proto::SetupConfigEvent {
-                sources: sources.iter().map(|s| source_info(s)).collect(),
+                sources: vec![],
                 systems: systems.iter().map(|s| system_info(s)).collect(),
             },
         ));

@@ -236,6 +236,14 @@ public:
     explicit RustPluginBridge(rust::Box<RustPluginBox> plugin)
         : plugin_(std::move(plugin)) {}
 
+    // Override the default init() which references the `frequency_format`
+    // global — that symbol isn't exported from the trunk-recorder binary
+    // (no -rdynamic), so leaving it unresolved would fail at dlopen time.
+    int init(Config * /*config*/, std::vector<Source *> /*sources*/,
+             std::vector<System *> /*systems*/) override {
+        return 0;
+    }
+
     int parse_config(json config_data) override {
         std::string json_str = config_data.dump();
         return rust_plugin_parse_config(*plugin_, rust::Str(json_str.data(), json_str.size()));
@@ -325,34 +333,15 @@ public:
         return rust_plugin_setup_systems(*plugin_, slice);
     }
 
-    int setup_sources(std::vector<Source *> sources) override {
-        std::vector<TrSource> wrappers;
-        wrappers.reserve(sources.size());
-        for (auto *s : sources) {
-            wrappers.emplace_back(s);
-        }
-        std::vector<const TrSource *> ptrs;
-        ptrs.reserve(wrappers.size());
-        for (auto &w : wrappers) {
-            ptrs.push_back(&w);
-        }
-        rust::Slice<const TrSource *const> slice(ptrs.data(), ptrs.size());
-        return rust_plugin_setup_sources(*plugin_, slice);
+    int setup_sources(std::vector<Source *> /*sources*/) override {
+        // Source has no virtual methods — we cannot safely call its accessors
+        // from a dlopen'd plugin (the symbols aren't exported by trunk-recorder).
+        return rust_plugin_setup_sources(*plugin_);
     }
 
-    int setup_config(std::vector<Source *> sources,
+    int setup_config(std::vector<Source *> /*sources*/,
                      std::vector<System *> systems) override {
-        std::vector<TrSource> src_wrappers;
-        src_wrappers.reserve(sources.size());
-        for (auto *s : sources) {
-            src_wrappers.emplace_back(s);
-        }
-        std::vector<const TrSource *> src_ptrs;
-        src_ptrs.reserve(src_wrappers.size());
-        for (auto &w : src_wrappers) {
-            src_ptrs.push_back(&w);
-        }
-
+        // Source data omitted (non-virtual, see above); forward systems only.
         std::vector<TrSystem> sys_wrappers;
         sys_wrappers.reserve(systems.size());
         for (auto *s : systems) {
@@ -364,14 +353,14 @@ public:
             sys_ptrs.push_back(&w);
         }
 
-        rust::Slice<const TrSource *const> src_slice(src_ptrs.data(), src_ptrs.size());
         rust::Slice<const TrSystem *const> sys_slice(sys_ptrs.data(), sys_ptrs.size());
-        return rust_plugin_setup_config(*plugin_, src_slice, sys_slice);
+        return rust_plugin_setup_config(*plugin_, sys_slice);
     }
 
     int trunk_message(std::vector<TrunkMessage> messages,
                       System *system) override {
-        rust::Vec<TrTrunkMessage> msgs;
+        std::vector<TrTrunkMessage> msgs;
+        msgs.reserve(messages.size());
         for (const auto &m : messages) {
             msgs.push_back(convert_trunk_message(m));
         }
@@ -491,7 +480,6 @@ int32_t system_get_decode_rate(const TrSystem &sys) { return sys.ptr->get_decode
 // ── Recorder accessor implementations ──
 
 int32_t recorder_get_num(const TrRecorder &rec) { return rec.ptr->get_num(); }
-rust::String recorder_get_type_string(const TrRecorder &rec) { return rust::String(rec.ptr->get_type_string()); }
 double recorder_get_freq(const TrRecorder &rec) { return rec.ptr->get_freq(); }
 int32_t recorder_get_freq_error(const TrRecorder &rec) { return rec.ptr->get_freq_error(); }
 int64_t recorder_get_talkgroup(const TrRecorder &rec) { return rec.ptr->get_talkgroup(); }
@@ -503,24 +491,6 @@ bool recorder_is_idle(const TrRecorder &rec) { return rec.ptr->is_idle(); }
 double recorder_get_current_length(const TrRecorder &rec) { return rec.ptr->get_current_length(); }
 
 // ── Source accessor implementations ──
-
-int32_t source_get_num(const TrSource &src) { return src.ptr->get_num(); }
-double source_get_center(const TrSource &src) { return src.ptr->get_center(); }
-double source_get_rate(const TrSource &src) { return src.ptr->get_rate(); }
-double source_get_min_hz(const TrSource &src) { return src.ptr->get_min_hz(); }
-double source_get_max_hz(const TrSource &src) { return src.ptr->get_max_hz(); }
-rust::String source_get_driver(const TrSource &src) { return rust::String(src.ptr->get_driver()); }
-rust::String source_get_device(const TrSource &src) { return rust::String(src.ptr->get_device()); }
-rust::String source_get_antenna(const TrSource &src) { return rust::String(src.ptr->get_antenna()); }
-double source_get_if_gain(const TrSource &src) { return src.ptr->get_if_gain(); }
-double source_get_lna_gain(const TrSource &src) { return src.ptr->get_lna_gain(); }
-double source_get_pga_gain(const TrSource &src) { return src.ptr->get_pga_gain(); }
-double source_get_vga1_gain(const TrSource &src) { return src.ptr->get_vga1_gain(); }
-double source_get_vga2_gain(const TrSource &src) { return src.ptr->get_vga2_gain(); }
-int32_t source_get_analog_recorder_count(const TrSource &src) { return src.ptr->analog_recorder_count(); }
-int32_t source_get_digital_recorder_count(const TrSource &src) { return src.ptr->digital_recorder_count(); }
-int32_t source_get_debug_recorder_count(const TrSource &src) { return src.ptr->debug_recorder_count(); }
-int32_t source_get_sigmf_recorder_count(const TrSource &src) { return src.ptr->sigmf_recorder_count(); }
 
 } // namespace trunk_oxide
 

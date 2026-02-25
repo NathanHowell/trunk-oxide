@@ -201,8 +201,6 @@ pub mod ffi {
         type TrCall;
         type TrSystem;
         type TrRecorder;
-        type TrSource;
-
         // ── Call accessors ──
         fn call_get_talkgroup(call: &TrCall) -> i64;
         fn call_get_call_num(call: &TrCall) -> i64;
@@ -251,7 +249,6 @@ pub mod ffi {
 
         // ── Recorder accessors ──
         fn recorder_get_num(rec: &TrRecorder) -> i32;
-        fn recorder_get_type_string(rec: &TrRecorder) -> String;
         fn recorder_get_freq(rec: &TrRecorder) -> f64;
         fn recorder_get_freq_error(rec: &TrRecorder) -> i32;
         fn recorder_get_talkgroup(rec: &TrRecorder) -> i64;
@@ -262,30 +259,17 @@ pub mod ffi {
         fn recorder_is_idle(rec: &TrRecorder) -> bool;
         fn recorder_get_current_length(rec: &TrRecorder) -> f64;
 
-        // ── Source accessors ──
-        fn source_get_num(src: &TrSource) -> i32;
-        fn source_get_center(src: &TrSource) -> f64;
-        fn source_get_rate(src: &TrSource) -> f64;
-        fn source_get_min_hz(src: &TrSource) -> f64;
-        fn source_get_max_hz(src: &TrSource) -> f64;
-        fn source_get_driver(src: &TrSource) -> String;
-        fn source_get_device(src: &TrSource) -> String;
-        fn source_get_antenna(src: &TrSource) -> String;
-        fn source_get_if_gain(src: &TrSource) -> f64;
-        fn source_get_lna_gain(src: &TrSource) -> f64;
-        fn source_get_pga_gain(src: &TrSource) -> f64;
-        fn source_get_vga1_gain(src: &TrSource) -> f64;
-        fn source_get_vga2_gain(src: &TrSource) -> f64;
-        fn source_get_analog_recorder_count(src: &TrSource) -> i32;
-        fn source_get_digital_recorder_count(src: &TrSource) -> i32;
-        fn source_get_debug_recorder_count(src: &TrSource) -> i32;
-        fn source_get_sigmf_recorder_count(src: &TrSource) -> i32;
     }
 
     // ── Rust functions callable from C++ (plugin callbacks) ──
 
     extern "Rust" {
         type RustPluginBox;
+
+        // Takes ownership of a Box<RustPluginBox> to drop it. This also
+        // forces cxx to generate the Box<RustPluginBox> C++ template
+        // instantiation needed by bridge.cpp.
+        fn drop_rust_plugin_box(plugin: Box<RustPluginBox>);
 
         fn rust_plugin_parse_config(plugin: &mut RustPluginBox, json_str: &str) -> i32;
         fn rust_plugin_start(plugin: &mut RustPluginBox) -> i32;
@@ -315,13 +299,9 @@ pub mod ffi {
             plugin: &mut RustPluginBox,
             systems: &[*const TrSystem],
         ) -> i32;
-        fn rust_plugin_setup_sources(
-            plugin: &mut RustPluginBox,
-            sources: &[*const TrSource],
-        ) -> i32;
+        fn rust_plugin_setup_sources(plugin: &mut RustPluginBox) -> i32;
         fn rust_plugin_setup_config(
             plugin: &mut RustPluginBox,
-            sources: &[*const TrSource],
             systems: &[*const TrSystem],
         ) -> i32;
         fn rust_plugin_trunk_message(
@@ -387,6 +367,10 @@ impl RustPluginBox {
     }
 }
 
+fn drop_rust_plugin_box(_plugin: Box<RustPluginBox>) {
+    // Box is dropped automatically
+}
+
 /// Trait that downstream crates implement to receive plugin callbacks.
 /// This is the raw FFI-level trait; the safe `Plugin` trait in trunk-recorder-plugin
 /// wraps this with ergonomic types.
@@ -416,12 +400,8 @@ pub trait RustPluginCallbacks: Send {
     fn setup_recorder(&mut self, recorder: &ffi::TrRecorder) -> i32;
     fn setup_system(&mut self, system: &ffi::TrSystem) -> i32;
     fn setup_systems(&mut self, systems: &[*const ffi::TrSystem]) -> i32;
-    fn setup_sources(&mut self, sources: &[*const ffi::TrSource]) -> i32;
-    fn setup_config(
-        &mut self,
-        sources: &[*const ffi::TrSource],
-        systems: &[*const ffi::TrSystem],
-    ) -> i32;
+    fn setup_sources(&mut self) -> i32;
+    fn setup_config(&mut self, systems: &[*const ffi::TrSystem]) -> i32;
     fn trunk_message(&mut self, messages: &[ffi::TrTrunkMessage], system: &ffi::TrSystem) -> i32;
     fn system_rates(&mut self, systems: &[*const ffi::TrSystem], time_diff: f32) -> i32;
     fn unit_registration(&mut self, system: &ffi::TrSystem, source_id: i64) -> i32;
@@ -508,16 +488,15 @@ fn rust_plugin_setup_systems(plugin: &mut RustPluginBox, systems: &[*const ffi::
     plugin.inner.setup_systems(systems)
 }
 
-fn rust_plugin_setup_sources(plugin: &mut RustPluginBox, sources: &[*const ffi::TrSource]) -> i32 {
-    plugin.inner.setup_sources(sources)
+fn rust_plugin_setup_sources(plugin: &mut RustPluginBox) -> i32 {
+    plugin.inner.setup_sources()
 }
 
 fn rust_plugin_setup_config(
     plugin: &mut RustPluginBox,
-    sources: &[*const ffi::TrSource],
     systems: &[*const ffi::TrSystem],
 ) -> i32 {
-    plugin.inner.setup_config(sources, systems)
+    plugin.inner.setup_config(systems)
 }
 
 fn rust_plugin_trunk_message(

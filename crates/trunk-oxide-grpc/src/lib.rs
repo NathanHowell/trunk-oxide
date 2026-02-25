@@ -1,8 +1,7 @@
 use tokio::sync::mpsc;
 use tonic::transport::Channel;
 use trunk_recorder_plugin::{
-    Plugin, Result, SignalEvent, TrCall, TrCallData, TrRecorder, TrSource, TrSystem,
-    TrTrunkMessage,
+    Plugin, Result, SignalEvent, TrCall, TrCallData, TrRecorder, TrSource, TrSystem, TrTrunkMessage,
 };
 
 mod proto {
@@ -218,9 +217,7 @@ fn convert_call_data(cd: &TrCallData) -> proto::CallData {
     }
 }
 
-fn convert_signal_type(
-    st: trunk_recorder_plugin::TrSignalType,
-) -> i32 {
+fn convert_signal_type(st: trunk_recorder_plugin::TrSignalType) -> i32 {
     use trunk_recorder_plugin::TrSignalType;
     match st {
         TrSignalType::Normal => proto::SignalType::Normal as i32,
@@ -406,28 +403,27 @@ impl Plugin for GrpcPlugin {
         Ok(())
     }
 
-    fn audio_stream(
-        &mut self,
-        call: &TrCall,
-        recorder: &TrRecorder,
-        samples: &[i16],
-    ) -> Result {
+    fn audio_stream(&mut self, call: &TrCall, recorder: &TrRecorder, samples: &[i16]) -> Result {
         use trunk_recorder_sys::ffi::{
             call_get_freq, call_get_sys_num, call_get_talkgroup, recorder_get_wav_hz,
         };
         if let Some(tx) = &self.audio_tx {
             // Convert i16 samples to bytes (little-endian)
-            let bytes: Vec<u8> = samples
-                .iter()
-                .flat_map(|s| s.to_le_bytes())
-                .collect();
+            let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+            let sample_rate_i64 = recorder_get_wav_hz(recorder);
+            let Ok(sample_rate) = i32::try_from(sample_rate_i64) else {
+                tracing::warn!(
+                    sample_rate = sample_rate_i64,
+                    "sample rate outside i32 range; dropping audio chunk"
+                );
+                return Ok(());
+            };
             let msg = proto::AudioSample {
                 talkgroup: call_get_talkgroup(call),
                 sys_num: call_get_sys_num(call),
                 freq: call_get_freq(call),
                 samples: bytes,
-                #[allow(clippy::cast_possible_truncation)]
-                sample_rate: recorder_get_wav_hz(recorder) as i32,
+                sample_rate,
             };
             if tx.try_send(msg).is_err() {
                 tracing::warn!("audio channel full or closed, dropping samples");
@@ -567,12 +563,7 @@ impl Plugin for GrpcPlugin {
         Ok(())
     }
 
-    fn unit_answer_request(
-        &mut self,
-        system: &TrSystem,
-        source_id: i64,
-        talkgroup: i64,
-    ) -> Result {
+    fn unit_answer_request(&mut self, system: &TrSystem, source_id: i64, talkgroup: i64) -> Result {
         self.send_unit_event(
             proto::UnitEventType::AnswerRequest,
             system,
@@ -582,12 +573,7 @@ impl Plugin for GrpcPlugin {
         Ok(())
     }
 
-    fn unit_location(
-        &mut self,
-        system: &TrSystem,
-        source_id: i64,
-        talkgroup: i64,
-    ) -> Result {
+    fn unit_location(&mut self, system: &TrSystem, source_id: i64, talkgroup: i64) -> Result {
         self.send_unit_event(proto::UnitEventType::Location, system, source_id, talkgroup);
         Ok(())
     }
@@ -602,24 +588,33 @@ async fn run_streams(
     event_rx: mpsc::Receiver<proto::PluginEvent>,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let channel = Channel::from_shared(addr)?.connect().await?;
-    let mut audio_client = TrunkRecorderPluginClient::new(channel.clone());
-    let mut client = TrunkRecorderPluginClient::new(channel);
+    let audio_handle = {
+        let mut audio_client = TrunkRecorderPluginClient::new(channel.clone());
+        tokio::spawn(async move {
+            let stream = tokio_stream::wrappers::ReceiverStream::new(audio_rx);
+            if let Err(e) = audio_client.stream_audio(stream).await {
+                tracing::error!("StreamAudio error: {e}");
+            }
+        })
+    };
 
-    let audio_handle = tokio::spawn(async move {
-        let stream = tokio_stream::wrappers::ReceiverStream::new(audio_rx);
-        if let Err(e) = audio_client.stream_audio(stream).await {
-            tracing::error!("StreamAudio error: {e}");
-        }
-    });
+    let event_handle = {
+        let mut client = TrunkRecorderPluginClient::new(channel);
+        tokio::spawn(async move {
+            let stream = tokio_stream::wrappers::ReceiverStream::new(event_rx);
+            if let Err(e) = client.stream_events(stream).await {
+                tracing::error!("StreamEvents error: {e}");
+            }
+        })
+    };
 
-    let event_handle = tokio::spawn(async move {
-        let stream = tokio_stream::wrappers::ReceiverStream::new(event_rx);
-        if let Err(e) = client.stream_events(stream).await {
-            tracing::error!("StreamEvents error: {e}");
-        }
-    });
-
-    let _ = tokio::try_join!(audio_handle, event_handle);
+    let (audio_result, event_result) = tokio::join!(audio_handle, event_handle);
+    if let Err(e) = audio_result {
+        tracing::error!("audio stream task join error: {e}");
+    }
+    if let Err(e) = event_result {
+        tracing::error!("event stream task join error: {e}");
+    }
     Ok(())
 }
 

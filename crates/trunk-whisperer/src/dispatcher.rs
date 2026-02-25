@@ -1,10 +1,10 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use tokio::sync::{mpsc, RwLock};
+use tokio::sync::{RwLock, mpsc};
 
 use crate::aggregator::{Aggregator, AggregatorMessage};
-use crate::call_handler::{CallHandler, CallMessage};
+use crate::call_handler::{CallHandler, CallHandlerConfig, CallMessage};
 use crate::discord::DiscordClient;
 use crate::proto;
 use crate::proto::plugin_event::Event;
@@ -124,10 +124,12 @@ impl Dispatcher {
             rx,
             Arc::clone(&self.transcriber),
             Arc::clone(&self.discord),
-            self.buffer_duration_ms,
-            self.channel_id,
-            self.tone_detection,
-            self.tone_detection_duration_s,
+            CallHandlerConfig {
+                buffer_duration_ms: self.buffer_duration_ms,
+                channel_id: self.channel_id,
+                tone_detection: self.tone_detection,
+                tone_detection_duration_s: self.tone_detection_duration_s,
+            },
         );
 
         tokio::spawn(handler.run());
@@ -147,7 +149,9 @@ impl Dispatcher {
 
         let tx = self.calls.write().await.remove(&key);
         if let Some(tx) = tx {
-            let _ = tx.send(CallMessage::End(event.call_data.map(Box::new))).await;
+            let _ = tx
+                .send(CallMessage::End(event.call_data.map(Box::new)))
+                .await;
         }
     }
 

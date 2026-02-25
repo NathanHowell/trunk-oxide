@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
 use tokio::sync::Semaphore;
@@ -19,8 +19,9 @@ impl Transcriber {
         for device_id in 0..config.gpu_count {
             let mut ctx_params = WhisperContextParameters::default();
             ctx_params.use_gpu(true);
-            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-            ctx_params.gpu_device(device_id as i32);
+            let gpu_device = i32::try_from(device_id)
+                .map_err(|_| anyhow::anyhow!("gpu_count exceeds i32::MAX"))?;
+            ctx_params.gpu_device(gpu_device);
             ctx_params.flash_attn(config.flash_attn);
 
             let ctx = WhisperContext::new_with_params(&config.model_path, ctx_params)?;

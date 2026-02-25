@@ -420,7 +420,6 @@ pub struct ToneDetector {
 }
 
 impl ToneDetector {
-    #[allow(dead_code)]
     pub fn new(sample_rate: u32, max_duration_s: f32) -> Self {
         Self::with_ctcss(sample_rate, max_duration_s, false)
     }
@@ -435,13 +434,10 @@ impl ToneDetector {
         let hop_size = (sample_rate as f32 * HOP_S) as usize;
         let max_samples = (sample_rate as f32 * max_duration_s) as usize;
 
-        let mut bank_freqs = Vec::new();
-        let mut freq = BANK_START_HZ;
-        #[allow(clippy::while_float)]
-        while freq <= BANK_END_HZ {
-            bank_freqs.push(freq);
-            freq += BANK_STEP_HZ;
-        }
+        let bank_bins = ((BANK_END_HZ - BANK_START_HZ) / BANK_STEP_HZ).floor() as usize + 1;
+        let bank_freqs = (0..bank_bins)
+            .map(|idx| BANK_START_HZ + idx as f32 * BANK_STEP_HZ)
+            .collect();
 
         let ctcss_window_size = (sample_rate as f32 * CTCSS_WINDOW_S) as usize;
         let ctcss_hop_size = (sample_rate as f32 * CTCSS_HOP_S) as usize;

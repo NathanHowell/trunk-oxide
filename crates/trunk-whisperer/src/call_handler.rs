@@ -13,12 +13,17 @@ use crate::tone_detect::{DetectedTone, NotchFilter, ToneDetector};
 use crate::transcriber::Transcriber;
 
 pub enum CallMessage {
-    Audio {
-        samples: Vec<u8>,
-        sample_rate: i32,
-    },
+    Audio { samples: Vec<u8>, sample_rate: i32 },
     Event(String),
     End(Option<Box<proto::CallData>>),
+}
+
+#[derive(Clone, Copy)]
+pub struct CallHandlerConfig {
+    pub buffer_duration_ms: u64,
+    pub channel_id: u64,
+    pub tone_detection: bool,
+    pub tone_detection_duration_s: f32,
 }
 
 pub struct CallHandler {
@@ -39,25 +44,21 @@ pub struct CallHandler {
 }
 
 impl CallHandler {
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         key: CallKey,
         call_info: proto::CallInfo,
         rx: mpsc::Receiver<CallMessage>,
         transcriber: Arc<Transcriber>,
         discord: Arc<DiscordClient>,
-        buffer_duration_ms: u64,
-        channel_id: u64,
-        tone_detection: bool,
-        tone_detection_duration_s: f32,
+        config: CallHandlerConfig,
     ) -> Self {
-        let detect_ctcss = tone_detection && call_info.is_conventional;
-        let tone_detector = if tone_detection {
-            Some(ToneDetector::with_ctcss(
-                16000,
-                tone_detection_duration_s,
-                detect_ctcss,
-            ))
+        let detect_ctcss = config.tone_detection && call_info.is_conventional;
+        let tone_detector = if config.tone_detection {
+            Some(if detect_ctcss {
+                ToneDetector::with_ctcss(16000, config.tone_detection_duration_s, true)
+            } else {
+                ToneDetector::new(16000, config.tone_detection_duration_s)
+            })
         } else {
             None
         };
@@ -68,8 +69,8 @@ impl CallHandler {
             rx,
             transcriber,
             discord,
-            buffer_duration_ms,
-            channel_id,
+            buffer_duration_ms: config.buffer_duration_ms,
+            channel_id: config.channel_id,
             audio_buffer: Vec::new(),
             resampler: None,
             tone_detector,
@@ -128,8 +129,8 @@ impl CallHandler {
     }
 
     async fn create_thread(&mut self) -> Result<()> {
-        let start_time = DateTime::<Utc>::from_timestamp(self.call_info.start_time, 0)
-            .unwrap_or_else(Utc::now);
+        let start_time =
+            DateTime::<Utc>::from_timestamp(self.call_info.start_time, 0).unwrap_or_else(Utc::now);
         let time_str = start_time.format("%H:%M:%S").to_string();
 
         let tag = if self.call_info.talkgroup_tag.is_empty() {
@@ -187,10 +188,10 @@ impl CallHandler {
         let samples = if sample_rate == 16000 {
             decoded
         } else {
+            let input_rate = u32::try_from(sample_rate)
+                .map_err(|_| anyhow::anyhow!("invalid input sample rate: {sample_rate}"))?;
             let resampler = self.resampler.get_or_insert_with(|| {
-                #[allow(clippy::cast_sign_loss)]
-                Resampler::new(sample_rate as u32)
-                    .expect("failed to create resampler")
+                Resampler::new(input_rate).expect("failed to create resampler")
             });
             resampler.process(&decoded)?
         };
@@ -214,8 +215,9 @@ impl CallHandler {
             self.finish_tone_detection().await?;
         }
 
-        #[allow(clippy::cast_possible_truncation)]
-        let buffer_threshold = (self.buffer_duration_ms as usize * 16000) / 1000;
+        let buffer_duration_ms = usize::try_from(self.buffer_duration_ms)
+            .map_err(|_| anyhow::anyhow!("buffer_duration_ms too large"))?;
+        let buffer_threshold = buffer_duration_ms.saturating_mul(16);
         if self.audio_buffer.len() >= buffer_threshold {
             let audio: Vec<f32> = self.audio_buffer.drain(..).collect();
             self.transcribe_and_post(audio).await?;
@@ -307,9 +309,7 @@ impl CallHandler {
             let (first, rest) = new_text.split_at(split_pos);
 
             if let Some(msg_id) = self.current_message_id {
-                self.discord
-                    .edit_message(thread_id, msg_id, first)
-                    .await?;
+                self.discord.edit_message(thread_id, msg_id, first).await?;
             } else {
                 self.discord.send_message(thread_id, first).await?;
             }

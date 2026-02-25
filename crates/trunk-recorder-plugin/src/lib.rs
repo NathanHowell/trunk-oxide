@@ -40,12 +40,7 @@ pub trait Plugin: Send {
     fn signal(&mut self, _event: SignalEvent<'_>) -> Result {
         Ok(())
     }
-    fn audio_stream(
-        &mut self,
-        _call: &TrCall,
-        _recorder: &TrRecorder,
-        _samples: &[i16],
-    ) -> Result {
+    fn audio_stream(&mut self, _call: &TrCall, _recorder: &TrRecorder, _samples: &[i16]) -> Result {
         Ok(())
     }
     fn call_start(&mut self, _call: &TrCall) -> Result {
@@ -106,12 +101,7 @@ pub trait Plugin: Send {
     ) -> Result {
         Ok(())
     }
-    fn unit_location(
-        &mut self,
-        _system: &TrSystem,
-        _source_id: i64,
-        _talkgroup: i64,
-    ) -> Result {
+    fn unit_location(&mut self, _system: &TrSystem, _source_id: i64, _talkgroup: i64) -> Result {
         Ok(())
     }
 }
@@ -129,15 +119,15 @@ impl<P: Plugin> PluginAdapter<P> {
     }
 
     /// Convert a slice of raw pointers to a vec of references.
-    /// # Safety
-    /// The pointers must be valid for the duration of the call.
+    ///
+    /// Pointers are provided by the trunk-recorder callback ABI and are expected
+    /// to remain valid for the duration of the callback.
     #[allow(unsafe_code)]
-    unsafe fn ptr_slice_to_refs<'a, T>(ptrs: &[*const T]) -> Vec<&'a T> {
+    fn ptr_slice_to_refs<T>(ptrs: &[*const T]) -> Vec<&T> {
         ptrs.iter().map(|p| unsafe { &**p }).collect()
     }
 }
 
-#[allow(unsafe_code)]
 impl<P: Plugin> trunk_recorder_sys::RustPluginCallbacks for PluginAdapter<P> {
     fn parse_config(&mut self, json_str: &str) -> i32 {
         match serde_json::from_str(json_str) {
@@ -211,12 +201,7 @@ impl<P: Plugin> trunk_recorder_sys::RustPluginCallbacks for PluginAdapter<P> {
         }
     }
 
-    fn audio_stream(
-        &mut self,
-        call: &TrCall,
-        recorder: &TrRecorder,
-        samples: &[i16],
-    ) -> i32 {
+    fn audio_stream(&mut self, call: &TrCall, recorder: &TrRecorder, samples: &[i16]) -> i32 {
         match self.inner.audio_stream(call, recorder, samples) {
             Ok(()) => 0,
             Err(e) => {
@@ -247,7 +232,7 @@ impl<P: Plugin> trunk_recorder_sys::RustPluginCallbacks for PluginAdapter<P> {
     }
 
     fn calls_active(&mut self, calls: &[*const TrCall]) -> i32 {
-        let refs = unsafe { Self::ptr_slice_to_refs(calls) };
+        let refs = Self::ptr_slice_to_refs(calls);
         match self.inner.calls_active(&refs) {
             Ok(()) => 0,
             Err(e) => {
@@ -278,7 +263,7 @@ impl<P: Plugin> trunk_recorder_sys::RustPluginCallbacks for PluginAdapter<P> {
     }
 
     fn setup_systems(&mut self, systems: &[*const TrSystem]) -> i32 {
-        let refs = unsafe { Self::ptr_slice_to_refs(systems) };
+        let refs = Self::ptr_slice_to_refs(systems);
         match self.inner.setup_systems(&refs) {
             Ok(()) => 0,
             Err(e) => {
@@ -289,7 +274,7 @@ impl<P: Plugin> trunk_recorder_sys::RustPluginCallbacks for PluginAdapter<P> {
     }
 
     fn setup_sources(&mut self, sources: &[*const TrSource]) -> i32 {
-        let refs = unsafe { Self::ptr_slice_to_refs(sources) };
+        let refs = Self::ptr_slice_to_refs(sources);
         match self.inner.setup_sources(&refs) {
             Ok(()) => 0,
             Err(e) => {
@@ -299,13 +284,9 @@ impl<P: Plugin> trunk_recorder_sys::RustPluginCallbacks for PluginAdapter<P> {
         }
     }
 
-    fn setup_config(
-        &mut self,
-        sources: &[*const TrSource],
-        systems: &[*const TrSystem],
-    ) -> i32 {
-        let src_refs = unsafe { Self::ptr_slice_to_refs(sources) };
-        let sys_refs = unsafe { Self::ptr_slice_to_refs(systems) };
+    fn setup_config(&mut self, sources: &[*const TrSource], systems: &[*const TrSystem]) -> i32 {
+        let src_refs = Self::ptr_slice_to_refs(sources);
+        let sys_refs = Self::ptr_slice_to_refs(systems);
         match self.inner.setup_config(&src_refs, &sys_refs) {
             Ok(()) => 0,
             Err(e) => {
@@ -315,11 +296,7 @@ impl<P: Plugin> trunk_recorder_sys::RustPluginCallbacks for PluginAdapter<P> {
         }
     }
 
-    fn trunk_message(
-        &mut self,
-        messages: &[TrTrunkMessage],
-        system: &TrSystem,
-    ) -> i32 {
+    fn trunk_message(&mut self, messages: &[TrTrunkMessage], system: &TrSystem) -> i32 {
         match self.inner.trunk_message(messages, system) {
             Ok(()) => 0,
             Err(e) => {
@@ -330,7 +307,7 @@ impl<P: Plugin> trunk_recorder_sys::RustPluginCallbacks for PluginAdapter<P> {
     }
 
     fn system_rates(&mut self, systems: &[*const TrSystem], time_diff: f32) -> i32 {
-        let refs = unsafe { Self::ptr_slice_to_refs(systems) };
+        let refs = Self::ptr_slice_to_refs(systems);
         match self.inner.system_rates(&refs, time_diff) {
             Ok(()) => 0,
             Err(e) => {
@@ -370,12 +347,7 @@ impl<P: Plugin> trunk_recorder_sys::RustPluginCallbacks for PluginAdapter<P> {
         }
     }
 
-    fn unit_group_affiliation(
-        &mut self,
-        system: &TrSystem,
-        source_id: i64,
-        talkgroup: i64,
-    ) -> i32 {
+    fn unit_group_affiliation(&mut self, system: &TrSystem, source_id: i64, talkgroup: i64) -> i32 {
         match self
             .inner
             .unit_group_affiliation(system, source_id, talkgroup)
@@ -398,12 +370,7 @@ impl<P: Plugin> trunk_recorder_sys::RustPluginCallbacks for PluginAdapter<P> {
         }
     }
 
-    fn unit_answer_request(
-        &mut self,
-        system: &TrSystem,
-        source_id: i64,
-        talkgroup: i64,
-    ) -> i32 {
+    fn unit_answer_request(&mut self, system: &TrSystem, source_id: i64, talkgroup: i64) -> i32 {
         match self.inner.unit_answer_request(system, source_id, talkgroup) {
             Ok(()) => 0,
             Err(e) => {
@@ -413,12 +380,7 @@ impl<P: Plugin> trunk_recorder_sys::RustPluginCallbacks for PluginAdapter<P> {
         }
     }
 
-    fn unit_location(
-        &mut self,
-        system: &TrSystem,
-        source_id: i64,
-        talkgroup: i64,
-    ) -> i32 {
+    fn unit_location(&mut self, system: &TrSystem, source_id: i64, talkgroup: i64) -> i32 {
         match self.inner.unit_location(system, source_id, talkgroup) {
             Ok(()) => 0,
             Err(e) => {
@@ -451,8 +413,7 @@ macro_rules! export_plugin {
     ($create_expr:expr) => {
         #[allow(unsafe_code)]
         #[unsafe(no_mangle)]
-        pub extern "C" fn rust_create_plugin(
-        ) -> *mut $crate::trunk_recorder_sys::RustPluginBox {
+        pub extern "C" fn rust_create_plugin() -> *mut $crate::trunk_recorder_sys::RustPluginBox {
             let plugin_box = $crate::into_plugin_box($create_expr);
             Box::into_raw(Box::new(plugin_box))
         }

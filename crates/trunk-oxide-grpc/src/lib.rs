@@ -210,7 +210,10 @@ fn convert_signal_type(
         TrSignalType::RadioReviveAck => proto::SignalType::RadioReviveAck as i32,
         TrSignalType::NormalPre => proto::SignalType::NormalPre as i32,
         TrSignalType::EmergencyPre => proto::SignalType::EmergencyPre as i32,
-        _ => proto::SignalType::Normal as i32,
+        other => {
+            tracing::warn!("unknown signal type: {:?}", other);
+            proto::SignalType::Normal as i32
+        }
     }
 }
 
@@ -239,7 +242,10 @@ fn convert_trunk_messages(messages: &[TrTrunkMessage]) -> Vec<proto::TrunkMessag
                 TrMessageType::InvalidCcMessage => proto::MessageType::InvalidCcMessage as i32,
                 TrMessageType::Tdulc => proto::MessageType::Tdulc as i32,
                 TrMessageType::Unknown => proto::MessageType::Unknown as i32,
-                _ => proto::MessageType::Unknown as i32,
+                other => {
+                    tracing::warn!("unknown message type: {:?}", other);
+                    proto::MessageType::Unknown as i32
+                }
             },
             meta: m.meta.clone(),
             freq: m.freq,
@@ -379,7 +385,7 @@ impl Plugin for GrpcPlugin {
     fn audio_stream(
         &mut self,
         call: &TrCall,
-        _recorder: &TrRecorder,
+        recorder: &TrRecorder,
         samples: &[i16],
     ) -> Result {
         use trunk_recorder_sys::ffi::*;
@@ -394,7 +400,7 @@ impl Plugin for GrpcPlugin {
                 sys_num: call_get_sys_num(call),
                 freq: call_get_freq(call),
                 samples: bytes,
-                sample_rate: 0, // filled by recorder if available
+                sample_rate: recorder_get_wav_hz(recorder) as i32,
             };
             if tx.try_send(msg).is_err() {
                 tracing::warn!("audio channel full or closed, dropping samples");

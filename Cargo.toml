@@ -1,0 +1,7 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/trunk-recorder-sys",
+    "crates/trunk-recorder-plugin",
+    "crates/trunk-oxide-grpc",
+]

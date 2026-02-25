@@ -1,0 +1,21 @@
+[package]
+name = "trunk-oxide-grpc"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+trunk-recorder-sys = { path = "../trunk-recorder-sys" }
+trunk-recorder-plugin = { path = "../trunk-recorder-plugin" }
+tonic = "0.12"
+prost = "0.13"
+prost-types = "0.13"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
+serde_json = "1"
+tokio-stream = "0.1"
+tracing = "0.1"
+
+[build-dependencies]
+tonic-build = "0.12"

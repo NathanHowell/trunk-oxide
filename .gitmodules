@@ -1,0 +1,3 @@
+[submodule "trunk-recorder"]
+	path = trunk-recorder
+	url = https://github.com/robotastic/trunk-recorder.git

@@ -19,6 +19,21 @@ const DTMF_MAP: [[char; 4]; 4] = [
     ['*', '0', '#', 'D'],
 ];
 
+// Standard EIA CTCSS/PL tones (67.0–254.1 Hz)
+const CTCSS_FREQS: [f32; 38] = [
+    67.0, 71.9, 74.4, 77.0, 79.7, 82.5, 85.4, 88.5, 91.5, 94.8, 97.4, 100.0, 103.5, 107.2,
+    110.9, 114.8, 118.8, 123.0, 127.3, 131.8, 136.5, 141.3, 146.2, 151.4, 156.7, 162.2, 167.9,
+    173.8, 179.9, 186.2, 192.8, 203.5, 210.7, 218.1, 225.7, 233.6, 241.8, 250.3,
+];
+
+// CTCSS analysis uses longer windows for adequate frequency resolution
+const CTCSS_WINDOW_S: f32 = 0.200; // 200ms → 5 Hz bin spacing at 16 kHz
+const CTCSS_HOP_S: f32 = 0.100; // 100ms hop
+
+// CTCSS detection thresholds
+const CTCSS_PEAK_TO_NOISE_RATIO: f32 = 8.0;
+const CTCSS_DOMINANCE_RATIO: f32 = 0.5;
+
 // Detection thresholds
 const FREQ_TOLERANCE_HZ: f32 = 50.0;
 const PEAK_TO_MEAN_RATIO: f32 = 10.0;
@@ -46,6 +61,9 @@ pub enum DetectedTone {
     },
     Dtmf {
         digits: Vec<char>,
+    },
+    Ctcss {
+        freq: f32,
     },
 }
 
@@ -156,6 +174,27 @@ fn detect_dtmf_window(samples: &[f32], sample_rate: f32) -> Option<char> {
     }
 
     None
+}
+
+fn detect_ctcss_window(samples: &[f32], sample_rate: f32) -> Option<usize> {
+    let mags: Vec<f32> = CTCSS_FREQS
+        .iter()
+        .map(|&f| goertzel_mag_sq(samples, f, sample_rate))
+        .collect();
+
+    let (peak_idx, &peak_mag) = mags
+        .iter()
+        .enumerate()
+        .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+        .unwrap();
+
+    let mean_mag = mags.iter().sum::<f32>() / mags.len() as f32;
+
+    if mean_mag > 0.0 && peak_mag > CTCSS_PEAK_TO_NOISE_RATIO * mean_mag {
+        Some(peak_idx)
+    } else {
+        None
+    }
 }
 
 // --- Segment extraction ---
@@ -369,11 +408,21 @@ pub struct ToneDetector {
     bank_freqs: Vec<f32>,
     window_freqs: Vec<Option<f32>>,
     window_dtmf: Vec<Option<char>>,
+    // CTCSS uses longer windows (200ms) for adequate frequency resolution
+    ctcss_pending: Vec<f32>,
+    ctcss_window_size: usize,
+    ctcss_hop_size: usize,
+    window_ctcss: Vec<Option<usize>>, // index into CTCSS_FREQS
+    detect_ctcss: bool,
     complete: bool,
 }
 
 impl ToneDetector {
     pub fn new(sample_rate: u32, max_duration_s: f32) -> Self {
+        Self::with_ctcss(sample_rate, max_duration_s, false)
+    }
+
+    pub fn with_ctcss(sample_rate: u32, max_duration_s: f32, detect_ctcss: bool) -> Self {
         let window_size = (sample_rate as f32 * WINDOW_S) as usize;
         let hop_size = (sample_rate as f32 * HOP_S) as usize;
         let max_samples = (sample_rate as f32 * max_duration_s) as usize;
@@ -385,6 +434,9 @@ impl ToneDetector {
             freq += BANK_STEP_HZ;
         }
 
+        let ctcss_window_size = (sample_rate as f32 * CTCSS_WINDOW_S) as usize;
+        let ctcss_hop_size = (sample_rate as f32 * CTCSS_HOP_S) as usize;
+
         Self {
             sample_rate,
             window_size,
@@ -395,6 +447,11 @@ impl ToneDetector {
             bank_freqs,
             window_freqs: Vec::new(),
             window_dtmf: Vec::new(),
+            ctcss_pending: Vec::new(),
+            ctcss_window_size,
+            ctcss_hop_size,
+            window_ctcss: Vec::new(),
+            detect_ctcss,
             complete: false,
         }
     }
@@ -422,6 +479,18 @@ impl ToneDetector {
 
             let hop = self.hop_size;
             self.pending.drain(..hop);
+        }
+
+        // CTCSS analysis with longer (200ms) windows
+        if self.detect_ctcss {
+            self.ctcss_pending.extend_from_slice(samples);
+            while self.ctcss_pending.len() >= self.ctcss_window_size {
+                let window = &self.ctcss_pending[..self.ctcss_window_size];
+                self.window_ctcss
+                    .push(detect_ctcss_window(window, sr));
+                let hop = self.ctcss_hop_size;
+                self.ctcss_pending.drain(..hop);
+            }
         }
 
         if self.samples_fed >= self.max_samples {
@@ -465,6 +534,30 @@ impl ToneDetector {
             tone_end_window = tone_end_window.max(end);
         }
 
+        // CTCSS aggregation: find the dominant CTCSS frequency across all windows
+        if self.detect_ctcss && !self.window_ctcss.is_empty() {
+            let mut counts = [0usize; 38];
+            let mut present = 0usize;
+            for w in &self.window_ctcss {
+                if let Some(idx) = w {
+                    counts[*idx] += 1;
+                    present += 1;
+                }
+            }
+            if present > 0 {
+                let (best_idx, &best_count) = counts
+                    .iter()
+                    .enumerate()
+                    .max_by_key(|&(_, c)| *c)
+                    .unwrap();
+                if best_count as f32 / present as f32 > CTCSS_DOMINANCE_RATIO {
+                    tones.push(DetectedTone::Ctcss {
+                        freq: CTCSS_FREQS[best_idx],
+                    });
+                }
+            }
+        }
+
         let tone_end_sample = tone_end_window * self.hop_size;
 
         ToneDetectorResult {
@@ -502,6 +595,64 @@ impl std::fmt::Display for DetectedTone {
             DetectedTone::Dtmf { digits } => {
                 write!(f, "DTMF: {}", digits.iter().collect::<String>())
             }
+            DetectedTone::Ctcss { freq } => {
+                write!(f, "CTCSS: {:.1} Hz", freq)
+            }
+        }
+    }
+}
+
+// --- Notch (band-reject) biquad filter ---
+
+pub struct NotchFilter {
+    b0: f32,
+    b1: f32,
+    b2: f32,
+    a1: f32,
+    a2: f32,
+    x1: f32,
+    x2: f32,
+    y1: f32,
+    y2: f32,
+}
+
+impl NotchFilter {
+    pub fn new(sample_rate: u32, center_freq: f32, q: f32) -> Self {
+        let w0 = 2.0 * PI * center_freq / sample_rate as f32;
+        let alpha = w0.sin() / (2.0 * q);
+
+        let b0 = 1.0;
+        let b1 = -2.0 * w0.cos();
+        let b2 = 1.0;
+        let a0 = 1.0 + alpha;
+        let a1 = -2.0 * w0.cos();
+        let a2 = 1.0 - alpha;
+
+        // Normalize by a0
+        Self {
+            b0: b0 / a0,
+            b1: b1 / a0,
+            b2: b2 / a0,
+            a1: a1 / a0,
+            a2: a2 / a0,
+            x1: 0.0,
+            x2: 0.0,
+            y1: 0.0,
+            y2: 0.0,
+        }
+    }
+
+    pub fn process(&mut self, samples: &mut [f32]) {
+        for sample in samples.iter_mut() {
+            let x0 = *sample;
+            let y0 = self.b0 * x0 + self.b1 * self.x1 + self.b2 * self.x2
+                - self.a1 * self.y1
+                - self.a2 * self.y2;
+            self.x2 = self.x1;
+            self.x1 = x0;
+            self.y2 = self.y1;
+            self.y1 = y0;
+            *sample = y0;
         }
     }
 }
@@ -774,6 +925,150 @@ mod tests {
         let result = det.finish();
         // Should not panic; may or may not detect anything
         let _ = result;
+    }
+
+    #[test]
+    fn ctcss_detection() {
+        let sr = 16000;
+        // 5s of 118.8 Hz CTCSS (low amplitude, ~15% of voice level)
+        // mixed with voice-band content (broadband)
+        let n = (sr as f32 * 5.0) as usize;
+        let signal: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f32 / sr as f32;
+                let ctcss = 0.15 * (2.0 * PI * 118.8 * t).sin();
+                // Simulate voice with multiple frequencies above 250 Hz
+                let voice = 0.3 * (2.0 * PI * 350.0 * t).sin()
+                    + 0.2 * (2.0 * PI * 800.0 * t).sin()
+                    + 0.1 * (2.0 * PI * 1200.0 * t).sin();
+                ctcss + voice
+            })
+            .collect();
+
+        let mut det = ToneDetector::with_ctcss(sr, 5.0, true);
+        det.process(&signal);
+        let result = det.finish();
+
+        let ctcss = result
+            .tones
+            .iter()
+            .find(|t| matches!(t, DetectedTone::Ctcss { .. }));
+        assert!(
+            ctcss.is_some(),
+            "should detect CTCSS, got: {:?}",
+            result.tones
+        );
+
+        if let Some(DetectedTone::Ctcss { freq }) = ctcss {
+            assert_eq!(*freq, 118.8, "should detect 118.8 Hz CTCSS, got {}", freq);
+        }
+    }
+
+    #[test]
+    fn ctcss_with_dispatch_tones() {
+        let sr = 16000;
+        // 1s tone A + 3s tone B (two-tone dispatch) with CTCSS underneath
+        let n = (sr as f32 * 5.0) as usize;
+        let signal: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f32 / sr as f32;
+                let ctcss = 0.15 * (2.0 * PI * 162.2 * t).sin();
+                let dispatch = if t < 1.0 {
+                    0.8 * (2.0 * PI * 1000.0 * t).sin()
+                } else if t < 4.0 {
+                    0.8 * (2.0 * PI * 850.0 * t).sin()
+                } else {
+                    0.0
+                };
+                ctcss + dispatch
+            })
+            .collect();
+
+        let mut det = ToneDetector::with_ctcss(sr, 5.0, true);
+        det.process(&signal);
+        let result = det.finish();
+
+        let has_two_tone = result
+            .tones
+            .iter()
+            .any(|t| matches!(t, DetectedTone::TwoTone { .. }));
+        let has_ctcss = result
+            .tones
+            .iter()
+            .any(|t| matches!(t, DetectedTone::Ctcss { .. }));
+
+        assert!(has_two_tone, "should detect two-tone, got: {:?}", result.tones);
+        assert!(has_ctcss, "should detect CTCSS, got: {:?}", result.tones);
+
+        if let Some(DetectedTone::Ctcss { freq }) = result
+            .tones
+            .iter()
+            .find(|t| matches!(t, DetectedTone::Ctcss { .. }))
+        {
+            assert_eq!(*freq, 162.2, "should detect 162.2 Hz CTCSS, got {}", freq);
+        }
+    }
+
+    #[test]
+    fn notch_filter_attenuation() {
+        let sr = 16000;
+        let ctcss_freq = 118.8_f32;
+        let n = (sr as f32 * 2.0) as usize;
+        // Skip filter startup transient when measuring
+        let skip = (sr as f32 * 0.2) as usize;
+
+        // Pure CTCSS tone
+        let mut signal: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f32 / sr as f32;
+                (2.0 * PI * ctcss_freq * t).sin()
+            })
+            .collect();
+
+        // Measure power before filtering (steady-state region only)
+        let power_before: f32 =
+            signal[skip..].iter().map(|s| s * s).sum::<f32>() / (n - skip) as f32;
+
+        let mut filter = NotchFilter::new(sr, ctcss_freq, 30.0);
+        filter.process(&mut signal);
+
+        // Measure power after filtering (skip transient)
+        let power_after: f32 =
+            signal[skip..].iter().map(|s| s * s).sum::<f32>() / (n - skip) as f32;
+
+        let attenuation_db = 10.0 * (power_after / power_before).log10();
+        assert!(
+            attenuation_db < -20.0,
+            "notch should attenuate CTCSS by >20 dB, got {:.1} dB",
+            attenuation_db
+        );
+
+        // Nearby frequencies should pass through
+        for offset in [50.0_f32, -50.0] {
+            let nearby_freq = ctcss_freq + offset;
+            if nearby_freq <= 0.0 {
+                continue;
+            }
+            let mut nearby: Vec<f32> = (0..n)
+                .map(|i| {
+                    let t = i as f32 / sr as f32;
+                    (2.0 * PI * nearby_freq * t).sin()
+                })
+                .collect();
+            let power_before: f32 = nearby.iter().map(|s| s * s).sum::<f32>() / n as f32;
+
+            let mut filter = NotchFilter::new(sr, ctcss_freq, 30.0);
+            filter.process(&mut nearby);
+
+            let power_after: f32 = nearby.iter().map(|s| s * s).sum::<f32>() / n as f32;
+            let attenuation_db = 10.0 * (power_after / power_before).log10();
+            assert!(
+                attenuation_db > -3.0,
+                "nearby freq {:.1} Hz should pass (<3 dB loss), got {:.1} dB",
+                nearby_freq,
+                attenuation_db
+            );
+        }
     }
 
     #[test]

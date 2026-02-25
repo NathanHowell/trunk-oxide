@@ -9,7 +9,7 @@ use crate::discord::DiscordClient;
 use crate::dispatcher::CallKey;
 use crate::proto;
 use crate::resampler::Resampler;
-use crate::tone_detect::ToneDetector;
+use crate::tone_detect::{DetectedTone, NotchFilter, ToneDetector};
 use crate::transcriber::Transcriber;
 
 pub enum CallMessage {
@@ -32,6 +32,7 @@ pub struct CallHandler {
     audio_buffer: Vec<f32>,
     resampler: Option<Resampler>,
     tone_detector: Option<ToneDetector>,
+    notch_filter: Option<NotchFilter>,
     thread_id: Option<ChannelId>,
     current_message_id: Option<MessageId>,
     current_message_text: String,
@@ -49,8 +50,13 @@ impl CallHandler {
         tone_detection: bool,
         tone_detection_duration_s: f32,
     ) -> Self {
+        let detect_ctcss = tone_detection && call_info.is_conventional;
         let tone_detector = if tone_detection {
-            Some(ToneDetector::new(16000, tone_detection_duration_s))
+            Some(ToneDetector::with_ctcss(
+                16000,
+                tone_detection_duration_s,
+                detect_ctcss,
+            ))
         } else {
             None
         };
@@ -66,6 +72,7 @@ impl CallHandler {
             audio_buffer: Vec::new(),
             resampler: None,
             tone_detector,
+            notch_filter: None,
             thread_id: None,
             current_message_id: None,
             current_message_text: String::new(),
@@ -190,6 +197,11 @@ impl CallHandler {
             detector.process(&samples);
         }
 
+        let mut samples = samples;
+        if let Some(filter) = &mut self.notch_filter {
+            filter.process(&mut samples);
+        }
+
         self.audio_buffer.extend_from_slice(&samples);
 
         if self
@@ -227,10 +239,21 @@ impl CallHandler {
                 self.discord.send_message(thread_id, &msg).await?;
             }
 
-            // Strip tone samples from the front of the audio buffer
+            // Strip dispatch tone samples from the front of the audio buffer
             let strip = result.tone_end_sample.min(self.audio_buffer.len());
             if strip > 0 {
                 self.audio_buffer.drain(..strip);
+            }
+
+            // If CTCSS detected, create notch filter and retroactively filter buffered audio
+            if let Some(DetectedTone::Ctcss { freq }) = result
+                .tones
+                .iter()
+                .find(|t| matches!(t, DetectedTone::Ctcss { .. }))
+            {
+                let mut filter = NotchFilter::new(16000, *freq, 30.0);
+                filter.process(&mut self.audio_buffer);
+                self.notch_filter = Some(filter);
             }
         }
 

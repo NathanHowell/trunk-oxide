@@ -90,7 +90,7 @@ fn main() {
     println!("cargo:rerun-if-changed=cpp/bridge.cpp");
 }
 
-/// Compute the GNURADIO_VERSION hex value using trunk-recorder's encoding:
+/// Compute the `GNURADIO_VERSION` hex value using trunk-recorder's encoding:
 /// `(major/10)<<20 | (major%10)<<16 | (minor/10)<<12 | (minor%10)<<8 | (patch/10)<<4 | (patch%10)`
 fn compute_gnuradio_version(version: &str) -> u32 {
     let parts: Vec<u32> = version.split('.').filter_map(|s| s.parse().ok()).collect();

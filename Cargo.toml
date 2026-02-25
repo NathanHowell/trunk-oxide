@@ -7,6 +7,26 @@ members = [
     "crates/trunk-whisperer",
 ]
 
+[workspace.package]
+edition = "2024"
+version = "0.1.0"
+rust-version = "1.85"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+unused_must_use = "deny"
+
+[workspace.lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+
+# Pedantic exceptions — too noisy or subjective
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+module_name_repetitions = "allow"
+must_use_candidate = "allow"
+
 [workspace.dependencies]
 trunk-recorder-sys = { path = "crates/trunk-recorder-sys" }
 trunk-recorder-plugin = { path = "crates/trunk-recorder-plugin" }

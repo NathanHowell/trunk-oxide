@@ -14,7 +14,15 @@ use proto::trunk_recorder_plugin_client::TrunkRecorderPluginClient;
 // ── Conversion helpers ──
 
 fn call_info(call: &TrCall) -> proto::CallInfo {
-    use trunk_recorder_sys::ffi::*;
+    use trunk_recorder_sys::ffi::{
+        call_elapsed, call_get_call_num, call_get_conversation_mode, call_get_current_length,
+        call_get_current_source_id, call_get_duplex, call_get_emergency, call_get_encrypted,
+        call_get_freq, call_get_freq_error, call_get_is_analog, call_get_mode,
+        call_get_monitoring_state, call_get_noise, call_get_phase2_tdma, call_get_priority,
+        call_get_short_name, call_get_signal, call_get_start_time, call_get_state,
+        call_get_sys_num, call_get_talkgroup, call_get_talkgroup_display, call_get_talkgroup_tag,
+        call_get_tdma_slot, call_is_conventional,
+    };
     proto::CallInfo {
         talkgroup: call_get_talkgroup(call),
         call_num: call_get_call_num(call),
@@ -40,13 +48,19 @@ fn call_info(call: &TrCall) -> proto::CallInfo {
         short_name: call_get_short_name(call),
         talkgroup_display: call_get_talkgroup_display(call),
         talkgroup_tag: call_get_talkgroup_tag(call),
-        state: call_get_state(call).repr as i32,
-        monitoring_state: call_get_monitoring_state(call).repr as i32,
+        state: i32::from(call_get_state(call).repr),
+        monitoring_state: i32::from(call_get_monitoring_state(call).repr),
     }
 }
 
 fn system_info(sys: &TrSystem) -> proto::SystemInfo {
-    use trunk_recorder_sys::ffi::*;
+    use trunk_recorder_sys::ffi::{
+        system_get_analog_levels, system_get_bandplan, system_get_compress_wav,
+        system_get_conversation_mode, system_get_decode_rate, system_get_digital_levels,
+        system_get_message_count, system_get_nac, system_get_short_name, system_get_squelch_db,
+        system_get_sys_id, system_get_sys_num, system_get_sys_rfss, system_get_sys_site_id,
+        system_get_system_type, system_get_wacn,
+    };
     proto::SystemInfo {
         sys_num: system_get_sys_num(sys),
         sys_id: system_get_sys_id(sys),
@@ -68,7 +82,11 @@ fn system_info(sys: &TrSystem) -> proto::SystemInfo {
 }
 
 fn recorder_info(rec: &TrRecorder) -> proto::RecorderInfo {
-    use trunk_recorder_sys::ffi::*;
+    use trunk_recorder_sys::ffi::{
+        recorder_get_current_length, recorder_get_freq, recorder_get_freq_error, recorder_get_num,
+        recorder_get_talkgroup, recorder_get_type_string, recorder_get_wav_hz, recorder_is_active,
+        recorder_is_analog, recorder_is_conventional, recorder_is_idle,
+    };
     proto::RecorderInfo {
         id: recorder_get_num(rec),
         r#type: recorder_get_type_string(rec),
@@ -85,7 +103,13 @@ fn recorder_info(rec: &TrRecorder) -> proto::RecorderInfo {
 }
 
 fn source_info(src: &TrSource) -> proto::SourceInfo {
-    use trunk_recorder_sys::ffi::*;
+    use trunk_recorder_sys::ffi::{
+        source_get_analog_recorder_count, source_get_antenna, source_get_center,
+        source_get_debug_recorder_count, source_get_device, source_get_digital_recorder_count,
+        source_get_driver, source_get_if_gain, source_get_lna_gain, source_get_max_hz,
+        source_get_min_hz, source_get_num, source_get_pga_gain, source_get_rate,
+        source_get_sigmf_recorder_count, source_get_vga1_gain, source_get_vga2_gain,
+    };
     proto::SourceInfo {
         src_num: source_get_num(src),
         center_freq: source_get_center(src),
@@ -188,7 +212,7 @@ fn convert_call_data(cd: &TrCallData) -> proto::CallData {
                 filename: t.filename.clone(),
             })
             .collect(),
-        status: cd.status.repr as i32,
+        status: i32::from(cd.status.repr),
         process_call_time: cd.process_call_time,
         retry_attempt: cd.retry_attempt,
     }
@@ -388,7 +412,9 @@ impl Plugin for GrpcPlugin {
         recorder: &TrRecorder,
         samples: &[i16],
     ) -> Result {
-        use trunk_recorder_sys::ffi::*;
+        use trunk_recorder_sys::ffi::{
+            call_get_freq, call_get_sys_num, call_get_talkgroup, recorder_get_wav_hz,
+        };
         if let Some(tx) = &self.audio_tx {
             // Convert i16 samples to bytes (little-endian)
             let bytes: Vec<u8> = samples
@@ -400,6 +426,7 @@ impl Plugin for GrpcPlugin {
                 sys_num: call_get_sys_num(call),
                 freq: call_get_freq(call),
                 samples: bytes,
+                #[allow(clippy::cast_possible_truncation)]
                 sample_rate: recorder_get_wav_hz(recorder) as i32,
             };
             if tx.try_send(msg).is_err() {
@@ -568,14 +595,15 @@ impl Plugin for GrpcPlugin {
 
 // ── Background stream tasks ──
 
+#[allow(clippy::significant_drop_tightening)]
 async fn run_streams(
     addr: String,
     audio_rx: mpsc::Receiver<proto::AudioSample>,
     event_rx: mpsc::Receiver<proto::PluginEvent>,
 ) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let channel = Channel::from_shared(addr)?.connect().await?;
-    let mut client = TrunkRecorderPluginClient::new(channel.clone());
-    let mut audio_client = TrunkRecorderPluginClient::new(channel);
+    let mut audio_client = TrunkRecorderPluginClient::new(channel.clone());
+    let mut client = TrunkRecorderPluginClient::new(channel);
 
     let audio_handle = tokio::spawn(async move {
         let stream = tokio_stream::wrappers::ReceiverStream::new(audio_rx);

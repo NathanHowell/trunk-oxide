@@ -55,32 +55,32 @@ impl Default for AudioConfig {
     }
 }
 
-fn default_gpu_count() -> usize {
+const fn default_gpu_count() -> usize {
     2
 }
-fn default_max_concurrent() -> usize {
+const fn default_max_concurrent() -> usize {
     4
 }
-fn default_flash_attn() -> bool {
+const fn default_flash_attn() -> bool {
     true
 }
 fn default_language() -> String {
     "en".to_string()
 }
-fn default_buffer_duration_ms() -> u64 {
+const fn default_buffer_duration_ms() -> u64 {
     10000
 }
-fn default_tone_detection() -> bool {
+const fn default_tone_detection() -> bool {
     true
 }
-fn default_tone_detection_duration_s() -> f32 {
+const fn default_tone_detection_duration_s() -> f32 {
     5.0
 }
 
 impl Config {
     pub fn load() -> Result<Self> {
         let content = std::fs::read_to_string("config.toml")?;
-        let mut config: Config = toml::from_str(&content)?;
+        let mut config: Self = toml::from_str(&content)?;
 
         if let Ok(token) = std::env::var("DISCORD_TOKEN") {
             config.discord.bot_token = token;

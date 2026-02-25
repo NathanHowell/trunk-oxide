@@ -1,3 +1,4 @@
+use std::fmt::Write;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -10,7 +11,7 @@ use crate::discord::DiscordClient;
 use crate::proto;
 
 pub enum AggregatorMessage {
-    Signal(proto::SignalEvent),
+    Signal(Box<proto::SignalEvent>),
     TrunkMessage(proto::TrunkMessageEvent),
     Unit(proto::UnitEvent),
     SystemRates(proto::SystemRatesEvent),
@@ -145,13 +146,11 @@ impl AggregatorInner {
         // Batch messages under Discord's 2000-char limit
         let mut batch = String::new();
         for line in self.buffer.drain(..) {
-            if batch.len() + line.len() + 1 > 2000 {
-                if !batch.is_empty() {
-                    if let Err(e) = self.discord.send_message(thread_id, &batch).await {
-                        tracing::error!(error = %e, "failed to post aggregated events");
-                    }
-                    batch.clear();
+            if batch.len() + line.len() + 1 > 2000 && !batch.is_empty() {
+                if let Err(e) = self.discord.send_message(thread_id, &batch).await {
+                    tracing::error!(error = %e, "failed to post aggregated events");
                 }
+                batch.clear();
             }
             if !batch.is_empty() {
                 batch.push('\n');
@@ -174,7 +173,7 @@ impl AggregatorInner {
             return Ok(());
         }
 
-        let thread_name = format!("System Events - {}", hour_key);
+        let thread_name = format!("System Events - {hour_key}");
         let thread_id = self
             .discord
             .create_call_thread(self.channel_id, &thread_name)
@@ -192,18 +191,20 @@ impl AggregatorInner {
 fn format_setup_config(e: &proto::SetupConfigEvent) -> String {
     let mut text = String::from("**Setup Config**\n");
     for sys in &e.systems {
-        text.push_str(&format!(
-            "  System: {} ({}) - type: {}\n",
+        let _ = writeln!(
+            text,
+            "  System: {} ({}) - type: {}",
             sys.short_name, sys.sys_num, sys.system_type
-        ));
+        );
     }
     for src in &e.sources {
-        text.push_str(&format!(
-            "  Source {}: {} @ {:.3} MHz\n",
+        let _ = writeln!(
+            text,
+            "  Source {}: {} @ {:.3} MHz",
             src.src_num,
             src.driver,
             src.center_freq / 1_000_000.0
-        ));
+        );
     }
     text
 }
@@ -211,10 +212,11 @@ fn format_setup_config(e: &proto::SetupConfigEvent) -> String {
 fn format_setup_systems(e: &proto::SetupSystemsEvent) -> String {
     let mut text = String::from("**Systems**\n");
     for sys in &e.systems {
-        text.push_str(&format!(
-            "  {} (sys_num={}, type={})\n",
+        let _ = writeln!(
+            text,
+            "  {} (sys_num={}, type={})",
             sys.short_name, sys.sys_num, sys.system_type
-        ));
+        );
     }
     text
 }
@@ -222,52 +224,56 @@ fn format_setup_systems(e: &proto::SetupSystemsEvent) -> String {
 fn format_setup_sources(e: &proto::SetupSourcesEvent) -> String {
     let mut text = String::from("**Sources**\n");
     for src in &e.sources {
-        text.push_str(&format!(
-            "  Source {}: {} @ {:.3} MHz (analog={}, digital={})\n",
+        let _ = writeln!(
+            text,
+            "  Source {}: {} @ {:.3} MHz (analog={}, digital={})",
             src.src_num,
             src.driver,
             src.center_freq / 1_000_000.0,
             src.analog_recorders,
             src.digital_recorders
-        ));
+        );
     }
     text
 }
 
 fn format_setup_system(e: &proto::SetupSystemEvent) -> String {
-    if let Some(sys) = &e.system {
-        format!(
-            "**System**: {} (sys_num={}, type={})",
-            sys.short_name, sys.sys_num, sys.system_type
-        )
-    } else {
-        "**System**: (no data)".to_string()
-    }
+    e.system.as_ref().map_or_else(
+        || "**System**: (no data)".to_string(),
+        |sys| {
+            format!(
+                "**System**: {} (sys_num={}, type={})",
+                sys.short_name, sys.sys_num, sys.system_type
+            )
+        },
+    )
 }
 
 fn format_setup_recorder(e: &proto::SetupRecorderEvent) -> String {
-    if let Some(rec) = &e.recorder {
-        format!(
-            "**Recorder**: id={} type={} freq={:.4} MHz",
-            rec.id,
-            rec.r#type,
-            rec.freq / 1_000_000.0
-        )
-    } else {
-        "**Recorder**: (no data)".to_string()
-    }
+    e.recorder.as_ref().map_or_else(
+        || "**Recorder**: (no data)".to_string(),
+        |rec| {
+            format!(
+                "**Recorder**: id={} type={} freq={:.4} MHz",
+                rec.id,
+                rec.r#type,
+                rec.freq / 1_000_000.0
+            )
+        },
+    )
 }
 
 fn format_signal(e: &proto::SignalEvent) -> String {
-    let signal_type = proto::SignalType::try_from(e.signal_type)
-        .map(|st| {
+    let signal_type = proto::SignalType::try_from(e.signal_type).map_or_else(
+        |_| format!("UNKNOWN({})", e.signal_type),
+        |st| {
             st.as_str_name()
                 .strip_prefix("SIGNAL_TYPE_")
                 .unwrap_or(st.as_str_name())
                 .to_string()
-        })
-        .unwrap_or_else(|_| format!("UNKNOWN({})", e.signal_type));
-    format!("Signal: unit {} - {}", e.unit_id, signal_type)
+        },
+    );
+    format!("Signal: unit {} - {signal_type}", e.unit_id)
 }
 
 fn format_trunk_message(e: &proto::TrunkMessageEvent) -> String {
@@ -275,21 +281,21 @@ fn format_trunk_message(e: &proto::TrunkMessageEvent) -> String {
     let sys_name = e
         .system
         .as_ref()
-        .map(|s| s.short_name.as_str())
-        .unwrap_or("unknown");
-    format!("Trunk: {} messages from {}", count, sys_name)
+        .map_or("unknown", |s| s.short_name.as_str());
+    format!("Trunk: {count} messages from {sys_name}")
 }
 
 fn format_unit(e: &proto::UnitEvent) -> String {
-    let event_type = proto::UnitEventType::try_from(e.r#type)
-        .map(|et| {
+    let event_type = proto::UnitEventType::try_from(e.r#type).map_or_else(
+        |_| format!("UNKNOWN({})", e.r#type),
+        |et| {
             et.as_str_name()
                 .strip_prefix("UNIT_EVENT_TYPE_")
                 .unwrap_or(et.as_str_name())
                 .to_string()
-        })
-        .unwrap_or_else(|_| format!("UNKNOWN({})", e.r#type));
-    format!("Unit: {} - source {}", event_type, e.source_id)
+        },
+    );
+    format!("Unit: {event_type} - source {}", e.source_id)
 }
 
 fn format_system_rates(e: &proto::SystemRatesEvent) -> String {

@@ -1,3 +1,5 @@
+#![allow(unsafe_code)]
+
 #[cxx::bridge(namespace = "trunk_oxide")]
 pub mod ffi {
     // ── Shared enums (mirrored in both C++ and Rust) ──

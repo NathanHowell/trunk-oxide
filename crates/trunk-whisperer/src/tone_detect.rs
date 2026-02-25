@@ -21,9 +21,9 @@ const DTMF_MAP: [[char; 4]; 4] = [
 
 // Standard EIA CTCSS/PL tones (67.0–254.1 Hz)
 const CTCSS_FREQS: [f32; 38] = [
-    67.0, 71.9, 74.4, 77.0, 79.7, 82.5, 85.4, 88.5, 91.5, 94.8, 97.4, 100.0, 103.5, 107.2,
-    110.9, 114.8, 118.8, 123.0, 127.3, 131.8, 136.5, 141.3, 146.2, 151.4, 156.7, 162.2, 167.9,
-    173.8, 179.9, 186.2, 192.8, 203.5, 210.7, 218.1, 225.7, 233.6, 241.8, 250.3,
+    67.0, 71.9, 74.4, 77.0, 79.7, 82.5, 85.4, 88.5, 91.5, 94.8, 97.4, 100.0, 103.5, 107.2, 110.9,
+    114.8, 118.8, 123.0, 127.3, 131.8, 136.5, 141.3, 146.2, 151.4, 156.7, 162.2, 167.9, 173.8,
+    179.9, 186.2, 192.8, 203.5, 210.7, 218.1, 225.7, 233.6, 241.8, 250.3,
 ];
 
 // CTCSS analysis uses longer windows for adequate frequency resolution
@@ -74,6 +74,7 @@ pub struct ToneDetectorResult {
 
 // --- Goertzel algorithm ---
 
+#[allow(clippy::cast_precision_loss)]
 fn goertzel_mag_sq(samples: &[f32], target_freq: f32, sample_rate: f32) -> f32 {
     let n = samples.len() as f32;
     let k = (target_freq * n / sample_rate).round();
@@ -89,11 +90,12 @@ fn goertzel_mag_sq(samples: &[f32], target_freq: f32, sample_rate: f32) -> f32 {
         s1 = s0;
     }
 
-    s1 * s1 + s2 * s2 - coeff * s1 * s2
+    s1.mul_add(s1, s2.mul_add(s2, -(coeff * s1 * s2)))
 }
 
 // --- Window analysis ---
 
+#[allow(clippy::cast_precision_loss)]
 fn extract_dominant_freq(magnitudes: &[f32], bank_freqs: &[f32]) -> Option<f32> {
     if magnitudes.is_empty() {
         return None;
@@ -116,7 +118,7 @@ fn extract_dominant_freq(magnitudes: &[f32], bank_freqs: &[f32]) -> Option<f32> 
         let m1 = magnitudes[peak_idx - 1];
         let m0 = magnitudes[peak_idx];
         let m2 = magnitudes[peak_idx + 1];
-        let denom = m1 - 2.0 * m0 + m2;
+        let denom = 2.0f32.mul_add(-m0, m1) + m2;
         if denom.abs() > f32::EPSILON {
             let delta = 0.5 * (m1 - m2) / denom;
             return Some(bank_freqs[peak_idx] + delta * BANK_STEP_HZ);
@@ -127,12 +129,10 @@ fn extract_dominant_freq(magnitudes: &[f32], bank_freqs: &[f32]) -> Option<f32> 
 }
 
 fn detect_dtmf_window(samples: &[f32], sample_rate: f32) -> Option<char> {
-    let low_mags: [f32; 4] = std::array::from_fn(|i| {
-        goertzel_mag_sq(samples, DTMF_LOW[i], sample_rate)
-    });
-    let high_mags: [f32; 4] = std::array::from_fn(|i| {
-        goertzel_mag_sq(samples, DTMF_HIGH[i], sample_rate)
-    });
+    let low_mags: [f32; 4] =
+        std::array::from_fn(|i| goertzel_mag_sq(samples, DTMF_LOW[i], sample_rate));
+    let high_mags: [f32; 4] =
+        std::array::from_fn(|i| goertzel_mag_sq(samples, DTMF_HIGH[i], sample_rate));
 
     let (low_idx, low_max) = low_mags
         .iter()
@@ -176,6 +176,7 @@ fn detect_dtmf_window(samples: &[f32], sample_rate: f32) -> Option<char> {
     None
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn detect_ctcss_window(samples: &[f32], sample_rate: f32) -> Option<usize> {
     let mags: Vec<f32> = CTCSS_FREQS
         .iter()
@@ -206,11 +207,13 @@ struct ToneSegment {
 }
 
 impl ToneSegment {
+    #[allow(clippy::cast_precision_loss)]
     fn duration_s(&self, hop_s: f32) -> f32 {
         (self.end_window - self.start_window) as f32 * hop_s
     }
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn extract_segments(window_freqs: &[Option<f32>]) -> Vec<ToneSegment> {
     let mut segments = Vec::new();
     let mut i = 0;
@@ -264,10 +267,8 @@ fn detect_two_tone(segments: &[ToneSegment], hop_s: f32) -> Option<(DetectedTone
         let dur_b = b.duration_s(hop_s);
 
         if (a.freq - b.freq).abs() > FREQ_TOLERANCE_HZ
-            && dur_a >= 0.5
-            && dur_a <= 2.0
-            && dur_b >= 1.0
-            && dur_b <= 5.0
+            && (0.5..=2.0).contains(&dur_a)
+            && (1.0..=5.0).contains(&dur_b)
         {
             return Some((
                 DetectedTone::TwoTone {
@@ -299,6 +300,7 @@ fn detect_long_tone(segments: &[ToneSegment], hop_s: f32) -> Option<(DetectedTon
     None
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn detect_warble(window_freqs: &[Option<f32>], hop_s: f32) -> Option<(DetectedTone, usize)> {
     let tone_windows: Vec<(usize, f32)> = window_freqs
         .iter()
@@ -418,10 +420,16 @@ pub struct ToneDetector {
 }
 
 impl ToneDetector {
+    #[allow(dead_code)]
     pub fn new(sample_rate: u32, max_duration_s: f32) -> Self {
         Self::with_ctcss(sample_rate, max_duration_s, false)
     }
 
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss
+    )]
     pub fn with_ctcss(sample_rate: u32, max_duration_s: f32, detect_ctcss: bool) -> Self {
         let window_size = (sample_rate as f32 * WINDOW_S) as usize;
         let hop_size = (sample_rate as f32 * HOP_S) as usize;
@@ -429,6 +437,7 @@ impl ToneDetector {
 
         let mut bank_freqs = Vec::new();
         let mut freq = BANK_START_HZ;
+        #[allow(clippy::while_float)]
         while freq <= BANK_END_HZ {
             bank_freqs.push(freq);
             freq += BANK_STEP_HZ;
@@ -456,6 +465,7 @@ impl ToneDetector {
         }
     }
 
+    #[allow(clippy::cast_precision_loss)]
     pub fn process(&mut self, samples: &[f32]) {
         if self.complete {
             return;
@@ -486,8 +496,7 @@ impl ToneDetector {
             self.ctcss_pending.extend_from_slice(samples);
             while self.ctcss_pending.len() >= self.ctcss_window_size {
                 let window = &self.ctcss_pending[..self.ctcss_window_size];
-                self.window_ctcss
-                    .push(detect_ctcss_window(window, sr));
+                self.window_ctcss.push(detect_ctcss_window(window, sr));
                 let hop = self.ctcss_hop_size;
                 self.ctcss_pending.drain(..hop);
             }
@@ -498,10 +507,11 @@ impl ToneDetector {
         }
     }
 
-    pub fn is_complete(&self) -> bool {
+    pub const fn is_complete(&self) -> bool {
         self.complete
     }
 
+    #[allow(clippy::cast_precision_loss)]
     pub fn finish(self) -> ToneDetectorResult {
         let hop_s = HOP_S;
         let segments = extract_segments(&self.window_freqs);
@@ -538,18 +548,13 @@ impl ToneDetector {
         if self.detect_ctcss && !self.window_ctcss.is_empty() {
             let mut counts = [0usize; 38];
             let mut present = 0usize;
-            for w in &self.window_ctcss {
-                if let Some(idx) = w {
-                    counts[*idx] += 1;
-                    present += 1;
-                }
+            for w in self.window_ctcss.iter().flatten() {
+                counts[*w] += 1;
+                present += 1;
             }
             if present > 0 {
-                let (best_idx, &best_count) = counts
-                    .iter()
-                    .enumerate()
-                    .max_by_key(|&(_, c)| *c)
-                    .unwrap();
+                let (best_idx, &best_count) =
+                    counts.iter().enumerate().max_by_key(|&(_, c)| *c).unwrap();
                 if best_count as f32 / present as f32 > CTCSS_DOMINANCE_RATIO {
                     tones.push(DetectedTone::Ctcss {
                         freq: CTCSS_FREQS[best_idx],
@@ -570,33 +575,31 @@ impl ToneDetector {
 impl std::fmt::Display for DetectedTone {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            DetectedTone::TwoTone {
+            Self::TwoTone {
                 tone_a,
                 tone_b,
                 duration_a,
                 duration_b,
             } => write!(
                 f,
-                "Two-Tone: {:.0} Hz ({:.2}s) / {:.0} Hz ({:.2}s)",
-                tone_a, duration_a, tone_b, duration_b
+                "Two-Tone: {tone_a:.0} Hz ({duration_a:.2}s) / {tone_b:.0} Hz ({duration_b:.2}s)",
             ),
-            DetectedTone::LongTone { freq, duration } => {
-                write!(f, "Long Tone: {:.0} Hz ({:.2}s)", freq, duration)
+            Self::LongTone { freq, duration } => {
+                write!(f, "Long Tone: {freq:.0} Hz ({duration:.2}s)")
             }
-            DetectedTone::HiLowWarble {
+            Self::HiLowWarble {
                 freq_hi,
                 freq_lo,
                 duration,
             } => write!(
                 f,
-                "Hi-Low Warble: {:.0}/{:.0} Hz ({:.2}s)",
-                freq_hi, freq_lo, duration
+                "Hi-Low Warble: {freq_hi:.0}/{freq_lo:.0} Hz ({duration:.2}s)",
             ),
-            DetectedTone::Dtmf { digits } => {
+            Self::Dtmf { digits } => {
                 write!(f, "DTMF: {}", digits.iter().collect::<String>())
             }
-            DetectedTone::Ctcss { freq } => {
-                write!(f, "CTCSS: {:.1} Hz", freq)
+            Self::Ctcss { freq } => {
+                write!(f, "CTCSS: {freq:.1} Hz")
             }
         }
     }
@@ -617,6 +620,7 @@ pub struct NotchFilter {
 }
 
 impl NotchFilter {
+    #[allow(clippy::cast_precision_loss)]
     pub fn new(sample_rate: u32, center_freq: f32, q: f32) -> Self {
         let w0 = 2.0 * PI * center_freq / sample_rate as f32;
         let alpha = w0.sin() / (2.0 * q);
@@ -645,9 +649,14 @@ impl NotchFilter {
     pub fn process(&mut self, samples: &mut [f32]) {
         for sample in samples.iter_mut() {
             let x0 = *sample;
-            let y0 = self.b0 * x0 + self.b1 * self.x1 + self.b2 * self.x2
-                - self.a1 * self.y1
-                - self.a2 * self.y2;
+            let y0 = self.b0.mul_add(
+                x0,
+                self.b1.mul_add(
+                    self.x1,
+                    self.b2
+                        .mul_add(self.x2, (-self.a1).mul_add(self.y1, -self.a2 * self.y2)),
+                ),
+            );
             self.x2 = self.x1;
             self.x1 = x0;
             self.y2 = self.y1;
@@ -754,12 +763,13 @@ mod tests {
             .tones
             .iter()
             .find(|t| matches!(t, DetectedTone::TwoTone { .. }));
-        assert!(tt.is_some(), "should detect two-tone, got: {:?}", result.tones);
+        assert!(
+            tt.is_some(),
+            "should detect two-tone, got: {:?}",
+            result.tones
+        );
 
-        if let Some(DetectedTone::TwoTone {
-            tone_a, tone_b, ..
-        }) = tt
-        {
+        if let Some(DetectedTone::TwoTone { tone_a, tone_b, .. }) = tt {
             assert!(
                 (*tone_a - 1000.0).abs() < 30.0,
                 "tone A should be ~1000 Hz, got {}",
@@ -787,7 +797,11 @@ mod tests {
             .tones
             .iter()
             .find(|t| matches!(t, DetectedTone::LongTone { .. }));
-        assert!(lt.is_some(), "should detect long tone, got: {:?}", result.tones);
+        assert!(
+            lt.is_some(),
+            "should detect long tone, got: {:?}",
+            result.tones
+        );
 
         if let Some(DetectedTone::LongTone { freq, duration }) = lt {
             assert!(
@@ -813,11 +827,7 @@ mod tests {
             .tones
             .iter()
             .find(|t| matches!(t, DetectedTone::HiLowWarble { .. }));
-        assert!(
-            w.is_some(),
-            "should detect warble, got: {:?}",
-            result.tones
-        );
+        assert!(w.is_some(), "should detect warble, got: {:?}", result.tones);
 
         if let Some(DetectedTone::HiLowWarble {
             freq_hi, freq_lo, ..
@@ -997,7 +1007,11 @@ mod tests {
             .iter()
             .any(|t| matches!(t, DetectedTone::Ctcss { .. }));
 
-        assert!(has_two_tone, "should detect two-tone, got: {:?}", result.tones);
+        assert!(
+            has_two_tone,
+            "should detect two-tone, got: {:?}",
+            result.tones
+        );
         assert!(has_ctcss, "should detect CTCSS, got: {:?}", result.tones);
 
         if let Some(DetectedTone::Ctcss { freq }) = result
@@ -1083,7 +1097,10 @@ mod tests {
             .map(|i| {
                 let t = i as f32 / sr as f32;
                 let mut s = 0.0_f32;
-                for &f in &[173.0, 311.0, 479.0, 613.0, 757.0, 919.0, 1061.0, 1223.0, 1399.0, 1567.0, 1741.0, 1933.0, 2111.0, 2309.0, 2503.0] {
+                for &f in &[
+                    173.0, 311.0, 479.0, 613.0, 757.0, 919.0, 1061.0, 1223.0, 1399.0, 1567.0,
+                    1741.0, 1933.0, 2111.0, 2309.0, 2503.0,
+                ] {
                     s += (2.0 * PI * f * t).sin();
                 }
                 s / 15.0

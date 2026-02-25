@@ -18,7 +18,7 @@ pub enum CallMessage {
         sample_rate: i32,
     },
     Event(String),
-    End(Option<proto::CallData>),
+    End(Option<Box<proto::CallData>>),
 }
 
 pub struct CallHandler {
@@ -39,6 +39,7 @@ pub struct CallHandler {
 }
 
 impl CallHandler {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         key: CallKey,
         call_info: proto::CallInfo,
@@ -187,6 +188,7 @@ impl CallHandler {
             decoded
         } else {
             let resampler = self.resampler.get_or_insert_with(|| {
+                #[allow(clippy::cast_sign_loss)]
                 Resampler::new(sample_rate as u32)
                     .expect("failed to create resampler")
             });
@@ -207,11 +209,12 @@ impl CallHandler {
         if self
             .tone_detector
             .as_ref()
-            .is_some_and(|d| d.is_complete())
+            .is_some_and(ToneDetector::is_complete)
         {
             self.finish_tone_detection().await?;
         }
 
+        #[allow(clippy::cast_possible_truncation)]
         let buffer_threshold = (self.buffer_duration_ms as usize * 16000) / 1000;
         if self.audio_buffer.len() >= buffer_threshold {
             let audio: Vec<f32> = self.audio_buffer.drain(..).collect();
@@ -233,7 +236,7 @@ impl CallHandler {
                 let msg = result
                     .tones
                     .iter()
-                    .map(|t| format!("**{}**", t))
+                    .map(|t| format!("**{t}**"))
                     .collect::<Vec<_>>()
                     .join("\n");
                 self.discord.send_message(thread_id, &msg).await?;
@@ -322,6 +325,7 @@ impl CallHandler {
         Ok(())
     }
 
+    #[allow(clippy::needless_pass_by_ref_mut)]
     async fn post_event(&mut self, text: &str) -> Result<()> {
         let Some(thread_id) = self.thread_id else {
             return Ok(());
@@ -330,7 +334,7 @@ impl CallHandler {
         Ok(())
     }
 
-    async fn handle_end(&mut self, call_data: Option<proto::CallData>) -> Result<()> {
+    async fn handle_end(&mut self, call_data: Option<Box<proto::CallData>>) -> Result<()> {
         // Flush resampler
         if let Some(resampler) = &mut self.resampler {
             let flushed = resampler.flush()?;
@@ -376,7 +380,7 @@ fn decode_audio(bytes: &[u8]) -> Vec<f32> {
         .chunks_exact(2)
         .map(|chunk| {
             let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-            sample as f32 / 32768.0
+            f32::from(sample) / 32768.0
         })
         .collect()
 }

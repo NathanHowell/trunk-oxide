@@ -145,8 +145,9 @@ impl Dispatcher {
             talkgroup: call_data.talkgroup,
         };
 
-        if let Some(tx) = self.calls.write().await.remove(&key) {
-            let _ = tx.send(CallMessage::End(event.call_data)).await;
+        let tx = self.calls.write().await.remove(&key);
+        if let Some(tx) = tx {
+            let _ = tx.send(CallMessage::End(event.call_data.map(Box::new))).await;
         }
     }
 
@@ -164,7 +165,7 @@ impl Dispatcher {
             }
         }
         self.aggregator
-            .send(AggregatorMessage::Signal(event));
+            .send(AggregatorMessage::Signal(Box::new(event)));
     }
 
     async fn handle_unit(&self, event: proto::UnitEvent) {
@@ -187,14 +188,15 @@ impl Dispatcher {
 }
 
 fn format_signal_event(event: &proto::SignalEvent) -> String {
-    let signal_type = proto::SignalType::try_from(event.signal_type)
-        .map(|st| {
+    let signal_type = proto::SignalType::try_from(event.signal_type).map_or_else(
+        |_| format!("UNKNOWN({})", event.signal_type),
+        |st| {
             st.as_str_name()
                 .strip_prefix("SIGNAL_TYPE_")
                 .unwrap_or(st.as_str_name())
                 .to_string()
-        })
-        .unwrap_or_else(|_| format!("UNKNOWN({})", event.signal_type));
+        },
+    );
 
     format!(
         "**Signal**: unit {} - {} ({})",
@@ -203,14 +205,15 @@ fn format_signal_event(event: &proto::SignalEvent) -> String {
 }
 
 fn format_unit_event(event: &proto::UnitEvent) -> String {
-    let event_type = proto::UnitEventType::try_from(event.r#type)
-        .map(|et| {
+    let event_type = proto::UnitEventType::try_from(event.r#type).map_or_else(
+        |_| format!("UNKNOWN({})", event.r#type),
+        |et| {
             et.as_str_name()
                 .strip_prefix("UNIT_EVENT_TYPE_")
                 .unwrap_or(et.as_str_name())
                 .to_string()
-        })
-        .unwrap_or_else(|_| format!("UNKNOWN({})", event.r#type));
+        },
+    );
 
     format!(
         "**Unit**: {} - source {} (tg {})",

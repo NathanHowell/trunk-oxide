@@ -14,7 +14,7 @@ pub struct Resampler {
 
 impl Resampler {
     pub fn new(input_rate: u32) -> Result<Self> {
-        let ratio = OUTPUT_RATE as f64 / input_rate as f64;
+        let ratio = f64::from(OUTPUT_RATE) / f64::from(input_rate);
         let params = SincInterpolationParameters {
             sinc_len: 256,
             f_cutoff: 0.95,

@@ -124,18 +124,20 @@ struct PluginAdapter<P: Plugin> {
 }
 
 impl<P: Plugin> PluginAdapter<P> {
-    fn new(plugin: P) -> Self {
+    const fn new(plugin: P) -> Self {
         Self { inner: plugin }
     }
 
     /// Convert a slice of raw pointers to a vec of references.
     /// # Safety
     /// The pointers must be valid for the duration of the call.
+    #[allow(unsafe_code)]
     unsafe fn ptr_slice_to_refs<'a, T>(ptrs: &[*const T]) -> Vec<&'a T> {
         ptrs.iter().map(|p| unsafe { &**p }).collect()
     }
 }
 
+#[allow(unsafe_code)]
 impl<P: Plugin> trunk_recorder_sys::RustPluginCallbacks for PluginAdapter<P> {
     fn parse_config(&mut self, json_str: &str) -> i32 {
         match serde_json::from_str(json_str) {
@@ -447,6 +449,7 @@ pub fn into_plugin_box<P: Plugin + 'static>(plugin: P) -> trunk_recorder_sys::Ru
 #[macro_export]
 macro_rules! export_plugin {
     ($create_expr:expr) => {
+        #[allow(unsafe_code)]
         #[unsafe(no_mangle)]
         pub extern "C" fn rust_create_plugin(
         ) -> *mut $crate::trunk_recorder_sys::RustPluginBox {

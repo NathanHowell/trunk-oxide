@@ -11,7 +11,7 @@ pub struct TrunkRecorderService {
 }
 
 impl TrunkRecorderService {
-    pub fn new(dispatcher: Arc<Dispatcher>) -> Self {
+    pub const fn new(dispatcher: Arc<Dispatcher>) -> Self {
         Self { dispatcher }
     }
 }

@@ -19,6 +19,7 @@ impl Transcriber {
         for device_id in 0..config.gpu_count {
             let mut ctx_params = WhisperContextParameters::default();
             ctx_params.use_gpu(true);
+            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
             ctx_params.gpu_device(device_id as i32);
             ctx_params.flash_attn(config.flash_attn);
 

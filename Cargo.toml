@@ -4,4 +4,28 @@ members = [
     "crates/trunk-recorder-sys",
     "crates/trunk-recorder-plugin",
     "crates/trunk-oxide-grpc",
+    "crates/trunk-whisperer",
 ]
+
+[workspace.dependencies]
+trunk-recorder-sys = { path = "crates/trunk-recorder-sys" }
+trunk-recorder-plugin = { path = "crates/trunk-recorder-plugin" }
+anyhow = "1"
+chrono = "0.4"
+cxx = "1"
+cxx-build = "1"
+prost = "0.13"
+prost-types = "0.13"
+pkg-config = "0.3"
+rubato = "0.16"
+serenity = { version = "0.12", default-features = false, features = ["builder", "http", "model", "rustls_backend"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros"] }
+tokio-stream = "0.1"
+toml = "0.8"
+tonic = "0.12"
+tonic-build = "0.12"
+tracing = "0.1"
+tracing-subscriber = "0.3"
+whisper-rs = "0.15"

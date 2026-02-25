@@ -14,7 +14,8 @@ prost-types = "0.13"
 whisper-rs = "0.15"
 rubato = "0.16"
 serenity = { version = "0.12", default-features = false, features = ["builder", "http", "model", "rustls_backend"] }
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "signal", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "signal", "time", "net"] }
+tokio-stream = { version = "0.1", features = ["net"] }
 serde = { version = "1", features = ["derive"] }
 toml = "0.8"
 tracing = "0.1"

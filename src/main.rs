@@ -39,16 +39,20 @@ async fn main() -> Result<()> {
         config.audio.tone_detection_duration_s,
     ));
 
-    let addr = config.grpc.listen_addr.parse()?;
+    let listen_path = &config.grpc.listen_path;
+    let _ = std::fs::remove_file(listen_path);
+    let listener = tokio::net::UnixListener::bind(listen_path)?;
+    let incoming = tokio_stream::wrappers::UnixListenerStream::new(listener);
+
     let service = grpc::TrunkRecorderService::new(dispatcher);
 
-    tracing::info!(%addr, "trunk-whisperer listening");
+    tracing::info!(path = %listen_path, "trunk-whisperer listening");
 
     tonic::transport::Server::builder()
         .add_service(
             proto::trunk_recorder_plugin_server::TrunkRecorderPluginServer::new(service),
         )
-        .serve_with_shutdown(addr, shutdown_signal())
+        .serve_with_incoming_shutdown(incoming, shutdown_signal())
         .await?;
 
     Ok(())

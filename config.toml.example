@@ -1,5 +1,5 @@
 [grpc]
-listen_addr = "0.0.0.0:50051"
+listen_path = "/tmp/trunk-whisperer.sock"
 
 [discord]
 bot_token = ""  # Override via DISCORD_TOKEN env var

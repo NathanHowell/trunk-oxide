@@ -12,7 +12,7 @@ pub struct Config {
 
 #[derive(Debug, Deserialize)]
 pub struct GrpcConfig {
-    pub listen_addr: String,
+    pub listen_path: String,
 }
 
 #[derive(Debug, Deserialize)]

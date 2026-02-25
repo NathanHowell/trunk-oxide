@@ -1,0 +1,49 @@
+# trunk-whisperer: standalone gRPC speech-to-text service
+# whisper-rs statically links whisper.cpp — the binary is self-contained
+
+FROM rust:trixie AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    cmake \
+    libclang-dev \
+    libprotobuf-dev \
+    protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Copy workspace manifests and lockfile first for dependency caching
+COPY Cargo.toml Cargo.lock ./
+COPY crates/trunk-whisperer/Cargo.toml crates/trunk-whisperer/Cargo.toml
+COPY crates/trunk-whisperer/build.rs crates/trunk-whisperer/build.rs
+COPY crates/trunk-whisperer/proto crates/trunk-whisperer/proto
+COPY crates/trunk-oxide-grpc/Cargo.toml crates/trunk-oxide-grpc/Cargo.toml
+COPY crates/trunk-recorder-plugin/Cargo.toml crates/trunk-recorder-plugin/Cargo.toml
+COPY crates/trunk-recorder-sys/Cargo.toml crates/trunk-recorder-sys/Cargo.toml
+
+# Create stub sources so cargo can resolve the workspace and cache dependencies
+RUN mkdir -p crates/trunk-whisperer/src \
+    && echo "fn main() {}" > crates/trunk-whisperer/src/main.rs \
+    && mkdir -p crates/trunk-oxide-grpc/src \
+    && echo "" > crates/trunk-oxide-grpc/src/lib.rs \
+    && mkdir -p crates/trunk-recorder-plugin/src \
+    && echo "" > crates/trunk-recorder-plugin/src/lib.rs \
+    && mkdir -p crates/trunk-recorder-sys/src \
+    && echo "" > crates/trunk-recorder-sys/src/lib.rs
+
+RUN cargo build --release -p trunk-whisperer || true
+
+# Copy real sources and rebuild
+COPY crates/trunk-whisperer/src crates/trunk-whisperer/src
+
+# Touch sources to invalidate the stub build artifacts
+RUN touch crates/trunk-whisperer/src/main.rs
+
+RUN cargo build --release -p trunk-whisperer
+
+# Runtime — distroless for minimal attack surface
+FROM gcr.io/distroless/cc-debian13:nonroot
+
+COPY --from=builder /build/target/release/trunk-whisperer /usr/local/bin/trunk-whisperer
+
+ENTRYPOINT ["trunk-whisperer"]

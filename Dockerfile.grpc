@@ -1,0 +1,66 @@
+# trunk-oxide-grpc: cdylib plugin for trunk-recorder
+# Built on rust:trixie (gnuradio 3.10.12), runs on the trunk-recorder 5.1.1 image
+# (gnuradio 3.10.9 — same minor series, stable header ABI).
+# The plugin doesn't link gnuradio .so files directly (--allow-shlib-undefined);
+# symbols resolve at dlopen time from the host process.
+
+FROM rust:trixie AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    gnuradio-dev \
+    libboost-all-dev \
+    libprotobuf-dev \
+    libuhd-dev \
+    mold \
+    pkg-config \
+    protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+
+# rust-lld does not support --require-defined; use mold for the final link
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-Clink-arg=-fuse-ld=mold"
+
+WORKDIR /build
+
+# Copy workspace manifests, lockfile, and trunk-recorder subdir (headers for build.rs)
+COPY Cargo.toml Cargo.lock ./
+COPY trunk-recorder trunk-recorder
+COPY crates/trunk-oxide-grpc/Cargo.toml crates/trunk-oxide-grpc/Cargo.toml
+COPY crates/trunk-oxide-grpc/build.rs crates/trunk-oxide-grpc/build.rs
+COPY crates/trunk-oxide-grpc/proto crates/trunk-oxide-grpc/proto
+COPY crates/trunk-recorder-sys/Cargo.toml crates/trunk-recorder-sys/Cargo.toml
+COPY crates/trunk-recorder-sys/build.rs crates/trunk-recorder-sys/build.rs
+COPY crates/trunk-recorder-sys/cpp crates/trunk-recorder-sys/cpp
+COPY crates/trunk-recorder-plugin/Cargo.toml crates/trunk-recorder-plugin/Cargo.toml
+COPY crates/trunk-whisperer/Cargo.toml crates/trunk-whisperer/Cargo.toml
+
+# Create stub sources so cargo can resolve the workspace and cache dependencies
+RUN mkdir -p crates/trunk-oxide-grpc/src \
+    && echo "" > crates/trunk-oxide-grpc/src/lib.rs \
+    && mkdir -p crates/trunk-recorder-sys/src \
+    && echo "" > crates/trunk-recorder-sys/src/lib.rs \
+    && mkdir -p crates/trunk-recorder-plugin/src \
+    && echo "" > crates/trunk-recorder-plugin/src/lib.rs \
+    && mkdir -p crates/trunk-whisperer/src \
+    && echo "fn main() {}" > crates/trunk-whisperer/src/main.rs
+
+RUN cargo build --release -p trunk-oxide-grpc || true
+
+# Copy real sources and rebuild
+COPY crates/trunk-recorder-sys/src crates/trunk-recorder-sys/src
+COPY crates/trunk-recorder-plugin/src crates/trunk-recorder-plugin/src
+COPY crates/trunk-oxide-grpc/src crates/trunk-oxide-grpc/src
+
+# Touch sources to invalidate the stub build artifacts
+RUN touch crates/trunk-recorder-sys/src/lib.rs \
+    crates/trunk-recorder-plugin/src/lib.rs \
+    crates/trunk-oxide-grpc/src/lib.rs
+
+RUN cargo build --release -p trunk-oxide-grpc
+
+# Verify the plugin exports the expected symbol
+RUN nm -D --defined-only target/release/libtrunk_oxide_grpc.so | grep -q create_plugin
+
+# Runtime — upstream trunk-recorder image
+FROM robotastic/trunk-recorder:5.1.1@sha256:9621002ed6be8a59406b179489db9031d376e6faed52d9589901625c66a939a1
+
+COPY --from=builder /build/target/release/libtrunk_oxide_grpc.so /usr/local/lib/trunk-recorder/

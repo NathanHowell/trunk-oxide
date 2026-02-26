@@ -8,7 +8,11 @@ use proto::trunk_oxide_client::TrunkOxideClient;
 
 use crate::dispatcher::Dispatcher;
 
-pub async fn run(socket_path: String, dispatcher: Arc<Dispatcher>) -> Result<()> {
+pub async fn run(
+    socket_path: String,
+    dispatcher: Arc<Dispatcher>,
+    reporter: tonic_health::server::HealthReporter,
+) -> Result<()> {
     let channel = Endpoint::try_from("http://[::]:50051")?
         .connect_with_connector(tower::service_fn(move |_| {
             let path = socket_path.clone();
@@ -27,6 +31,8 @@ pub async fn run(socket_path: String, dispatcher: Arc<Dispatcher>) -> Result<()>
 
     let mut event_stream = event_response.into_inner();
     let mut audio_stream = audio_response.into_inner();
+
+    reporter.set_service_status("", tonic_health::ServingStatus::Serving).await;
 
     let dispatcher_events = Arc::clone(&dispatcher);
     let event_handle = tokio::spawn(async move {
@@ -50,6 +56,8 @@ pub async fn run(socket_path: String, dispatcher: Arc<Dispatcher>) -> Result<()>
     if let Err(e) = audio_result {
         tracing::error!("audio stream task join error: {e}");
     }
+
+    reporter.set_service_status("", tonic_health::ServingStatus::NotServing).await;
 
     Ok(())
 }

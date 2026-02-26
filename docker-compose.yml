@@ -11,6 +11,12 @@ services:
       - ./tests:/test:ro
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr", "unix:///var/run/trunk-oxide/trunk-oxide.sock"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
 
   fetch-whisper-model:
     image: debian:trixie-slim
@@ -45,6 +51,12 @@ services:
         condition: service_completed_successfully
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr", "unix:///var/run/trunk-whisperer/trunk-whisperer.sock"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
 
   trunk-discord:
     build:
@@ -53,13 +65,22 @@ services:
     volumes:
       - oxide-socket:/var/run/trunk-oxide:ro
       - whisperer-socket:/var/run/trunk-whisperer:ro
+      - discord-socket:/var/run/trunk-discord
       - ./config-discord.toml:/etc/trunk-discord/config.toml:ro
     depends_on:
-      - trunk-oxide
-      - trunk-whisperer
+      trunk-oxide:
+        condition: service_healthy
+      trunk-whisperer:
+        condition: service_healthy
     environment:
       - DISCORD_TOKEN
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
+    healthcheck:
+      test: ["CMD", "grpc_health_probe", "-addr", "unix:///var/run/trunk-discord/trunk-discord.sock"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
 
   jaeger:
     image: jaegertracing/all-in-one:1
@@ -71,4 +92,5 @@ services:
 volumes:
   oxide-socket:
   whisperer-socket:
+  discord-socket:
   whisper-models:

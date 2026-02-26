@@ -55,6 +55,29 @@ async fn main() -> Result<()> {
 
     let config = config::Config::load()?;
 
+    // Start health server on its own UDS
+    let (reporter, health_service) = tonic_health::server::health_reporter();
+    let health_listen_path = config.grpc.listen_path.clone();
+    tokio::spawn(async move {
+        let _ = std::fs::remove_file(&health_listen_path);
+        let listener = match tokio::net::UnixListener::bind(&health_listen_path) {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::error!(path = %health_listen_path, error = %e, "failed to bind health UDS");
+                return;
+            }
+        };
+        let incoming = tokio_stream::wrappers::UnixListenerStream::new(listener);
+        tracing::info!(path = %health_listen_path, "trunk-discord health server listening");
+        if let Err(e) = tonic::transport::Server::builder()
+            .add_service(health_service)
+            .serve_with_incoming(incoming)
+            .await
+        {
+            tracing::error!("health server error: {e}");
+        }
+    });
+
     let whisperer =
         grpc_whisperer::WhispererConnection::connect(config.whisperer.socket_path.clone()).await?;
     tracing::info!(
@@ -83,7 +106,7 @@ async fn main() -> Result<()> {
         "connecting to trunk-oxide"
     );
 
-    grpc_oxide::run(config.oxide.socket_path.clone(), dispatcher).await?;
+    grpc_oxide::run(config.oxide.socket_path.clone(), dispatcher, reporter).await?;
 
     if let Some(provider) = otel_provider {
         let _ = provider.shutdown();

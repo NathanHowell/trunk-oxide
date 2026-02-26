@@ -54,8 +54,11 @@ RUN touch crates/trunk-discord/src/main.rs crates/trunk-oxide-proto/src/lib.rs
 RUN cargo build --release -p trunk-discord
 
 # Runtime — distroless for minimal attack surface
+FROM ghcr.io/grpc-ecosystem/grpc-health-probe:v0.4.45 AS health-probe
+
 FROM gcr.io/distroless/cc-debian13:nonroot
 
+COPY --from=health-probe /ko-app/grpc-health-probe /bin/grpc_health_probe
 COPY --from=builder /build/target/release/trunk-discord /bin/trunk-discord
 
 ENTRYPOINT ["/bin/trunk-discord"]

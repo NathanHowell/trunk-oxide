@@ -66,6 +66,7 @@ toml = "0.8"
 tower = { version = "0.4", features = ["util"] }
 hyper-util = "0.1"
 tonic = "0.14"
+tonic-health = "0.14"
 tonic-prost = "0.14"
 tonic-prost-build = "0.14"
 tracing = "0.1"

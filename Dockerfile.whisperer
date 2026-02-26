@@ -53,8 +53,11 @@ RUN touch crates/trunk-whisperer/src/main.rs
 RUN cargo build --release -p trunk-whisperer
 
 # Runtime — distroless for minimal attack surface
+FROM ghcr.io/grpc-ecosystem/grpc-health-probe:v0.4.45 AS health-probe
+
 FROM gcr.io/distroless/cc-debian13:nonroot
 
+COPY --from=health-probe /ko-app/grpc-health-probe /bin/grpc_health_probe
 COPY --from=builder /build/target/release/trunk-whisperer /bin/trunk-whisperer
 
 ENTRYPOINT ["/bin/trunk-whisperer"]

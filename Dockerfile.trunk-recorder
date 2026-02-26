@@ -107,6 +107,8 @@ RUN cargo build --release -p trunk-oxide-driver
 
 # ── Runtime ──
 
+FROM ghcr.io/grpc-ecosystem/grpc-health-probe:v0.4.45 AS health-probe
+
 FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -120,6 +122,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     sox \
     && rm -rf /var/lib/apt/lists/*
 
+COPY --from=health-probe /ko-app/grpc-health-probe /bin/grpc_health_probe
 COPY --from=builder /usr/local /usr/local
 COPY --from=builder /build/target/release/trunk-oxide-driver /usr/local/bin/
 

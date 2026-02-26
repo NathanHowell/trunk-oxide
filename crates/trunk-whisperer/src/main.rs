@@ -58,9 +58,15 @@ async fn main() -> Result<()> {
 
     let service = grpc::WhispererService::new(transcriber);
 
+    let (reporter, health_service) = tonic_health::server::health_reporter();
+    reporter
+        .set_serving::<proto::whisperer_server::WhispererServer<grpc::WhispererService>>()
+        .await;
+
     tracing::info!(path = %listen_path, "trunk-whisperer listening");
 
     tonic::transport::Server::builder()
+        .add_service(health_service)
         .add_service(proto::whisperer_server::WhispererServer::new(service))
         .serve_with_incoming_shutdown(incoming, shutdown_signal())
         .await?;

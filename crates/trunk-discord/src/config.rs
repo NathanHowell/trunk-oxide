@@ -8,6 +8,8 @@ pub struct Config {
     pub discord: DiscordConfig,
     #[serde(default)]
     pub audio: AudioConfig,
+    #[serde(default)]
+    pub grpc: GrpcConfig,
 }
 
 #[derive(Debug, Deserialize)]
@@ -65,6 +67,24 @@ const fn default_tone_detection() -> bool {
 }
 const fn default_tone_detection_duration_s() -> f32 {
     5.0
+}
+
+#[derive(Debug, Deserialize)]
+pub struct GrpcConfig {
+    #[serde(default = "default_grpc_listen_path")]
+    pub listen_path: String,
+}
+
+impl Default for GrpcConfig {
+    fn default() -> Self {
+        Self {
+            listen_path: default_grpc_listen_path(),
+        }
+    }
+}
+
+fn default_grpc_listen_path() -> String {
+    "/var/run/trunk-discord/trunk-discord.sock".to_string()
 }
 
 impl Config {

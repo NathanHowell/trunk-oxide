@@ -425,9 +425,15 @@ impl Plugin for GrpcPlugin {
             };
             let incoming = tokio_stream::wrappers::UnixListenerStream::new(listener);
 
+            let (reporter, health_service) = tonic_health::server::health_reporter();
+            reporter
+                .set_serving::<TrunkOxideServer<TrunkOxideService>>()
+                .await;
+
             tracing::info!(path = %socket_path, "trunk-oxide gRPC server listening");
 
             if let Err(e) = tonic::transport::Server::builder()
+                .add_service(health_service)
                 .add_service(TrunkOxideServer::new(service))
                 .serve_with_incoming(incoming)
                 .await

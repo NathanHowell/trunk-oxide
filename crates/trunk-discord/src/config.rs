@@ -88,11 +88,13 @@ fn default_grpc_listen_path() -> String {
 }
 
 impl Config {
-    pub fn load() -> Result<Self> {
-        let content = std::fs::read_to_string("/etc/trunk-discord/config.toml")?;
+    pub fn load(config_path: &str, token_override: Option<&str>) -> Result<Self> {
+        let content = std::fs::read_to_string(config_path)?;
         let mut config: Self = toml::from_str(&content)?;
 
-        if let Ok(token) = std::env::var("DISCORD_TOKEN") {
+        if let Some(token) = token_override {
+            config.discord.bot_token = token.to_owned();
+        } else if let Ok(token) = std::env::var("DISCORD_TOKEN") {
             config.discord.bot_token = token;
         }
 

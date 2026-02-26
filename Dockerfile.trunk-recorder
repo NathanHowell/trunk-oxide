@@ -134,4 +134,4 @@ RUN ldconfig
 WORKDIR /app
 ENV HOME=/tmp
 
-CMD ["/usr/local/bin/trunk-oxide", "/app/config.json"]
+CMD ["/usr/local/bin/trunk-oxide"]

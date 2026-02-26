@@ -76,8 +76,10 @@ services:
         condition: service_healthy
       trunk-whisperer:
         condition: service_healthy
+    secrets:
+      - discord_token
+    command: ["--discord-token", "@/run/secrets/discord_token"]
     environment:
-      - DISCORD_TOKEN
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
     healthcheck:
       test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr", "unix:///run/service/grpc.sock"]
@@ -92,6 +94,10 @@ services:
       - COLLECTOR_OTLP_ENABLED=true
     ports:
       - "16686:16686"
+
+secrets:
+  discord_token:
+    environment: DISCORD_TOKEN
 
 volumes:
   oxide-socket:

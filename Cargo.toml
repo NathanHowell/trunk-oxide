@@ -74,3 +74,6 @@ tracing-opentelemetry = "0.32"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 pid1 = "0.1"
 whisper-rs = "0.15"
+clap = { version = "4", features = ["derive"] }
+argfile = "0.2"
+wild = "2"

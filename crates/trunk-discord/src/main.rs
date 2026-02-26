@@ -11,6 +11,7 @@ mod tone_detect;
 use std::sync::Arc;
 
 use anyhow::Result;
+use clap::Parser;
 use opentelemetry::trace::TracerProvider;
 use tracing_subscriber::prelude::*;
 
@@ -18,9 +19,25 @@ mod proto {
     tonic::include_proto!("whisperer");
 }
 
+#[derive(Parser)]
+struct Args {
+    /// Path to config file
+    #[arg(short, long, default_value = "/etc/trunk-discord/config.toml")]
+    config: String,
+
+    /// Discord bot token (use @/path/to/file to read from file)
+    #[arg(long)]
+    discord_token: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     pid1::Pid1Settings::new().launch()?;
+
+    let args = Args::parse_from(
+        argfile::expand_args_from(wild::args_os(), argfile::parse_fromfile, argfile::PREFIX)
+            .map_err(|e| anyhow::anyhow!(e))?,
+    );
 
     let otel_provider = if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
         let exporter = opentelemetry_otlp::SpanExporter::builder()
@@ -53,7 +70,7 @@ async fn main() -> Result<()> {
         .with(otel_layer)
         .init();
 
-    let config = config::Config::load()?;
+    let config = config::Config::load(&args.config, args.discord_token.as_deref())?;
 
     // Start health server on its own UDS
     let (reporter, health_service) = tonic_health::server::health_reporter();

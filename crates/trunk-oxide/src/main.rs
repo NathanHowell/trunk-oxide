@@ -5,13 +5,26 @@
 //! through the gRPC plugin to trunk-whisperer (or any other gRPC consumer).
 
 use anyhow::{Context, Result};
+use clap::Parser;
 use trunk_oxide::TrunkRecorderDriver;
 use trunk_oxide_grpc::GrpcPlugin;
 use opentelemetry::trace::TracerProvider;
 use tracing_subscriber::prelude::*;
 
+#[derive(Parser)]
+struct Args {
+    /// Path to trunk-recorder JSON config file
+    #[arg(default_value = "/app/config.json")]
+    config: String,
+}
+
 fn main() -> Result<()> {
     pid1::Pid1Settings::new().launch()?;
+
+    let args = Args::parse_from(
+        argfile::expand_args_from(wild::args_os(), argfile::parse_fromfile, argfile::PREFIX)
+            .map_err(|e| anyhow::anyhow!(e))?,
+    );
 
     let otel_provider = if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
         let exporter = opentelemetry_otlp::SpanExporter::builder()
@@ -44,12 +57,10 @@ fn main() -> Result<()> {
         .with(otel_layer)
         .init();
 
-    let config_path = std::env::args()
-        .nth(1)
-        .unwrap_or_else(|| "trunk-recorder.conf".to_string());
+    let config_path = &args.config;
 
     let config_json =
-        std::fs::read_to_string(&config_path).context("failed to read config file")?;
+        std::fs::read_to_string(config_path).context("failed to read config file")?;
 
     tracing::info!(config = %config_path, "starting trunk-oxide driver");
 

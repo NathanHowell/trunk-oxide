@@ -21,3 +21,6 @@ opentelemetry_sdk.workspace = true
 opentelemetry-otlp.workspace = true
 anyhow.workspace = true
 pid1.workspace = true
+clap.workspace = true
+argfile.workspace = true
+wild.workspace = true

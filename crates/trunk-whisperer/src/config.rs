@@ -44,8 +44,8 @@ fn default_language() -> String {
 }
 
 impl Config {
-    pub fn load() -> Result<Self> {
-        let content = std::fs::read_to_string("/etc/trunk-whisperer/config.toml")?;
+    pub fn load(config_path: &str) -> Result<Self> {
+        let content = std::fs::read_to_string(config_path)?;
         let config: Self = toml::from_str(&content)?;
         Ok(config)
     }

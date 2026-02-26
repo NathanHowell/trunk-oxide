@@ -4,7 +4,7 @@ use trunk_recorder_plugin::{
     Plugin, Result, SignalEvent, TrCall, TrCallData, TrRecorder, TrSystem, TrTrunkMessage,
 };
 
-mod proto {
+pub mod proto {
     tonic::include_proto!("trunk_oxide");
 }
 
@@ -271,8 +271,8 @@ fn convert_trunk_messages(messages: &[TrTrunkMessage]) -> Vec<proto::TrunkMessag
 
 const DEFAULT_SOCKET_PATH: &str = "/var/run/trunk-oxide/trunk-oxide.sock";
 
-struct GrpcConfig {
-    socket_path: String,
+pub struct GrpcConfig {
+    pub socket_path: String,
 }
 
 impl Default for GrpcConfig {
@@ -283,7 +283,7 @@ impl Default for GrpcConfig {
     }
 }
 
-struct GrpcPlugin {
+pub struct GrpcPlugin {
     config: GrpcConfig,
     runtime: Option<tokio::runtime::Runtime>,
     audio_tx: Option<mpsc::Sender<proto::AudioSample>>,
@@ -291,7 +291,7 @@ struct GrpcPlugin {
 }
 
 impl GrpcPlugin {
-    fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             config: GrpcConfig::default(),
             runtime: None,
@@ -607,6 +607,7 @@ async fn run_streams(
     Ok(())
 }
 
-// ── Plugin export ──
+// ── Plugin export (dlopen mode only) ──
 
+#[cfg(feature = "plugin-export")]
 trunk_recorder_plugin::export_plugin!(GrpcPlugin::new());

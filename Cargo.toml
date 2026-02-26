@@ -39,6 +39,8 @@ must_use_candidate = "allow"
 [workspace.dependencies]
 trunk-recorder-sys = { path = "crates/trunk-recorder-sys" }
 trunk-recorder-plugin = { path = "crates/trunk-recorder-plugin" }
+trunk-oxide-driver = { path = "crates/trunk-oxide-driver" }
+trunk-oxide-grpc = { path = "crates/trunk-oxide-grpc" }
 anyhow = "1"
 chrono = "0.4"
 cxx = "1"

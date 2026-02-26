@@ -7,8 +7,12 @@ rust-version.workspace = true
 [lints]
 workspace = true
 
+[features]
+default = ["plugin-export"]
+plugin-export = []
+
 [lib]
-crate-type = ["cdylib"]
+crate-type = ["cdylib", "rlib"]
 
 [dependencies]
 trunk-recorder-sys.workspace = true

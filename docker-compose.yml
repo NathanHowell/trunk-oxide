@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.trunk-recorder
+    devices:
+      - /dev/bus/usb:/dev/bus/usb
     volumes:
       - oxide-socket:/var/run/trunk-oxide
       - ./trunk-recorder.conf:/app/config.json:ro

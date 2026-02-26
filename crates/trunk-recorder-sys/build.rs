@@ -111,6 +111,17 @@ fn main() {
         }
 
         println!("cargo:rustc-link-lib=trunk-recorder");
+
+        // spdlog uses external fmt on Debian (SPDLOG_FMT_EXTERNAL)
+        if let Ok(fmt_lib) = pkg_config::Config::new().probe("fmt") {
+            for path in &fmt_lib.link_paths {
+                println!("cargo:rustc-link-search=native={}", path.display());
+            }
+        } else {
+            // Fallback: try linking fmt directly
+            println!("cargo:rustc-link-lib=fmt");
+        }
+
         if let Ok(lib_dir) = std::env::var("TRUNK_RECORDER_LIB_DIR") {
             println!("cargo:rustc-link-search=native={lib_dir}");
         }

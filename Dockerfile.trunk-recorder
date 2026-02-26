@@ -1,4 +1,4 @@
-# trunk-recorder + trunk-oxide-grpc plugin, built from source on Debian Trixie.
+# trunk-oxide-driver: links libtrunk-recorder.so and drives it via FFI.
 # Building both from the same base avoids glibc/ABI mismatches.
 
 FROM rust:trixie AS builder
@@ -28,6 +28,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libuhd-dev \
     libusb-dev \
     libusb-1.0-0-dev \
+    libfmt-dev \
     mold \
     pkg-config \
     protobuf-compiler \
@@ -39,49 +40,70 @@ ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-Clink-arg=-fuse-ld=mold"
 
 WORKDIR /build
 
-# ── Build trunk-recorder from source ──
+# ── Build trunk-recorder as a shared library ──
 
 COPY trunk-recorder trunk-recorder
 
 RUN cmake -S trunk-recorder -B trunk-recorder/build \
+        -DBUILD_SHARED_API=ON \
+        -DCMAKE_INSTALL_LIBDIR=lib \
     && cmake --build trunk-recorder/build -j2 \
     && cmake --install trunk-recorder/build --prefix /usr/local
 
-# ── Build trunk-oxide-grpc plugin ──
+# ── Build trunk-oxide-driver binary ──
 
 COPY Cargo.toml Cargo.lock ./
+
+# Copy manifests, build scripts, and proto files for trunk-oxide-driver and its deps
+COPY crates/trunk-oxide-driver/Cargo.toml crates/trunk-oxide-driver/Cargo.toml
 COPY crates/trunk-oxide-grpc/Cargo.toml crates/trunk-oxide-grpc/Cargo.toml
-COPY crates/trunk-oxide-grpc/build.rs crates/trunk-oxide-grpc/build.rs
-COPY crates/trunk-oxide-grpc/proto crates/trunk-oxide-grpc/proto
+COPY crates/trunk-oxide-proto/Cargo.toml crates/trunk-oxide-proto/Cargo.toml
+COPY crates/trunk-oxide-proto/build.rs crates/trunk-oxide-proto/build.rs
+COPY crates/trunk-oxide-proto/proto crates/trunk-oxide-proto/proto
 COPY crates/trunk-recorder-sys/Cargo.toml crates/trunk-recorder-sys/Cargo.toml
 COPY crates/trunk-recorder-sys/build.rs crates/trunk-recorder-sys/build.rs
 COPY crates/trunk-recorder-sys/cpp crates/trunk-recorder-sys/cpp
 COPY crates/trunk-recorder-plugin/Cargo.toml crates/trunk-recorder-plugin/Cargo.toml
+
+# Stub workspace members not needed for this build
 COPY crates/trunk-whisperer/Cargo.toml crates/trunk-whisperer/Cargo.toml
+COPY crates/trunk-discord/Cargo.toml crates/trunk-discord/Cargo.toml
 
 # Create stub sources so cargo can resolve the workspace and cache dependencies
-RUN mkdir -p crates/trunk-oxide-grpc/src \
+RUN mkdir -p crates/trunk-oxide-driver/src \
+    && echo "" > crates/trunk-oxide-driver/src/lib.rs \
+    && echo "fn main() {}" > crates/trunk-oxide-driver/src/main.rs \
+    && mkdir -p crates/trunk-oxide-grpc/src \
     && echo "" > crates/trunk-oxide-grpc/src/lib.rs \
+    && mkdir -p crates/trunk-oxide-proto/src \
+    && echo "" > crates/trunk-oxide-proto/src/lib.rs \
     && mkdir -p crates/trunk-recorder-sys/src \
     && echo "" > crates/trunk-recorder-sys/src/lib.rs \
     && mkdir -p crates/trunk-recorder-plugin/src \
     && echo "" > crates/trunk-recorder-plugin/src/lib.rs \
     && mkdir -p crates/trunk-whisperer/src \
-    && echo "fn main() {}" > crates/trunk-whisperer/src/main.rs
+    && echo "fn main() {}" > crates/trunk-whisperer/src/main.rs \
+    && mkdir -p crates/trunk-discord/src \
+    && echo "fn main() {}" > crates/trunk-discord/src/main.rs
 
-RUN cargo build --release -p trunk-oxide-grpc || true
+ENV TRUNK_RECORDER_LIB_DIR=/usr/local/lib
+
+RUN cargo build --release -p trunk-oxide-driver || true
 
 COPY crates/trunk-recorder-sys/src crates/trunk-recorder-sys/src
 COPY crates/trunk-recorder-plugin/src crates/trunk-recorder-plugin/src
+COPY crates/trunk-oxide-proto/src crates/trunk-oxide-proto/src
 COPY crates/trunk-oxide-grpc/src crates/trunk-oxide-grpc/src
+COPY crates/trunk-oxide-driver/src crates/trunk-oxide-driver/src
 
 RUN touch crates/trunk-recorder-sys/src/lib.rs \
     crates/trunk-recorder-plugin/src/lib.rs \
-    crates/trunk-oxide-grpc/src/lib.rs
+    crates/trunk-oxide-proto/src/lib.rs \
+    crates/trunk-oxide-grpc/src/lib.rs \
+    crates/trunk-oxide-driver/src/lib.rs \
+    crates/trunk-oxide-driver/src/main.rs
 
-RUN cargo build --release -p trunk-oxide-grpc
-
-RUN nm -D --defined-only target/release/libtrunk_oxide_grpc.so | grep -q create_plugin
+RUN cargo build --release -p trunk-oxide-driver
 
 # ── Runtime ──
 
@@ -99,11 +121,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /usr/local /usr/local
-COPY --from=builder /build/target/release/libtrunk_oxide_grpc.so /usr/local/lib/
+COPY --from=builder /build/target/release/trunk-oxide-driver /usr/local/bin/
 
 RUN ldconfig
 
 WORKDIR /app
 ENV HOME=/tmp
 
-CMD ["trunk-recorder", "--config=/app/config.json"]
+CMD ["trunk-oxide-driver", "/app/config.json"]

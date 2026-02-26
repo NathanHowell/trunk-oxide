@@ -12,6 +12,25 @@ services:
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
 
+  fetch-whisper-model:
+    image: debian:trixie-slim
+    volumes:
+      - whisper-models:/models
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        model=/models/ggml-small.en.bin
+        if [ -f "$$model" ]; then
+          echo "Model already present"
+          exit 0
+        fi
+        apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates
+        curl -fSL -o "$$model.tmp" \
+          https://huggingface.co/ggerganov/whisper.cpp/resolve/main/ggml-small.en.bin
+        mv "$$model.tmp" "$$model"
+
   trunk-whisperer:
     build:
       context: .
@@ -20,7 +39,10 @@ services:
     volumes:
       - whisperer-socket:/var/run/trunk-whisperer
       - ./config-whisperer.toml:/etc/trunk-whisperer/config.toml:ro
-      - ${WHISPER_MODEL_DIR:-./tests}:/models:ro
+      - whisper-models:/models:ro
+    depends_on:
+      fetch-whisper-model:
+        condition: service_completed_successfully
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
 
@@ -49,3 +71,4 @@ services:
 volumes:
   oxide-socket:
   whisperer-socket:
+  whisper-models:

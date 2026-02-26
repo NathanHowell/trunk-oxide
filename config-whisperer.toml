@@ -2,4 +2,4 @@
 listen_path = "/var/run/trunk-whisperer/trunk-whisperer.sock"
 
 [whisper]
-model_path = "/models/ggml-base.en.bin"
+model_path = "/models/ggml-small.en.bin"

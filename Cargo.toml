@@ -4,6 +4,15 @@ members = [
     "crates/trunk-recorder-sys",
     "crates/trunk-recorder-plugin",
     "crates/trunk-oxide-grpc",
+    "crates/trunk-oxide-driver",
+    "crates/trunk-whisperer",
+]
+# trunk-oxide-driver enables link-shared on trunk-recorder-sys which conflicts
+# with the dlopen plugin build. Exclude it from the default build.
+default-members = [
+    "crates/trunk-recorder-sys",
+    "crates/trunk-recorder-plugin",
+    "crates/trunk-oxide-grpc",
     "crates/trunk-whisperer",
 ]
 

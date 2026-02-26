@@ -1,0 +1,13 @@
+[package]
+name = "trunk-oxide-driver"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+trunk-recorder-sys = { workspace = true, features = ["link-shared"] }
+trunk-recorder-plugin.workspace = true
+cxx.workspace = true

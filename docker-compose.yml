@@ -97,7 +97,7 @@ services:
 
 secrets:
   discord_token:
-    environment: DISCORD_TOKEN
+    file: ./secrets/discord_token
 
 volumes:
   oxide-socket:

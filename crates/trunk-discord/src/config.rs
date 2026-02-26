@@ -93,9 +93,9 @@ impl Config {
         let mut config: Self = toml::from_str(&content)?;
 
         if let Some(token) = token_override {
-            config.discord.bot_token = token.to_owned();
+            config.discord.bot_token = token.trim().to_owned();
         } else if let Ok(token) = std::env::var("DISCORD_TOKEN") {
-            config.discord.bot_token = token;
+            config.discord.bot_token = token.trim().to_owned();
         }
 
         Ok(config)

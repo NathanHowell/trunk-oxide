@@ -1,5 +1,5 @@
 [package]
-name = "trunk-oxide-driver"
+name = "trunk-oxide"
 edition.workspace = true
 version.workspace = true
 rust-version.workspace = true

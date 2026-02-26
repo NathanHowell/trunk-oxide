@@ -47,8 +47,11 @@ COPY trunk-recorder trunk-recorder
 RUN cmake -S trunk-recorder -B trunk-recorder/build \
         -DBUILD_SHARED_API=ON \
         -DCMAKE_INSTALL_LIBDIR=lib \
-    && cmake --build trunk-recorder/build -j2 \
-    && cmake --install trunk-recorder/build --prefix /usr/local
+    && cmake --build trunk-recorder/build -j2 --target trunk_recorder_shared \
+    && mkdir -p /usr/local/lib/trunk-recorder \
+    && cp trunk-recorder/build/libtrunk-recorder.so /usr/local/lib/ \
+    && cp trunk-recorder/build/libgnuradio-op25_repeater.so /usr/local/lib/trunk-recorder/ \
+    && ldconfig
 
 # ── Build trunk-oxide-driver binary ──
 

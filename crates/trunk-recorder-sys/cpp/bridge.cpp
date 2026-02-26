@@ -517,6 +517,11 @@ public:
     explicit CxxEventSink(std::shared_ptr<RustPluginBridge> bridge)
         : bridge_(std::move(bridge)) {}
 
+    void audio_callback(Call *call, Recorder *recorder,
+                        int16_t *samples, int sampleCount) override {
+        bridge_->audio_stream(call, recorder, samples, sampleCount);
+    }
+
     void poll_one() override {
         bridge_->poll_one();
     }

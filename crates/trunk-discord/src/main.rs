@@ -110,13 +110,20 @@ async fn main() -> Result<()> {
 
     let dispatcher = Arc::new(dispatcher::Dispatcher::new(
         whisperer,
-        discord_client,
+        Arc::clone(&discord_client),
         aggregator,
         config.audio.buffer_duration_ms,
         config.discord.channel_id,
         config.audio.tone_detection,
         config.audio.tone_detection_duration_s,
     ));
+
+    discord_client
+        .send_message(
+            serenity::model::id::ChannelId::new(config.discord.channel_id),
+            "trunk-discord is now online.",
+        )
+        .await?;
 
     tracing::info!(
         oxide_socket = %config.oxide.socket_path,

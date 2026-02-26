@@ -383,9 +383,8 @@ fn detect_warble(window_freqs: &[Option<f32>], hop_s: f32) -> Option<(DetectedTo
     }
 
     // Compare transitions/window against threshold without float casts.
-    let transitions_fast_enough = transitions
-        .saturating_mul(HOP_MS.saturating_mul(WARBLE_MIN_TRANSITIONS_PER_SEC))
-        > duration_windows.saturating_mul(MILLIS_PER_SECOND);
+    let transitions_fast_enough = transitions.saturating_mul(MILLIS_PER_SECOND)
+        > duration_windows.saturating_mul(HOP_MS.saturating_mul(WARBLE_MIN_TRANSITIONS_PER_SEC));
     if transitions_fast_enough && transitions >= WARBLE_MIN_TRANSITIONS {
         let (hi, lo) = if freq_a > fb {
             (freq_a, fb)

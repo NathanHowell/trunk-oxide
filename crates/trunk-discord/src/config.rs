@@ -19,7 +19,7 @@ pub struct OxideConfig {
 }
 
 fn default_oxide_socket() -> String {
-    "/var/run/trunk-oxide/trunk-oxide.sock".to_string()
+    "/run/trunk-oxide/grpc.sock".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -29,7 +29,7 @@ pub struct WhispererConfig {
 }
 
 fn default_whisperer_socket() -> String {
-    "/var/run/trunk-whisperer/trunk-whisperer.sock".to_string()
+    "/run/trunk-whisperer/grpc.sock".to_string()
 }
 
 #[derive(Debug, Deserialize)]
@@ -84,7 +84,7 @@ impl Default for GrpcConfig {
 }
 
 fn default_grpc_listen_path() -> String {
-    "/var/run/trunk-discord/trunk-discord.sock".to_string()
+    "/run/service/grpc.sock".to_string()
 }
 
 impl Config {

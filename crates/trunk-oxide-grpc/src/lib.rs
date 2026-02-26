@@ -333,7 +333,7 @@ impl TrunkOxide for TrunkOxideService {
 
 // ── Plugin implementation ──
 
-const DEFAULT_SOCKET_PATH: &str = "/var/run/trunk-oxide/trunk-oxide.sock";
+const DEFAULT_SOCKET_PATH: &str = "/run/service/grpc.sock";
 
 pub struct GrpcConfig {
     pub socket_path: String,

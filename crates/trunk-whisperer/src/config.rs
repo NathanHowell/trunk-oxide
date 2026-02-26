@@ -14,7 +14,7 @@ pub struct GrpcConfig {
 }
 
 fn default_listen_path() -> String {
-    "/var/run/trunk-whisperer/trunk-whisperer.sock".to_string()
+    "/run/service/grpc.sock".to_string()
 }
 
 #[derive(Debug, Deserialize)]

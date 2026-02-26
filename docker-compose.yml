@@ -6,13 +6,13 @@ services:
     devices:
       - /dev/bus/usb:/dev/bus/usb
     volumes:
-      - oxide-socket:/var/run/trunk-oxide
+      - oxide-socket:/run/service
       - ./trunk-recorder.conf:/app/config.json:ro
       - ./tests:/test:ro
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
     healthcheck:
-      test: ["CMD", "grpc_health_probe", "-addr", "unix:///var/run/trunk-oxide/trunk-oxide.sock"]
+      test: ["CMD", "grpc_health_probe", "-addr", "unix:///run/service/grpc.sock"]
       interval: 5s
       timeout: 3s
       retries: 3
@@ -43,7 +43,7 @@ services:
       dockerfile: Dockerfile.whisperer
     user: "0:0"
     volumes:
-      - whisperer-socket:/var/run/trunk-whisperer
+      - whisperer-socket:/run/service
       - ./config-whisperer.toml:/etc/trunk-whisperer/config.toml:ro
       - whisper-models:/models:ro
     depends_on:
@@ -52,7 +52,7 @@ services:
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
     healthcheck:
-      test: ["CMD", "grpc_health_probe", "-addr", "unix:///var/run/trunk-whisperer/trunk-whisperer.sock"]
+      test: ["CMD", "grpc_health_probe", "-addr", "unix:///run/service/grpc.sock"]
       interval: 5s
       timeout: 3s
       retries: 3
@@ -63,9 +63,9 @@ services:
       context: .
       dockerfile: Dockerfile.discord
     volumes:
-      - oxide-socket:/var/run/trunk-oxide:ro
-      - whisperer-socket:/var/run/trunk-whisperer:ro
-      - discord-socket:/var/run/trunk-discord
+      - oxide-socket:/run/trunk-oxide:ro
+      - whisperer-socket:/run/trunk-whisperer:ro
+      - discord-socket:/run/service
       - ./config-discord.toml:/etc/trunk-discord/config.toml:ro
     depends_on:
       trunk-oxide:
@@ -76,7 +76,7 @@ services:
       - DISCORD_TOKEN
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
     healthcheck:
-      test: ["CMD", "grpc_health_probe", "-addr", "unix:///var/run/trunk-discord/trunk-discord.sock"]
+      test: ["CMD", "grpc_health_probe", "-addr", "unix:///run/service/grpc.sock"]
       interval: 5s
       timeout: 3s
       retries: 3

@@ -466,16 +466,19 @@ impl Plugin for GrpcPlugin {
             unit_id: event.unit_id,
             signaling_type: event.signaling_type.unwrap_or_default().to_string(),
             signal_type: convert_signal_type(event.signal_type),
-            call: Some(call_info(event.call)),
-            system: Some(system_info(event.system)),
+            call: event.call.map(call_info),
+            system: event.system.map(system_info),
             recorder: event.recorder.map(recorder_info),
         }));
         Ok(())
     }
 
-    fn audio_stream(&mut self, call: &TrCall, recorder: &TrRecorder, samples: &[i16]) -> Result {
+    fn audio_stream(&mut self, call: Option<&TrCall>, recorder: &TrRecorder, samples: &[i16]) -> Result {
         use trunk_recorder_sys::ffi::{
             call_get_freq, call_get_sys_num, call_get_talkgroup, recorder_get_wav_hz,
+        };
+        let Some(call) = call else {
+            return Ok(());
         };
         if let Some(tx) = &self.audio_tx {
             // Convert i16 samples to bytes (little-endian)

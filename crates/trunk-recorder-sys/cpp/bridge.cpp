@@ -280,20 +280,18 @@ public:
     int signal(long unitId, const char *signaling_type,
                gr::blocks::SignalType sig_type,
                Call *call, System *system, Recorder *recorder) override {
-        TrCall tr_call(call);
-        TrSystem tr_sys(system);
         auto sig_str = signaling_type
             ? rust::Str(signaling_type, std::strlen(signaling_type))
             : rust::Str("", 0);
-        const TrRecorder *tr_rec_ptr = nullptr;
+        TrCall tr_call(call);
+        TrSystem tr_sys(system);
         TrRecorder tr_rec(recorder);
-        if (recorder) {
-            tr_rec_ptr = &tr_rec;
-        }
         return rust_plugin_signal(
             *plugin_, unitId, sig_str,
             convert_signal_type(sig_type),
-            tr_call, tr_sys, tr_rec_ptr);
+            call ? &tr_call : nullptr,
+            system ? &tr_sys : nullptr,
+            recorder ? &tr_rec : nullptr);
     }
 
     int audio_stream(Call *call, Recorder *recorder,
@@ -301,7 +299,10 @@ public:
         TrCall tr_call(call);
         TrRecorder tr_rec(recorder);
         rust::Slice<const int16_t> slice(samples, static_cast<size_t>(sampleCount));
-        return rust_plugin_audio_stream(*plugin_, tr_call, tr_rec, slice);
+        return rust_plugin_audio_stream(
+            *plugin_,
+            call ? &tr_call : nullptr,
+            tr_rec, slice);
     }
 
     int call_start(Call *call) override {

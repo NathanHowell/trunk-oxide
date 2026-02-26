@@ -287,13 +287,13 @@ pub mod ffi {
             unit_id: i64,
             signaling_type: &str,
             sig_type: TrSignalType,
-            call: &TrCall,
-            system: &TrSystem,
+            call: *const TrCall,
+            system: *const TrSystem,
             recorder: *const TrRecorder,
         ) -> i32;
-        fn rust_plugin_audio_stream(
+        unsafe fn rust_plugin_audio_stream(
             plugin: &mut RustPluginBox,
-            call: &TrCall,
+            call: *const TrCall,
             recorder: &TrRecorder,
             samples: &[i16],
         ) -> i32;
@@ -391,13 +391,13 @@ pub trait RustPluginCallbacks: Send {
         unit_id: i64,
         signaling_type: &str,
         sig_type: ffi::TrSignalType,
-        call: &ffi::TrCall,
-        system: &ffi::TrSystem,
+        call: Option<&ffi::TrCall>,
+        system: Option<&ffi::TrSystem>,
         recorder: Option<&ffi::TrRecorder>,
     ) -> i32;
     fn audio_stream(
         &mut self,
-        call: &ffi::TrCall,
+        call: Option<&ffi::TrCall>,
         recorder: &ffi::TrRecorder,
         samples: &[i16],
     ) -> i32;
@@ -448,32 +448,43 @@ fn rust_plugin_poll_one(plugin: &mut RustPluginBox) -> i32 {
     plugin.inner.poll_one()
 }
 
+/// Convert a nullable opaque pointer to `Option<&T>`.
+///
+/// # Safety
+/// The pointer must be valid for the lifetime of the returned reference,
+/// or null.
+unsafe fn nullable<T>(ptr: *const T) -> Option<&'static T> {
+    if ptr.is_null() {
+        None
+    } else {
+        Some(unsafe { &*ptr })
+    }
+}
+
 unsafe fn rust_plugin_signal(
     plugin: &mut RustPluginBox,
     unit_id: i64,
     signaling_type: &str,
     sig_type: ffi::TrSignalType,
-    call: &ffi::TrCall,
-    system: &ffi::TrSystem,
+    call: *const ffi::TrCall,
+    system: *const ffi::TrSystem,
     recorder: *const ffi::TrRecorder,
 ) -> i32 {
-    let recorder_opt = if recorder.is_null() {
-        None
-    } else {
-        // SAFETY: caller guarantees the pointer is valid for the duration of the callback
-        Some(unsafe { &*recorder })
-    };
+    let call = unsafe { nullable(call) };
+    let system = unsafe { nullable(system) };
+    let recorder = unsafe { nullable(recorder) };
     plugin
         .inner
-        .signal(unit_id, signaling_type, sig_type, call, system, recorder_opt)
+        .signal(unit_id, signaling_type, sig_type, call, system, recorder)
 }
 
-fn rust_plugin_audio_stream(
+unsafe fn rust_plugin_audio_stream(
     plugin: &mut RustPluginBox,
-    call: &ffi::TrCall,
+    call: *const ffi::TrCall,
     recorder: &ffi::TrRecorder,
     samples: &[i16],
 ) -> i32 {
+    let call = unsafe { nullable(call) };
     plugin.inner.audio_stream(call, recorder, samples)
 }
 

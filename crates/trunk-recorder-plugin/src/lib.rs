@@ -12,8 +12,8 @@ pub struct SignalEvent<'a> {
     pub unit_id: i64,
     pub signaling_type: Option<&'a str>,
     pub signal_type: TrSignalType,
-    pub call: &'a TrCall,
-    pub system: &'a TrSystem,
+    pub call: Option<&'a TrCall>,
+    pub system: Option<&'a TrSystem>,
     pub recorder: Option<&'a TrRecorder>,
 }
 
@@ -40,7 +40,7 @@ pub trait Plugin: Send {
     fn signal(&mut self, _event: SignalEvent<'_>) -> Result {
         Ok(())
     }
-    fn audio_stream(&mut self, _call: &TrCall, _recorder: &TrRecorder, _samples: &[i16]) -> Result {
+    fn audio_stream(&mut self, _call: Option<&TrCall>, _recorder: &TrRecorder, _samples: &[i16]) -> Result {
         Ok(())
     }
     fn call_start(&mut self, _call: &TrCall) -> Result {
@@ -180,8 +180,8 @@ impl<P: Plugin> trunk_recorder_sys::RustPluginCallbacks for PluginAdapter<P> {
         unit_id: i64,
         signaling_type: &str,
         sig_type: TrSignalType,
-        call: &TrCall,
-        system: &TrSystem,
+        call: Option<&TrCall>,
+        system: Option<&TrSystem>,
         recorder: Option<&TrRecorder>,
     ) -> i32 {
         let event = SignalEvent {
@@ -201,7 +201,7 @@ impl<P: Plugin> trunk_recorder_sys::RustPluginCallbacks for PluginAdapter<P> {
         }
     }
 
-    fn audio_stream(&mut self, call: &TrCall, recorder: &TrRecorder, samples: &[i16]) -> i32 {
+    fn audio_stream(&mut self, call: Option<&TrCall>, recorder: &TrRecorder, samples: &[i16]) -> i32 {
         match self.inner.audio_stream(call, recorder, samples) {
             Ok(()) => 0,
             Err(e) => {

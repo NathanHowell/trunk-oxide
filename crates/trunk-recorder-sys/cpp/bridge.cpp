@@ -668,9 +668,17 @@ TrContext &TrContext::operator=(TrContext &&) noexcept = default;
 
 #ifdef TR_LIBRARY_MODE
 
-std::unique_ptr<TrContext> tr_create(rust::Str config_json) {
+std::unique_ptr<TrContext> tr_create(rust::Str config_json,
+                                     rust::Box<RustPluginBox> plugin) {
     auto ctx = std::make_unique<TrContext>();
     std::string json_str(config_json.data(), config_json.size());
+
+    // Install the event sink before setup_systems(), which calls
+    // event_sink->setup_recorder() / call_start() for conventional channels.
+    ctx->impl->bridge = std::make_shared<RustPluginBridge>(std::move(plugin));
+    ctx->impl->event_sink = std::make_unique<CxxEventSink>(ctx->impl->bridge);
+    ctx->impl->trunk_ctx.config.event_sink = ctx->impl->event_sink.get();
+
     ctx->impl->trunk_ctx.tb = gr::make_top_block("Trunking");
     if (!load_config_from_string(json_str, ctx->impl->trunk_ctx.config,
                                  ctx->impl->trunk_ctx.tb,
@@ -681,20 +689,14 @@ std::unique_ptr<TrContext> tr_create(rust::Str config_json) {
     setup_systems(ctx->impl->trunk_ctx.config, ctx->impl->trunk_ctx.tb,
                   ctx->impl->trunk_ctx.sources, ctx->impl->trunk_ctx.systems,
                   ctx->impl->trunk_ctx.calls);
-    return ctx;
-}
 
-void tr_set_plugin(TrContext &ctx, rust::Box<RustPluginBox> plugin) {
-    ctx.impl->bridge = std::make_shared<RustPluginBridge>(std::move(plugin));
-    ctx.impl->event_sink = std::make_unique<CxxEventSink>(ctx.impl->bridge);
-    ctx.impl->trunk_ctx.config.event_sink = ctx.impl->event_sink.get();
-
-    // Notify the plugin of the current configuration
-    ctx.impl->bridge->setup_config(ctx.impl->trunk_ctx.sources,
-                                   ctx.impl->trunk_ctx.systems);
-    for (auto *sys : ctx.impl->trunk_ctx.systems) {
-        ctx.impl->bridge->setup_system(sys);
+    // Notify the plugin of the current configuration.
+    ctx->impl->bridge->setup_config(ctx->impl->trunk_ctx.sources,
+                                    ctx->impl->trunk_ctx.systems);
+    for (auto *sys : ctx->impl->trunk_ctx.systems) {
+        ctx->impl->bridge->setup_system(sys);
     }
+    return ctx;
 }
 
 void tr_start(TrContext &ctx) {
@@ -715,7 +717,8 @@ void tr_stop(TrContext &ctx) {
 
 #else // !TR_LIBRARY_MODE — stubs for dlopen plugin mode
 
-std::unique_ptr<TrContext> tr_create(rust::Str /*config_json*/) {
+std::unique_ptr<TrContext> tr_create(rust::Str /*config_json*/,
+                                     rust::Box<RustPluginBox> /*plugin*/) {
     std::abort();
 }
 
@@ -724,10 +727,6 @@ void tr_start(TrContext & /*ctx*/) {
 }
 
 void tr_stop(TrContext & /*ctx*/) {
-    std::abort();
-}
-
-void tr_set_plugin(TrContext & /*ctx*/, rust::Box<RustPluginBox> /*plugin*/) {
     std::abort();
 }
 

@@ -64,9 +64,9 @@ fn main() -> Result<()> {
 
     tracing::info!(config = %config_path, "starting trunk-oxide driver");
 
-    let mut driver = TrunkRecorderDriver::new(&config_json)
+    let mut driver = TrunkRecorderDriver::new(&config_json, GrpcPlugin::new())
         .context("failed to initialize trunk-recorder (SDR device open failure?)")?;
-    driver.start(GrpcPlugin::new());
+    driver.start();
 
     tracing::info!("trunk-recorder engine running, press Ctrl+C to stop");
 

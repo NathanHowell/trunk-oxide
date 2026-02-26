@@ -19,23 +19,26 @@ pub struct TrunkRecorderDriver {
 }
 
 impl TrunkRecorderDriver {
-    /// Create a new driver instance from a trunk-recorder JSON config string.
+    /// Create a new driver instance from a trunk-recorder JSON config string
+    /// and a plugin to receive events.
     ///
-    /// This parses the config, creates SDR sources, and sets up all systems
-    /// (trunking control channels, conventional channels, etc.) but does not
-    /// start the gnuradio flowgraph yet.
+    /// This parses the config, installs the event sink, creates SDR sources,
+    /// and sets up all systems (trunking control channels, conventional
+    /// channels, etc.) but does not start the gnuradio flowgraph yet.
+    ///
     /// # Errors
     ///
     /// Returns an error if the config is invalid or an SDR source fails to open.
-    pub fn new(config_json: &str) -> Result<Self, cxx::Exception> {
-        let ctx = ffi::tr_create(config_json)?;
+    pub fn new<P: Plugin + 'static>(config_json: &str, plugin: P) -> Result<Self, cxx::Exception> {
+        let plugin_box = trunk_recorder_plugin::into_plugin_box(plugin);
+        let ctx = ffi::tr_create(config_json, Box::new(plugin_box))?;
         Ok(Self {
             ctx,
             started: false,
         })
     }
 
-    /// Register a [`Plugin`] to receive events and start the engine.
+    /// Start the gnuradio flowgraph and monitor thread.
     ///
     /// The plugin's callbacks will be invoked from the C++ monitor thread.
     /// Use a channel-based plugin (e.g. sending events via `tokio::sync::mpsc`)
@@ -44,10 +47,8 @@ impl TrunkRecorderDriver {
     /// # Panics
     ///
     /// Panics if called more than once.
-    pub fn start<P: Plugin + 'static>(&mut self, plugin: P) {
+    pub fn start(&mut self) {
         assert!(!self.started, "TrunkRecorderDriver::start called twice");
-        let plugin_box = trunk_recorder_plugin::into_plugin_box(plugin);
-        ffi::tr_set_plugin(self.ctx.pin_mut(), Box::new(plugin_box));
         ffi::tr_start(self.ctx.pin_mut());
         self.started = true;
     }

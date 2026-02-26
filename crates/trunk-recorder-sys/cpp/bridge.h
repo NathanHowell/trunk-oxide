@@ -113,9 +113,9 @@ struct TrContext {
 };
 
 // ── Lifecycle functions ──
-std::unique_ptr<TrContext> tr_create(rust::Str config_json);
+std::unique_ptr<TrContext> tr_create(rust::Str config_json,
+                                     rust::Box<RustPluginBox> plugin);
 void tr_start(TrContext &ctx);
 void tr_stop(TrContext &ctx);
-void tr_set_plugin(TrContext &ctx, rust::Box<RustPluginBox> plugin);
 
 } // namespace trunk_oxide

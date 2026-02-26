@@ -58,7 +58,7 @@ FROM ghcr.io/grpc-ecosystem/grpc-health-probe:v0.4.45 AS health-probe
 
 FROM gcr.io/distroless/cc-debian13:nonroot
 
-COPY --from=health-probe /ko-app/grpc-health-probe /bin/grpc_health_probe
-COPY --from=builder /build/target/release/trunk-discord /bin/trunk-discord
+COPY --from=health-probe /ko-app/grpc-health-probe /usr/local/bin/grpc_health_probe
+COPY --from=builder /build/target/release/trunk-discord /usr/local/bin/trunk-discord
 
-ENTRYPOINT ["/bin/trunk-discord"]
+ENTRYPOINT ["/usr/local/bin/trunk-discord"]

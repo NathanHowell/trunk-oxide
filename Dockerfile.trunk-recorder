@@ -125,7 +125,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     sox \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=health-probe /ko-app/grpc-health-probe /bin/grpc_health_probe
+COPY --from=health-probe /ko-app/grpc-health-probe /usr/local/bin/grpc_health_probe
 COPY --from=builder /usr/local /usr/local
 COPY --from=builder /build/target/release/trunk-oxide-driver /usr/local/bin/
 
@@ -134,4 +134,4 @@ RUN ldconfig
 WORKDIR /app
 ENV HOME=/tmp
 
-CMD ["trunk-oxide-driver", "/app/config.json"]
+CMD ["/usr/local/bin/trunk-oxide-driver", "/app/config.json"]

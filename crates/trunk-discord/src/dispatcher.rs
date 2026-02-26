@@ -2,13 +2,14 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use tokio::sync::{RwLock, mpsc};
+use trunk_oxide_proto as proto;
+
+use proto::plugin_event::Event;
 
 use crate::aggregator::{Aggregator, AggregatorMessage};
 use crate::call_handler::{CallHandler, CallHandlerConfig, CallMessage};
 use crate::discord::DiscordClient;
-use crate::proto;
-use crate::proto::plugin_event::Event;
-use crate::transcriber::Transcriber;
+use crate::grpc_whisperer::WhispererConnection;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct CallKey {
@@ -18,7 +19,7 @@ pub struct CallKey {
 
 pub struct Dispatcher {
     calls: RwLock<HashMap<CallKey, mpsc::Sender<CallMessage>>>,
-    transcriber: Arc<Transcriber>,
+    whisperer: WhispererConnection,
     discord: Arc<DiscordClient>,
     aggregator: Arc<Aggregator>,
     buffer_duration_ms: u64,
@@ -29,7 +30,7 @@ pub struct Dispatcher {
 
 impl Dispatcher {
     pub fn new(
-        transcriber: Arc<Transcriber>,
+        whisperer: WhispererConnection,
         discord: Arc<DiscordClient>,
         aggregator: Arc<Aggregator>,
         buffer_duration_ms: u64,
@@ -39,7 +40,7 @@ impl Dispatcher {
     ) -> Self {
         Self {
             calls: RwLock::new(HashMap::new()),
-            transcriber,
+            whisperer,
             discord,
             aggregator,
             buffer_duration_ms,
@@ -122,7 +123,7 @@ impl Dispatcher {
             key.clone(),
             call,
             rx,
-            Arc::clone(&self.transcriber),
+            self.whisperer.clone(),
             Arc::clone(&self.discord),
             CallHandlerConfig {
                 buffer_duration_ms: self.buffer_duration_ms,

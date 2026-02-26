@@ -1,24 +1,37 @@
 services:
+  trunk-oxide:
+    build:
+      context: .
+      dockerfile: Dockerfile.trunk-recorder
+    volumes:
+      - oxide-socket:/var/run/trunk-oxide
+      - ./trunk-recorder.conf:/app/config.json:ro
+      - ./tests:/test:ro
+
   trunk-whisperer:
     build:
       context: .
       dockerfile: Dockerfile.whisperer
     user: "0:0"
     volumes:
-      - socket:/var/run/trunk-oxide
-      - ./config.toml:/etc/trunk-whisperer/config.toml:ro
+      - whisperer-socket:/var/run/trunk-whisperer
+      - ./config-whisperer.toml:/etc/trunk-whisperer/config.toml:ro
       - ${WHISPER_MODEL_DIR:-./tests}:/models:ro
 
-  trunk-recorder:
+  trunk-discord:
     build:
       context: .
-      dockerfile: Dockerfile.trunk-recorder
+      dockerfile: Dockerfile.discord
     volumes:
-      - socket:/var/run/trunk-oxide
-      - ./trunk-recorder.conf:/app/config.json:ro
-      - ./tests:/test:ro
+      - oxide-socket:/var/run/trunk-oxide:ro
+      - whisperer-socket:/var/run/trunk-whisperer:ro
+      - ./config-discord.toml:/etc/trunk-discord/config.toml:ro
     depends_on:
+      - trunk-oxide
       - trunk-whisperer
+    environment:
+      - DISCORD_TOKEN
 
 volumes:
-  socket:
+  oxide-socket:
+  whisperer-socket:

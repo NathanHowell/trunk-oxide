@@ -2339,21 +2339,65 @@ dependencies = [
 ]
 
 [[package]]
+name = "trunk-discord"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "hyper-util",
+ "prost",
+ "rubato",
+ "serde",
+ "serenity",
+ "tokio",
+ "tokio-stream",
+ "toml",
+ "tonic",
+ "tonic-build",
+ "tower 0.4.13",
+ "tracing",
+ "tracing-subscriber",
+ "trunk-oxide-proto",
+]
+
+[[package]]
+name = "trunk-oxide-driver"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cxx",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "trunk-oxide-grpc",
+ "trunk-recorder-plugin",
+ "trunk-recorder-sys",
+]
+
+[[package]]
 name = "trunk-oxide-grpc"
 version = "0.1.0"
 dependencies = [
- "hyper-util",
  "prost",
  "prost-types",
  "serde_json",
  "tokio",
  "tokio-stream",
  "tonic",
- "tonic-build",
- "tower 0.4.13",
  "tracing",
+ "trunk-oxide-proto",
  "trunk-recorder-plugin",
  "trunk-recorder-sys",
+]
+
+[[package]]
+name = "trunk-oxide-proto"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "prost-types",
+ "tonic",
+ "tonic-build",
 ]
 
 [[package]]
@@ -2378,12 +2422,8 @@ name = "trunk-whisperer"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "chrono",
  "prost",
- "prost-types",
- "rubato",
  "serde",
- "serenity",
  "tokio",
  "tokio-stream",
  "toml",

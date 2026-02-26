@@ -6,9 +6,9 @@ use chrono::Utc;
 use serenity::model::id::ChannelId;
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
+use trunk_oxide_proto as proto;
 
 use crate::discord::DiscordClient;
-use crate::proto;
 
 pub enum AggregatorMessage {
     Signal(Box<proto::SignalEvent>),

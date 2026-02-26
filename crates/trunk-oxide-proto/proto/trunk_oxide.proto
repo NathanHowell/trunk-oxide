@@ -4,13 +4,13 @@ package trunk_oxide;
 import "google/protobuf/empty.proto";
 
 // ── Service ──
-// The plugin acts as a gRPC CLIENT connecting to an external server.
+// trunk-oxide acts as a gRPC SERVER; clients subscribe to streams.
 
-service TrunkRecorderPlugin {
-  // Client-streaming: continuous int16 PCM audio samples
-  rpc StreamAudio(stream AudioSample) returns (google.protobuf.Empty);
-  // Client-streaming: all other events multiplexed via oneof
-  rpc StreamEvents(stream PluginEvent) returns (google.protobuf.Empty);
+service TrunkOxide {
+  // Server-streaming: clients subscribe to receive events
+  rpc SubscribeEvents(google.protobuf.Empty) returns (stream PluginEvent);
+  // Server-streaming: clients subscribe to receive audio samples
+  rpc SubscribeAudio(google.protobuf.Empty) returns (stream AudioSample);
 }
 
 // ── Audio ──

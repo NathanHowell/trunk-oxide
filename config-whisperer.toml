@@ -1,0 +1,5 @@
+[grpc]
+listen_path = "/var/run/trunk-whisperer/trunk-whisperer.sock"
+
+[whisper]
+model_path = "/models/ggml-base.en.bin"

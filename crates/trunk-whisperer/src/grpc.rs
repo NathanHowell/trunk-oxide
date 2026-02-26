@@ -1,46 +1,53 @@
 use std::sync::Arc;
 
-use tonic::{Request, Response, Status, Streaming};
+use tonic::{Request, Response, Status};
 
-use crate::dispatcher::Dispatcher;
-use crate::proto;
-use crate::proto::trunk_recorder_plugin_server::TrunkRecorderPlugin;
+use crate::proto::whisperer_server::Whisperer;
+use crate::proto::{TranscribeRequest, TranscribeResponse};
+use crate::transcriber::Transcriber;
 
-pub struct TrunkRecorderService {
-    dispatcher: Arc<Dispatcher>,
+pub struct WhispererService {
+    transcriber: Arc<Transcriber>,
 }
 
-impl TrunkRecorderService {
-    pub const fn new(dispatcher: Arc<Dispatcher>) -> Self {
-        Self { dispatcher }
+impl WhispererService {
+    pub const fn new(transcriber: Arc<Transcriber>) -> Self {
+        Self { transcriber }
     }
 }
 
 #[tonic::async_trait]
-impl TrunkRecorderPlugin for TrunkRecorderService {
-    async fn stream_audio(
+impl Whisperer for WhispererService {
+    async fn transcribe(
         &self,
-        request: Request<Streaming<proto::AudioSample>>,
-    ) -> Result<Response<()>, Status> {
-        let mut stream = request.into_inner();
+        request: Request<TranscribeRequest>,
+    ) -> Result<Response<TranscribeResponse>, Status> {
+        let req = request.into_inner();
 
-        while let Some(sample) = stream.message().await? {
-            self.dispatcher.handle_audio(sample).await;
+        // Decode f32 LE bytes
+        if req.audio.len() % 4 != 0 {
+            return Err(Status::invalid_argument(
+                "audio bytes length must be a multiple of 4 (f32 LE)",
+            ));
+        }
+        let audio: Vec<f32> = req
+            .audio
+            .chunks_exact(4)
+            .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+
+        if audio.is_empty() {
+            return Ok(Response::new(TranscribeResponse {
+                text: String::new(),
+            }));
         }
 
-        Ok(Response::new(()))
-    }
+        let text = self
+            .transcriber
+            .transcribe(audio)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
 
-    async fn stream_events(
-        &self,
-        request: Request<Streaming<proto::PluginEvent>>,
-    ) -> Result<Response<()>, Status> {
-        let mut stream = request.into_inner();
-
-        while let Some(event) = stream.message().await? {
-            self.dispatcher.handle_event(event).await;
-        }
-
-        Ok(Response::new(()))
+        Ok(Response::new(TranscribeResponse { text }))
     }
 }

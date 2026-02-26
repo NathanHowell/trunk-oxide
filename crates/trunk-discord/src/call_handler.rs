@@ -4,13 +4,13 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serenity::model::id::{ChannelId, MessageId};
 use tokio::sync::mpsc;
+use trunk_oxide_proto as proto;
 
 use crate::discord::DiscordClient;
 use crate::dispatcher::CallKey;
-use crate::proto;
+use crate::grpc_whisperer::WhispererConnection;
 use crate::resampler::Resampler;
 use crate::tone_detect::{DetectedTone, NotchFilter, ToneDetector};
-use crate::transcriber::Transcriber;
 
 pub enum CallMessage {
     Audio { samples: Vec<u8>, sample_rate: i32 },
@@ -30,7 +30,7 @@ pub struct CallHandler {
     key: CallKey,
     call_info: proto::CallInfo,
     rx: mpsc::Receiver<CallMessage>,
-    transcriber: Arc<Transcriber>,
+    whisperer: WhispererConnection,
     discord: Arc<DiscordClient>,
     buffer_duration_ms: u64,
     channel_id: u64,
@@ -48,7 +48,7 @@ impl CallHandler {
         key: CallKey,
         call_info: proto::CallInfo,
         rx: mpsc::Receiver<CallMessage>,
-        transcriber: Arc<Transcriber>,
+        whisperer: WhispererConnection,
         discord: Arc<DiscordClient>,
         config: CallHandlerConfig,
     ) -> Self {
@@ -67,7 +67,7 @@ impl CallHandler {
             key,
             call_info,
             rx,
-            transcriber,
+            whisperer,
             discord,
             buffer_duration_ms: config.buffer_duration_ms,
             channel_id: config.channel_id,
@@ -270,7 +270,7 @@ impl CallHandler {
             return Ok(());
         }
 
-        let text = self.transcriber.transcribe(audio).await?;
+        let text = self.whisperer.transcribe(audio).await?;
         let text = text.trim();
         if text.is_empty() {
             return Ok(());

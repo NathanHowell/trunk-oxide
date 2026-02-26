@@ -3,17 +3,21 @@ resolver = "3"
 members = [
     "crates/trunk-recorder-sys",
     "crates/trunk-recorder-plugin",
+    "crates/trunk-oxide-proto",
     "crates/trunk-oxide-grpc",
     "crates/trunk-oxide-driver",
     "crates/trunk-whisperer",
+    "crates/trunk-discord",
 ]
 # trunk-oxide-driver enables link-shared on trunk-recorder-sys which conflicts
 # with the dlopen plugin build. Exclude it from the default build.
 default-members = [
     "crates/trunk-recorder-sys",
     "crates/trunk-recorder-plugin",
+    "crates/trunk-oxide-proto",
     "crates/trunk-oxide-grpc",
     "crates/trunk-whisperer",
+    "crates/trunk-discord",
 ]
 
 [workspace.package]
@@ -40,6 +44,7 @@ must_use_candidate = "allow"
 trunk-recorder-sys = { path = "crates/trunk-recorder-sys" }
 trunk-recorder-plugin = { path = "crates/trunk-recorder-plugin" }
 trunk-oxide-driver = { path = "crates/trunk-oxide-driver" }
+trunk-oxide-proto = { path = "crates/trunk-oxide-proto" }
 trunk-oxide-grpc = { path = "crates/trunk-oxide-grpc" }
 anyhow = "1"
 chrono = "0.4"

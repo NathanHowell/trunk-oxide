@@ -17,19 +17,30 @@ COPY Cargo.toml Cargo.lock ./
 COPY crates/trunk-whisperer/Cargo.toml crates/trunk-whisperer/Cargo.toml
 COPY crates/trunk-whisperer/build.rs crates/trunk-whisperer/build.rs
 COPY crates/trunk-whisperer/proto crates/trunk-whisperer/proto
+
+# Stub workspace members that trunk-whisperer doesn't depend on
 COPY crates/trunk-oxide-grpc/Cargo.toml crates/trunk-oxide-grpc/Cargo.toml
+COPY crates/trunk-oxide-proto/Cargo.toml crates/trunk-oxide-proto/Cargo.toml
 COPY crates/trunk-recorder-plugin/Cargo.toml crates/trunk-recorder-plugin/Cargo.toml
 COPY crates/trunk-recorder-sys/Cargo.toml crates/trunk-recorder-sys/Cargo.toml
+COPY crates/trunk-discord/Cargo.toml crates/trunk-discord/Cargo.toml
+COPY crates/trunk-oxide-driver/Cargo.toml crates/trunk-oxide-driver/Cargo.toml
 
 # Create stub sources so cargo can resolve the workspace and cache dependencies
 RUN mkdir -p crates/trunk-whisperer/src \
     && echo "fn main() {}" > crates/trunk-whisperer/src/main.rs \
     && mkdir -p crates/trunk-oxide-grpc/src \
     && echo "" > crates/trunk-oxide-grpc/src/lib.rs \
+    && mkdir -p crates/trunk-oxide-proto/src \
+    && echo "" > crates/trunk-oxide-proto/src/lib.rs \
     && mkdir -p crates/trunk-recorder-plugin/src \
     && echo "" > crates/trunk-recorder-plugin/src/lib.rs \
     && mkdir -p crates/trunk-recorder-sys/src \
-    && echo "" > crates/trunk-recorder-sys/src/lib.rs
+    && echo "" > crates/trunk-recorder-sys/src/lib.rs \
+    && mkdir -p crates/trunk-discord/src \
+    && echo "fn main() {}" > crates/trunk-discord/src/main.rs \
+    && mkdir -p crates/trunk-oxide-driver/src \
+    && echo "" > crates/trunk-oxide-driver/src/lib.rs
 
 RUN cargo build --release -p trunk-whisperer || true
 

@@ -1,14 +1,13 @@
-use tokio::sync::mpsc;
-use tonic::transport::Endpoint;
+use tokio::sync::broadcast;
+use tokio_stream::wrappers::ReceiverStream;
+use tonic::{Request, Response, Status};
 use trunk_recorder_plugin::{
     Plugin, Result, SignalEvent, TrCall, TrCallData, TrRecorder, TrSystem, TrTrunkMessage,
 };
 
-pub mod proto {
-    tonic::include_proto!("trunk_oxide");
-}
+pub use trunk_oxide_proto as proto;
 
-use proto::trunk_recorder_plugin_client::TrunkRecorderPluginClient;
+use proto::trunk_oxide_server::{TrunkOxide, TrunkOxideServer};
 
 // ── Conversion helpers ──
 
@@ -267,6 +266,71 @@ fn convert_trunk_messages(messages: &[TrTrunkMessage]) -> Vec<proto::TrunkMessag
         .collect()
 }
 
+// ── gRPC service implementation ──
+
+struct TrunkOxideService {
+    audio_tx: broadcast::Sender<proto::AudioSample>,
+    event_tx: broadcast::Sender<proto::PluginEvent>,
+}
+
+#[tonic::async_trait]
+impl TrunkOxide for TrunkOxideService {
+    type SubscribeEventsStream = ReceiverStream<std::result::Result<proto::PluginEvent, Status>>;
+    type SubscribeAudioStream = ReceiverStream<std::result::Result<proto::AudioSample, Status>>;
+
+    async fn subscribe_events(
+        &self,
+        _request: Request<()>,
+    ) -> std::result::Result<Response<Self::SubscribeEventsStream>, Status> {
+        let mut broadcast_rx = self.event_tx.subscribe();
+        let (tx, rx) = tokio::sync::mpsc::channel(4096);
+
+        tokio::spawn(async move {
+            loop {
+                match broadcast_rx.recv().await {
+                    Ok(event) => {
+                        if tx.send(Ok(event)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "event subscriber lagged");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn subscribe_audio(
+        &self,
+        _request: Request<()>,
+    ) -> std::result::Result<Response<Self::SubscribeAudioStream>, Status> {
+        let mut broadcast_rx = self.audio_tx.subscribe();
+        let (tx, rx) = tokio::sync::mpsc::channel(4096);
+
+        tokio::spawn(async move {
+            loop {
+                match broadcast_rx.recv().await {
+                    Ok(sample) => {
+                        if tx.send(Ok(sample)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(broadcast::error::RecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "audio subscriber lagged");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+}
+
 // ── Plugin implementation ──
 
 const DEFAULT_SOCKET_PATH: &str = "/var/run/trunk-oxide/trunk-oxide.sock";
@@ -286,8 +350,8 @@ impl Default for GrpcConfig {
 pub struct GrpcPlugin {
     config: GrpcConfig,
     runtime: Option<tokio::runtime::Runtime>,
-    audio_tx: Option<mpsc::Sender<proto::AudioSample>>,
-    event_tx: Option<mpsc::Sender<proto::PluginEvent>>,
+    audio_tx: Option<broadcast::Sender<proto::AudioSample>>,
+    event_tx: Option<broadcast::Sender<proto::PluginEvent>>,
 }
 
 impl GrpcPlugin {
@@ -303,9 +367,8 @@ impl GrpcPlugin {
     fn send_event(&self, event: proto::plugin_event::Event) {
         if let Some(tx) = &self.event_tx {
             let msg = proto::PluginEvent { event: Some(event) };
-            if tx.try_send(msg).is_err() {
-                tracing::warn!("event channel full or closed, dropping event");
-            }
+            // broadcast::send fails only when there are no receivers — that's fine.
+            let _ = tx.send(msg);
         }
     }
 
@@ -341,14 +404,35 @@ impl Plugin for GrpcPlugin {
             .enable_all()
             .build()?;
 
-        let (audio_tx, audio_rx) = mpsc::channel::<proto::AudioSample>(4096);
-        let (event_tx, event_rx) = mpsc::channel::<proto::PluginEvent>(4096);
+        let (audio_tx, _) = broadcast::channel::<proto::AudioSample>(4096);
+        let (event_tx, _) = broadcast::channel::<proto::PluginEvent>(4096);
+
+        let service = TrunkOxideService {
+            audio_tx: audio_tx.clone(),
+            event_tx: event_tx.clone(),
+        };
 
         let socket_path = self.config.socket_path.clone();
 
         rt.spawn(async move {
-            if let Err(e) = run_streams(socket_path, audio_rx, event_rx).await {
-                tracing::error!("gRPC stream error: {e}");
+            let _ = std::fs::remove_file(&socket_path);
+            let listener = match tokio::net::UnixListener::bind(&socket_path) {
+                Ok(l) => l,
+                Err(e) => {
+                    tracing::error!(path = %socket_path, error = %e, "failed to bind UDS");
+                    return;
+                }
+            };
+            let incoming = tokio_stream::wrappers::UnixListenerStream::new(listener);
+
+            tracing::info!(path = %socket_path, "trunk-oxide gRPC server listening");
+
+            if let Err(e) = tonic::transport::Server::builder()
+                .add_service(TrunkOxideServer::new(service))
+                .serve_with_incoming(incoming)
+                .await
+            {
+                tracing::error!("gRPC server error: {e}");
             }
         });
 
@@ -405,9 +489,7 @@ impl Plugin for GrpcPlugin {
                 samples: bytes,
                 sample_rate,
             };
-            if tx.try_send(msg).is_err() {
-                tracing::warn!("audio channel full or closed, dropping samples");
-            }
+            let _ = tx.send(msg);
         }
         Ok(())
     }
@@ -559,55 +641,3 @@ impl Plugin for GrpcPlugin {
     }
 }
 
-// ── Background stream tasks ──
-
-#[allow(clippy::significant_drop_tightening)]
-async fn run_streams(
-    socket_path: String,
-    audio_rx: mpsc::Receiver<proto::AudioSample>,
-    event_rx: mpsc::Receiver<proto::PluginEvent>,
-) -> std::result::Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    // The URI is unused for UDS but tonic requires a valid one.
-    let channel = Endpoint::try_from("http://[::]:50051")?
-        .connect_with_connector(tower::service_fn(move |_| {
-            let path = socket_path.clone();
-            async move {
-                let stream = tokio::net::UnixStream::connect(path).await?;
-                Ok::<_, std::io::Error>(hyper_util::rt::TokioIo::new(stream))
-            }
-        }))
-        .await?;
-    let audio_handle = {
-        let mut audio_client = TrunkRecorderPluginClient::new(channel.clone());
-        tokio::spawn(async move {
-            let stream = tokio_stream::wrappers::ReceiverStream::new(audio_rx);
-            if let Err(e) = audio_client.stream_audio(stream).await {
-                tracing::error!("StreamAudio error: {e}");
-            }
-        })
-    };
-
-    let event_handle = {
-        let mut client = TrunkRecorderPluginClient::new(channel);
-        tokio::spawn(async move {
-            let stream = tokio_stream::wrappers::ReceiverStream::new(event_rx);
-            if let Err(e) = client.stream_events(stream).await {
-                tracing::error!("StreamEvents error: {e}");
-            }
-        })
-    };
-
-    let (audio_result, event_result) = tokio::join!(audio_handle, event_handle);
-    if let Err(e) = audio_result {
-        tracing::error!("audio stream task join error: {e}");
-    }
-    if let Err(e) = event_result {
-        tracing::error!("event stream task join error: {e}");
-    }
-    Ok(())
-}
-
-// ── Plugin export (dlopen mode only) ──
-
-#[cfg(feature = "plugin-export")]
-trunk_recorder_plugin::export_plugin!(GrpcPlugin::new());

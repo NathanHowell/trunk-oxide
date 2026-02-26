@@ -8,6 +8,7 @@ members = [
     "crates/trunk-oxide",
     "crates/trunk-whisperer",
     "crates/trunk-discord",
+    "crates/trunk-solver",
 ]
 # trunk-oxide enables link-shared on trunk-recorder-sys which conflicts
 # with the dlopen plugin build. Exclude it from the default build.
@@ -18,6 +19,7 @@ default-members = [
     "crates/trunk-oxide-grpc",
     "crates/trunk-whisperer",
     "crates/trunk-discord",
+    "crates/trunk-solver",
 ]
 
 [workspace.package]
@@ -77,3 +79,5 @@ whisper-rs = "0.15"
 clap = { version = "4", features = ["derive"] }
 argfile = "0.2"
 wild = "2"
+z3 = { version = "0.19", features = ["gh-release"] }
+csv = "1"

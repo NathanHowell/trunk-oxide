@@ -89,6 +89,33 @@ fn main() {
     // Suppress warnings from trunk-recorder headers
     build.warnings(false);
 
+    // Library mode: link against libtrunk-recorder.so and enable full lifecycle support
+    if std::env::var("CARGO_FEATURE_LINK_SHARED").is_ok() {
+        build.define("TR_LIBRARY_MODE", None);
+        build.define("TR_HEADLESS", None);
+
+        // Add cmake.h compat stub for config.h's transitive include
+        let cmake_stub = compat_dir.join("cmake.h");
+        if !cmake_stub.exists() {
+            std::fs::write(
+                &cmake_stub,
+                r#"#pragma once
+#define PROJECT_NAME "trunk-recorder"
+#define PROJECT_VER  "0.0.0"
+#define PROJECT_VER_MAJOR "0"
+#define PROJECT_VER_MINOR "0"
+#define PTOJECT_VER_PATCH "0"
+"#,
+            )
+            .ok();
+        }
+
+        println!("cargo:rustc-link-lib=trunk-recorder");
+        if let Ok(lib_dir) = std::env::var("TRUNK_RECORDER_LIB_DIR") {
+            println!("cargo:rustc-link-search=native={lib_dir}");
+        }
+    }
+
     build.compile("trunk_recorder_sys_bridge");
 
     println!("cargo:rerun-if-changed=src/lib.rs");

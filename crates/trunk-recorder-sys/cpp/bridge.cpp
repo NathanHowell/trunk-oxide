@@ -5,7 +5,23 @@
 #include "trunk-recorder-sys/src/lib.rs.h"
 
 #include <boost/shared_ptr.hpp>
+#include <cstdlib>
 #include <cstring>
+
+#ifdef TR_LIBRARY_MODE
+#include "trunk-recorder/trunk_context.h"
+#include "trunk-recorder/event_sink.h"
+#include <thread>
+
+// Forward declarations for functions provided by libtrunk-recorder.so
+bool load_config_from_string(const std::string &json_body, Config &config,
+                             gr::top_block_sptr &tb, std::vector<Source *> &sources,
+                             std::vector<System *> &systems);
+bool setup_systems(Config &config, gr::top_block_sptr &tb,
+                   std::vector<Source *> &sources, std::vector<System *> &systems,
+                   std::vector<Call *> &calls);
+int monitor_messages(TrunkContext &ctx);
+#endif
 
 namespace trunk_oxide {
 
@@ -492,9 +508,233 @@ double recorder_get_current_length(const TrRecorder &rec) { return rec.ptr->get_
 
 // ── Source accessor implementations ──
 
+// ── CxxEventSink: EventSink subclass that delegates to RustPluginBridge ──
+// Used in library mode to route trunk-recorder events to Rust callbacks.
+
+#ifdef TR_LIBRARY_MODE
+class CxxEventSink : public EventSink {
+public:
+    explicit CxxEventSink(std::shared_ptr<RustPluginBridge> bridge)
+        : bridge_(std::move(bridge)) {}
+
+    void poll_one() override {
+        bridge_->poll_one();
+    }
+
+    int signal(long unitId, const char *signaling_type,
+               gr::blocks::SignalType sig_type, Call *call,
+               System *system, Recorder *recorder) override {
+        return bridge_->signal(unitId, signaling_type, sig_type, call, system, recorder);
+    }
+
+    void trunk_message(std::vector<TrunkMessage> messages, System *system) override {
+        bridge_->trunk_message(std::move(messages), system);
+    }
+
+    void call_start(Call *call) override {
+        bridge_->call_start(call);
+    }
+
+    void conclude_call(Call *call, System *sys, Config /*config*/) override {
+        // Build Call_Data_t directly (no Call_Concluder in headless/library mode)
+        Call_Data_t call_info = {};
+        call_info.status = INITIAL;
+        call_info.process_call_time = time(0);
+        call_info.retry_attempt = 0;
+        call_info.error_count = 0;
+        call_info.spike_count = 0;
+        call_info.freq = call->get_freq();
+        call_info.freq_error = call->get_freq_error();
+        call_info.signal = call->get_signal();
+        call_info.noise = call->get_noise();
+        if (call->get_recorder()) {
+            call_info.recorder_num = call->get_recorder()->get_num();
+        }
+        call_info.encrypted = call->get_encrypted();
+        call_info.emergency = call->get_emergency();
+        call_info.priority = call->get_priority();
+        call_info.mode = call->get_mode();
+        call_info.duplex = call->get_duplex();
+        call_info.tdma_slot = call->get_tdma_slot();
+        call_info.phase2_tdma = call->get_phase2_tdma();
+        call_info.transmission_list = call->get_transmissions();
+        call_info.sys_num = sys->get_sys_num();
+        call_info.short_name = sys->get_short_name();
+        call_info.upload_script = sys->get_upload_script();
+        call_info.audio_archive = sys->get_audio_archive();
+        call_info.transmission_archive = sys->get_transmission_archive();
+        call_info.call_log = sys->get_call_log();
+        call_info.call_num = call->get_call_num();
+        call_info.compress_wav = sys->get_compress_wav();
+        call_info.talkgroup = call->get_talkgroup();
+        call_info.talkgroup_display = call->get_talkgroup_display();
+        call_info.talkgroup_tag = call->get_talkgroup_tag();
+        call_info.patched_talkgroups = sys->get_talkgroup_patch(call_info.talkgroup);
+        call_info.color_code = 0;
+        call_info.start_time = call->get_start_time();
+        call_info.stop_time = time(0);
+        call_info.length = call->get_current_length();
+
+        if (call->get_is_analog()) {
+            call_info.audio_type = "analog";
+        } else if (call->get_phase2_tdma()) {
+            call_info.audio_type = "digital tdma";
+        } else {
+            call_info.audio_type = "digital";
+        }
+
+        std::memset(call_info.filename, 0, sizeof(call_info.filename));
+        std::memset(call_info.status_filename, 0, sizeof(call_info.status_filename));
+        std::memset(call_info.converted, 0, sizeof(call_info.converted));
+
+        bridge_->call_end(call_info);
+    }
+
+    void calls_active(std::vector<Call *> calls) override {
+        bridge_->calls_active(std::move(calls));
+    }
+
+    void setup_recorder(Recorder *recorder) override {
+        bridge_->setup_recorder(recorder);
+    }
+
+    void setup_system(System *system) override {
+        bridge_->setup_system(system);
+    }
+
+    void setup_config(std::vector<Source *> sources, std::vector<System *> systems) override {
+        bridge_->setup_config(std::move(sources), std::move(systems));
+    }
+
+    void system_rates(std::vector<System *> systems, float timeDiff) override {
+        bridge_->system_rates(std::move(systems), timeDiff);
+    }
+
+    void unit_registration(System *system, long source_id) override {
+        bridge_->unit_registration(system, source_id);
+    }
+
+    void unit_deregistration(System *system, long source_id) override {
+        bridge_->unit_deregistration(system, source_id);
+    }
+
+    void unit_acknowledge_response(System *system, long source_id) override {
+        bridge_->unit_acknowledge_response(system, source_id);
+    }
+
+    void unit_group_affiliation(System *system, long source_id,
+                                long talkgroup_num) override {
+        bridge_->unit_group_affiliation(system, source_id, talkgroup_num);
+    }
+
+    void unit_data_grant(System *system, long source_id) override {
+        bridge_->unit_data_grant(system, source_id);
+    }
+
+    void unit_answer_request(System *system, long source_id,
+                             long talkgroup) override {
+        bridge_->unit_answer_request(system, source_id, talkgroup);
+    }
+
+    void unit_location(System *system, long source_id,
+                       long talkgroup_num) override {
+        bridge_->unit_location(system, source_id, talkgroup_num);
+    }
+
+private:
+    std::shared_ptr<RustPluginBridge> bridge_;
+};
+#endif // TR_LIBRARY_MODE
+
+// ── TrContext pimpl implementation ──
+
+#ifdef TR_LIBRARY_MODE
+struct TrContextImpl {
+    TrunkContext trunk_ctx;
+    std::thread monitor_thread;
+    std::unique_ptr<CxxEventSink> event_sink;
+    std::shared_ptr<RustPluginBridge> bridge;
+};
+#else
+struct TrContextImpl {};
+#endif
+
+TrContext::TrContext() : impl(std::make_unique<TrContextImpl>()) {}
+TrContext::~TrContext() = default;
+TrContext::TrContext(TrContext &&) noexcept = default;
+TrContext &TrContext::operator=(TrContext &&) noexcept = default;
+
+// ── Lifecycle function implementations ──
+
+#ifdef TR_LIBRARY_MODE
+
+std::unique_ptr<TrContext> tr_create(rust::Str config_json) {
+    auto ctx = std::make_unique<TrContext>();
+    std::string json_str(config_json.data(), config_json.size());
+    ctx->impl->trunk_ctx.tb = gr::make_top_block("Trunking");
+    load_config_from_string(json_str, ctx->impl->trunk_ctx.config,
+                            ctx->impl->trunk_ctx.tb,
+                            ctx->impl->trunk_ctx.sources,
+                            ctx->impl->trunk_ctx.systems);
+    setup_systems(ctx->impl->trunk_ctx.config, ctx->impl->trunk_ctx.tb,
+                  ctx->impl->trunk_ctx.sources, ctx->impl->trunk_ctx.systems,
+                  ctx->impl->trunk_ctx.calls);
+    return ctx;
+}
+
+void tr_set_plugin(TrContext &ctx, rust::Box<RustPluginBox> plugin) {
+    ctx.impl->bridge = std::make_shared<RustPluginBridge>(std::move(plugin));
+    ctx.impl->event_sink = std::make_unique<CxxEventSink>(ctx.impl->bridge);
+    ctx.impl->trunk_ctx.config.event_sink = ctx.impl->event_sink.get();
+
+    // Notify the plugin of the current configuration
+    ctx.impl->bridge->setup_config(ctx.impl->trunk_ctx.sources,
+                                   ctx.impl->trunk_ctx.systems);
+    for (auto *sys : ctx.impl->trunk_ctx.systems) {
+        ctx.impl->bridge->setup_system(sys);
+    }
+}
+
+void tr_start(TrContext &ctx) {
+    ctx.impl->trunk_ctx.tb->start();
+    ctx.impl->monitor_thread = std::thread([&ctx] {
+        ctx.impl->trunk_ctx.exit_code = monitor_messages(ctx.impl->trunk_ctx);
+    });
+}
+
+void tr_stop(TrContext &ctx) {
+    ctx.impl->trunk_ctx.exit_flag = 1;
+    if (ctx.impl->monitor_thread.joinable()) {
+        ctx.impl->monitor_thread.join();
+    }
+    ctx.impl->trunk_ctx.tb->stop();
+    ctx.impl->trunk_ctx.tb->wait();
+}
+
+#else // !TR_LIBRARY_MODE — stubs for dlopen plugin mode
+
+std::unique_ptr<TrContext> tr_create(rust::Str /*config_json*/) {
+    std::abort();
+}
+
+void tr_start(TrContext & /*ctx*/) {
+    std::abort();
+}
+
+void tr_stop(TrContext & /*ctx*/) {
+    std::abort();
+}
+
+void tr_set_plugin(TrContext & /*ctx*/, rust::Box<RustPluginBox> /*plugin*/) {
+    std::abort();
+}
+
+#endif // TR_LIBRARY_MODE
+
 } // namespace trunk_oxide
 
-// ── Plugin entry point ──
+// ── Plugin entry point (dlopen mode only) ──
+#ifndef TR_LIBRARY_MODE
 // Exported as the symbol trunk-recorder looks for when loading plugins.
 // The Rust side must provide `rust_create_plugin()` returning a Box<RustPluginBox>.
 extern "C" rust::Box<trunk_oxide::RustPluginBox> rust_create_plugin();
@@ -505,3 +745,4 @@ extern "C" boost::shared_ptr<Plugin_Api> create_plugin() {
         new trunk_oxide::RustPluginBridge(std::move(rust_plugin))
     );
 }
+#endif

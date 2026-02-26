@@ -10,6 +10,9 @@ workspace = true
 [dependencies]
 cxx.workspace = true
 
+[features]
+link-shared = []
+
 [build-dependencies]
 cxx-build.workspace = true
 pkg-config.workspace = true

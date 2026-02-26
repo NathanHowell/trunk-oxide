@@ -259,6 +259,14 @@ pub mod ffi {
         fn recorder_is_idle(rec: &TrRecorder) -> bool;
         fn recorder_get_current_length(rec: &TrRecorder) -> f64;
 
+        // ── Opaque lifecycle type ──
+        type TrContext;
+
+        // ── Lifecycle functions ──
+        fn tr_create(config_json: &str) -> UniquePtr<TrContext>;
+        fn tr_start(ctx: Pin<&mut TrContext>);
+        fn tr_stop(ctx: Pin<&mut TrContext>);
+        fn tr_set_plugin(ctx: Pin<&mut TrContext>, plugin: Box<RustPluginBox>);
     }
 
     // ── Rust functions callable from C++ (plugin callbacks) ──

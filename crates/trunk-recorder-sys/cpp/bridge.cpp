@@ -672,10 +672,12 @@ std::unique_ptr<TrContext> tr_create(rust::Str config_json) {
     auto ctx = std::make_unique<TrContext>();
     std::string json_str(config_json.data(), config_json.size());
     ctx->impl->trunk_ctx.tb = gr::make_top_block("Trunking");
-    load_config_from_string(json_str, ctx->impl->trunk_ctx.config,
-                            ctx->impl->trunk_ctx.tb,
-                            ctx->impl->trunk_ctx.sources,
-                            ctx->impl->trunk_ctx.systems);
+    if (!load_config_from_string(json_str, ctx->impl->trunk_ctx.config,
+                                 ctx->impl->trunk_ctx.tb,
+                                 ctx->impl->trunk_ctx.sources,
+                                 ctx->impl->trunk_ctx.systems)) {
+        throw std::runtime_error("Failed to load config (source device open failure?)");
+    }
     setup_systems(ctx->impl->trunk_ctx.config, ctx->impl->trunk_ctx.tb,
                   ctx->impl->trunk_ctx.sources, ctx->impl->trunk_ctx.systems,
                   ctx->impl->trunk_ctx.calls);

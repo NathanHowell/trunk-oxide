@@ -263,7 +263,7 @@ pub mod ffi {
         type TrContext;
 
         // ── Lifecycle functions ──
-        fn tr_create(config_json: &str) -> UniquePtr<TrContext>;
+        fn tr_create(config_json: &str) -> Result<UniquePtr<TrContext>>;
         fn tr_start(ctx: Pin<&mut TrContext>);
         fn tr_stop(ctx: Pin<&mut TrContext>);
         fn tr_set_plugin(ctx: Pin<&mut TrContext>, plugin: Box<RustPluginBox>);

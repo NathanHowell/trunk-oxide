@@ -24,13 +24,15 @@ impl TrunkRecorderDriver {
     /// This parses the config, creates SDR sources, and sets up all systems
     /// (trunking control channels, conventional channels, etc.) but does not
     /// start the gnuradio flowgraph yet.
-    #[must_use]
-    pub fn new(config_json: &str) -> Self {
-        let ctx = ffi::tr_create(config_json);
-        Self {
+    /// # Errors
+    ///
+    /// Returns an error if the config is invalid or an SDR source fails to open.
+    pub fn new(config_json: &str) -> Result<Self, cxx::Exception> {
+        let ctx = ffi::tr_create(config_json)?;
+        Ok(Self {
             ctx,
             started: false,
-        }
+        })
     }
 
     /// Register a [`Plugin`] to receive events and start the engine.

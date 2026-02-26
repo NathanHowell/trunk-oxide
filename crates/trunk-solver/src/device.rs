@@ -11,6 +11,9 @@ pub struct Device {
     pub driver: String,
     pub device_template: String,
     pub gain: i64,
+    /// Sample rate must be a multiple of this value (driver requirement).
+    /// For osmosdr sources, trunk-recorder requires a multiple of 24000.
+    pub rate_multiple: i64,
 }
 
 impl Device {
@@ -25,6 +28,7 @@ impl Device {
             driver: "osmosdr".into(),
             device_template: "rtl={}".into(),
             gain: 24,
+            rate_multiple: 24_000,
         }
     }
 
@@ -39,6 +43,7 @@ impl Device {
             driver: "osmosdr".into(),
             device_template: "airspy={}".into(),
             gain: 24,
+            rate_multiple: 24_000,
         }
     }
 

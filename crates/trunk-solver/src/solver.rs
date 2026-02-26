@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 use z3::ast::{Bool, Int};
 
 use crate::device::{Device, SampleRate};
-use crate::{Channel, BANDWIDTH, HALFWIDTH, Signal, Source};
+use crate::{CHANNEL_HALFWIDTH, Channel, Signal, Source};
 
 struct Problem {
     ranges: Vec<Int>,
@@ -31,7 +31,6 @@ fn build_problem(opt: &z3::Optimize, channels: &[Channel], devices: &[Device]) -
         .map(|(l, u)| u - l)
         .collect();
 
-    let bw = Int::from_i64(BANDWIDTH);
     let zero = Int::from_i64(0);
 
     for (i, (r, device)) in ranges.iter().zip(devices.iter()).enumerate() {
@@ -51,33 +50,35 @@ fn build_problem(opt: &z3::Optimize, channels: &[Channel], devices: &[Device]) -
         }
         opt.assert(&Bool::or(&rate_options));
 
-        // Bandwidth alignment: range is a multiple of channel bandwidth
+        // Rate must be a multiple of the device's required rate multiple
+        // (e.g. osmosdr requires multiples of 24,000 Hz)
+        let rate_mul = Int::from_i64(device.rate_multiple);
         let mult = Int::new_const(format!("mult_{i}"));
-        opt.assert(&r.eq(&(&bw * &mult)));
+        opt.assert(&r.eq(&(&rate_mul * &mult)));
     }
 
     // Frequency coverage constraints
     for channel in channels {
         let freq = Int::from_i64(channel.frequency);
-        let hw = Int::from_i64(HALFWIDTH);
+        let hw = Int::from_i64(CHANNEL_HALFWIDTH);
 
         let in_range_options: Vec<Bool> = lower_freq
             .iter()
             .zip(upper_freq.iter())
             .map(|(l, u)| {
-                // freq >= lower + HALFWIDTH
+                // freq >= lower + CHANNEL_HALFWIDTH
                 let lower_bound = freq.ge(&(l + &hw));
-                // freq <= upper - HALFWIDTH
+                // freq <= upper - CHANNEL_HALFWIDTH
                 let upper_bound = freq.le(&(u - &hw));
                 // Center avoidance: center frequency doesn't land on a channel frequency
                 // Use multiply-by-2 trick to avoid integer division:
-                //   freq - HALFWIDTH >= (upper + lower) / 2
-                //   <=> 2*(freq - HALFWIDTH) >= upper + lower
+                //   freq - CHANNEL_HALFWIDTH >= (upper + lower) / 2
+                //   <=> 2*(freq - CHANNEL_HALFWIDTH) >= upper + lower
                 let center_times_2 = u + l;
                 let avoid_above =
-                    Int::from_i64(2 * (channel.frequency - HALFWIDTH)).ge(&center_times_2);
+                    Int::from_i64(2 * (channel.frequency - CHANNEL_HALFWIDTH)).ge(&center_times_2);
                 let avoid_below =
-                    Int::from_i64(2 * (channel.frequency + HALFWIDTH)).le(&center_times_2);
+                    Int::from_i64(2 * (channel.frequency + CHANNEL_HALFWIDTH)).le(&center_times_2);
                 Bool::and(&[
                     lower_bound,
                     upper_bound,

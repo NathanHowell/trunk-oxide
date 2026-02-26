@@ -2,8 +2,12 @@ pub mod config;
 pub mod device;
 pub mod solver;
 
-pub const BANDWIDTH: i64 = 12_500;
-pub const HALFWIDTH: i64 = BANDWIDTH / 2;
+/// Half the P25/narrowband FM channel width (12,500 Hz / 2).
+///
+/// Used as a guard band so channel frequencies aren't at the very edge
+/// of an SDR's usable bandwidth, and to keep the SDR center frequency
+/// off any active channel.
+pub const CHANNEL_HALFWIDTH: i64 = 6_250;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {

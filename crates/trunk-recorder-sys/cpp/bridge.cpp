@@ -282,14 +282,18 @@ public:
                Call *call, System *system, Recorder *recorder) override {
         TrCall tr_call(call);
         TrSystem tr_sys(system);
-        TrRecorder tr_rec(recorder);
         auto sig_str = signaling_type
             ? rust::Str(signaling_type, std::strlen(signaling_type))
             : rust::Str("", 0);
+        const TrRecorder *tr_rec_ptr = nullptr;
+        TrRecorder tr_rec(recorder);
+        if (recorder) {
+            tr_rec_ptr = &tr_rec;
+        }
         return rust_plugin_signal(
             *plugin_, unitId, sig_str,
             convert_signal_type(sig_type),
-            tr_call, tr_sys, tr_rec);
+            tr_call, tr_sys, tr_rec_ptr);
     }
 
     int audio_stream(Call *call, Recorder *recorder,

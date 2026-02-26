@@ -282,14 +282,14 @@ pub mod ffi {
         fn rust_plugin_start(plugin: &mut RustPluginBox) -> i32;
         fn rust_plugin_stop(plugin: &mut RustPluginBox) -> i32;
         fn rust_plugin_poll_one(plugin: &mut RustPluginBox) -> i32;
-        fn rust_plugin_signal(
+        unsafe fn rust_plugin_signal(
             plugin: &mut RustPluginBox,
             unit_id: i64,
             signaling_type: &str,
             sig_type: TrSignalType,
             call: &TrCall,
             system: &TrSystem,
-            recorder: &TrRecorder,
+            recorder: *const TrRecorder,
         ) -> i32;
         fn rust_plugin_audio_stream(
             plugin: &mut RustPluginBox,
@@ -393,7 +393,7 @@ pub trait RustPluginCallbacks: Send {
         sig_type: ffi::TrSignalType,
         call: &ffi::TrCall,
         system: &ffi::TrSystem,
-        recorder: &ffi::TrRecorder,
+        recorder: Option<&ffi::TrRecorder>,
     ) -> i32;
     fn audio_stream(
         &mut self,
@@ -448,18 +448,24 @@ fn rust_plugin_poll_one(plugin: &mut RustPluginBox) -> i32 {
     plugin.inner.poll_one()
 }
 
-fn rust_plugin_signal(
+unsafe fn rust_plugin_signal(
     plugin: &mut RustPluginBox,
     unit_id: i64,
     signaling_type: &str,
     sig_type: ffi::TrSignalType,
     call: &ffi::TrCall,
     system: &ffi::TrSystem,
-    recorder: &ffi::TrRecorder,
+    recorder: *const ffi::TrRecorder,
 ) -> i32 {
+    let recorder_opt = if recorder.is_null() {
+        None
+    } else {
+        // SAFETY: caller guarantees the pointer is valid for the duration of the callback
+        Some(unsafe { &*recorder })
+    };
     plugin
         .inner
-        .signal(unit_id, signaling_type, sig_type, call, system, recorder)
+        .signal(unit_id, signaling_type, sig_type, call, system, recorder_opt)
 }
 
 fn rust_plugin_audio_stream(

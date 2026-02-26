@@ -14,7 +14,7 @@ pub struct SignalEvent<'a> {
     pub signal_type: TrSignalType,
     pub call: &'a TrCall,
     pub system: &'a TrSystem,
-    pub recorder: &'a TrRecorder,
+    pub recorder: Option<&'a TrRecorder>,
 }
 
 /// Result type for plugin callbacks.
@@ -182,7 +182,7 @@ impl<P: Plugin> trunk_recorder_sys::RustPluginCallbacks for PluginAdapter<P> {
         sig_type: TrSignalType,
         call: &TrCall,
         system: &TrSystem,
-        recorder: &TrRecorder,
+        recorder: Option<&TrRecorder>,
     ) -> i32 {
         let event = SignalEvent {
             unit_id,

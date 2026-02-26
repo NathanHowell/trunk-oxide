@@ -468,7 +468,7 @@ impl Plugin for GrpcPlugin {
             signal_type: convert_signal_type(event.signal_type),
             call: Some(call_info(event.call)),
             system: Some(system_info(event.system)),
-            recorder: Some(recorder_info(event.recorder)),
+            recorder: event.recorder.map(recorder_info),
         }));
         Ok(())
     }

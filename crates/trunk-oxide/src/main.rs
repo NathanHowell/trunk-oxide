@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use trunk_oxide::TrunkRecorderDriver;
+use trunk_oxide::TrunkRecorderBuilder;
 use trunk_oxide_grpc::GrpcPlugin;
 use opentelemetry::trace::TracerProvider;
 use tracing_subscriber::prelude::*;
@@ -64,9 +64,9 @@ fn main() -> Result<()> {
 
     tracing::info!(config = %config_path, "starting trunk-oxide driver");
 
-    let mut driver = TrunkRecorderDriver::new(&config_json, GrpcPlugin::new())
-        .context("failed to initialize trunk-recorder (SDR device open failure?)")?;
-    driver.start();
+    let recorder = TrunkRecorderBuilder::new(&config_json, GrpcPlugin::new())
+        .context("failed to initialize trunk-recorder (SDR device open failure?)")?
+        .start();
 
     tracing::info!("trunk-recorder engine running, press Ctrl+C to stop");
 
@@ -81,7 +81,7 @@ fn main() -> Result<()> {
     });
 
     tracing::info!("shutting down");
-    driver.stop();
+    drop(recorder);
 
     if let Some(provider) = otel_provider {
         let _ = provider.shutdown();

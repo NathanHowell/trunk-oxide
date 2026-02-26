@@ -39,6 +39,8 @@ struct ConfigSystem {
     system_type: String,
     #[serde(default, alias = "control_channels")]
     control_channels: Vec<i64>,
+    #[serde(default, alias = "voice_channels")]
+    voice_channels: Vec<i64>,
     channel_file: Option<PathBuf>,
 }
 
@@ -86,6 +88,14 @@ impl TrunkConfig {
                             frequency: freq,
                             signal: Signal::Digital,
                             tag: Some(Tag::Primary),
+                            system: Some(i),
+                        });
+                    }
+                    for &freq in &system.voice_channels {
+                        channels.push(Channel {
+                            frequency: freq,
+                            signal: Signal::Digital,
+                            tag: None,
                             system: Some(i),
                         });
                     }

@@ -3,18 +3,20 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.whisperer
+    user: "0:0"
     volumes:
       - socket:/var/run/trunk-oxide
       - ./config.toml:/etc/trunk-whisperer/config.toml:ro
-      - ${WHISPER_MODEL_DIR:-.}:/models:ro
+      - ${WHISPER_MODEL_DIR:-./tests}:/models:ro
 
   trunk-recorder:
     build:
       context: .
-      dockerfile: Dockerfile.grpc
+      dockerfile: Dockerfile.trunk-recorder
     volumes:
       - socket:/var/run/trunk-oxide
-      - ./trunk-recorder.conf:/etc/trunk-recorder/config.json:ro
+      - ./trunk-recorder.conf:/app/config.json:ro
+      - ./tests:/test:ro
     depends_on:
       - trunk-whisperer
 

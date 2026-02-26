@@ -1,0 +1,9 @@
+# RTL-SDR stable symlinks by USB port path
+SUBSYSTEM=="usb", ATTR{idVendor}=="0bda", ATTR{idProduct}=="2838", ENV{DEVTYPE}=="usb_device", \
+  ATTR{devpath}=="3.1",   SYMLINK+="rtlsdr0", MODE="0660", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0bda", ATTR{idProduct}=="2838", ENV{DEVTYPE}=="usb_device", \
+  ATTR{devpath}=="3.3",   SYMLINK+="rtlsdr1", MODE="0660", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0bda", ATTR{idProduct}=="2838", ENV{DEVTYPE}=="usb_device", \
+  ATTR{devpath}=="3.4.2", SYMLINK+="rtlsdr2", MODE="0660", GROUP="plugdev"
+SUBSYSTEM=="usb", ATTR{idVendor}=="0bda", ATTR{idProduct}=="2838", ENV{DEVTYPE}=="usb_device", \
+  ATTR{devpath}=="3.4.4", SYMLINK+="rtlsdr3", MODE="0660", GROUP="plugdev"

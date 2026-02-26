@@ -4,8 +4,13 @@ services:
       context: .
       dockerfile: Dockerfile.trunk-recorder
     privileged: true
+    group_add:
+      - keep-groups
     devices:
-      - /dev/bus/usb:/dev/bus/usb
+      - /dev/rtlsdr0
+      - /dev/rtlsdr1
+      - /dev/rtlsdr2
+      - /dev/rtlsdr3
     volumes:
       - oxide-socket:/run/service
       - ./trunk-recorder.conf:/app/config.json:ro

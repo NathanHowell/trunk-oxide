@@ -182,6 +182,7 @@ fn extract_sources(
                 center: i64::midpoint(upper, lower),
                 rate: upper - lower,
                 gain: device.gain,
+                ppm: device.ppm,
                 driver: device.driver.clone(),
                 device: device.device_template.replace("{}", &i.to_string()),
                 error: 0,

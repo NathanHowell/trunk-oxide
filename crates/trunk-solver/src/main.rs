@@ -4,7 +4,7 @@ use anyhow::{Result, bail};
 use clap::Parser;
 
 use trunk_solver::Source;
-use trunk_solver::config::parse_config;
+use trunk_solver::config::{parse_config, parse_devices_from_config};
 use trunk_solver::device::Device;
 use trunk_solver::solver::solve;
 
@@ -16,12 +16,13 @@ struct Cli {
     config: PathBuf,
 
     /// Device types to use (e.g., rtlsdr, airspy). Repeat for multiple devices.
+    /// If omitted, inferred from the existing sources in the config file.
     #[arg(long = "device")]
     devices: Vec<String>,
 
     /// Number of devices (only when a single device type is specified)
-    #[arg(long = "count", default_value = "1")]
-    count: usize,
+    #[arg(long = "count")]
+    count: Option<usize>,
 }
 
 fn main() -> Result<()> {
@@ -40,6 +41,16 @@ fn main() -> Result<()> {
 
     let devices = build_device_list(&cli)?;
 
+    eprintln!(
+        "Using {} device(s): {}",
+        devices.len(),
+        devices
+            .iter()
+            .map(|d| d.device_template.split('=').next().unwrap_or("?"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+
     let sources = solve(&channels, &devices)?;
 
     let output = sources_to_json(&sources)?;
@@ -49,31 +60,35 @@ fn main() -> Result<()> {
 }
 
 fn build_device_list(cli: &Cli) -> Result<Vec<Device>> {
-    let mut devices = Vec::new();
+    if cli.devices.is_empty() && cli.count.is_none() {
+        // Infer from existing config sources
+        let devices = parse_devices_from_config(&cli.config)?;
+        if devices.is_empty() {
+            bail!("No sources in config and no --device specified");
+        }
+        return Ok(devices);
+    }
+
+    let count = cli.count.unwrap_or(1);
 
     if cli.devices.is_empty() {
-        // Default: rtlsdr devices
-        for _ in 0..cli.count {
-            devices.push(Device::rtlsdr());
-        }
+        bail!("--count requires at least one --device");
     } else if cli.devices.len() == 1 {
         let device = Device::from_name(&cli.devices[0])
             .ok_or_else(|| anyhow::anyhow!("Unknown device: {}", cli.devices[0]))?;
-        for _ in 0..cli.count {
-            devices.push(device.clone());
-        }
+        Ok(vec![device; count])
     } else {
-        if cli.count > 1 {
+        if count > 1 {
             bail!("--count is only supported for a single device type");
         }
-        for name in &cli.devices {
-            let device = Device::from_name(name)
-                .ok_or_else(|| anyhow::anyhow!("Unknown device: {name}"))?;
-            devices.push(device);
-        }
+        cli.devices
+            .iter()
+            .map(|name| {
+                Device::from_name(name)
+                    .ok_or_else(|| anyhow::anyhow!("Unknown device: {name}"))
+            })
+            .collect()
     }
-
-    Ok(devices)
 }
 
 fn sources_to_json(sources: &[Source]) -> Result<String> {
@@ -85,7 +100,7 @@ fn sources_to_json(sources: &[Source]) -> Result<String> {
                 "rate": s.rate,
                 "gain": s.gain,
                 "error": s.error,
-                "ppm": 0,
+                "ppm": s.ppm,
                 "driver": s.driver,
                 "device": s.device,
                 "debugRecorders": 0,

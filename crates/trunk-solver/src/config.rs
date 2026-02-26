@@ -2,13 +2,41 @@ use std::path::Path;
 
 use anyhow::{Context, Result, bail};
 
+use crate::device::Device;
 use crate::{Channel, Signal, Tag};
 
-pub fn parse_config(path: &Path) -> Result<Vec<Channel>> {
+fn read_config(path: &Path) -> Result<serde_json::Value> {
     let content = std::fs::read_to_string(path)
         .with_context(|| format!("Failed to read config file: {}", path.display()))?;
-    let config: serde_json::Value =
-        serde_json::from_str(&content).context("Failed to parse config JSON")?;
+    serde_json::from_str(&content).context("Failed to parse config JSON")
+}
+
+/// Parse the existing `sources` array from a trunk-recorder config to infer
+/// device types, gain, and ppm. Returns one [`Device`] per source entry.
+pub fn parse_devices_from_config(path: &Path) -> Result<Vec<Device>> {
+    let config = read_config(path)?;
+    let sources = config["sources"]
+        .as_array()
+        .context("Missing 'sources' array in config")?;
+
+    let mut devices = Vec::new();
+    for source in sources {
+        let device_str = source["device"]
+            .as_str()
+            .context("Source missing 'device' field")?;
+        let gain = source["gain"].as_i64().unwrap_or(24);
+        let ppm = source["ppm"].as_i64().unwrap_or(0);
+
+        let device = Device::from_source_config(device_str, gain, ppm)
+            .ok_or_else(|| anyhow::anyhow!("Unknown device type: {device_str}"))?;
+        devices.push(device);
+    }
+
+    Ok(devices)
+}
+
+pub fn parse_config(path: &Path) -> Result<Vec<Channel>> {
+    let config = read_config(path)?;
 
     let config_dir = path.parent().unwrap_or_else(|| Path::new("."));
     let mut channels = Vec::new();

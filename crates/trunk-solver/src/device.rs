@@ -50,4 +50,20 @@ impl Device {
             _ => None,
         }
     }
+
+    /// Infer device type from a trunk-recorder source `device` string
+    /// (e.g. `"rtl=0"`, `"airspy=1"`), overriding gain and ppm with
+    /// the values from the existing config.
+    #[must_use]
+    pub fn from_source_config(device_str: &str, gain: i64, ppm: i64) -> Option<Self> {
+        let prefix = device_str.split('=').next()?;
+        let mut device = match prefix {
+            "rtl" => Self::rtlsdr(),
+            "airspy" => Self::airspy(),
+            _ => return None,
+        };
+        device.gain = gain;
+        device.ppm = ppm;
+        Some(device)
+    }
 }

@@ -3,6 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.trunk-recorder
+    privileged: true
     devices:
       - /dev/bus/usb:/dev/bus/usb
     volumes:
@@ -64,9 +65,10 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.discord
+    user: "0:0"
     volumes:
-      - oxide-socket:/run/trunk-oxide:ro
-      - whisperer-socket:/run/trunk-whisperer:ro
+      - oxide-socket:/run/trunk-oxide
+      - whisperer-socket:/run/trunk-whisperer
       - discord-socket:/run/service
       - ./config-discord.toml:/etc/trunk-discord/config.toml:ro
     depends_on:

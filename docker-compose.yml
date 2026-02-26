@@ -9,6 +9,7 @@ services:
       - oxide-socket:/run/service
       - ./trunk-recorder.conf:/app/config.json:ro
       - ./smco-talkgroups.csv:/app/smco-talkgroups.csv:ro
+      - ./svrcs-talkgroups.csv:/app/svrcs-talkgroups.csv:ro
       - ./conventional-channels.csv:/app/conventional-channels.csv:ro
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318

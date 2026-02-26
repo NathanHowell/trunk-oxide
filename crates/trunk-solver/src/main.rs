@@ -4,7 +4,7 @@ use anyhow::{Result, bail};
 use clap::Parser;
 
 use trunk_solver::Source;
-use trunk_solver::config::{parse_config, parse_devices_from_config};
+use trunk_solver::config::load_config;
 use trunk_solver::device::Device;
 use trunk_solver::solver::solve;
 
@@ -28,8 +28,13 @@ struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let channels = parse_config(&cli.config)?;
+    let config = load_config(&cli.config)?;
+    let config_dir = cli
+        .config
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
 
+    let channels = config.channels(config_dir)?;
     if channels.is_empty() {
         bail!("No channels found in config");
     }
@@ -39,7 +44,7 @@ fn main() -> Result<()> {
         eprintln!("  {} {:?}", c.frequency, c.signal);
     }
 
-    let devices = build_device_list(&cli)?;
+    let devices = build_device_list(&cli, &config)?;
 
     eprintln!(
         "Using {} device(s): {}",
@@ -59,10 +64,12 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn build_device_list(cli: &Cli) -> Result<Vec<Device>> {
+fn build_device_list(
+    cli: &Cli,
+    config: &trunk_solver::config::TrunkConfig,
+) -> Result<Vec<Device>> {
     if cli.devices.is_empty() && cli.count.is_none() {
-        // Infer from existing config sources
-        let devices = parse_devices_from_config(&cli.config)?;
+        let devices = config.devices()?;
         if devices.is_empty() {
             bail!("No sources in config and no --device specified");
         }

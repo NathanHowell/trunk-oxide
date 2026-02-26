@@ -3,6 +3,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.trunk-recorder
+    restart: unless-stopped
     privileged: true
     group_add:
       - keep-groups
@@ -18,7 +19,7 @@ services:
       - ./svrcs-talkgroups.csv:/app/svrcs-talkgroups.csv:ro
       - ./conventional-channels.csv:/app/conventional-channels.csv:ro
     environment:
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
+      # - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
     healthcheck:
       test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr", "unix:///run/service/grpc.sock"]
       interval: 5s

@@ -5,7 +5,7 @@
 //! through the gRPC plugin to trunk-whisperer (or any other gRPC consumer).
 
 use anyhow::{Context, Result};
-use trunk_oxide_driver::TrunkRecorderDriver;
+use trunk_oxide::TrunkRecorderDriver;
 use trunk_oxide_grpc::GrpcPlugin;
 use opentelemetry::trace::TracerProvider;
 use tracing_subscriber::prelude::*;

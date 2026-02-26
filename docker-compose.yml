@@ -7,6 +7,8 @@ services:
       - oxide-socket:/var/run/trunk-oxide
       - ./trunk-recorder.conf:/app/config.json:ro
       - ./tests:/test:ro
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
 
   trunk-whisperer:
     build:
@@ -17,6 +19,8 @@ services:
       - whisperer-socket:/var/run/trunk-whisperer
       - ./config-whisperer.toml:/etc/trunk-whisperer/config.toml:ro
       - ${WHISPER_MODEL_DIR:-./tests}:/models:ro
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
 
   trunk-discord:
     build:
@@ -31,6 +35,14 @@ services:
       - trunk-whisperer
     environment:
       - DISCORD_TOKEN
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
+
+  jaeger:
+    image: jaegertracing/all-in-one:1
+    environment:
+      - COLLECTOR_OTLP_ENABLED=true
+    ports:
+      - "16686:16686"
 
 volumes:
   oxide-socket:

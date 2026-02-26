@@ -5,6 +5,8 @@ mod transcriber;
 use std::sync::Arc;
 
 use anyhow::Result;
+use opentelemetry::trace::TracerProvider;
+use tracing_subscriber::prelude::*;
 
 mod proto {
     tonic::include_proto!("whisperer");
@@ -13,7 +15,37 @@ mod proto {
 #[tokio::main]
 async fn main() -> Result<()> {
     pid1::Pid1Settings::new().launch()?;
-    tracing_subscriber::fmt::init();
+
+    let otel_provider = if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
+        let exporter = opentelemetry_otlp::SpanExporter::builder()
+            .with_http()
+            .build()?;
+
+        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+            .with_batch_exporter(exporter)
+            .with_resource(
+                opentelemetry_sdk::Resource::builder_empty()
+                    .with_service_name("trunk-whisperer")
+                    .build(),
+            )
+            .build();
+
+        opentelemetry::global::set_tracer_provider(provider.clone());
+        Some(provider)
+    } else {
+        None
+    };
+
+    let otel_layer = otel_provider.as_ref().map(|provider| {
+        let tracer = provider.tracer("trunk-whisperer");
+        tracing_opentelemetry::layer().with_tracer(tracer)
+    });
+
+    tracing_subscriber::registry()
+        .with(tracing_subscriber::fmt::layer())
+        .with(tracing_subscriber::EnvFilter::from_default_env())
+        .with(otel_layer)
+        .init();
 
     let config = config::Config::load()?;
 
@@ -32,6 +64,10 @@ async fn main() -> Result<()> {
         .add_service(proto::whisperer_server::WhispererServer::new(service))
         .serve_with_incoming_shutdown(incoming, shutdown_signal())
         .await?;
+
+    if let Some(provider) = otel_provider {
+        let _ = provider.shutdown();
+    }
 
     Ok(())
 }

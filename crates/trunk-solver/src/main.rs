@@ -3,8 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use clap::Parser;
 
-use trunk_solver::Source;
-use trunk_solver::config::load_config;
+use trunk_solver::config::TrunkConfig;
 use trunk_solver::device::Device;
 use trunk_solver::solver::solve;
 
@@ -28,7 +27,7 @@ struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let config = load_config(&cli.config)?;
+    let mut config = TrunkConfig::load(&cli.config)?;
     let config_dir = cli
         .config
         .parent()
@@ -58,16 +57,13 @@ fn main() -> Result<()> {
 
     let sources = solve(&channels, &devices)?;
 
-    let output = sources_to_json(&sources)?;
-    println!("{output}");
+    config.patch_sources(&sources);
+    println!("{}", config.to_json_pretty());
 
     Ok(())
 }
 
-fn build_device_list(
-    cli: &Cli,
-    config: &trunk_solver::config::TrunkConfig,
-) -> Result<Vec<Device>> {
+fn build_device_list(cli: &Cli, config: &TrunkConfig) -> Result<Vec<Device>> {
     if cli.devices.is_empty() && cli.count.is_none() {
         let devices = config.devices()?;
         if devices.is_empty() {
@@ -96,27 +92,4 @@ fn build_device_list(
             })
             .collect()
     }
-}
-
-fn sources_to_json(sources: &[Source]) -> Result<String> {
-    let sources_json: Vec<serde_json::Value> = sources
-        .iter()
-        .map(|s| {
-            serde_json::json!({
-                "center": s.center,
-                "rate": s.rate,
-                "gain": s.gain,
-                "error": s.error,
-                "ppm": s.ppm,
-                "driver": s.driver,
-                "device": s.device,
-                "debugRecorders": 0,
-                "digitalRecorders": s.digital_recorders,
-                "analogRecorders": s.analog_recorders,
-            })
-        })
-        .collect();
-
-    let output = serde_json::json!({ "sources": sources_json });
-    Ok(serde_json::to_string_pretty(&output)?)
 }

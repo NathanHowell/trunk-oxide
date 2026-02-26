@@ -25,7 +25,8 @@ pub struct Channel {
     pub system: Option<usize>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct Source {
     pub center: i64,
     pub rate: i64,

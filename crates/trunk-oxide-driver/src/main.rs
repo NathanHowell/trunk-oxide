@@ -9,6 +9,7 @@ use trunk_oxide_driver::TrunkRecorderDriver;
 use trunk_oxide_grpc::GrpcPlugin;
 
 fn main() -> Result<()> {
+    pid1::Pid1Settings::new().launch()?;
     tracing_subscriber::fmt::init();
 
     let config_path = std::env::args()

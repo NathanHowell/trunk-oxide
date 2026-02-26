@@ -18,6 +18,7 @@ mod proto {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    pid1::Pid1Settings::new().launch()?;
     tracing_subscriber::fmt::init();
 
     let config = config::Config::load()?;

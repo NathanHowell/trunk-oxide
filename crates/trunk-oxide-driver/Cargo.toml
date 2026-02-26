@@ -16,3 +16,4 @@ tokio = { workspace = true, features = ["signal"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
+pid1.workspace = true

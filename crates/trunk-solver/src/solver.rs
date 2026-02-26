@@ -4,6 +4,34 @@ use z3::ast::{Bool, Int};
 use crate::device::{Device, SampleRate};
 use crate::{CHANNEL_HALFWIDTH, Channel, Signal, Source};
 
+/// Replicate trunk-recorder's `Source::set_min_max()` decimation logic.
+///
+/// Given a sample rate, returns the per-side guard band (`if1 / 2`) that
+/// trunk-recorder subtracts from each edge to get the usable bandwidth.
+/// The usable range is `center ± (rate/2 - guard)`.
+fn decimation_guard(rate: i64) -> i64 {
+    let if_freqs: [i64; 3] = [24000, 25000, 32000];
+    let mut decim: i64 = 24000; // trunk-recorder default
+
+    for &if_freq in &if_freqs {
+        if rate % if_freq != 0 {
+            continue;
+        }
+        let q = rate / if_freq;
+        if q & 1 != 0 {
+            continue;
+        }
+        if q >= 40 && (q & 3) == 0 {
+            decim = q / 4;
+        } else {
+            decim = q / 2;
+        }
+    }
+
+    let if1 = rate / decim;
+    if1 / 2
+}
+
 struct Problem {
     ranges: Vec<Int>,
     lower_freq: Vec<Int>,
@@ -57,7 +85,12 @@ fn build_problem(opt: &z3::Optimize, channels: &[Channel], devices: &[Device]) -
         opt.assert(&r.eq(&(&rate_mul * &mult)));
     }
 
-    // Frequency coverage constraints
+    // Frequency coverage constraints.
+    //
+    // trunk-recorder shrinks each SDR's usable bandwidth by a decimation-
+    // dependent guard band (see Source::set_min_max in source.cc).  The guard
+    // depends on the sample rate, which is a Z3 variable.  We enumerate every
+    // valid rate for each device and encode the correct guard for each.
     for channel in channels {
         let freq = Int::from_i64(channel.frequency);
         let hw = Int::from_i64(CHANNEL_HALFWIDTH);
@@ -65,25 +98,44 @@ fn build_problem(opt: &z3::Optimize, channels: &[Channel], devices: &[Device]) -
         let in_range_options: Vec<Bool> = lower_freq
             .iter()
             .zip(upper_freq.iter())
-            .map(|(l, u)| {
-                // freq >= lower + CHANNEL_HALFWIDTH
-                let lower_bound = freq.ge(&(l + &hw));
-                // freq <= upper - CHANNEL_HALFWIDTH
-                let upper_bound = freq.le(&(u - &hw));
-                // Center avoidance: center frequency doesn't land on a channel frequency
-                // Use multiply-by-2 trick to avoid integer division:
-                //   freq - CHANNEL_HALFWIDTH >= (upper + lower) / 2
-                //   <=> 2*(freq - CHANNEL_HALFWIDTH) >= upper + lower
-                let center_times_2 = u + l;
-                let avoid_above =
-                    Int::from_i64(2 * (channel.frequency - CHANNEL_HALFWIDTH)).ge(&center_times_2);
-                let avoid_below =
-                    Int::from_i64(2 * (channel.frequency + CHANNEL_HALFWIDTH)).le(&center_times_2);
-                Bool::and(&[
-                    lower_bound,
-                    upper_bound,
-                    Bool::or(&[avoid_above, avoid_below]),
-                ])
+            .zip(ranges.iter())
+            .zip(devices.iter())
+            .map(|(((l, u), r), device)| {
+                // Build per-rate disjuncts that apply the correct decimation guard.
+                let rate_disjuncts: Vec<Bool> = valid_rates(device)
+                    .map(|rate| {
+                        let guard = Int::from_i64(decimation_guard(rate));
+                        let rate_z3 = Int::from_i64(rate);
+
+                        // rate == this candidate
+                        let rate_match = r.eq(&rate_z3);
+                        // freq >= lower + guard + CHANNEL_HALFWIDTH
+                        let lower_bound = freq.ge(&(l + &guard + &hw));
+                        // freq <= upper - guard - CHANNEL_HALFWIDTH
+                        let upper_bound = freq.le(&(u - &guard - &hw));
+
+                        // Center avoidance: SDR center frequency doesn't land on a channel.
+                        // center = (upper + lower) / 2, avoid integer division:
+                        //   2*(freq - CHANNEL_HALFWIDTH) >= upper + lower  OR
+                        //   2*(freq + CHANNEL_HALFWIDTH) <= upper + lower
+                        let center_times_2 = u + l;
+                        let avoid_above =
+                            Int::from_i64(2 * (channel.frequency - CHANNEL_HALFWIDTH))
+                                .ge(&center_times_2);
+                        let avoid_below =
+                            Int::from_i64(2 * (channel.frequency + CHANNEL_HALFWIDTH))
+                                .le(&center_times_2);
+
+                        Bool::and(&[
+                            rate_match,
+                            lower_bound,
+                            upper_bound,
+                            Bool::or(&[avoid_above, avoid_below]),
+                        ])
+                    })
+                    .collect();
+
+                Bool::or(&rate_disjuncts)
             })
             .collect();
 
@@ -95,6 +147,32 @@ fn build_problem(opt: &z3::Optimize, channels: &[Channel], devices: &[Device]) -
         lower_freq,
         upper_freq,
     }
+}
+
+/// Enumerate all valid sample rates for a device.
+fn valid_rates(device: &Device) -> impl Iterator<Item = i64> + '_ {
+    device.sample_rates.iter().flat_map(move |sr| {
+        let mul = device.rate_multiple;
+        match *sr {
+            SampleRate::Exact(v) => {
+                let lo_mult = v / mul;
+                let hi_mult = lo_mult;
+                (lo_mult..=hi_mult)
+                    .map(move |m| m * mul)
+                    .filter(move |&r| r == v)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+            }
+            SampleRate::Range(lo, hi) => {
+                let lo_mult = (lo + mul - 1) / mul; // ceil division
+                let hi_mult = hi / mul;
+                (lo_mult..=hi_mult)
+                    .map(move |m| m * mul)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+            }
+        }
+    })
 }
 
 pub fn solve(channels: &[Channel], devices: &[Device]) -> Result<Vec<Source>> {
@@ -161,10 +239,19 @@ fn extract_sources(
             .ok_or_else(|| anyhow::anyhow!("Failed to evaluate upper_{i}"))?;
 
         if lower != upper {
+            let rate = upper - lower;
+            let guard = decimation_guard(rate);
+
+            // Usable range after decimation guard
+            let usable_lower = lower + guard;
+            let usable_upper = upper - guard;
+
             let analog_recorders = channels
                 .iter()
                 .filter(|c| {
-                    c.signal == Signal::Analog && c.frequency >= lower && c.frequency <= upper
+                    c.signal == Signal::Analog
+                        && c.frequency >= usable_lower
+                        && c.frequency <= usable_upper
                 })
                 .count();
 
@@ -174,14 +261,14 @@ fn extract_sources(
                 .filter(|c| {
                     c.signal == Signal::Digital
                         && c.tag.is_none()
-                        && c.frequency >= lower
-                        && c.frequency <= upper
+                        && c.frequency >= usable_lower
+                        && c.frequency <= usable_upper
                 })
                 .count();
 
             sources.push(Source {
                 center: i64::midpoint(upper, lower),
-                rate: upper - lower,
+                rate,
                 gain: device.gain,
                 ppm: device.ppm,
                 driver: device.driver.clone(),
@@ -195,4 +282,122 @@ fn extract_sources(
 
     eprintln!("Devices required: {}", sources.len());
     Ok(sources)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Channel, Signal, Tag};
+    use crate::device::Device;
+
+    /// Helper: assert every channel is within the usable range of some source,
+    /// applying trunk-recorder's actual decimation guard.
+    fn assert_all_covered(channels: &[Channel], sources: &[Source]) {
+        for ch in channels {
+            let covered = sources.iter().any(|s| {
+                let guard = decimation_guard(s.rate);
+                let min = s.center - s.rate / 2 + guard;
+                let max = s.center + s.rate / 2 - guard;
+                ch.frequency >= min + CHANNEL_HALFWIDTH && ch.frequency <= max - CHANNEL_HALFWIDTH
+            });
+            assert!(
+                covered,
+                "channel {:.6} MHz not covered by any source",
+                ch.frequency as f64 / 1e6
+            );
+        }
+    }
+
+    #[test]
+    fn test_decimation_guard() {
+        // Rate 912,000: 912000/24000=38 (even, <40) → decim=19, if1=48000
+        assert_eq!(decimation_guard(912_000), 24_000);
+
+        // Rate 2,448,000: 2448000/24000=102 (even, >=40, %4==2) → decim=51, if1=48000
+        assert_eq!(decimation_guard(2_448_000), 24_000);
+
+        // Rate 2,500,000: 2500000/25000=100 (even, >=40, %4==0) → decim=25, if1=100000
+        assert_eq!(decimation_guard(2_500_000), 50_000);
+
+        // Rate 2,088,000: 2088000/24000=87 (odd, skipped) → fallback decim=24000
+        // if1 = 2088000/24000 = 87, guard = 43
+        assert_eq!(decimation_guard(2_088_000), 43);
+
+        // Rate where no if_freq divides evenly → fallback decim=24000
+        assert_eq!(decimation_guard(999_999), 20);
+    }
+
+    #[test]
+    fn test_two_conventional_channels() {
+        // The exact bug case: two analog channels 750 kHz apart.
+        // Old solver picked rate=912k which couldn't cover both after decimation.
+        let channels = vec![
+            Channel { frequency: 488_337_500, signal: Signal::Analog, tag: None, system: None },
+            Channel { frequency: 489_087_500, signal: Signal::Analog, tag: None, system: None },
+        ];
+        let devices = vec![Device::rtlsdr()];
+
+        let sources = solve(&channels, &devices).expect("should find a solution");
+        assert_eq!(sources.len(), 1);
+        assert_all_covered(&channels, &sources);
+    }
+
+    #[test]
+    fn test_digital_channels_coverage() {
+        // P25 control + voice channels spanning ~770–774 MHz.
+        let control = [772_031_250, 772_406_250, 772_706_250, 773_481_250];
+        let voice = [
+            770_031_250, 770_306_250, 771_281_250, 771_431_250,
+            771_581_250, 771_881_250,
+        ];
+
+        let mut channels: Vec<Channel> = control
+            .iter()
+            .map(|&f| Channel {
+                frequency: f,
+                signal: Signal::Digital,
+                tag: Some(Tag::Primary),
+                system: Some(0),
+            })
+            .collect();
+        channels.extend(voice.iter().map(|&f| Channel {
+            frequency: f,
+            signal: Signal::Digital,
+            tag: None,
+            system: Some(0),
+        }));
+
+        let devices = vec![Device::rtlsdr(), Device::rtlsdr(), Device::rtlsdr()];
+
+        let sources = solve(&channels, &devices).expect("should find a solution");
+        assert!(!sources.is_empty());
+        assert_all_covered(&channels, &sources);
+    }
+
+    #[test]
+    fn test_single_channel() {
+        let channels = vec![
+            Channel { frequency: 460_000_000, signal: Signal::Analog, tag: None, system: None },
+        ];
+        let devices = vec![Device::rtlsdr()];
+
+        let sources = solve(&channels, &devices).expect("should find a solution");
+        assert_eq!(sources.len(), 1);
+        assert_all_covered(&channels, &sources);
+        // Rate should be minimal — smallest valid RTL-SDR rate (multiple of 24k, in 225001..300000)
+        assert!(sources[0].rate <= 300_000);
+    }
+
+    #[test]
+    fn test_impossible_assignment() {
+        // Two channels 10 MHz apart — impossible with a single RTL-SDR (max ~2.56 MHz)
+        let channels = vec![
+            Channel { frequency: 460_000_000, signal: Signal::Analog, tag: None, system: None },
+            Channel { frequency: 470_000_000, signal: Signal::Analog, tag: None, system: None },
+        ];
+        let devices = vec![Device::rtlsdr()];
+
+        let result = solve(&channels, &devices);
+        assert!(result.is_err());
+    }
 }

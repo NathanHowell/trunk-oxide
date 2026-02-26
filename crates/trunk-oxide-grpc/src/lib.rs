@@ -464,7 +464,7 @@ impl Plugin for GrpcPlugin {
     fn signal(&mut self, event: SignalEvent<'_>) -> Result {
         self.send_event(proto::plugin_event::Event::Signal(proto::SignalEvent {
             unit_id: event.unit_id,
-            signaling_type: event.signaling_type.to_string(),
+            signaling_type: event.signaling_type.unwrap_or_default().to_string(),
             signal_type: convert_signal_type(event.signal_type),
             call: Some(call_info(event.call)),
             system: Some(system_info(event.system)),

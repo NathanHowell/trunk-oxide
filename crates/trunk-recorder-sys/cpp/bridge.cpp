@@ -283,9 +283,11 @@ public:
         TrCall tr_call(call);
         TrSystem tr_sys(system);
         TrRecorder tr_rec(recorder);
+        auto sig_str = signaling_type
+            ? rust::Str(signaling_type, std::strlen(signaling_type))
+            : rust::Str("", 0);
         return rust_plugin_signal(
-            *plugin_, unitId,
-            rust::Str(signaling_type, std::strlen(signaling_type)),
+            *plugin_, unitId, sig_str,
             convert_signal_type(sig_type),
             tr_call, tr_sys, tr_rec);
     }

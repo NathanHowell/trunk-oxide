@@ -10,7 +10,7 @@ pub use trunk_recorder_sys;
 /// A signal event delivered to [`Plugin::signal`].
 pub struct SignalEvent<'a> {
     pub unit_id: i64,
-    pub signaling_type: &'a str,
+    pub signaling_type: Option<&'a str>,
     pub signal_type: TrSignalType,
     pub call: &'a TrCall,
     pub system: &'a TrSystem,
@@ -186,7 +186,7 @@ impl<P: Plugin> trunk_recorder_sys::RustPluginCallbacks for PluginAdapter<P> {
     ) -> i32 {
         let event = SignalEvent {
             unit_id,
-            signaling_type,
+            signaling_type: if signaling_type.is_empty() { None } else { Some(signaling_type) },
             signal_type: sig_type,
             call,
             system,

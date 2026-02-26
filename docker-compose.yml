@@ -8,7 +8,8 @@ services:
     volumes:
       - oxide-socket:/run/service
       - ./trunk-recorder.conf:/app/config.json:ro
-      - ./tests:/test:ro
+      - ./smco-talkgroups.csv:/app/smco-talkgroups.csv:ro
+      - ./conventional-channels.csv:/app/conventional-channels.csv:ro
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
     healthcheck:

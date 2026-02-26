@@ -15,8 +15,8 @@ fn main() {
 
     // Compute GNURADIO_VERSION hex from pkg-config version (e.g. "3.10.12")
     let gnuradio_version_hex = compute_gnuradio_version(&gnuradio_runtime.version);
-    println!(
-        "cargo:warning=Using GNURADIO_VERSION=0x{gnuradio_version_hex:06x} ({})",
+    eprintln!(
+        "Using GNURADIO_VERSION=0x{gnuradio_version_hex:06x} ({})",
         gnuradio_runtime.version
     );
 

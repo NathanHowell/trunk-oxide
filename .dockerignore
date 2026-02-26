@@ -2,4 +2,5 @@ target/
 .git/
 .claude/
 trunk-recorder/.git/
+trunk-recorder/build/
 secrets/

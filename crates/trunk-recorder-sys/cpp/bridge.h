@@ -29,8 +29,8 @@ struct RustPluginBox;
 // These wrap raw pointers to trunk-recorder objects.
 
 struct TrCall final {
-    Call *ptr;
-    explicit TrCall(Call *p) : ptr(p) {}
+    std::shared_ptr<Call> ptr;
+    explicit TrCall(const std::shared_ptr<Call> &p) : ptr(p) {}
 };
 
 struct TrSystem final {

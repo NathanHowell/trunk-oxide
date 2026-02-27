@@ -20,7 +20,7 @@ bool load_config_from_string(const std::string &json_body, Config &config,
                              std::vector<std::shared_ptr<System>> &systems);
 bool setup_systems(Config &config, gr::top_block_sptr &tb,
                    std::vector<std::shared_ptr<Source>> &sources, std::vector<std::shared_ptr<System>> &systems,
-                   std::vector<Call *> &calls);
+                   std::vector<std::shared_ptr<Call>> &calls);
 int monitor_messages(TrunkContext &ctx);
 #endif
 
@@ -261,7 +261,7 @@ public:
 
     int signal(long unitId, const char *signaling_type,
                gr::blocks::SignalType sig_type,
-               Call *call, const std::shared_ptr<System> &system, const std::shared_ptr<Recorder> &recorder) {
+               const std::shared_ptr<Call> &call, const std::shared_ptr<System> &system, const std::shared_ptr<Recorder> &recorder) {
         auto sig_str = signaling_type
             ? rust::Str(signaling_type, std::strlen(signaling_type))
             : rust::Str("", 0);
@@ -276,7 +276,7 @@ public:
             recorder ? &tr_rec : nullptr);
     }
 
-    int audio_stream(Call *call, const std::shared_ptr<Recorder> &recorder,
+    int audio_stream(const std::shared_ptr<Call> &call, const std::shared_ptr<Recorder> &recorder,
                      int16_t *samples, int sampleCount) {
         TrCall tr_call(call);
         TrRecorder tr_rec(recorder);
@@ -287,7 +287,7 @@ public:
             tr_rec, slice);
     }
 
-    int call_start(Call *call) {
+    int call_start(const std::shared_ptr<Call> &call) {
         TrCall tr_call(call);
         return rust_plugin_call_start(*plugin_, tr_call);
     }
@@ -297,11 +297,11 @@ public:
         return rust_plugin_call_end(*plugin_, data);
     }
 
-    int calls_active(std::vector<Call *> calls) {
-        // Convert vector<Call*> to vector of TrCall, then pass pointers
+    int calls_active(std::vector<std::shared_ptr<Call>> calls) {
+        // Convert vector<shared_ptr<Call>> to vector of TrCall, then pass pointers
         std::vector<TrCall> wrappers;
         wrappers.reserve(calls.size());
-        for (auto *c : calls) {
+        for (auto &c : calls) {
             wrappers.emplace_back(c);
         }
         std::vector<const TrCall *> ptrs;
@@ -505,7 +505,7 @@ public:
     explicit CxxEventSink(std::shared_ptr<RustPluginBridge> bridge)
         : bridge_(std::move(bridge)) {}
 
-    void audio_callback(Call *call, const std::shared_ptr<Recorder> &recorder,
+    void audio_callback(const std::shared_ptr<Call> &call, const std::shared_ptr<Recorder> &recorder,
                         int16_t *samples, int sampleCount) override {
         bridge_->audio_stream(call, recorder, samples, sampleCount);
     }
@@ -515,7 +515,7 @@ public:
     }
 
     int signal(long unitId, const char *signaling_type,
-               gr::blocks::SignalType sig_type, Call *call,
+               gr::blocks::SignalType sig_type, const std::shared_ptr<Call> &call,
                const std::shared_ptr<System> &system, const std::shared_ptr<Recorder> &recorder) override {
         return bridge_->signal(unitId, signaling_type, sig_type, call, system, recorder);
     }
@@ -525,11 +525,11 @@ public:
         bridge_->trunk_message(std::move(messages), system);
     }
 
-    void call_start(Call *call) override {
+    void call_start(const std::shared_ptr<Call> &call) override {
         bridge_->call_start(call);
     }
 
-    void conclude_call(Call *call, const std::shared_ptr<System> &sys, Config /*config*/) override {
+    void conclude_call(const std::shared_ptr<Call> &call, const std::shared_ptr<System> &sys, Config /*config*/) override {
         Call_Data_t call_info = {};
         call_info.status = INITIAL;
         call_info.error_count = 0;
@@ -572,7 +572,7 @@ public:
         bridge_->call_end(call_info);
     }
 
-    void calls_active(std::vector<Call *> calls) override {
+    void calls_active(std::vector<std::shared_ptr<Call>> calls) override {
         bridge_->calls_active(std::move(calls));
     }
 

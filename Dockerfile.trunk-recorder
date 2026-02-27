@@ -14,8 +14,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libairspy-dev \
     libairspyhf-dev \
     libbladerf-dev \
-    libboost-dev \
-    libboost-log-dev \
+    libboost-all-dev \
+    libvolk-dev \
     libfmt-dev \
     libspdlog-dev \
     libgnuradio-analog3.10.12 \
@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgnuradio-digital3.10.12 \
     libgnuradio-fft3.10.12 \
     libgnuradio-filter3.10.12 \
+    libgnuradio-network3.10.12 \
     libgnuradio-pmt3.10.12 \
     libgnuradio-runtime3.10.12 \
     libgnuradio-uhd3.10.12 \
@@ -135,6 +136,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgnuradio-digital3.10.12 \
     libgnuradio-fft3.10.12 \
     libgnuradio-filter3.10.12 \
+    libgnuradio-network3.10.12 \
     libgnuradio-pmt3.10.12 \
     libgnuradio-runtime3.10.12 \
     libgnuradio-uhd3.10.12 \

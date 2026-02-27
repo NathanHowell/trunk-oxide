@@ -1,8 +1,8 @@
 //! trunk-oxide: Drives trunk-recorder as a linked library.
 //!
 //! This binary replaces the trunk-recorder executable. It links against
-//! libtrunk-recorder.so, reads the config file (TOML or legacy JSON), and
-//! routes all events through the gRPC plugin to downstream consumers.
+//! libtrunk-recorder.so, reads the TOML config file, and routes all events
+//! through the gRPC plugin to downstream consumers.
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -13,7 +13,7 @@ use tracing_subscriber::prelude::*;
 
 #[derive(Parser)]
 struct Args {
-    /// Path to config file (TOML or legacy JSON, detected by extension)
+    /// Path to TOML config file
     #[arg(default_value = "/app/config.toml")]
     config: String,
 }
@@ -60,19 +60,11 @@ fn main() -> Result<()> {
     let config_path = &args.config;
     tracing::info!(config = %config_path, "starting trunk-oxide driver");
 
-    let recorder = if config_path.ends_with(".toml") {
-        let config = trunk_config::Config::load(config_path)
-            .context("failed to load TOML config")?;
-        TrunkRecorderBuilder::from_config(&config, GrpcPlugin::new())
-            .context("failed to initialize trunk-recorder from TOML config")?
-            .start()
-    } else {
-        let config_json =
-            std::fs::read_to_string(config_path).context("failed to read config file")?;
-        TrunkRecorderBuilder::new(&config_json, GrpcPlugin::new())
-            .context("failed to initialize trunk-recorder (SDR device open failure?)")?
-            .start()
-    };
+    let config = trunk_config::Config::load(config_path)
+        .context("failed to load TOML config")?;
+    let recorder = TrunkRecorderBuilder::from_config(&config, GrpcPlugin::new())
+        .context("failed to initialize trunk-recorder")?
+        .start();
 
     tracing::info!("trunk-recorder engine running, press Ctrl+C to stop");
 

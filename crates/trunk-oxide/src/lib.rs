@@ -24,17 +24,6 @@ pub struct TrunkRecorder {
 }
 
 impl TrunkRecorderBuilder {
-    /// Parse config, open SDR sources, and set up all systems.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the config is invalid or an SDR source fails to open.
-    pub fn new<P: Plugin + 'static>(config_json: &str, plugin: P) -> Result<Self, cxx::Exception> {
-        let plugin_box = trunk_recorder_plugin::into_plugin_box(plugin);
-        let ctx = ffi::tr_create(config_json, Box::new(plugin_box))?;
-        Ok(Self { ctx })
-    }
-
     /// Build from a parsed TOML config using the builder FFI.
     ///
     /// This bypasses JSON config parsing entirely — Rust owns all config

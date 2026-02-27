@@ -6,8 +6,6 @@
 
 #include <cstdlib>
 #include <cstring>
-#include <json.hpp>
-using json = nlohmann::json;
 
 #ifdef TR_LIBRARY_MODE
 #include "trunk-recorder/trunk_context.h"
@@ -19,9 +17,6 @@ using json = nlohmann::json;
 #include <thread>
 
 // Forward declarations for functions provided by libtrunk-recorder.so
-bool load_config_from_string(const std::string &json_body, Config &config,
-                             gr::top_block_sptr &tb, std::vector<std::shared_ptr<Source>> &sources,
-                             std::vector<std::shared_ptr<System>> &systems);
 bool setup_systems(Config &config, gr::top_block_sptr &tb,
                    std::vector<std::shared_ptr<Source>> &sources, std::vector<std::shared_ptr<System>> &systems,
                    std::vector<std::shared_ptr<Call>> &calls);
@@ -238,11 +233,6 @@ class RustPluginBridge {
 public:
     explicit RustPluginBridge(rust::Box<RustPluginBox> plugin)
         : plugin_(std::move(plugin)) {}
-
-    int parse_config(json config_data) {
-        std::string json_str = config_data.dump();
-        return rust_plugin_parse_config(*plugin_, rust::Str(json_str.data(), json_str.size()));
-    }
 
     int start() {
         return rust_plugin_start(*plugin_);
@@ -660,40 +650,6 @@ TrContext &TrContext::operator=(TrContext &&) noexcept = default;
 
 #ifdef TR_LIBRARY_MODE
 
-std::unique_ptr<TrContext> tr_create(rust::Str config_json,
-                                     rust::Box<RustPluginBox> plugin) {
-    auto ctx = std::make_unique<TrContext>();
-    std::string json_str(config_json.data(), config_json.size());
-
-    // Install the event sink before setup_systems(), which calls
-    // event_sink->setup_recorder() / call_start() for conventional channels.
-    ctx->impl->bridge = std::make_shared<RustPluginBridge>(std::move(plugin));
-    ctx->impl->trunk_ctx.config.event_sink = std::make_shared<CxxEventSink>(ctx->impl->bridge);
-
-    ctx->impl->trunk_ctx.tb = gr::make_top_block("Trunking");
-    if (!load_config_from_string(json_str, ctx->impl->trunk_ctx.config,
-                                 ctx->impl->trunk_ctx.tb,
-                                 ctx->impl->trunk_ctx.sources,
-                                 ctx->impl->trunk_ctx.systems)) {
-        throw std::runtime_error("Failed to load config (source device open failure?)");
-    }
-    setup_systems(ctx->impl->trunk_ctx.config, ctx->impl->trunk_ctx.tb,
-                  ctx->impl->trunk_ctx.sources, ctx->impl->trunk_ctx.systems,
-                  ctx->impl->trunk_ctx.calls);
-
-    // Notify the plugin of the current configuration.
-    ctx->impl->bridge->setup_config(ctx->impl->trunk_ctx.sources,
-                                    ctx->impl->trunk_ctx.systems);
-    for (auto &sys : ctx->impl->trunk_ctx.systems) {
-        ctx->impl->bridge->setup_system(sys);
-    }
-
-    // Start the Rust plugin (spawns the gRPC server).
-    ctx->impl->bridge->start();
-
-    return ctx;
-}
-
 void tr_start(TrContext &ctx) {
     ctx.impl->trunk_ctx.tb->start();
     ctx.impl->monitor_thread = std::thread([&ctx] {
@@ -1011,11 +967,6 @@ void tr_system_set_unit_tags_mode(TrContext &ctx, int32_t sys_idx, rust::Str mod
 }
 
 #else // !TR_LIBRARY_MODE — stubs for dlopen plugin mode
-
-std::unique_ptr<TrContext> tr_create(rust::Str /*config_json*/,
-                                     rust::Box<RustPluginBox> /*plugin*/) {
-    std::abort();
-}
 
 std::unique_ptr<TrContext> tr_create_from_builder(rust::Box<RustPluginBox> /*plugin*/) {
     std::abort();

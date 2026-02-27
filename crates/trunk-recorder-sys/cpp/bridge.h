@@ -109,8 +109,6 @@ struct TrContext {
 };
 
 // ── Lifecycle functions ──
-std::unique_ptr<TrContext> tr_create(rust::Str config_json,
-                                     rust::Box<RustPluginBox> plugin);
 std::unique_ptr<TrContext> tr_create_from_builder(rust::Box<RustPluginBox> plugin);
 void tr_finalize(TrContext &ctx);
 void tr_start(TrContext &ctx);

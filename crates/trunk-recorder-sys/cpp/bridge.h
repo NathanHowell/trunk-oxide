@@ -39,8 +39,8 @@ struct TrSystem final {
 };
 
 struct TrRecorder final {
-    Recorder *ptr;
-    explicit TrRecorder(Recorder *p) : ptr(p) {}
+    std::shared_ptr<Recorder> ptr;
+    explicit TrRecorder(const std::shared_ptr<Recorder> &p) : ptr(p) {}
 };
 
 // ── Call accessor wrappers ──

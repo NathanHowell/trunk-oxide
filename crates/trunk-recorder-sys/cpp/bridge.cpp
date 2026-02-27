@@ -313,7 +313,7 @@ public:
         return rust_plugin_calls_active(*plugin_, slice);
     }
 
-    int setup_recorder(Recorder *recorder) {
+    int setup_recorder(const std::shared_ptr<Recorder> &recorder) {
         TrRecorder tr_rec(recorder);
         return rust_plugin_setup_recorder(*plugin_, tr_rec);
     }
@@ -575,7 +575,7 @@ public:
         bridge_->calls_active(std::move(calls));
     }
 
-    void setup_recorder(Recorder *recorder) override {
+    void setup_recorder(const std::shared_ptr<Recorder> &recorder) override {
         bridge_->setup_recorder(recorder);
     }
 

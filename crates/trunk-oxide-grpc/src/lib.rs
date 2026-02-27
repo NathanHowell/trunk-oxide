@@ -392,20 +392,23 @@ impl GrpcPlugin {
             };
             let msg = proto::PluginEvent { event: Some(event) };
 
-            // Sanity-check: encode the message to verify it round-trips.
+            // Sanity-check: tonic uses encoded_len() for the gRPC frame header,
+            // then encode() for the payload. If encoded_len() < actual bytes,
+            // the client receives a truncated message ("buffer underflow").
             use prost::Message;
-            let encoded_len = msg.encoded_len();
-            let mut buf = Vec::with_capacity(encoded_len);
+            let predicted_len = msg.encoded_len();
+            let mut buf = Vec::with_capacity(predicted_len);
             if let Err(e) = msg.encode(&mut buf) {
                 tracing::error!(event_type, error = %e, "failed to encode PluginEvent — dropping");
                 return;
             }
-            if let Err(e) = proto::PluginEvent::decode(buf.as_slice()) {
+            let actual_len = buf.len();
+            if actual_len != predicted_len {
                 tracing::error!(
                     event_type,
-                    encoded_len,
-                    error = %e,
-                    "PluginEvent fails round-trip decode — dropping"
+                    predicted_len,
+                    actual_len,
+                    "encoded_len() mismatch — tonic would send truncated frame, dropping"
                 );
                 return;
             }

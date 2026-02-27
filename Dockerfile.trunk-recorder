@@ -119,12 +119,14 @@ COPY crates/trunk-recorder-sys/src crates/trunk-recorder-sys/src
 COPY crates/trunk-recorder-plugin/src crates/trunk-recorder-plugin/src
 COPY crates/trunk-oxide-proto/src crates/trunk-oxide-proto/src
 COPY crates/trunk-oxide-grpc/src crates/trunk-oxide-grpc/src
+COPY crates/trunk-config/src crates/trunk-config/src
 COPY crates/trunk-oxide/src crates/trunk-oxide/src
 
 RUN touch crates/trunk-recorder-sys/src/lib.rs \
     crates/trunk-recorder-plugin/src/lib.rs \
     crates/trunk-oxide-proto/src/lib.rs \
     crates/trunk-oxide-grpc/src/lib.rs \
+    crates/trunk-config/src/lib.rs \
     crates/trunk-oxide/src/lib.rs \
     crates/trunk-oxide/src/main.rs
 

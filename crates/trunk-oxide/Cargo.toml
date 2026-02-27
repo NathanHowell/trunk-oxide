@@ -11,6 +11,7 @@ workspace = true
 trunk-recorder-sys = { workspace = true, features = ["link-shared"] }
 trunk-recorder-plugin.workspace = true
 trunk-oxide-grpc.workspace = true
+trunk-config.workspace = true
 cxx.workspace = true
 tokio = { workspace = true, features = ["signal"] }
 tracing.workspace = true

@@ -825,9 +825,6 @@ void tr_source_create_sigmf_recorders(TrContext &ctx, int32_t idx, int32_t count
 
 // ── System builder implementations ──
 
-// Forward declaration for system_type_from_string (from global_structs.h/cc)
-extern SystemType system_type_from_string(const std::string &s);
-
 int32_t tr_add_system(TrContext &ctx, rust::Str short_name, rust::Str system_type) {
     int32_t sys_idx = static_cast<int32_t>(ctx.impl->trunk_ctx.systems.size());
     auto system = System::make(sys_idx);

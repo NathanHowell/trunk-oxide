@@ -2984,6 +2984,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "trunk-config",
  "trunk-oxide-grpc",
  "trunk-recorder-plugin",
  "trunk-recorder-sys",

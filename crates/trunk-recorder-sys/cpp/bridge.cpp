@@ -635,7 +635,6 @@ private:
 struct TrContextImpl {
     TrunkContext trunk_ctx;
     std::thread monitor_thread;
-    std::unique_ptr<CxxEventSink> event_sink;
     std::shared_ptr<RustPluginBridge> bridge;
 };
 #else
@@ -659,8 +658,7 @@ std::unique_ptr<TrContext> tr_create(rust::Str config_json,
     // Install the event sink before setup_systems(), which calls
     // event_sink->setup_recorder() / call_start() for conventional channels.
     ctx->impl->bridge = std::make_shared<RustPluginBridge>(std::move(plugin));
-    ctx->impl->event_sink = std::make_unique<CxxEventSink>(ctx->impl->bridge);
-    ctx->impl->trunk_ctx.config.event_sink = ctx->impl->event_sink.get();
+    ctx->impl->trunk_ctx.config.event_sink = std::make_shared<CxxEventSink>(ctx->impl->bridge);
 
     ctx->impl->trunk_ctx.tb = gr::make_top_block("Trunking");
     if (!load_config_from_string(json_str, ctx->impl->trunk_ctx.config,

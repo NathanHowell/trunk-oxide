@@ -8,7 +8,6 @@ use tokio::sync::mpsc;
 use trunk_oxide_proto as proto;
 
 use crate::discord::DiscordClient;
-use crate::dispatcher::CallKey;
 use crate::grpc_whisperer::WhispererConnection;
 use crate::resampler::Resampler;
 use crate::tone_detect::{DetectedTone, NotchFilter, ToneDetector};
@@ -30,7 +29,6 @@ pub struct CallHandlerConfig {
 const MAX_DESCRIPTION_LEN: usize = 3800;
 
 pub struct CallHandler {
-    key: CallKey,
     call_info: proto::CallInfo,
     rx: mpsc::Receiver<CallMessage>,
     whisperer: WhispererConnection,
@@ -56,7 +54,6 @@ pub struct CallHandler {
 
 impl CallHandler {
     pub fn new(
-        key: CallKey,
         call_info: proto::CallInfo,
         rx: mpsc::Receiver<CallMessage>,
         whisperer: WhispererConnection,
@@ -86,7 +83,6 @@ impl CallHandler {
         };
 
         Self {
-            key,
             call_info,
             rx,
             whisperer,
@@ -111,11 +107,7 @@ impl CallHandler {
 
     pub async fn run(mut self) {
         if let Err(e) = self.send_initial_embed().await {
-            tracing::error!(
-                talkgroup = self.key.talkgroup,
-                error = %e,
-                "failed to post call embed"
-            );
+            tracing::error!(error = %e, "failed to post call embed");
             return;
         }
 
@@ -126,29 +118,17 @@ impl CallHandler {
                     sample_rate,
                 } => {
                     if let Err(e) = self.handle_audio(&samples, sample_rate).await {
-                        tracing::error!(
-                            talkgroup = self.key.talkgroup,
-                            error = %e,
-                            "audio handling error"
-                        );
+                        tracing::error!(error = %e, "audio handling error");
                     }
                 }
                 CallMessage::Event(text) => {
                     if let Err(e) = self.post_event(&text).await {
-                        tracing::error!(
-                            talkgroup = self.key.talkgroup,
-                            error = %e,
-                            "event posting error"
-                        );
+                        tracing::error!(error = %e, "event posting error");
                     }
                 }
                 CallMessage::End(call_data) => {
                     if let Err(e) = self.handle_end(call_data).await {
-                        tracing::error!(
-                            talkgroup = self.key.talkgroup,
-                            error = %e,
-                            "call end handling error"
-                        );
+                        tracing::error!(error = %e, "call end handling error");
                     }
                     return;
                 }
@@ -234,12 +214,7 @@ impl CallHandler {
         let msg_id = self.discord.send_embed(self.thread_id, embed).await?;
         self.embed_message_id = Some(msg_id);
 
-        tracing::info!(
-            talkgroup = self.key.talkgroup,
-            sys_num = self.key.sys_num,
-            thread = %self.thread_id,
-            "call started"
-        );
+        tracing::info!(thread = %self.thread_id, "call started");
 
         Ok(())
     }
@@ -391,11 +366,7 @@ impl CallHandler {
         }
         self.update_embed().await?;
 
-        tracing::info!(
-            talkgroup = self.key.talkgroup,
-            sys_num = self.key.sys_num,
-            "call ended"
-        );
+        tracing::info!("call ended");
 
         Ok(())
     }

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Utc};
 use serenity::model::id::ChannelId;
 use tokio::sync::{RwLock, mpsc};
+use tracing::Instrument;
 use trunk_oxide_proto as proto;
 
 use proto::plugin_event::Event;
@@ -14,9 +15,9 @@ use crate::discord::DiscordClient;
 use crate::grpc_whisperer::WhispererConnection;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
-pub struct CallKey {
-    pub sys_num: i32,
-    pub talkgroup: i64,
+struct CallKey {
+    sys_num: i32,
+    talkgroup: i64,
 }
 
 /// Key for reusing Discord threads: one thread per talkgroup per day.
@@ -187,8 +188,15 @@ impl Dispatcher {
 
         let (tx, rx) = mpsc::channel(1024);
 
+        let span = tracing::info_span!(
+            "call",
+            talkgroup = call.talkgroup,
+            sys_num = call.sys_num,
+            freq = call.freq,
+            encrypted = call.encrypted,
+        );
+
         let handler = CallHandler::new(
-            key.clone(),
             call,
             rx,
             self.whisperer.clone(),
@@ -201,7 +209,7 @@ impl Dispatcher {
             thread_id,
         );
 
-        tokio::spawn(handler.run());
+        tokio::spawn(handler.run().instrument(span));
 
         self.calls.write().await.insert(key, tx);
     }

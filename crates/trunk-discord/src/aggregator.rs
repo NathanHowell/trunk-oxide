@@ -123,7 +123,7 @@ impl AggregatorInner {
                     self.last_setup_config = Some(text.clone());
                     let embed = CreateEmbed::new()
                         .title("Setup Config")
-                        .colour(0x3498db_u32)
+                        .colour(0x0034_98db_u32)
                         .description(text);
                     self.post_embed(embed).await;
                 }
@@ -134,7 +134,7 @@ impl AggregatorInner {
                     self.last_setup_systems = Some(text.clone());
                     let embed = CreateEmbed::new()
                         .title("Systems")
-                        .colour(0x3498db_u32)
+                        .colour(0x0034_98db_u32)
                         .description(text);
                     self.post_embed(embed).await;
                 }
@@ -145,7 +145,7 @@ impl AggregatorInner {
                     self.last_setup_sources = Some(text.clone());
                     let embed = CreateEmbed::new()
                         .title("Sources")
-                        .colour(0x3498db_u32)
+                        .colour(0x0034_98db_u32)
                         .description(text);
                     self.post_embed(embed).await;
                 }
@@ -157,7 +157,7 @@ impl AggregatorInner {
                     self.last_setup_system.insert(key, text.clone());
                     let embed = CreateEmbed::new()
                         .title("System")
-                        .colour(0x3498db_u32)
+                        .colour(0x0034_98db_u32)
                         .description(text);
                     self.post_embed(embed).await;
                 }
@@ -223,7 +223,7 @@ impl AggregatorInner {
         let table = build_recorder_table(&self.recorder_state);
         let embed = CreateEmbed::new()
             .title("Recorders")
-            .colour(0x3498db_u32)
+            .colour(0x0034_98db_u32)
             .description(table);
 
         if let Some(msg_id) = self.recorder_embed_id {
@@ -249,7 +249,7 @@ impl AggregatorInner {
     fn build_activity_embed(&mut self) -> CreateEmbed {
         let mut embed = CreateEmbed::new()
             .title("System Activity")
-            .colour(0x95a5a6_u32); // grey
+            .colour(0x0095_a5a6_u32); // grey
 
         // Signals: "12 NORMAL, 2 EMERGENCY"
         if !self.signal_counts.is_empty() {
@@ -451,7 +451,7 @@ fn format_setup_system(e: &proto::SetupSystemEvent) -> String {
 
 fn build_recorder_table(recorders: &HashMap<i32, proto::RecorderInfo>) -> String {
     let mut ids: Vec<i32> = recorders.keys().copied().collect();
-    ids.sort();
+    ids.sort_unstable();
 
     let mut table = String::from("```\n");
     let _ = writeln!(table, "{:<4} {:<8} {:>12} {:>10} State", "ID", "Type", "Freq (MHz)", "TG");

@@ -19,6 +19,7 @@ use tokio::sync::Mutex;
 use tracing_subscriber::prelude::*;
 
 mod proto {
+    #![allow(clippy::all, clippy::pedantic, clippy::nursery)]
     tonic::include_proto!("whisperer");
 }
 
@@ -32,24 +33,17 @@ struct Args {
     #[arg(long)]
     discord_token: Option<String>,
 
-    /// Directory for hourly SQLite databases
+    /// Directory for hourly `SQLite` databases
     #[arg(long, default_value = "/var/lib/trunk-discord/db")]
     db_path: PathBuf,
 }
 
-#[tokio::main]
-async fn main() -> Result<()> {
-    pid1::Pid1Settings::new().launch()?;
-
-    let args = Args::parse_from(
-        argfile::expand_args_from(wild::args_os(), argfile::parse_fromfile, argfile::PREFIX)
-            .map_err(|e| anyhow::anyhow!(e))?,
-    );
-
+fn init_tracing() -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
     let otel_provider = if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
         let exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_http()
-            .build()?;
+            .build()
+            .ok()?;
 
         let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
             .with_batch_exporter(exporter)
@@ -77,9 +71,55 @@ async fn main() -> Result<()> {
         .with(otel_layer)
         .init();
 
+    otel_provider
+}
+
+async fn init_channel_manager(
+    discord_client: &Arc<discord::DiscordClient>,
+    config: &config::DiscordConfig,
+) -> channel_manager::ChannelLookup {
+    let lookup = channel_manager::new_lookup();
+    if let Some(guild_id) = config.guild_id {
+        if !config.groups.is_empty() {
+            match channel_manager::resolve_existing(discord_client, guild_id, &config.groups, &lookup)
+                .await
+            {
+                Ok(existing_channels) => {
+                    let reconcile_discord = Arc::clone(discord_client);
+                    let reconcile_groups = config.groups.clone();
+                    let reconcile_lookup = Arc::clone(&lookup);
+                    tokio::spawn(channel_manager::reconcile(
+                        reconcile_discord,
+                        guild_id,
+                        reconcile_groups,
+                        reconcile_lookup,
+                        existing_channels,
+                    ));
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to resolve existing channels, using fallback");
+                }
+            }
+        }
+    } else if !config.groups.is_empty() {
+        tracing::warn!("discord.groups configured but guild_id is missing, channel management disabled");
+    }
+    lookup
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
+    pid1::Pid1Settings::new().launch()?;
+
+    let args = Args::parse_from(
+        argfile::expand_args_from(wild::args_os(), argfile::parse_fromfile, argfile::PREFIX)
+            .map_err(|e| anyhow::anyhow!(e))?,
+    );
+
+    let otel_provider = init_tracing();
+
     let config = config::Config::load(&args.config, args.discord_token.as_deref())?;
 
-    // Start health server on its own UDS
     let (reporter, health_service) = tonic_health::server::health_reporter();
     let health_listen_path = config.grpc.listen_path.clone();
     tokio::spawn(async move {
@@ -115,39 +155,7 @@ async fn main() -> Result<()> {
     tracing::info!(path = %args.db_path.display(), hour, "opened initial database");
 
     let discord_client = Arc::new(discord::DiscordClient::new(&config.discord));
-
-    // Resolve existing channel mappings and start background reconciliation
-    let channel_lookup = channel_manager::new_lookup();
-    if let Some(guild_id) = config.discord.guild_id {
-        if !config.discord.groups.is_empty() {
-            match channel_manager::resolve_existing(
-                &discord_client,
-                guild_id,
-                &config.discord.groups,
-                &channel_lookup,
-            )
-            .await
-            {
-                Ok(existing_channels) => {
-                    let reconcile_discord = Arc::clone(&discord_client);
-                    let reconcile_groups = config.discord.groups.clone();
-                    let reconcile_lookup = Arc::clone(&channel_lookup);
-                    tokio::spawn(channel_manager::reconcile(
-                        reconcile_discord,
-                        guild_id,
-                        reconcile_groups,
-                        reconcile_lookup,
-                        existing_channels,
-                    ));
-                }
-                Err(e) => {
-                    tracing::error!(error = %e, "failed to resolve existing channels, using fallback");
-                }
-            }
-        }
-    } else if !config.discord.groups.is_empty() {
-        tracing::warn!("discord.groups configured but guild_id is missing, channel management disabled");
-    }
+    let channel_lookup = init_channel_manager(&discord_client, &config.discord).await;
 
     let aggregator = Arc::new(aggregator::Aggregator::new(
         Arc::clone(&discord_client),

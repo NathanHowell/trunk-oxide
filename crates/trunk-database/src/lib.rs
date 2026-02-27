@@ -129,7 +129,7 @@ impl Database {
         Ok(())
     }
 
-    pub fn copy_threads_from(&self, other: &Database, date: &str) -> Result<usize> {
+    pub fn copy_threads_from(&self, other: &Self, date: &str) -> Result<usize> {
         let mut read_stmt = other.conn.prepare(
             "SELECT sys_num, talkgroup, date, channel_id FROM thread_cache WHERE date = ?1",
         )?;

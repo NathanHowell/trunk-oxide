@@ -1,4 +1,8 @@
-tonic::include_proto!("trunk_oxide");
+#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
+mod generated {
+    tonic::include_proto!("trunk_oxide");
+}
+pub use generated::*;
 
 pub mod types;
 pub use types::*;

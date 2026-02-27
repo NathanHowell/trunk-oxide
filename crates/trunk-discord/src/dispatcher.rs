@@ -103,6 +103,7 @@ impl Dispatcher {
                     tracing::warn!(error = %e, "failed to copy thread cache to new hourly db");
                 }
                 *db = new_db;
+                drop(db);
                 *current = now_hour;
                 tracing::info!(hour = %*current, "rotated to new hourly database");
             }
@@ -198,75 +199,14 @@ impl Dispatcher {
             cache.get(&cache_key).copied()
         };
 
-        let thread_id = match thread_id {
-            Some(id) => id,
-            None => {
-                // Check DB for thread from earlier this session/hour
-                let db_thread = {
-                    let db = self.db.lock().await;
-                    db.get_thread(sys_num, talkgroup, &date_str)
-                        .unwrap_or(None)
-                        .and_then(|id| {
-                            std::num::NonZeroU64::new(id).map(ChannelId::from)
-                        })
-                };
-
-                if let Some(id) = db_thread {
-                    self.thread_cache.write().await.insert(cache_key, id);
-                    id
-                } else {
-                    let tag = if call.talkgroup_tag.is_empty() {
-                        call.talkgroup_display.clone()
-                    } else {
-                        call.talkgroup_tag.clone()
-                    };
-
-                    let thread_name = format!("TG {} - {} [{}]", call.talkgroup, tag, date_str);
-                    let thread_name = if thread_name.len() > 100 {
-                        thread_name[..100].to_string()
-                    } else {
-                        thread_name
-                    };
-
-                    // Resolve target channel: check lookup for mapped channel, else fallback
-                    let target_channel = {
-                        let map = self.channel_lookup.read().await;
-                        map.get(&(call.short_name.clone(), call.talkgroup))
-                            .copied()
-                            .unwrap_or(self.channel_id)
-                    };
-
-                    match self
-                        .discord
-                        .create_call_thread(target_channel, &thread_name)
-                        .await
-                    {
-                        Ok(id) => {
-                            self.thread_cache
-                                .write()
-                                .await
-                                .insert(cache_key, id);
-
-                            // Persist to DB
-                            let db = self.db.lock().await;
-                            if let Err(e) = db.set_thread(sys_num, talkgroup, &date_str, id.get()) {
-                                tracing::warn!(error = %e, "failed to persist thread to db");
-                            }
-
-                            id
-                        }
-                        Err(e) => {
-                            tracing::error!(
-                                talkgroup = call.talkgroup,
-                                error = %e,
-                                "failed to create discord thread"
-                            );
-                            return;
-                        }
-                    }
-                }
-            }
+        let thread_id = if let Some(id) = thread_id {
+            Some(id)
+        } else {
+            self.resolve_or_create_thread(&call, sys_num, talkgroup, cache_key, &date_str)
+                .await
         };
+
+        let Some(thread_id) = thread_id else { return };
 
         // Insert call record into DB
         let call_row_id = {
@@ -282,7 +222,7 @@ impl Dispatcher {
                 encrypted: call.encrypted,
                 emergency: call.emergency,
                 start_time: call.start_time,
-                tag: tag.to_string(),
+                tag: (*tag).clone(),
                 short_name: call.short_name.clone(),
                 thread_id: Some(thread_id.get()),
                 embed_message_id: None,
@@ -325,6 +265,76 @@ impl Dispatcher {
         tokio::spawn(handler.run().instrument(span));
 
         self.calls.write().await.insert(key, tx);
+    }
+
+    async fn resolve_or_create_thread(
+        &self,
+        call: &proto::CallInfo,
+        sys_num: SysNum,
+        talkgroup: Talkgroup,
+        cache_key: ThreadCacheKey,
+        date_str: &str,
+    ) -> Option<ChannelId> {
+        // Check DB for thread from earlier this session/hour
+        let db_thread = {
+            let db = self.db.lock().await;
+            db.get_thread(sys_num, talkgroup, date_str)
+                .unwrap_or(None)
+                .and_then(|id| std::num::NonZeroU64::new(id).map(ChannelId::from))
+        };
+
+        if let Some(id) = db_thread {
+            self.thread_cache.write().await.insert(cache_key, id);
+            return Some(id);
+        }
+
+        let tag = if call.talkgroup_tag.is_empty() {
+            call.talkgroup_display.clone()
+        } else {
+            call.talkgroup_tag.clone()
+        };
+
+        let thread_name = format!("TG {} - {} [{}]", call.talkgroup, tag, date_str);
+        let thread_name = if thread_name.len() > 100 {
+            thread_name[..100].to_string()
+        } else {
+            thread_name
+        };
+
+        // Resolve target channel: check lookup for mapped channel, else fallback
+        let target_channel = {
+            let map = self.channel_lookup.read().await;
+            map.get(&(call.short_name.clone(), call.talkgroup))
+                .copied()
+                .unwrap_or(self.channel_id)
+        };
+
+        match self
+            .discord
+            .create_call_thread(target_channel, &thread_name)
+            .await
+        {
+            Ok(id) => {
+                self.thread_cache.write().await.insert(cache_key, id);
+
+                // Persist to DB
+                let db = self.db.lock().await;
+                if let Err(e) = db.set_thread(sys_num, talkgroup, date_str, id.get()) {
+                    tracing::warn!(error = %e, "failed to persist thread to db");
+                }
+                drop(db);
+
+                Some(id)
+            }
+            Err(e) => {
+                tracing::error!(
+                    talkgroup = call.talkgroup,
+                    error = %e,
+                    "failed to create discord thread"
+                );
+                None
+            }
+        }
     }
 
     async fn handle_call_end(&self, event: proto::CallEndEvent) {

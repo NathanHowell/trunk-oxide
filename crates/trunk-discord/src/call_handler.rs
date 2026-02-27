@@ -158,12 +158,12 @@ impl CallHandler {
 
         let colour = if self.call_ended {
             if self.call_info.encrypted {
-                0xe74c3c_u32 // red
+                0x00e7_4c3c_u32 // red
             } else {
-                0x2ecc71_u32 // green
+                0x002e_cc71_u32 // green
             }
         } else {
-            0x95a5a6_u32 // grey
+            0x0095_a5a6_u32 // grey
         };
 
         let mut embed = CreateEmbed::new().title(title).colour(colour);
@@ -228,6 +228,7 @@ impl CallHandler {
         Ok(())
     }
 
+    #[allow(clippy::needless_pass_by_ref_mut)]
     async fn update_embed(&mut self) -> Result<()> {
         if let Some(msg_id) = self.embed_message_id {
             let embed = self.build_embed();

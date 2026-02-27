@@ -61,6 +61,7 @@ services:
         condition: service_completed_successfully
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
+      - RUST_LOG=info
     healthcheck:
       test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr", "unix:///run/service/grpc.sock"]
       interval: 5s

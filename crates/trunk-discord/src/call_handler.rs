@@ -407,10 +407,15 @@ fn decode_audio(bytes: &[u8]) -> Vec<f32> {
 
 /// Check if Whisper returned a "blank audio" placeholder.
 fn is_blank_audio(text: &str) -> bool {
-    let t = text.trim().to_lowercase();
+    let t = text
+        .trim()
+        .trim_start_matches(['[', '('])
+        .trim_end_matches([']', ')'])
+        .to_lowercase()
+        .replace('_', " ");
     t.contains("blank audio")
         || t.contains("no speech")
+        || t == "silence"
         || t == "..."
         || t == "."
-        || t == "[silence]"
 }

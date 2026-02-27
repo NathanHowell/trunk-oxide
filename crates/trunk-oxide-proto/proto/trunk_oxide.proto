@@ -74,8 +74,8 @@ message CallInfo {
   int64 call_num = 2;
   int32 sys_num = 3;
   double freq = 4;
-  double signal = 5;
-  double noise = 6;
+  optional double signal = 5;
+  optional double noise = 6;
   int32 freq_error = 7;
   bool encrypted = 8;
   bool emergency = 9;
@@ -173,8 +173,8 @@ message CallData {
   int32 freq_error = 11;
   int32 source_num = 12;
   int32 recorder_num = 13;
-  double signal = 14;
-  double noise = 15;
+  optional double signal = 14;
+  optional double noise = 15;
   int64 start_time = 16;
   int64 stop_time = 17;
   int64 error_count = 18;

@@ -212,7 +212,9 @@ impl CallHandler {
 
         // End-of-call fields
         if let Some(duration) = self.call_end_duration {
-            embed = embed.field("Duration", format!("{duration:.1}s"), true);
+            if duration > 0.0 {
+                embed = embed.field("Duration", format!("{duration:.1}s"), true);
+            }
         }
         if let Some(signal) = self.call_end_signal {
             embed = embed.field("Signal", format!("{signal:.1} dB"), true);
@@ -381,7 +383,7 @@ impl CallHandler {
         self.call_ended = true;
         if let Some(data) = &call_data {
             self.call_end_duration = Some(data.length);
-            self.call_end_signal = Some(data.signal);
+            self.call_end_signal = data.signal;
         }
         self.update_embed().await?;
 

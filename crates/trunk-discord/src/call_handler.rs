@@ -164,9 +164,13 @@ impl CallHandler {
         };
 
         let colour = if self.call_ended {
-            0x95a5a6_u32 // grey
+            if self.call_info.encrypted {
+                0xe74c3c_u32 // red
+            } else {
+                0x2ecc71_u32 // green
+            }
         } else {
-            0x2ecc71_u32 // green
+            0x95a5a6_u32 // grey
         };
 
         let mut embed = CreateEmbed::new().title(title).colour(colour);

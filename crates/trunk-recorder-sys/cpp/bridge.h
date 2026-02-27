@@ -5,7 +5,6 @@
 
 // trunk-recorder headers — these provide the real type definitions.
 // Include paths are set by build.rs (gnuradio, boost, op25_repeater, etc.)
-#include "trunk-recorder/plugin_manager/plugin_api.h"
 #include "trunk-recorder/recorders/recorder.h"
 
 #include <memory>

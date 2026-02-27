@@ -4,7 +4,6 @@
 // cxx-generated header for the Rust bridge
 #include "trunk-recorder-sys/src/lib.rs.h"
 
-#include <boost/shared_ptr.hpp>
 #include <cstdlib>
 #include <cstring>
 
@@ -234,41 +233,33 @@ static TrCallData convert_call_data(const Call_Data_t &cd) {
     return out;
 }
 
-// ── RustPluginBridge: C++ Plugin_Api subclass that delegates to Rust ──
+// ── RustPluginBridge: delegates all plugin callbacks to Rust via FFI ──
 
-class RustPluginBridge : public Plugin_Api {
+class RustPluginBridge {
 public:
     explicit RustPluginBridge(rust::Box<RustPluginBox> plugin)
         : plugin_(std::move(plugin)) {}
 
-    // Override the default init() which references the `frequency_format`
-    // global — that symbol isn't exported from the trunk-recorder binary
-    // (no -rdynamic), so leaving it unresolved would fail at dlopen time.
-    int init(Config * /*config*/, std::vector<Source *> /*sources*/,
-             std::vector<System *> /*systems*/) override {
-        return 0;
-    }
-
-    int parse_config(json config_data) override {
+    int parse_config(json config_data) {
         std::string json_str = config_data.dump();
         return rust_plugin_parse_config(*plugin_, rust::Str(json_str.data(), json_str.size()));
     }
 
-    int start() override {
+    int start() {
         return rust_plugin_start(*plugin_);
     }
 
-    int stop() override {
+    int stop() {
         return rust_plugin_stop(*plugin_);
     }
 
-    int poll_one() override {
+    int poll_one() {
         return rust_plugin_poll_one(*plugin_);
     }
 
     int signal(long unitId, const char *signaling_type,
                gr::blocks::SignalType sig_type,
-               Call *call, System *system, Recorder *recorder) override {
+               Call *call, System *system, Recorder *recorder) {
         auto sig_str = signaling_type
             ? rust::Str(signaling_type, std::strlen(signaling_type))
             : rust::Str("", 0);
@@ -284,7 +275,7 @@ public:
     }
 
     int audio_stream(Call *call, Recorder *recorder,
-                     int16_t *samples, int sampleCount) override {
+                     int16_t *samples, int sampleCount) {
         TrCall tr_call(call);
         TrRecorder tr_rec(recorder);
         rust::Slice<const int16_t> slice(samples, static_cast<size_t>(sampleCount));
@@ -294,17 +285,17 @@ public:
             tr_rec, slice);
     }
 
-    int call_start(Call *call) override {
+    int call_start(Call *call) {
         TrCall tr_call(call);
         return rust_plugin_call_start(*plugin_, tr_call);
     }
 
-    int call_end(Call_Data_t call_info) override {
+    int call_end(Call_Data_t call_info) {
         TrCallData data = convert_call_data(call_info);
         return rust_plugin_call_end(*plugin_, data);
     }
 
-    int calls_active(std::vector<Call *> calls) override {
+    int calls_active(std::vector<Call *> calls) {
         // Convert vector<Call*> to vector of TrCall, then pass pointers
         std::vector<TrCall> wrappers;
         wrappers.reserve(calls.size());
@@ -320,17 +311,17 @@ public:
         return rust_plugin_calls_active(*plugin_, slice);
     }
 
-    int setup_recorder(Recorder *recorder) override {
+    int setup_recorder(Recorder *recorder) {
         TrRecorder tr_rec(recorder);
         return rust_plugin_setup_recorder(*plugin_, tr_rec);
     }
 
-    int setup_system(System *system) override {
+    int setup_system(System *system) {
         TrSystem tr_sys(system);
         return rust_plugin_setup_system(*plugin_, tr_sys);
     }
 
-    int setup_systems(std::vector<System *> systems) override {
+    int setup_systems(std::vector<System *> systems) {
         std::vector<TrSystem> wrappers;
         wrappers.reserve(systems.size());
         for (auto *s : systems) {
@@ -345,14 +336,14 @@ public:
         return rust_plugin_setup_systems(*plugin_, slice);
     }
 
-    int setup_sources(std::vector<Source *> /*sources*/) override {
+    int setup_sources(std::vector<Source *> /*sources*/) {
         // Source has no virtual methods — we cannot safely call its accessors
         // from a dlopen'd plugin (the symbols aren't exported by trunk-recorder).
         return rust_plugin_setup_sources(*plugin_);
     }
 
     int setup_config(std::vector<Source *> /*sources*/,
-                     std::vector<System *> systems) override {
+                     std::vector<System *> systems) {
         // Source data omitted (non-virtual, see above); forward systems only.
         std::vector<TrSystem> sys_wrappers;
         sys_wrappers.reserve(systems.size());
@@ -370,7 +361,7 @@ public:
     }
 
     int trunk_message(std::vector<TrunkMessage> messages,
-                      System *system) override {
+                      System *system) {
         std::vector<TrTrunkMessage> msgs;
         msgs.reserve(messages.size());
         for (const auto &m : messages) {
@@ -382,7 +373,7 @@ public:
             tr_sys);
     }
 
-    int system_rates(std::vector<System *> systems, float timeDiff) override {
+    int system_rates(std::vector<System *> systems, float timeDiff) {
         std::vector<TrSystem> wrappers;
         wrappers.reserve(systems.size());
         for (auto *s : systems) {
@@ -397,42 +388,42 @@ public:
         return rust_plugin_system_rates(*plugin_, slice, timeDiff);
     }
 
-    int unit_registration(System *sys, long source_id) override {
+    int unit_registration(System *sys, long source_id) {
         TrSystem tr_sys(sys);
         return rust_plugin_unit_registration(*plugin_, tr_sys, source_id);
     }
 
-    int unit_deregistration(System *sys, long source_id) override {
+    int unit_deregistration(System *sys, long source_id) {
         TrSystem tr_sys(sys);
         return rust_plugin_unit_deregistration(*plugin_, tr_sys, source_id);
     }
 
-    int unit_acknowledge_response(System *sys, long source_id) override {
+    int unit_acknowledge_response(System *sys, long source_id) {
         TrSystem tr_sys(sys);
         return rust_plugin_unit_acknowledge_response(*plugin_, tr_sys, source_id);
     }
 
     int unit_group_affiliation(System *sys, long source_id,
-                                long talkgroup_num) override {
+                                long talkgroup_num) {
         TrSystem tr_sys(sys);
         return rust_plugin_unit_group_affiliation(
             *plugin_, tr_sys, source_id, talkgroup_num);
     }
 
-    int unit_data_grant(System *sys, long source_id) override {
+    int unit_data_grant(System *sys, long source_id) {
         TrSystem tr_sys(sys);
         return rust_plugin_unit_data_grant(*plugin_, tr_sys, source_id);
     }
 
     int unit_answer_request(System *sys, long source_id,
-                            long talkgroup) override {
+                            long talkgroup) {
         TrSystem tr_sys(sys);
         return rust_plugin_unit_answer_request(
             *plugin_, tr_sys, source_id, talkgroup);
     }
 
     int unit_location(System *sys, long source_id,
-                      long talkgroup_num) override {
+                      long talkgroup_num) {
         TrSystem tr_sys(sys);
         return rust_plugin_unit_location(*plugin_, tr_sys, source_id, talkgroup_num);
     }
@@ -725,17 +716,3 @@ void tr_stop(TrContext & /*ctx*/) {
 #endif // TR_LIBRARY_MODE
 
 } // namespace trunk_oxide
-
-// ── Plugin entry point (dlopen mode only) ──
-#ifndef TR_LIBRARY_MODE
-// Exported as the symbol trunk-recorder looks for when loading plugins.
-// The Rust side must provide `rust_create_plugin()` returning a Box<RustPluginBox>.
-extern "C" rust::Box<trunk_oxide::RustPluginBox> rust_create_plugin();
-
-extern "C" boost::shared_ptr<Plugin_Api> create_plugin() {
-    auto rust_plugin = rust_create_plugin();
-    return boost::shared_ptr<Plugin_Api>(
-        new trunk_oxide::RustPluginBridge(std::move(rust_plugin))
-    );
-}
-#endif

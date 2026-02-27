@@ -160,7 +160,7 @@ message SourceInfo {
 
 message CallData {
   int64 talkgroup = 1;
-  int64 color_code = 2;
+  uint32 color_code = 2;
   repeated uint64 patched_talkgroups = 3;
   string talkgroup_tag = 4;
   string talkgroup_alpha_tag = 5;

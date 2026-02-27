@@ -145,7 +145,7 @@ pub mod ffi {
     #[derive(Debug, Clone)]
     struct TrCallData {
         pub talkgroup: i64,
-        pub color_code: i64,
+        pub color_code: u32,
         pub patched_talkgroups: Vec<u64>,
         pub talkgroup_tag: String,
         pub talkgroup_alpha_tag: String,

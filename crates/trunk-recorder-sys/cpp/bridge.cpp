@@ -456,7 +456,7 @@ bool call_get_conversation_mode(const TrCall &call) { return call.ptr->get_conve
 int64_t call_get_current_source_id(const TrCall &call) { return call.ptr->get_current_source_id(); }
 double call_get_current_length(const TrCall &call) { return call.ptr->get_current_length(); }
 int64_t call_get_start_time(const TrCall &call) { return static_cast<int64_t>(call.ptr->get_start_time()); }
-int64_t call_elapsed(const TrCall &call) { return call.ptr->elapsed(); }
+int64_t call_elapsed(const TrCall &call) { return static_cast<int64_t>(call.ptr->elapsed().count()); }
 rust::String call_get_short_name(const TrCall &call) { return rust::String(call.ptr->get_short_name()); }
 rust::String call_get_talkgroup_display(const TrCall &call) { return rust::String(call.ptr->get_talkgroup_display()); }
 rust::String call_get_talkgroup_tag(const TrCall &call) { return rust::String(call.ptr->get_talkgroup_tag()); }

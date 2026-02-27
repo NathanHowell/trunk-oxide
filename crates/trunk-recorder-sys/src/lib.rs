@@ -414,6 +414,14 @@ pub mod ffi {
             source_id: i64,
             talkgroup: i64,
         ) -> i32;
+        fn rust_plugin_unit_alias_discovered(
+            plugin: &mut RustPluginBox,
+            system: &TrSystem,
+            radio_id: i64,
+            alias: &str,
+            source: &str,
+            talkgroup_id: i64,
+        ) -> i32;
     }
 }
 
@@ -483,6 +491,14 @@ pub trait RustPluginCallbacks: Send {
         talkgroup: i64,
     ) -> i32;
     fn unit_location(&mut self, system: &ffi::TrSystem, source_id: i64, talkgroup: i64) -> i32;
+    fn unit_alias_discovered(
+        &mut self,
+        system: &ffi::TrSystem,
+        radio_id: i64,
+        alias: &str,
+        source: &str,
+        talkgroup_id: i64,
+    ) -> i32;
 }
 
 // ── Trampoline functions from C++ → Rust via cxx ──
@@ -655,4 +671,17 @@ fn rust_plugin_unit_location(
     talkgroup: i64,
 ) -> i32 {
     plugin.inner.unit_location(system, source_id, talkgroup)
+}
+
+fn rust_plugin_unit_alias_discovered(
+    plugin: &mut RustPluginBox,
+    system: &ffi::TrSystem,
+    radio_id: i64,
+    alias: &str,
+    source: &str,
+    talkgroup_id: i64,
+) -> i32 {
+    plugin
+        .inner
+        .unit_alias_discovered(system, radio_id, alias, source, talkgroup_id)
 }

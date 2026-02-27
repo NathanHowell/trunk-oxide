@@ -104,6 +104,16 @@ pub trait Plugin: Send {
     fn unit_location(&mut self, _system: &TrSystem, _source_id: i64, _talkgroup: i64) -> Result {
         Ok(())
     }
+    fn unit_alias_discovered(
+        &mut self,
+        _system: &TrSystem,
+        _radio_id: i64,
+        _alias: &str,
+        _source: &str,
+        _talkgroup_id: i64,
+    ) -> Result {
+        Ok(())
+    }
 }
 
 // ── Adapter: wraps a Plugin impl to satisfy RustPluginCallbacks ──
@@ -383,6 +393,26 @@ impl<P: Plugin> trunk_recorder_sys::RustPluginCallbacks for PluginAdapter<P> {
             Ok(()) => 0,
             Err(e) => {
                 eprintln!("trunk-oxide plugin unit_location error: {e}");
+                -1
+            }
+        }
+    }
+
+    fn unit_alias_discovered(
+        &mut self,
+        system: &TrSystem,
+        radio_id: i64,
+        alias: &str,
+        source: &str,
+        talkgroup_id: i64,
+    ) -> i32 {
+        match self
+            .inner
+            .unit_alias_discovered(system, radio_id, alias, source, talkgroup_id)
+        {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("trunk-oxide plugin unit_alias_discovered error: {e}");
                 -1
             }
         }

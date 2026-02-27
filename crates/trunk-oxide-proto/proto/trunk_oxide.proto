@@ -39,6 +39,7 @@ message PluginEvent {
     SetupSystemsEvent setup_systems = 10;
     SetupSourcesEvent setup_sources = 11;
     SetupConfigEvent setup_config = 12;
+    UnitAliasEvent unit_alias = 13;
   }
 }
 
@@ -345,4 +346,12 @@ message SetupSourcesEvent {
 message SetupConfigEvent {
   repeated SourceInfo sources = 1;
   repeated SystemInfo systems = 2;
+}
+
+message UnitAliasEvent {
+  SystemInfo system = 1;
+  int64 radio_id = 2;
+  string alias = 3;
+  string source = 4;
+  int64 talkgroup_id = 5;
 }

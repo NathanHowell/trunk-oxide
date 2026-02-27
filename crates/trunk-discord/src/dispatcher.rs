@@ -169,6 +169,15 @@ impl Dispatcher {
             Event::SetupConfig(e) => {
                 self.aggregator.send(AggregatorMessage::SetupConfig(e));
             }
+            Event::UnitAlias(e) => {
+                tracing::debug!(
+                    radio_id = e.radio_id,
+                    alias = %e.alias,
+                    source = %e.source,
+                    talkgroup_id = e.talkgroup_id,
+                    "OTA unit alias discovered"
+                );
+            }
         }
     }
 

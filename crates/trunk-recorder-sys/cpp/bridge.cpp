@@ -15,6 +15,7 @@ using json = nlohmann::json;
 #include "trunk-recorder/source.h"
 #include "trunk-recorder/systems/system.h"
 #include "trunk-recorder/talkgroup.h"
+#include "trunk-recorder/unit_tags_ota.h"
 #include <thread>
 
 // Forward declarations for functions provided by libtrunk-recorder.so
@@ -426,6 +427,15 @@ public:
         return rust_plugin_unit_location(*plugin_, tr_sys, source_id, talkgroup_num);
     }
 
+    int unit_alias_discovered(const std::shared_ptr<System> &sys, const OTAAlias &alias) {
+        TrSystem tr_sys(sys);
+        return rust_plugin_unit_alias_discovered(
+            *plugin_, tr_sys, alias.radio_id,
+            rust::Str(alias.alias.data(), alias.alias.size()),
+            rust::Str(alias.source.data(), alias.source.size()),
+            alias.talkgroup_id);
+    }
+
 private:
     rust::Box<RustPluginBox> plugin_;
 };
@@ -617,6 +627,11 @@ public:
     void unit_location(const std::shared_ptr<System> &system, long source_id,
                        long talkgroup_num) override {
         bridge_->unit_location(system, source_id, talkgroup_num);
+    }
+
+    void unit_alias_discovered(const std::shared_ptr<System> &system,
+                               const OTAAlias &alias) override {
+        bridge_->unit_alias_discovered(system, alias);
     }
 
 private:

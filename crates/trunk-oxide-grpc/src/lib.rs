@@ -636,5 +636,25 @@ impl Plugin for GrpcPlugin {
         self.send_unit_event(proto::UnitEventType::Location, system, source_id, talkgroup);
         Ok(())
     }
+
+    fn unit_alias_discovered(
+        &mut self,
+        system: &TrSystem,
+        radio_id: i64,
+        alias: &str,
+        source: &str,
+        talkgroup_id: i64,
+    ) -> Result {
+        self.send_event(proto::plugin_event::Event::UnitAlias(
+            proto::UnitAliasEvent {
+                system: Some(system_info(system)),
+                radio_id,
+                alias: alias.to_string(),
+                source: source.to_string(),
+                talkgroup_id,
+            },
+        ));
+        Ok(())
+    }
 }
 

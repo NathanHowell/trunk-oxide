@@ -376,43 +376,7 @@ impl GrpcPlugin {
 
     fn send_event(&self, event: proto::plugin_event::Event) {
         if let Some(tx) = &self.event_tx {
-            let event_type = match &event {
-                proto::plugin_event::Event::Signal(_) => "signal",
-                proto::plugin_event::Event::CallStart(_) => "call_start",
-                proto::plugin_event::Event::CallEnd(_) => "call_end",
-                proto::plugin_event::Event::CallsActive(_) => "calls_active",
-                proto::plugin_event::Event::TrunkMessage(_) => "trunk_message",
-                proto::plugin_event::Event::Unit(_) => "unit",
-                proto::plugin_event::Event::SystemRates(_) => "system_rates",
-                proto::plugin_event::Event::SetupRecorder(_) => "setup_recorder",
-                proto::plugin_event::Event::SetupSystem(_) => "setup_system",
-                proto::plugin_event::Event::SetupSystems(_) => "setup_systems",
-                proto::plugin_event::Event::SetupSources(_) => "setup_sources",
-                proto::plugin_event::Event::SetupConfig(_) => "setup_config",
-            };
             let msg = proto::PluginEvent { event: Some(event) };
-
-            // Sanity-check: tonic uses encoded_len() for the gRPC frame header,
-            // then encode() for the payload. If encoded_len() < actual bytes,
-            // the client receives a truncated message ("buffer underflow").
-            use prost::Message;
-            let predicted_len = msg.encoded_len();
-            let mut buf = Vec::with_capacity(predicted_len);
-            if let Err(e) = msg.encode(&mut buf) {
-                tracing::error!(event_type, error = %e, "failed to encode PluginEvent — dropping");
-                return;
-            }
-            let actual_len = buf.len();
-            if actual_len != predicted_len {
-                tracing::error!(
-                    event_type,
-                    predicted_len,
-                    actual_len,
-                    "encoded_len() mismatch — tonic would send truncated frame, dropping"
-                );
-                return;
-            }
-
             let _ = tx.send(msg);
         }
     }

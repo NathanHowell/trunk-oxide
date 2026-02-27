@@ -5,7 +5,7 @@ use std::sync::Arc;
 use anyhow::Result;
 use chrono::Utc;
 use serenity::all::CreateEmbed;
-use serenity::model::id::ChannelId;
+use serenity::model::id::{ChannelId, MessageId};
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
 use trunk_oxide_proto as proto;
@@ -45,7 +45,11 @@ impl Aggregator {
             last_setup_systems: None,
             last_setup_sources: None,
             last_setup_system: HashMap::new(),
-            last_setup_recorder: HashMap::new(),
+            // Recorder table
+            recorder_state: HashMap::new(),
+            recorder_embed_id: None,
+            // System activity embed
+            activity_embed_id: None,
             // Aggregated counters
             trunk_message_counts: HashMap::new(),
             unit_counts: HashMap::new(),
@@ -76,7 +80,13 @@ struct AggregatorInner {
     last_setup_systems: Option<String>,
     last_setup_sources: Option<String>,
     last_setup_system: HashMap<i32, String>,
-    last_setup_recorder: HashMap<i32, String>,
+
+    // Recorder table: single embed edited in place
+    recorder_state: HashMap<i32, proto::RecorderInfo>,
+    recorder_embed_id: Option<MessageId>,
+
+    // System activity: single embed edited in place
+    activity_embed_id: Option<MessageId>,
 
     // Aggregated counters (flushed periodically)
     trunk_message_counts: HashMap<String, (u64, u64)>, // sys_name -> (messages, batches)
@@ -150,15 +160,9 @@ impl AggregatorInner {
                 }
             }
             AggregatorMessage::SetupRecorder(e) => {
-                let key = e.recorder.as_ref().map_or(0, |r| r.id);
-                let text = format_setup_recorder(&e);
-                if self.last_setup_recorder.get(&key) != Some(&text) {
-                    self.last_setup_recorder.insert(key, text.clone());
-                    let embed = CreateEmbed::new()
-                        .title("Recorder")
-                        .colour(0x3498db_u32)
-                        .description(text);
-                    self.post_embed(embed).await;
+                if let Some(rec) = e.recorder {
+                    self.recorder_state.insert(rec.id, rec);
+                    self.update_recorder_embed().await;
                 }
             }
             // Signals are kept as individual lines (relatively rare)
@@ -199,6 +203,33 @@ impl AggregatorInner {
         if let Some(thread_id) = self.current_thread_id {
             if let Err(e) = self.discord.send_embed(thread_id, embed).await {
                 tracing::error!(error = %e, "failed to post setup event");
+            }
+        }
+    }
+
+    async fn update_recorder_embed(&mut self) {
+        if let Err(e) = self.ensure_hourly_thread().await {
+            tracing::error!(error = %e, "failed to ensure hourly thread");
+            return;
+        }
+        let Some(thread_id) = self.current_thread_id else {
+            return;
+        };
+
+        let table = build_recorder_table(&self.recorder_state);
+        let embed = CreateEmbed::new()
+            .title("Recorders")
+            .colour(0x3498db_u32)
+            .description(table);
+
+        if let Some(msg_id) = self.recorder_embed_id {
+            if let Err(e) = self.discord.edit_embed(thread_id, msg_id, embed).await {
+                tracing::error!(error = %e, "failed to edit recorder embed");
+            }
+        } else {
+            match self.discord.send_embed(thread_id, embed).await {
+                Ok(msg_id) => self.recorder_embed_id = Some(msg_id),
+                Err(e) => tracing::error!(error = %e, "failed to post recorder embed"),
             }
         }
     }
@@ -253,32 +284,31 @@ impl AggregatorInner {
             return;
         };
 
-        // Batch lines into embed descriptions under Discord's 4096-char embed limit
-        let mut batch = String::new();
+        // Build description from buffered lines (truncate to fit embed limit)
+        let mut description = String::new();
         for line in self.buffer.drain(..) {
-            if batch.len() + line.len() + 1 > 4000 && !batch.is_empty() {
-                let embed = CreateEmbed::new()
-                    .title("System Activity")
-                    .colour(0x95a5a6_u32) // grey
-                    .description(&batch);
-                if let Err(e) = self.discord.send_embed(thread_id, embed).await {
-                    tracing::error!(error = %e, "failed to post aggregated events");
-                }
-                batch.clear();
+            if !description.is_empty() {
+                description.push('\n');
             }
-            if !batch.is_empty() {
-                batch.push('\n');
+            description.push_str(&line);
+            if description.len() > 4000 {
+                break;
             }
-            batch.push_str(&line);
         }
 
-        if !batch.is_empty() {
-            let embed = CreateEmbed::new()
-                .title("System Activity")
-                .colour(0x95a5a6_u32) // grey
-                .description(batch);
-            if let Err(e) = self.discord.send_embed(thread_id, embed).await {
-                tracing::error!(error = %e, "failed to post aggregated events");
+        let embed = CreateEmbed::new()
+            .title("System Activity")
+            .colour(0x95a5a6_u32) // grey
+            .description(description);
+
+        if let Some(msg_id) = self.activity_embed_id {
+            if let Err(e) = self.discord.edit_embed(thread_id, msg_id, embed).await {
+                tracing::error!(error = %e, "failed to edit activity embed");
+            }
+        } else {
+            match self.discord.send_embed(thread_id, embed).await {
+                Ok(msg_id) => self.activity_embed_id = Some(msg_id),
+                Err(e) => tracing::error!(error = %e, "failed to post activity embed"),
             }
         }
     }
@@ -299,6 +329,11 @@ impl AggregatorInner {
 
         self.current_thread_id = Some(thread_id);
         self.current_hour = hour_key;
+
+        // Reset embed IDs so new embeds are posted in the new thread
+        self.recorder_embed_id = None;
+        self.recorder_state.clear();
+        self.activity_embed_id = None;
 
         tracing::info!(thread = %thread_id, "created hourly summary thread");
 
@@ -367,18 +402,38 @@ fn format_setup_system(e: &proto::SetupSystemEvent) -> String {
     )
 }
 
-fn format_setup_recorder(e: &proto::SetupRecorderEvent) -> String {
-    e.recorder.as_ref().map_or_else(
-        || "(no data)".to_string(),
-        |rec| {
-            format!(
-                "id={} type={} freq={:.4} MHz",
-                rec.id,
-                rec.r#type,
-                rec.freq / 1_000_000.0
-            )
-        },
-    )
+fn build_recorder_table(recorders: &HashMap<i32, proto::RecorderInfo>) -> String {
+    let mut ids: Vec<i32> = recorders.keys().copied().collect();
+    ids.sort();
+
+    let mut table = String::from("```\n");
+    let _ = writeln!(table, "{:<4} {:<8} {:>12} {:>10} {}", "ID", "Type", "Freq (MHz)", "TG", "State");
+    for id in ids {
+        let rec = &recorders[&id];
+        let state = if rec.is_active {
+            "active"
+        } else if rec.is_idle {
+            "idle"
+        } else {
+            "—"
+        };
+        let tg = if rec.talkgroup != 0 {
+            rec.talkgroup.to_string()
+        } else {
+            "—".to_string()
+        };
+        let _ = writeln!(
+            table,
+            "{:<4} {:<8} {:>12.4} {:>10} {}",
+            rec.id,
+            rec.r#type,
+            rec.freq / 1_000_000.0,
+            tg,
+            state,
+        );
+    }
+    table.push_str("```");
+    table
 }
 
 fn format_signal(e: &proto::SignalEvent) -> String {

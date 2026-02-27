@@ -9,9 +9,7 @@ use clap::Parser;
 use opentelemetry::trace::TracerProvider;
 use tracing_subscriber::prelude::*;
 
-mod proto {
-    tonic::include_proto!("whisperer");
-}
+use trunk_whisperer_proto as proto;
 
 #[derive(Parser)]
 struct Args {

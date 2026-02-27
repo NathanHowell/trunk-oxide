@@ -18,10 +18,6 @@ use opentelemetry::trace::TracerProvider;
 use tokio::sync::Mutex;
 use tracing_subscriber::prelude::*;
 
-mod proto {
-    #![allow(clippy::all, clippy::pedantic, clippy::nursery)]
-    tonic::include_proto!("whisperer");
-}
 
 #[derive(Parser)]
 struct Args {

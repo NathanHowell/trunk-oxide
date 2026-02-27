@@ -12,6 +12,7 @@ default = []
 cuda = ["whisper-rs/cuda"]
 
 [dependencies]
+trunk-whisperer-proto.workspace = true
 tonic.workspace = true
 tonic-health.workspace = true
 tonic-prost.workspace = true
@@ -32,6 +33,3 @@ pid1.workspace = true
 clap.workspace = true
 argfile.workspace = true
 wild.workspace = true
-
-[build-dependencies]
-tonic-prost-build.workspace = true

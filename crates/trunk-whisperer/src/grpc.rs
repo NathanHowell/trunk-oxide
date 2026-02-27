@@ -25,7 +25,7 @@ impl Whisperer for WhispererService {
         let req = request.into_inner();
 
         // Decode f32 LE bytes
-        if req.audio.len() % 4 != 0 {
+        if !req.audio.len().is_multiple_of(4) {
             return Err(Status::invalid_argument(
                 "audio bytes length must be a multiple of 4 (f32 LE)",
             ));

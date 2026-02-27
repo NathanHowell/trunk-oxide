@@ -6,6 +6,7 @@ members = [
     "crates/trunk-oxide-proto",
     "crates/trunk-oxide-grpc",
     "crates/trunk-oxide",
+    "crates/trunk-whisperer-proto",
     "crates/trunk-whisperer",
     "crates/trunk-database",
     "crates/trunk-discord",
@@ -19,6 +20,7 @@ default-members = [
     "crates/trunk-oxide-proto",
     "crates/trunk-oxide-grpc",
     "crates/trunk-database",
+    "crates/trunk-whisperer-proto",
     "crates/trunk-whisperer",
     "crates/trunk-discord",
     "crates/trunk-solver",
@@ -50,6 +52,7 @@ trunk-recorder-plugin = { path = "crates/trunk-recorder-plugin" }
 trunk-oxide = { path = "crates/trunk-oxide" }
 trunk-oxide-proto = { path = "crates/trunk-oxide-proto" }
 trunk-oxide-grpc = { path = "crates/trunk-oxide-grpc" }
+trunk-whisperer-proto = { path = "crates/trunk-whisperer-proto" }
 trunk-database = { path = "crates/trunk-database" }
 anyhow = "1"
 chrono = "0.4"

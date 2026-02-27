@@ -2949,13 +2949,13 @@ dependencies = [
  "tonic",
  "tonic-health",
  "tonic-prost",
- "tonic-prost-build",
  "tower 0.4.13",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
  "trunk-database",
  "trunk-oxide-proto",
+ "trunk-whisperer-proto",
  "wild",
 ]
 
@@ -3057,12 +3057,22 @@ dependencies = [
  "tonic",
  "tonic-health",
  "tonic-prost",
- "tonic-prost-build",
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "trunk-whisperer-proto",
  "whisper-rs",
  "wild",
+]
+
+[[package]]
+name = "trunk-whisperer-proto"
+version = "0.1.0"
+dependencies = [
+ "prost",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
 ]
 
 [[package]]

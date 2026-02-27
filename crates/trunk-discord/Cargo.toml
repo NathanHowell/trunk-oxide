@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 trunk-oxide-proto.workspace = true
+trunk-whisperer-proto.workspace = true
 trunk-database.workspace = true
 tonic.workspace = true
 tonic-health.workspace = true
@@ -34,6 +35,3 @@ pid1.workspace = true
 clap.workspace = true
 argfile.workspace = true
 wild.workspace = true
-
-[build-dependencies]
-tonic-prost-build.workspace = true

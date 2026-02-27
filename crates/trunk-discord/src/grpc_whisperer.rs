@@ -1,8 +1,8 @@
 use anyhow::Result;
 use tonic::transport::Endpoint;
 
-use crate::proto::whisperer_client::WhispererClient;
-use crate::proto::TranscribeRequest;
+use trunk_whisperer_proto::whisperer_client::WhispererClient;
+use trunk_whisperer_proto::TranscribeRequest;
 
 #[derive(Clone)]
 pub struct WhispererConnection {

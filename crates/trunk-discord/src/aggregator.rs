@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::fmt::Write;
 use std::sync::Arc;
 
@@ -38,6 +39,17 @@ impl Aggregator {
             buffer: Vec::new(),
             current_thread_id: None,
             current_hour: String::new(),
+            // Setup event dedup
+            last_setup_config: None,
+            last_setup_systems: None,
+            last_setup_sources: None,
+            last_setup_system: HashMap::new(),
+            last_setup_recorder: HashMap::new(),
+            // Aggregated counters
+            trunk_message_counts: HashMap::new(),
+            unit_counts: HashMap::new(),
+            latest_rates: None,
+            latest_calls_active: None,
         };
 
         tokio::spawn(inner.run());
@@ -57,6 +69,19 @@ struct AggregatorInner {
     buffer: Vec<String>,
     current_thread_id: Option<ChannelId>,
     current_hour: String,
+
+    // Setup event dedup: only post when content changes
+    last_setup_config: Option<String>,
+    last_setup_systems: Option<String>,
+    last_setup_sources: Option<String>,
+    last_setup_system: HashMap<i32, String>,
+    last_setup_recorder: HashMap<i32, String>,
+
+    // Aggregated counters (flushed periodically)
+    trunk_message_counts: HashMap<String, (u64, u64)>, // sys_name -> (messages, batches)
+    unit_counts: HashMap<String, u64>,                  // event_type -> count
+    latest_rates: Option<String>,
+    latest_calls_active: Option<String>,
 }
 
 impl AggregatorInner {
@@ -77,42 +102,70 @@ impl AggregatorInner {
 
     async fn handle_message(&mut self, msg: AggregatorMessage) {
         match msg {
-            // Setup events are posted immediately
+            // Setup events: deduplicate by content
             AggregatorMessage::SetupConfig(e) => {
                 let text = format_setup_config(&e);
-                self.post_immediately(&text).await;
+                if self.last_setup_config.as_ref() != Some(&text) {
+                    self.last_setup_config = Some(text.clone());
+                    self.post_immediately(&text).await;
+                }
             }
             AggregatorMessage::SetupSystems(e) => {
                 let text = format_setup_systems(&e);
-                self.post_immediately(&text).await;
+                if self.last_setup_systems.as_ref() != Some(&text) {
+                    self.last_setup_systems = Some(text.clone());
+                    self.post_immediately(&text).await;
+                }
             }
             AggregatorMessage::SetupSources(e) => {
                 let text = format_setup_sources(&e);
-                self.post_immediately(&text).await;
+                if self.last_setup_sources.as_ref() != Some(&text) {
+                    self.last_setup_sources = Some(text.clone());
+                    self.post_immediately(&text).await;
+                }
             }
             AggregatorMessage::SetupSystem(e) => {
+                let key = e.system.as_ref().map_or(0, |s| s.sys_num);
                 let text = format_setup_system(&e);
-                self.post_immediately(&text).await;
+                if self.last_setup_system.get(&key) != Some(&text) {
+                    self.last_setup_system.insert(key, text.clone());
+                    self.post_immediately(&text).await;
+                }
             }
             AggregatorMessage::SetupRecorder(e) => {
+                let key = e.recorder.as_ref().map_or(0, |r| r.id);
                 let text = format_setup_recorder(&e);
-                self.post_immediately(&text).await;
+                if self.last_setup_recorder.get(&key) != Some(&text) {
+                    self.last_setup_recorder.insert(key, text.clone());
+                    self.post_immediately(&text).await;
+                }
             }
-            // Everything else is buffered
+            // Signals are kept as individual lines (relatively rare)
             AggregatorMessage::Signal(e) => {
                 self.buffer.push(format_signal(&e));
             }
+            // Trunk messages: aggregate counts per system
             AggregatorMessage::TrunkMessage(e) => {
-                self.buffer.push(format_trunk_message(&e));
+                let sys_name = e
+                    .system
+                    .as_ref()
+                    .map_or_else(|| "unknown".to_string(), |s| s.short_name.clone());
+                let msg_count = e.messages.len() as u64;
+                let entry = self.trunk_message_counts.entry(sys_name).or_insert((0, 0));
+                entry.0 += msg_count;
+                entry.1 += 1;
             }
+            // Unit events: aggregate by type
             AggregatorMessage::Unit(e) => {
-                self.buffer.push(format_unit(&e));
+                let event_type = format_unit_type(e.r#type);
+                *self.unit_counts.entry(event_type).or_insert(0) += 1;
             }
+            // Rates / calls active: keep only latest
             AggregatorMessage::SystemRates(e) => {
-                self.buffer.push(format_system_rates(&e));
+                self.latest_rates = Some(format_system_rates(&e));
             }
             AggregatorMessage::CallsActive(e) => {
-                self.buffer.push(format_calls_active(&e));
+                self.latest_calls_active = Some(format_calls_active(&e));
             }
         }
     }
@@ -129,7 +182,43 @@ impl AggregatorInner {
         }
     }
 
+    fn drain_aggregated(&mut self) {
+        // Trunk message summaries
+        if !self.trunk_message_counts.is_empty() {
+            let mut systems: Vec<_> = self.trunk_message_counts.drain().collect();
+            systems.sort_by(|a, b| a.0.cmp(&b.0));
+            let summaries: Vec<String> = systems
+                .into_iter()
+                .map(|(name, (msgs, batches))| format!("{name}: {msgs} msgs ({batches} batches)"))
+                .collect();
+            self.buffer.push(format!("Trunk: {}", summaries.join(", ")));
+        }
+
+        // Unit event summaries
+        if !self.unit_counts.is_empty() {
+            let mut types: Vec<_> = self.unit_counts.drain().collect();
+            types.sort_by(|a, b| a.0.cmp(&b.0));
+            let summaries: Vec<String> = types
+                .into_iter()
+                .map(|(typ, count)| format!("{count} {typ}"))
+                .collect();
+            self.buffer.push(format!("Units: {}", summaries.join(", ")));
+        }
+
+        // Latest rates snapshot
+        if let Some(rates) = self.latest_rates.take() {
+            self.buffer.push(rates);
+        }
+
+        // Latest calls active snapshot
+        if let Some(calls) = self.latest_calls_active.take() {
+            self.buffer.push(calls);
+        }
+    }
+
     async fn flush(&mut self) {
+        self.drain_aggregated();
+
         if self.buffer.is_empty() {
             return;
         }
@@ -276,26 +365,16 @@ fn format_signal(e: &proto::SignalEvent) -> String {
     format!("Signal: unit {} - {signal_type}", e.unit_id)
 }
 
-fn format_trunk_message(e: &proto::TrunkMessageEvent) -> String {
-    let count = e.messages.len();
-    let sys_name = e
-        .system
-        .as_ref()
-        .map_or("unknown", |s| s.short_name.as_str());
-    format!("Trunk: {count} messages from {sys_name}")
-}
-
-fn format_unit(e: &proto::UnitEvent) -> String {
-    let event_type = proto::UnitEventType::try_from(e.r#type).map_or_else(
-        |_| format!("UNKNOWN({})", e.r#type),
+fn format_unit_type(r#type: i32) -> String {
+    proto::UnitEventType::try_from(r#type).map_or_else(
+        |_| format!("UNKNOWN({type})"),
         |et| {
             et.as_str_name()
                 .strip_prefix("UNIT_EVENT_TYPE_")
                 .unwrap_or(et.as_str_name())
                 .to_string()
         },
-    );
-    format!("Unit: {event_type} - source {}", e.source_id)
+    )
 }
 
 fn format_system_rates(e: &proto::SystemRatesEvent) -> String {

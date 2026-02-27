@@ -222,7 +222,7 @@ pub mod ffi {
         fn system_get_sys_num(sys: &TrSystem) -> i32;
         fn system_get_sys_id(sys: &TrSystem) -> u64;
         fn system_get_short_name(sys: &TrSystem) -> String;
-        fn system_get_system_type(sys: &TrSystem) -> String;
+        fn system_get_system_type(sys: &TrSystem) -> i32;
         fn system_get_wacn(sys: &TrSystem) -> u64;
         fn system_get_nac(sys: &TrSystem) -> u64;
         fn system_get_sys_rfss(sys: &TrSystem) -> i32;

@@ -468,7 +468,10 @@ TrMonitoringState call_get_monitoring_state(const TrCall &call) { return convert
 int32_t system_get_sys_num(const TrSystem &sys) { return sys.ptr->get_sys_num(); }
 uint64_t system_get_sys_id(const TrSystem &sys) { return sys.ptr->get_sys_id(); }
 rust::String system_get_short_name(const TrSystem &sys) { return rust::String(sys.ptr->get_short_name()); }
-rust::String system_get_system_type(const TrSystem &sys) { return rust::String(sys.ptr->get_system_type()); }
+int32_t system_get_system_type(const TrSystem &sys) {
+    // Map C++ SystemType enum (0-based) to proto SystemType enum (1-based, 0 = UNSPECIFIED)
+    return static_cast<int32_t>(sys.ptr->get_system_type()) + 1;
+}
 uint64_t system_get_wacn(const TrSystem &sys) { return sys.ptr->get_wacn(); }
 uint64_t system_get_nac(const TrSystem &sys) { return sys.ptr->get_nac(); }
 int32_t system_get_sys_rfss(const TrSystem &sys) { return sys.ptr->get_sys_rfss(); }

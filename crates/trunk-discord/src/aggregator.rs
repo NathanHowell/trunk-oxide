@@ -380,13 +380,21 @@ impl AggregatorInner {
     }
 }
 
+fn format_system_type(system_type: i32) -> &'static str {
+    proto::SystemType::try_from(system_type).map_or("unknown", |st| {
+        st.as_str_name()
+            .strip_prefix("SYSTEM_TYPE_")
+            .unwrap_or(st.as_str_name())
+    })
+}
+
 fn format_setup_config(e: &proto::SetupConfigEvent) -> String {
     let mut text = String::new();
     for sys in &e.systems {
         let _ = writeln!(
             text,
             "System: {} ({}) - type: {}",
-            sys.short_name, sys.sys_num, sys.system_type
+            sys.short_name, sys.sys_num, format_system_type(sys.system_type)
         );
     }
     for src in &e.sources {
@@ -407,7 +415,7 @@ fn format_setup_systems(e: &proto::SetupSystemsEvent) -> String {
         let _ = writeln!(
             text,
             "{} (sys_num={}, type={})",
-            sys.short_name, sys.sys_num, sys.system_type
+            sys.short_name, sys.sys_num, format_system_type(sys.system_type)
         );
     }
     text
@@ -435,7 +443,7 @@ fn format_setup_system(e: &proto::SetupSystemEvent) -> String {
         |sys| {
             format!(
                 "{} (sys_num={}, type={})",
-                sys.short_name, sys.sys_num, sys.system_type
+                sys.short_name, sys.sys_num, format_system_type(sys.system_type)
             )
         },
     )

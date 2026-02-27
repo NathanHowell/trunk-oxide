@@ -98,13 +98,25 @@ message CallInfo {
   int32 monitoring_state = 26;
 }
 
+// ── System type ──
+
+enum SystemType {
+  SYSTEM_TYPE_UNSPECIFIED = 0;
+  SYSTEM_TYPE_CONVENTIONAL = 1;
+  SYSTEM_TYPE_CONVENTIONAL_P25 = 2;
+  SYSTEM_TYPE_CONVENTIONAL_DMR = 3;
+  SYSTEM_TYPE_CONVENTIONAL_SIGMF = 4;
+  SYSTEM_TYPE_SMARTNET = 5;
+  SYSTEM_TYPE_P25 = 6;
+}
+
 // ── System info ──
 
 message SystemInfo {
   int32 sys_num = 1;
   uint64 sys_id = 2;
   string short_name = 3;
-  string system_type = 4;
+  SystemType system_type = 4;
   uint64 wacn = 5;
   uint64 nac = 6;
   int32 rfss = 7;

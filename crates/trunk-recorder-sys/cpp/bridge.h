@@ -75,7 +75,7 @@ TrMonitoringState call_get_monitoring_state(const TrCall &call);
 int32_t system_get_sys_num(const TrSystem &sys);
 uint64_t system_get_sys_id(const TrSystem &sys);
 rust::String system_get_short_name(const TrSystem &sys);
-rust::String system_get_system_type(const TrSystem &sys);
+int32_t system_get_system_type(const TrSystem &sys);
 uint64_t system_get_wacn(const TrSystem &sys);
 uint64_t system_get_nac(const TrSystem &sys);
 int32_t system_get_sys_rfss(const TrSystem &sys);

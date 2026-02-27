@@ -261,7 +261,7 @@ public:
 
     int signal(long unitId, const char *signaling_type,
                gr::blocks::SignalType sig_type,
-               Call *call, System *system, Recorder *recorder) {
+               Call *call, System *system, const std::shared_ptr<Recorder> &recorder) {
         auto sig_str = signaling_type
             ? rust::Str(signaling_type, std::strlen(signaling_type))
             : rust::Str("", 0);
@@ -276,7 +276,7 @@ public:
             recorder ? &tr_rec : nullptr);
     }
 
-    int audio_stream(Call *call, Recorder *recorder,
+    int audio_stream(Call *call, const std::shared_ptr<Recorder> &recorder,
                      int16_t *samples, int sampleCount) {
         TrCall tr_call(call);
         TrRecorder tr_rec(recorder);
@@ -505,7 +505,7 @@ public:
     explicit CxxEventSink(std::shared_ptr<RustPluginBridge> bridge)
         : bridge_(std::move(bridge)) {}
 
-    void audio_callback(Call *call, Recorder *recorder,
+    void audio_callback(Call *call, const std::shared_ptr<Recorder> &recorder,
                         int16_t *samples, int sampleCount) override {
         bridge_->audio_stream(call, recorder, samples, sampleCount);
     }
@@ -516,7 +516,7 @@ public:
 
     int signal(long unitId, const char *signaling_type,
                gr::blocks::SignalType sig_type, Call *call,
-               System *system, Recorder *recorder) override {
+               System *system, const std::shared_ptr<Recorder> &recorder) override {
         return bridge_->signal(unitId, signaling_type, sig_type, call, system, recorder);
     }
 

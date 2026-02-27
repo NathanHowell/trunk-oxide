@@ -21,7 +21,6 @@ pub enum CallMessage {
 #[derive(Clone, Copy)]
 pub struct CallHandlerConfig {
     pub buffer_duration_ms: u64,
-    pub channel_id: u64,
     pub tone_detection: bool,
     pub tone_detection_duration_s: f32,
 }
@@ -33,7 +32,6 @@ pub struct CallHandler {
     whisperer: WhispererConnection,
     discord: Arc<DiscordClient>,
     buffer_duration_ms: u64,
-    channel_id: u64,
     audio_buffer: Vec<f32>,
     resampler: Option<Resampler>,
     tone_detector: Option<ToneDetector>,
@@ -51,6 +49,7 @@ impl CallHandler {
         whisperer: WhispererConnection,
         discord: Arc<DiscordClient>,
         config: CallHandlerConfig,
+        thread_id: ChannelId,
     ) -> Self {
         let detect_ctcss = config.tone_detection && call_info.is_conventional;
         let tone_detector = if config.tone_detection {
@@ -70,23 +69,22 @@ impl CallHandler {
             whisperer,
             discord,
             buffer_duration_ms: config.buffer_duration_ms,
-            channel_id: config.channel_id,
             audio_buffer: Vec::new(),
             resampler: None,
             tone_detector,
             notch_filter: None,
-            thread_id: None,
+            thread_id: Some(thread_id),
             current_message_id: None,
             current_message_text: String::new(),
         }
     }
 
     pub async fn run(mut self) {
-        if let Err(e) = self.create_thread().await {
+        if let Err(e) = self.post_call_start().await {
             tracing::error!(
                 talkgroup = self.key.talkgroup,
                 error = %e,
-                "failed to create discord thread"
+                "failed to post call start"
             );
             return;
         }
@@ -128,35 +126,15 @@ impl CallHandler {
         }
     }
 
-    async fn create_thread(&mut self) -> Result<()> {
+    async fn post_call_start(&mut self) -> Result<()> {
+        let thread_id = self.thread_id.expect("thread_id must be set before run()");
+
         let start_time =
             DateTime::<Utc>::from_timestamp(self.call_info.start_time, 0).unwrap_or_else(Utc::now);
         let time_str = start_time.format("%H:%M:%S").to_string();
 
-        let tag = if self.call_info.talkgroup_tag.is_empty() {
-            self.call_info.talkgroup_display.clone()
-        } else {
-            self.call_info.talkgroup_tag.clone()
-        };
-
-        let thread_name = format!("TG {} - {} [{}]", self.call_info.talkgroup, tag, time_str);
-        // Discord thread names are limited to 100 chars
-        let thread_name = if thread_name.len() > 100 {
-            thread_name[..100].to_string()
-        } else {
-            thread_name
-        };
-
-        let thread_id = self
-            .discord
-            .create_call_thread(self.channel_id, &thread_name)
-            .await?;
-        self.thread_id = Some(thread_id);
-
         let info = format!(
-            "**Talkgroup**: {} ({})\n**Freq**: {:.4} MHz\n**System**: {}\n**Encrypted**: {}",
-            self.call_info.talkgroup,
-            tag,
+            "---\n**Call @ {time_str}** | Freq: {:.4} MHz | System: {} | Encrypted: {}",
             self.call_info.freq / 1_000_000.0,
             self.call_info.short_name,
             if self.call_info.encrypted {
@@ -165,12 +143,11 @@ impl CallHandler {
                 "No"
             },
         );
-        let msg_id = self.discord.send_message(thread_id, &info).await?;
+        self.discord.send_message(thread_id, &info).await?;
 
         // Start a new message for transcription text
         self.current_message_id = None;
         self.current_message_text.clear();
-        let _ = msg_id;
 
         tracing::info!(
             talkgroup = self.key.talkgroup,

@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
+use serenity::model::id::ChannelId;
 use tokio::sync::{RwLock, mpsc};
 use trunk_oxide_proto as proto;
 
@@ -17,8 +19,17 @@ pub struct CallKey {
     pub talkgroup: i64,
 }
 
+/// Key for reusing Discord threads: one thread per talkgroup per day.
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+struct ThreadCacheKey {
+    sys_num: i32,
+    talkgroup: i64,
+    date: String, // "YYYY-MM-DD"
+}
+
 pub struct Dispatcher {
     calls: RwLock<HashMap<CallKey, mpsc::Sender<CallMessage>>>,
+    thread_cache: RwLock<HashMap<ThreadCacheKey, ChannelId>>,
     whisperer: WhispererConnection,
     discord: Arc<DiscordClient>,
     aggregator: Arc<Aggregator>,
@@ -40,6 +51,7 @@ impl Dispatcher {
     ) -> Self {
         Self {
             calls: RwLock::new(HashMap::new()),
+            thread_cache: RwLock::new(HashMap::new()),
             whisperer,
             discord,
             aggregator,
@@ -117,6 +129,62 @@ impl Dispatcher {
             talkgroup: call.talkgroup,
         };
 
+        // Look up or create a per-talkgroup-per-day thread
+        let start_time =
+            DateTime::<Utc>::from_timestamp(call.start_time, 0).unwrap_or_else(Utc::now);
+        let date_str = start_time.format("%Y-%m-%d").to_string();
+
+        let cache_key = ThreadCacheKey {
+            sys_num: call.sys_num,
+            talkgroup: call.talkgroup,
+            date: date_str.clone(),
+        };
+
+        let thread_id = {
+            let cache = self.thread_cache.read().await;
+            cache.get(&cache_key).copied()
+        };
+
+        let thread_id = match thread_id {
+            Some(id) => id,
+            None => {
+                let tag = if call.talkgroup_tag.is_empty() {
+                    call.talkgroup_display.clone()
+                } else {
+                    call.talkgroup_tag.clone()
+                };
+
+                let thread_name = format!("TG {} - {} [{}]", call.talkgroup, tag, date_str);
+                let thread_name = if thread_name.len() > 100 {
+                    thread_name[..100].to_string()
+                } else {
+                    thread_name
+                };
+
+                match self
+                    .discord
+                    .create_call_thread(self.channel_id, &thread_name)
+                    .await
+                {
+                    Ok(id) => {
+                        self.thread_cache
+                            .write()
+                            .await
+                            .insert(cache_key, id);
+                        id
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            talkgroup = call.talkgroup,
+                            error = %e,
+                            "failed to create discord thread"
+                        );
+                        return;
+                    }
+                }
+            }
+        };
+
         let (tx, rx) = mpsc::channel(1024);
 
         let handler = CallHandler::new(
@@ -127,10 +195,10 @@ impl Dispatcher {
             Arc::clone(&self.discord),
             CallHandlerConfig {
                 buffer_duration_ms: self.buffer_duration_ms,
-                channel_id: self.channel_id,
                 tone_detection: self.tone_detection,
                 tone_detection_duration_s: self.tone_detection_duration_s,
             },
+            thread_id,
         );
 
         tokio::spawn(handler.run());

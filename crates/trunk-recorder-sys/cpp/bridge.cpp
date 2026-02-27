@@ -6,6 +6,8 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <json.hpp>
+using json = nlohmann::json;
 
 #ifdef TR_LIBRARY_MODE
 #include "trunk-recorder/trunk_context.h"

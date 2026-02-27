@@ -1,12 +1,15 @@
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use serenity::model::id::ChannelId;
-use tokio::sync::{RwLock, mpsc};
+use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing::Instrument;
 use trunk_oxide_proto as proto;
 use proto::types::{SysNum, Talkgroup};
+
+use trunk_database::Database;
 
 use proto::plugin_event::Event;
 
@@ -39,9 +42,13 @@ pub struct Dispatcher {
     channel_id: ChannelId,
     tone_detection: bool,
     tone_detection_duration_s: f32,
+    db: Arc<Mutex<Database>>,
+    db_path: PathBuf,
+    current_hour: RwLock<String>,
 }
 
 impl Dispatcher {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         whisperer: WhispererConnection,
         discord: Arc<DiscordClient>,
@@ -50,7 +57,10 @@ impl Dispatcher {
         channel_id: ChannelId,
         tone_detection: bool,
         tone_detection_duration_s: f32,
+        db: Arc<Mutex<Database>>,
+        db_path: PathBuf,
     ) -> Self {
+        let current_hour = Utc::now().format("%Y-%m-%dT%H").to_string();
         Self {
             calls: RwLock::new(HashMap::new()),
             thread_cache: RwLock::new(HashMap::new()),
@@ -61,6 +71,40 @@ impl Dispatcher {
             channel_id,
             tone_detection,
             tone_detection_duration_s,
+            db,
+            db_path,
+            current_hour: RwLock::new(current_hour),
+        }
+    }
+
+    async fn ensure_current_hour(&self) {
+        let now_hour = Utc::now().format("%Y-%m-%dT%H").to_string();
+        let current = self.current_hour.read().await;
+        if *current == now_hour {
+            return;
+        }
+        drop(current);
+
+        let mut current = self.current_hour.write().await;
+        // Double-check after acquiring write lock
+        if *current == now_hour {
+            return;
+        }
+
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+        match Database::open_hourly(&self.db_path, &now_hour) {
+            Ok(new_db) => {
+                let mut db = self.db.lock().await;
+                if let Err(e) = new_db.copy_threads_from(&db, &today) {
+                    tracing::warn!(error = %e, "failed to copy thread cache to new hourly db");
+                }
+                *db = new_db;
+                *current = now_hour;
+                tracing::info!(hour = %*current, "rotated to new hourly database");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to open new hourly database");
+            }
         }
     }
 
@@ -126,6 +170,8 @@ impl Dispatcher {
     async fn handle_call_start(&self, event: proto::CallStartEvent) {
         let Some(call) = event.call else { return };
 
+        self.ensure_current_hour().await;
+
         let talkgroup = Talkgroup(call.talkgroup);
         let sys_num = SysNum(call.sys_num);
 
@@ -142,6 +188,7 @@ impl Dispatcher {
             date: date_str.clone(),
         };
 
+        // Check in-memory cache first, then DB
         let thread_id = {
             let cache = self.thread_cache.read().await;
             cache.get(&cache_key).copied()
@@ -150,39 +197,90 @@ impl Dispatcher {
         let thread_id = match thread_id {
             Some(id) => id,
             None => {
-                let tag = if call.talkgroup_tag.is_empty() {
-                    call.talkgroup_display.clone()
-                } else {
-                    call.talkgroup_tag.clone()
+                // Check DB for thread from earlier this session/hour
+                let db_thread = {
+                    let db = self.db.lock().await;
+                    db.get_thread(sys_num, talkgroup, &date_str)
+                        .unwrap_or(None)
+                        .and_then(|id| {
+                            std::num::NonZeroU64::new(id).map(ChannelId::from)
+                        })
                 };
 
-                let thread_name = format!("TG {} - {} [{}]", call.talkgroup, tag, date_str);
-                let thread_name = if thread_name.len() > 100 {
-                    thread_name[..100].to_string()
+                if let Some(id) = db_thread {
+                    self.thread_cache.write().await.insert(cache_key, id);
+                    id
                 } else {
-                    thread_name
-                };
+                    let tag = if call.talkgroup_tag.is_empty() {
+                        call.talkgroup_display.clone()
+                    } else {
+                        call.talkgroup_tag.clone()
+                    };
 
-                match self
-                    .discord
-                    .create_call_thread(self.channel_id, &thread_name)
-                    .await
-                {
-                    Ok(id) => {
-                        self.thread_cache
-                            .write()
-                            .await
-                            .insert(cache_key, id);
-                        id
+                    let thread_name = format!("TG {} - {} [{}]", call.talkgroup, tag, date_str);
+                    let thread_name = if thread_name.len() > 100 {
+                        thread_name[..100].to_string()
+                    } else {
+                        thread_name
+                    };
+
+                    match self
+                        .discord
+                        .create_call_thread(self.channel_id, &thread_name)
+                        .await
+                    {
+                        Ok(id) => {
+                            self.thread_cache
+                                .write()
+                                .await
+                                .insert(cache_key, id);
+
+                            // Persist to DB
+                            let db = self.db.lock().await;
+                            if let Err(e) = db.set_thread(sys_num, talkgroup, &date_str, id.get()) {
+                                tracing::warn!(error = %e, "failed to persist thread to db");
+                            }
+
+                            id
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                talkgroup = call.talkgroup,
+                                error = %e,
+                                "failed to create discord thread"
+                            );
+                            return;
+                        }
                     }
-                    Err(e) => {
-                        tracing::error!(
-                            talkgroup = call.talkgroup,
-                            error = %e,
-                            "failed to create discord thread"
-                        );
-                        return;
-                    }
+                }
+            }
+        };
+
+        // Insert call record into DB
+        let call_row_id = {
+            let tag = if call.talkgroup_tag.is_empty() {
+                &call.talkgroup_display
+            } else {
+                &call.talkgroup_tag
+            };
+            let record = trunk_database::CallRecord {
+                talkgroup,
+                sys_num,
+                freq: proto::types::Freq(call.freq),
+                encrypted: call.encrypted,
+                emergency: call.emergency,
+                start_time: call.start_time,
+                tag: tag.to_string(),
+                short_name: call.short_name.clone(),
+                thread_id: Some(thread_id.get()),
+                embed_message_id: None,
+            };
+            let db = self.db.lock().await;
+            match db.insert_call(&record) {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to insert call into db");
+                    None
                 }
             }
         };
@@ -208,6 +306,8 @@ impl Dispatcher {
                 tone_detection_duration_s: self.tone_detection_duration_s,
             },
             thread_id,
+            Arc::clone(&self.db),
+            call_row_id,
         );
 
         tokio::spawn(handler.run().instrument(span));

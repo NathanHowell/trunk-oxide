@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 trunk-oxide-proto.workspace = true
+trunk-database.workspace = true
 tonic.workspace = true
 tonic-health.workspace = true
 tonic-prost.workspace = true

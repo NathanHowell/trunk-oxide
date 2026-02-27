@@ -8,11 +8,13 @@ mod grpc_whisperer;
 mod resampler;
 mod tone_detect;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
 use clap::Parser;
 use opentelemetry::trace::TracerProvider;
+use tokio::sync::Mutex;
 use tracing_subscriber::prelude::*;
 
 mod proto {
@@ -28,6 +30,10 @@ struct Args {
     /// Discord bot token (use @/path/to/file to read from file)
     #[arg(long)]
     discord_token: Option<String>,
+
+    /// Directory for hourly SQLite databases
+    #[arg(long, default_value = "/var/lib/trunk-discord/db")]
+    db_path: PathBuf,
 }
 
 #[tokio::main]
@@ -102,10 +108,16 @@ async fn main() -> Result<()> {
         "connected to trunk-whisperer"
     );
 
+    let hour = chrono::Utc::now().format("%Y-%m-%dT%H").to_string();
+    let db = trunk_database::Database::open_hourly(&args.db_path, &hour)?;
+    let db = Arc::new(Mutex::new(db));
+    tracing::info!(path = %args.db_path.display(), hour, "opened initial database");
+
     let discord_client = Arc::new(discord::DiscordClient::new(&config.discord));
     let aggregator = Arc::new(aggregator::Aggregator::new(
         Arc::clone(&discord_client),
         config.discord.channel_id,
+        Arc::clone(&db),
     ));
 
     let dispatcher = Arc::new(dispatcher::Dispatcher::new(
@@ -116,6 +128,8 @@ async fn main() -> Result<()> {
         config.discord.channel_id,
         config.audio.tone_detection,
         config.audio.tone_detection_duration_s,
+        Arc::clone(&db),
+        args.db_path,
     ));
 
     discord_client

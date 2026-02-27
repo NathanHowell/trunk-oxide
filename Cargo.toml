@@ -7,6 +7,7 @@ members = [
     "crates/trunk-oxide-grpc",
     "crates/trunk-oxide",
     "crates/trunk-whisperer",
+    "crates/trunk-database",
     "crates/trunk-discord",
     "crates/trunk-solver",
 ]
@@ -17,6 +18,7 @@ default-members = [
     "crates/trunk-recorder-plugin",
     "crates/trunk-oxide-proto",
     "crates/trunk-oxide-grpc",
+    "crates/trunk-database",
     "crates/trunk-whisperer",
     "crates/trunk-discord",
     "crates/trunk-solver",
@@ -48,6 +50,7 @@ trunk-recorder-plugin = { path = "crates/trunk-recorder-plugin" }
 trunk-oxide = { path = "crates/trunk-oxide" }
 trunk-oxide-proto = { path = "crates/trunk-oxide-proto" }
 trunk-oxide-grpc = { path = "crates/trunk-oxide-grpc" }
+trunk-database = { path = "crates/trunk-database" }
 anyhow = "1"
 chrono = "0.4"
 cxx = "1"
@@ -81,6 +84,8 @@ argfile = "0.2"
 wild = "2"
 z3 = { version = "0.19", features = ["gh-release"] }
 csv = "1"
+rusqlite = { version = "0.34", features = ["bundled"] }
+sha2 = "0.10"
 
 [profile.release]
 debug = 2

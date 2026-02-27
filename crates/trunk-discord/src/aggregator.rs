@@ -6,11 +6,12 @@ use anyhow::Result;
 use chrono::Utc;
 use serenity::all::CreateEmbed;
 use serenity::model::id::{ChannelId, MessageId};
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 use tokio::time::{self, Duration};
 use trunk_oxide_proto as proto;
 
 use crate::discord::DiscordClient;
+use trunk_database::Database;
 
 pub enum AggregatorMessage {
     Signal(Box<proto::SignalEvent>),
@@ -30,13 +31,14 @@ pub struct Aggregator {
 }
 
 impl Aggregator {
-    pub fn new(discord: Arc<DiscordClient>, channel_id: ChannelId) -> Self {
+    pub fn new(discord: Arc<DiscordClient>, channel_id: ChannelId, db: Arc<Mutex<Database>>) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
 
         let inner = AggregatorInner {
             discord,
             channel_id,
             rx,
+            db,
             current_thread_id: None,
             current_hour: String::new(),
             // Setup event dedup
@@ -71,6 +73,7 @@ struct AggregatorInner {
     discord: Arc<DiscordClient>,
     channel_id: ChannelId,
     rx: mpsc::UnboundedReceiver<AggregatorMessage>,
+    db: Arc<Mutex<Database>>,
     current_thread_id: Option<ChannelId>,
     current_hour: String,
 
@@ -302,6 +305,28 @@ impl AggregatorInner {
     async fn flush(&mut self) {
         if !self.has_activity() {
             return;
+        }
+
+        // Snapshot counters for DB before build_activity_embed drains them
+        let snapshot = trunk_database::ActivitySnapshot {
+            timestamp: Utc::now().timestamp(),
+            signal_counts: self.signal_counts.clone(),
+            trunk_msg_counts: self.trunk_message_counts.clone(),
+            unit_counts: self.unit_counts.clone(),
+            decode_rates: self.latest_rates.as_ref().map(|r| {
+                r.systems
+                    .iter()
+                    .map(|s| (s.short_name.clone(), s.decode_rate))
+                    .collect()
+            }),
+            active_calls: self.latest_calls_active,
+        };
+
+        {
+            let db = self.db.lock().await;
+            if let Err(e) = db.insert_activity(&snapshot) {
+                tracing::warn!(error = %e, "failed to insert activity snapshot into db");
+            }
         }
 
         if let Err(e) = self.ensure_hourly_thread().await {

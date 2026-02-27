@@ -5,9 +5,11 @@ use anyhow::Result;
 use chrono::{DateTime, Utc};
 use serenity::all::{CreateEmbed, CreateEmbedFooter};
 use serenity::model::id::{ChannelId, MessageId};
-use tokio::sync::mpsc;
+use tokio::sync::{Mutex, mpsc};
 use trunk_oxide_proto as proto;
-use proto::types::{Freq, SignalDb};
+use proto::types::{CallRowId, Freq, SignalDb};
+
+use trunk_database::Database;
 
 use crate::discord::DiscordClient;
 use crate::grpc_whisperer::WhispererConnection;
@@ -52,6 +54,10 @@ pub struct CallHandler {
     call_end_signal: Option<SignalDb>,
     start_time_str: String,
     tag: String,
+
+    // Database
+    db: Arc<Mutex<Database>>,
+    call_row_id: Option<CallRowId>,
 }
 
 impl CallHandler {
@@ -62,6 +68,8 @@ impl CallHandler {
         discord: Arc<DiscordClient>,
         config: CallHandlerConfig,
         thread_id: ChannelId,
+        db: Arc<Mutex<Database>>,
+        call_row_id: Option<CallRowId>,
     ) -> Self {
         let detect_ctcss = config.tone_detection && call_info.is_conventional;
         let tone_detector = if config.tone_detection {
@@ -104,6 +112,8 @@ impl CallHandler {
             call_end_signal: None,
             start_time_str,
             tag,
+            db,
+            call_row_id,
         }
     }
 
@@ -363,6 +373,33 @@ impl CallHandler {
             self.call_end_signal = data.signal.map(SignalDb);
         }
         self.update_embed().await?;
+
+        // Persist final call state to DB
+        if let Some(row_id) = self.call_row_id {
+            let update = trunk_database::CallUpdate {
+                duration: self.call_end_duration,
+                signal: self.call_end_signal,
+                transcription: if self.transcription_text.is_empty() {
+                    None
+                } else {
+                    Some(self.transcription_text.clone())
+                },
+                tones: if self.detected_tones.is_empty() {
+                    None
+                } else {
+                    Some(self.detected_tones.clone())
+                },
+                events: if self.events.is_empty() {
+                    None
+                } else {
+                    Some(self.events.clone())
+                },
+            };
+            let db = self.db.lock().await;
+            if let Err(e) = db.update_call(row_id, &update) {
+                tracing::warn!(error = %e, "failed to update call in db");
+            }
+        }
 
         tracing::info!("call ended");
 

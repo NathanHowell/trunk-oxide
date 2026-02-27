@@ -37,7 +37,6 @@ impl Aggregator {
             discord,
             channel_id,
             rx,
-            buffer: Vec::new(),
             current_thread_id: None,
             current_hour: String::new(),
             // Setup event dedup
@@ -51,6 +50,7 @@ impl Aggregator {
             // System activity embed
             activity_embed_id: None,
             // Aggregated counters
+            signal_counts: HashMap::new(),
             trunk_message_counts: HashMap::new(),
             unit_counts: HashMap::new(),
             latest_rates: None,
@@ -71,7 +71,6 @@ struct AggregatorInner {
     discord: Arc<DiscordClient>,
     channel_id: u64,
     rx: mpsc::UnboundedReceiver<AggregatorMessage>,
-    buffer: Vec<String>,
     current_thread_id: Option<ChannelId>,
     current_hour: String,
 
@@ -89,10 +88,11 @@ struct AggregatorInner {
     activity_embed_id: Option<MessageId>,
 
     // Aggregated counters (flushed periodically)
+    signal_counts: HashMap<String, u64>,               // signal_type -> count
     trunk_message_counts: HashMap<String, (u64, u64)>, // sys_name -> (messages, batches)
     unit_counts: HashMap<String, u64>,                  // event_type -> count
-    latest_rates: Option<String>,
-    latest_calls_active: Option<String>,
+    latest_rates: Option<proto::SystemRatesEvent>,
+    latest_calls_active: Option<usize>,
 }
 
 impl AggregatorInner {
@@ -165,9 +165,10 @@ impl AggregatorInner {
                     self.update_recorder_embed().await;
                 }
             }
-            // Signals are kept as individual lines (relatively rare)
+            // Signals: aggregate by type
             AggregatorMessage::Signal(e) => {
-                self.buffer.push(format_signal(&e));
+                let signal_type = format_signal_type(e.signal_type);
+                *self.signal_counts.entry(signal_type).or_insert(0) += 1;
             }
             // Trunk messages: aggregate counts per system
             AggregatorMessage::TrunkMessage(e) => {
@@ -187,10 +188,10 @@ impl AggregatorInner {
             }
             // Rates / calls active: keep only latest
             AggregatorMessage::SystemRates(e) => {
-                self.latest_rates = Some(format_system_rates(&e));
+                self.latest_rates = Some(e);
             }
             AggregatorMessage::CallsActive(e) => {
-                self.latest_calls_active = Some(format_calls_active(&e));
+                self.latest_calls_active = Some(e.calls.len());
             }
         }
     }
@@ -234,44 +235,72 @@ impl AggregatorInner {
         }
     }
 
-    fn drain_aggregated(&mut self) {
-        // Trunk message summaries
-        if !self.trunk_message_counts.is_empty() {
-            let mut systems: Vec<_> = self.trunk_message_counts.drain().collect();
-            systems.sort_by(|a, b| a.0.cmp(&b.0));
-            let summaries: Vec<String> = systems
-                .into_iter()
-                .map(|(name, (msgs, batches))| format!("{name}: {msgs} msgs ({batches} batches)"))
-                .collect();
-            self.buffer.push(format!("Trunk: {}", summaries.join(", ")));
-        }
+    fn has_activity(&self) -> bool {
+        !self.signal_counts.is_empty()
+            || !self.trunk_message_counts.is_empty()
+            || !self.unit_counts.is_empty()
+            || self.latest_rates.is_some()
+            || self.latest_calls_active.is_some()
+    }
 
-        // Unit event summaries
-        if !self.unit_counts.is_empty() {
-            let mut types: Vec<_> = self.unit_counts.drain().collect();
+    fn build_activity_embed(&mut self) -> CreateEmbed {
+        let mut embed = CreateEmbed::new()
+            .title("System Activity")
+            .colour(0x95a5a6_u32); // grey
+
+        // Signals: "12 NORMAL, 2 EMERGENCY"
+        if !self.signal_counts.is_empty() {
+            let mut types: Vec<_> = self.signal_counts.drain().collect();
             types.sort_by(|a, b| a.0.cmp(&b.0));
-            let summaries: Vec<String> = types
+            let text: Vec<String> = types
                 .into_iter()
                 .map(|(typ, count)| format!("{count} {typ}"))
                 .collect();
-            self.buffer.push(format!("Units: {}", summaries.join(", ")));
+            embed = embed.field("Signals", text.join(", "), false);
         }
 
-        // Latest rates snapshot
+        // Trunk messages: "smco: 1364 msgs (1280 batches)"
+        if !self.trunk_message_counts.is_empty() {
+            let mut systems: Vec<_> = self.trunk_message_counts.drain().collect();
+            systems.sort_by(|a, b| a.0.cmp(&b.0));
+            let text: Vec<String> = systems
+                .into_iter()
+                .map(|(name, (msgs, batches))| format!("{name}: {msgs} msgs ({batches} batches)"))
+                .collect();
+            embed = embed.field("Trunk Messages", text.join("\n"), false);
+        }
+
+        // Unit events: "4 ACKNOWLEDGE_RESPONSE, 3 DATA_GRANT"
+        if !self.unit_counts.is_empty() {
+            let mut types: Vec<_> = self.unit_counts.drain().collect();
+            types.sort_by(|a, b| a.0.cmp(&b.0));
+            let text: Vec<String> = types
+                .into_iter()
+                .map(|(typ, count)| format!("{count} {typ}"))
+                .collect();
+            embed = embed.field("Unit Events", text.join(", "), false);
+        }
+
+        // Rates: inline fields per system
         if let Some(rates) = self.latest_rates.take() {
-            self.buffer.push(rates);
+            let text: Vec<String> = rates
+                .systems
+                .iter()
+                .map(|s| format!("{}: {} msg/s", s.short_name, s.decode_rate))
+                .collect();
+            embed = embed.field("Decode Rates", text.join(", "), true);
         }
 
-        // Latest calls active snapshot
-        if let Some(calls) = self.latest_calls_active.take() {
-            self.buffer.push(calls);
+        // Active calls
+        if let Some(count) = self.latest_calls_active.take() {
+            embed = embed.field("Active Calls", count.to_string(), true);
         }
+
+        embed
     }
 
     async fn flush(&mut self) {
-        self.drain_aggregated();
-
-        if self.buffer.is_empty() {
+        if !self.has_activity() {
             return;
         }
 
@@ -284,22 +313,7 @@ impl AggregatorInner {
             return;
         };
 
-        // Build description from buffered lines (truncate to fit embed limit)
-        let mut description = String::new();
-        for line in self.buffer.drain(..) {
-            if !description.is_empty() {
-                description.push('\n');
-            }
-            description.push_str(&line);
-            if description.len() > 4000 {
-                break;
-            }
-        }
-
-        let embed = CreateEmbed::new()
-            .title("System Activity")
-            .colour(0x95a5a6_u32) // grey
-            .description(description);
+        let embed = self.build_activity_embed();
 
         if let Some(msg_id) = self.activity_embed_id {
             if let Err(e) = self.discord.edit_embed(thread_id, msg_id, embed).await {
@@ -436,17 +450,16 @@ fn build_recorder_table(recorders: &HashMap<i32, proto::RecorderInfo>) -> String
     table
 }
 
-fn format_signal(e: &proto::SignalEvent) -> String {
-    let signal_type = proto::SignalType::try_from(e.signal_type).map_or_else(
-        |_| format!("UNKNOWN({})", e.signal_type),
+fn format_signal_type(signal_type: i32) -> String {
+    proto::SignalType::try_from(signal_type).map_or_else(
+        |_| format!("UNKNOWN({signal_type})"),
         |st| {
             st.as_str_name()
                 .strip_prefix("SIGNAL_TYPE_")
                 .unwrap_or(st.as_str_name())
                 .to_string()
         },
-    );
-    format!("Signal: unit {} - {signal_type}", e.unit_id)
+    )
 }
 
 fn format_unit_type(r#type: i32) -> String {
@@ -461,15 +474,3 @@ fn format_unit_type(r#type: i32) -> String {
     )
 }
 
-fn format_system_rates(e: &proto::SystemRatesEvent) -> String {
-    let rates: Vec<String> = e
-        .systems
-        .iter()
-        .map(|s| format!("{}: {}msg/s", s.short_name, s.decode_rate))
-        .collect();
-    format!("Rates: {}", rates.join(", "))
-}
-
-fn format_calls_active(e: &proto::CallsActiveEvent) -> String {
-    format!("Active calls: {}", e.calls.len())
-}

@@ -1,5 +1,8 @@
 tonic::include_proto!("trunk_oxide");
 
+pub mod types;
+pub use types::*;
+
 #[cfg(test)]
 mod tests {
     use super::*;

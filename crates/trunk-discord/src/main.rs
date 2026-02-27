@@ -119,10 +119,7 @@ async fn main() -> Result<()> {
     ));
 
     discord_client
-        .send_message(
-            serenity::model::id::ChannelId::new(config.discord.channel_id),
-            "trunk-discord is now online.",
-        )
+        .send_message(config.discord.channel_id, "trunk-discord is now online.")
         .await?;
 
     tracing::info!(

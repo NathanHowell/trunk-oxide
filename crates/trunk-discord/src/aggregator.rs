@@ -30,7 +30,7 @@ pub struct Aggregator {
 }
 
 impl Aggregator {
-    pub fn new(discord: Arc<DiscordClient>, channel_id: u64) -> Self {
+    pub fn new(discord: Arc<DiscordClient>, channel_id: ChannelId) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
 
         let inner = AggregatorInner {
@@ -69,7 +69,7 @@ impl Aggregator {
 
 struct AggregatorInner {
     discord: Arc<DiscordClient>,
-    channel_id: u64,
+    channel_id: ChannelId,
     rx: mpsc::UnboundedReceiver<AggregatorMessage>,
     current_thread_id: Option<ChannelId>,
     current_hour: String,

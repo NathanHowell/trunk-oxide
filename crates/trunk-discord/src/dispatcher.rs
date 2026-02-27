@@ -6,6 +6,7 @@ use serenity::model::id::ChannelId;
 use tokio::sync::{RwLock, mpsc};
 use tracing::Instrument;
 use trunk_oxide_proto as proto;
+use proto::types::{SysNum, Talkgroup};
 
 use proto::plugin_event::Event;
 
@@ -16,15 +17,15 @@ use crate::grpc_whisperer::WhispererConnection;
 
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 struct CallKey {
-    sys_num: i32,
-    talkgroup: i64,
+    sys_num: SysNum,
+    talkgroup: Talkgroup,
 }
 
 /// Key for reusing Discord threads: one thread per talkgroup per day.
 #[derive(Debug, Clone, Hash, Eq, PartialEq)]
 struct ThreadCacheKey {
-    sys_num: i32,
-    talkgroup: i64,
+    sys_num: SysNum,
+    talkgroup: Talkgroup,
     date: String, // "YYYY-MM-DD"
 }
 
@@ -35,7 +36,7 @@ pub struct Dispatcher {
     discord: Arc<DiscordClient>,
     aggregator: Arc<Aggregator>,
     buffer_duration_ms: u64,
-    channel_id: u64,
+    channel_id: ChannelId,
     tone_detection: bool,
     tone_detection_duration_s: f32,
 }
@@ -46,7 +47,7 @@ impl Dispatcher {
         discord: Arc<DiscordClient>,
         aggregator: Arc<Aggregator>,
         buffer_duration_ms: u64,
-        channel_id: u64,
+        channel_id: ChannelId,
         tone_detection: bool,
         tone_detection_duration_s: f32,
     ) -> Self {
@@ -73,8 +74,8 @@ impl Dispatcher {
         }
 
         let key = CallKey {
-            sys_num: sample.sys_num,
-            talkgroup: sample.talkgroup,
+            sys_num: SysNum(sample.sys_num),
+            talkgroup: Talkgroup(sample.talkgroup),
         };
 
         let calls = self.calls.read().await;
@@ -125,10 +126,10 @@ impl Dispatcher {
     async fn handle_call_start(&self, event: proto::CallStartEvent) {
         let Some(call) = event.call else { return };
 
-        let key = CallKey {
-            sys_num: call.sys_num,
-            talkgroup: call.talkgroup,
-        };
+        let talkgroup = Talkgroup(call.talkgroup);
+        let sys_num = SysNum(call.sys_num);
+
+        let key = CallKey { sys_num, talkgroup };
 
         // Look up or create a per-talkgroup-per-day thread
         let start_time =
@@ -136,8 +137,8 @@ impl Dispatcher {
         let date_str = start_time.format("%Y-%m-%d").to_string();
 
         let cache_key = ThreadCacheKey {
-            sys_num: call.sys_num,
-            talkgroup: call.talkgroup,
+            sys_num,
+            talkgroup,
             date: date_str.clone(),
         };
 
@@ -220,8 +221,8 @@ impl Dispatcher {
         };
 
         let key = CallKey {
-            sys_num: call_data.sys_num,
-            talkgroup: call_data.talkgroup,
+            sys_num: SysNum(call_data.sys_num),
+            talkgroup: Talkgroup(call_data.talkgroup),
         };
 
         let tx = self.calls.write().await.remove(&key);
@@ -235,8 +236,8 @@ impl Dispatcher {
     async fn handle_signal(&self, event: proto::SignalEvent) {
         if let Some(call) = &event.call {
             let key = CallKey {
-                sys_num: call.sys_num,
-                talkgroup: call.talkgroup,
+                sys_num: SysNum(call.sys_num),
+                talkgroup: Talkgroup(call.talkgroup),
             };
             let calls = self.calls.read().await;
             if let Some(tx) = calls.get(&key) {
@@ -253,8 +254,8 @@ impl Dispatcher {
         if event.talkgroup != 0 {
             if let Some(system) = &event.system {
                 let key = CallKey {
-                    sys_num: system.sys_num,
-                    talkgroup: event.talkgroup,
+                    sys_num: SysNum(system.sys_num),
+                    talkgroup: Talkgroup(event.talkgroup),
                 };
                 let calls = self.calls.read().await;
                 if let Some(tx) = calls.get(&key) {

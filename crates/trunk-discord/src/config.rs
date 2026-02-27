@@ -1,5 +1,6 @@
 use anyhow::Result;
 use serde::Deserialize;
+use serenity::model::id::ChannelId;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -36,7 +37,15 @@ fn default_whisperer_socket() -> String {
 pub struct DiscordConfig {
     #[serde(default)]
     pub bot_token: String,
-    pub channel_id: u64,
+    #[serde(deserialize_with = "deserialize_channel_id")]
+    pub channel_id: ChannelId,
+}
+
+fn deserialize_channel_id<'de, D: serde::Deserializer<'de>>(d: D) -> Result<ChannelId, D::Error> {
+    let id = u64::deserialize(d)?;
+    std::num::NonZeroU64::new(id)
+        .map(ChannelId::from)
+        .ok_or_else(|| serde::de::Error::custom("channel_id must be non-zero"))
 }
 
 #[derive(Debug, Deserialize)]

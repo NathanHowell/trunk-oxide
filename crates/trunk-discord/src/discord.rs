@@ -16,9 +16,8 @@ impl DiscordClient {
         }
     }
 
-    pub async fn create_call_thread(&self, channel_id: u64, name: &str) -> Result<ChannelId> {
-        let channel = ChannelId::new(channel_id);
-        let thread = channel
+    pub async fn create_call_thread(&self, channel_id: ChannelId, name: &str) -> Result<ChannelId> {
+        let thread = channel_id
             .create_thread(
                 &self.http,
                 CreateThread::new(name)

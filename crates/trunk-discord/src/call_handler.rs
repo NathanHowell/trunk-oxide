@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -6,6 +7,7 @@ use serenity::all::{CreateEmbed, CreateEmbedFooter};
 use serenity::model::id::{ChannelId, MessageId};
 use tokio::sync::mpsc;
 use trunk_oxide_proto as proto;
+use proto::types::{Freq, SignalDb};
 
 use crate::discord::DiscordClient;
 use crate::grpc_whisperer::WhispererConnection;
@@ -46,8 +48,8 @@ pub struct CallHandler {
     detected_tones: Vec<String>,
     events: Vec<String>,
     call_ended: bool,
-    call_end_duration: Option<f64>,
-    call_end_signal: Option<f64>,
+    call_end_duration: Option<Duration>,
+    call_end_signal: Option<SignalDb>,
     start_time_str: String,
     tag: String,
 }
@@ -173,11 +175,7 @@ impl CallHandler {
 
         // Always-present fields
         embed = embed
-            .field(
-                "Frequency",
-                format!("{:.4} MHz", self.call_info.freq / 1_000_000.0),
-                true,
-            )
+            .field("Frequency", Freq(self.call_info.freq).to_string(), true)
             .field("System", &self.call_info.short_name, true);
 
         if self.call_info.encrypted {
@@ -196,12 +194,12 @@ impl CallHandler {
 
         // End-of-call fields
         if let Some(duration) = self.call_end_duration {
-            if duration > 0.0 {
-                embed = embed.field("Duration", format!("{duration:.1}s"), true);
+            if !duration.is_zero() {
+                embed = embed.field("Duration", format!("{:.1}s", duration.as_secs_f64()), true);
             }
         }
         if let Some(signal) = self.call_end_signal {
-            embed = embed.field("Signal", format!("{signal:.1} dB"), true);
+            embed = embed.field("Signal", signal.to_string(), true);
         }
 
         embed = embed.footer(CreateEmbedFooter::new(&self.start_time_str));
@@ -361,8 +359,8 @@ impl CallHandler {
         // Update embed with end-of-call data
         self.call_ended = true;
         if let Some(data) = &call_data {
-            self.call_end_duration = Some(data.length);
-            self.call_end_signal = data.signal;
+            self.call_end_duration = Some(Duration::from_secs_f64(data.length));
+            self.call_end_signal = data.signal.map(SignalDb);
         }
         self.update_embed().await?;
 

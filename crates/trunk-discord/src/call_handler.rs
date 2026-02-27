@@ -87,11 +87,7 @@ impl CallHandler {
             .unwrap_or_else(Utc::now);
         let start_time_str = start_time.format("%H:%M:%S UTC").to_string();
 
-        let tag = if call_info.talkgroup_tag.is_empty() {
-            call_info.talkgroup_display.clone()
-        } else {
-            call_info.talkgroup_tag.clone()
-        };
+        let tag = call_info.talkgroup.to_string();
 
         Self {
             call_info,

@@ -92,8 +92,7 @@ message CallInfo {
   int64 start_time = 20;
   int64 elapsed = 21;
   string short_name = 22;
-  string talkgroup_display = 23;
-  string talkgroup_tag = 24;
+  reserved 23, 24; // removed: talkgroup_display, talkgroup_tag
   int32 state = 25;
   int32 monitoring_state = 26;
 }
@@ -174,11 +173,7 @@ message CallData {
   int64 talkgroup = 1;
   uint32 color_code = 2;
   repeated uint64 patched_talkgroups = 3;
-  string talkgroup_tag = 4;
-  string talkgroup_alpha_tag = 5;
-  string talkgroup_description = 6;
-  string talkgroup_display = 7;
-  string talkgroup_group = 8;
+  reserved 4, 5, 6, 7, 8; // removed: talkgroup descriptive fields
   int64 call_num = 9;
   double freq = 10;
   int32 freq_error = 11;

@@ -13,11 +13,13 @@ WORKDIR /build
 # Copy workspace manifests and lockfile first for dependency caching
 COPY Cargo.toml Cargo.lock ./
 COPY crates/trunk-discord/Cargo.toml crates/trunk-discord/Cargo.toml
-COPY crates/trunk-discord/build.rs crates/trunk-discord/build.rs
-COPY crates/trunk-discord/proto crates/trunk-discord/proto
 COPY crates/trunk-oxide-proto/Cargo.toml crates/trunk-oxide-proto/Cargo.toml
 COPY crates/trunk-oxide-proto/build.rs crates/trunk-oxide-proto/build.rs
 COPY crates/trunk-oxide-proto/proto crates/trunk-oxide-proto/proto
+COPY crates/trunk-whisperer-proto/Cargo.toml crates/trunk-whisperer-proto/Cargo.toml
+COPY crates/trunk-whisperer-proto/build.rs crates/trunk-whisperer-proto/build.rs
+COPY crates/trunk-whisperer-proto/proto crates/trunk-whisperer-proto/proto
+COPY crates/trunk-config/Cargo.toml crates/trunk-config/Cargo.toml
 
 # Stub workspace members that trunk-discord doesn't depend on
 COPY crates/trunk-oxide-grpc/Cargo.toml crates/trunk-oxide-grpc/Cargo.toml
@@ -46,6 +48,10 @@ RUN mkdir -p crates/trunk-discord/src \
     && echo "" > crates/trunk-oxide/src/lib.rs \
     && mkdir -p crates/trunk-solver/src \
     && echo "fn main() {}" > crates/trunk-solver/src/main.rs \
+    && mkdir -p crates/trunk-whisperer-proto/src \
+    && echo "" > crates/trunk-whisperer-proto/src/lib.rs \
+    && mkdir -p crates/trunk-config/src \
+    && echo "" > crates/trunk-config/src/lib.rs \
     && mkdir -p crates/trunk-database/src \
     && echo "" > crates/trunk-database/src/lib.rs
 
@@ -54,10 +60,12 @@ RUN cargo build --release -p trunk-discord || true
 # Copy real sources and rebuild
 COPY crates/trunk-discord/src crates/trunk-discord/src
 COPY crates/trunk-oxide-proto/src crates/trunk-oxide-proto/src
+COPY crates/trunk-whisperer-proto/src crates/trunk-whisperer-proto/src
+COPY crates/trunk-config/src crates/trunk-config/src
 COPY crates/trunk-database/src crates/trunk-database/src
 
 # Touch sources to invalidate the stub build artifacts
-RUN touch crates/trunk-discord/src/main.rs crates/trunk-oxide-proto/src/lib.rs crates/trunk-database/src/lib.rs
+RUN touch crates/trunk-discord/src/main.rs crates/trunk-oxide-proto/src/lib.rs crates/trunk-whisperer-proto/src/lib.rs crates/trunk-config/src/lib.rs crates/trunk-database/src/lib.rs
 
 RUN cargo build --release -p trunk-discord
 

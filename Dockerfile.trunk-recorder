@@ -75,6 +75,7 @@ COPY crates/trunk-recorder-sys/Cargo.toml crates/trunk-recorder-sys/Cargo.toml
 COPY crates/trunk-recorder-sys/build.rs crates/trunk-recorder-sys/build.rs
 COPY crates/trunk-recorder-sys/cpp crates/trunk-recorder-sys/cpp
 COPY crates/trunk-recorder-plugin/Cargo.toml crates/trunk-recorder-plugin/Cargo.toml
+COPY crates/trunk-config/Cargo.toml crates/trunk-config/Cargo.toml
 
 # Stub workspace members not needed for this build
 COPY crates/trunk-whisperer/Cargo.toml crates/trunk-whisperer/Cargo.toml
@@ -105,6 +106,8 @@ RUN mkdir -p crates/trunk-oxide/src \
     && echo "fn main() {}" > crates/trunk-solver/src/main.rs \
     && mkdir -p crates/trunk-database/src \
     && echo "" > crates/trunk-database/src/lib.rs \
+    && mkdir -p crates/trunk-config/src \
+    && echo "" > crates/trunk-config/src/lib.rs \
     && mkdir -p crates/trunk-whisperer-proto/src \
     && echo "" > crates/trunk-whisperer-proto/src/lib.rs
 

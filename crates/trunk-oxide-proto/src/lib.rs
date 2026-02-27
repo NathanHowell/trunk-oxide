@@ -186,7 +186,6 @@ mod tests {
                             sys_num: 1,
                             freq: 772_406_250.0,
                             short_name: "smco".to_string(),
-                            talkgroup_display: "FD Dispatch".to_string(),
                             ..Default::default()
                         }),
                     })),

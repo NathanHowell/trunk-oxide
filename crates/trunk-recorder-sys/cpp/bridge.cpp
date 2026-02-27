@@ -12,6 +12,9 @@ using json = nlohmann::json;
 #ifdef TR_LIBRARY_MODE
 #include "trunk-recorder/trunk_context.h"
 #include "trunk-recorder/event_sink.h"
+#include "trunk-recorder/source.h"
+#include "trunk-recorder/systems/system.h"
+#include "trunk-recorder/talkgroup.h"
 #include <thread>
 
 // Forward declarations for functions provided by libtrunk-recorder.so
@@ -183,11 +186,6 @@ static TrCallData convert_call_data(const Call_Data_t &cd) {
     }
     out.patched_talkgroups = std::move(patched);
 
-    out.talkgroup_tag = rust::String(cd.talkgroup_tag);
-    out.talkgroup_alpha_tag = rust::String(cd.talkgroup_alpha_tag);
-    out.talkgroup_description = rust::String(cd.talkgroup_description);
-    out.talkgroup_display = rust::String(cd.talkgroup_display);
-    out.talkgroup_group = rust::String(cd.talkgroup_group);
     out.call_num = cd.call_num;
     out.freq = cd.freq;
     out.freq_error = cd.freq_error;
@@ -456,8 +454,6 @@ double call_get_current_length(const TrCall &call) { return call.ptr->get_curren
 int64_t call_get_start_time(const TrCall &call) { return static_cast<int64_t>(call.ptr->get_start_time()); }
 int64_t call_elapsed(const TrCall &call) { return static_cast<int64_t>(call.ptr->elapsed().count()); }
 rust::String call_get_short_name(const TrCall &call) { return rust::String(call.ptr->get_short_name()); }
-rust::String call_get_talkgroup_display(const TrCall &call) { return rust::String(call.ptr->get_talkgroup_display()); }
-rust::String call_get_talkgroup_tag(const TrCall &call) { return rust::String(call.ptr->get_talkgroup_tag()); }
 TrState call_get_state(const TrCall &call) { return convert_state(call.ptr->get_state()); }
 TrMonitoringState call_get_monitoring_state(const TrCall &call) { return convert_monitoring_state(call.ptr->get_monitoring_state()); }
 
@@ -554,8 +550,6 @@ public:
         call_info.short_name = sys->get_short_name();
         call_info.call_num = call->get_call_num();
         call_info.talkgroup = call->get_talkgroup();
-        call_info.talkgroup_display = call->get_talkgroup_display();
-        call_info.talkgroup_tag = call->get_talkgroup_tag();
         call_info.patched_talkgroups = sys->get_talkgroup_patch(call_info.talkgroup);
         call_info.color_code = 0;
         call_info.start_time = call->get_start_time();
@@ -701,10 +695,321 @@ void tr_stop(TrContext &ctx) {
     ctx.impl->trunk_ctx.tb->wait();
 }
 
+// ── Builder: create empty context ──
+
+std::unique_ptr<TrContext> tr_create_from_builder(rust::Box<RustPluginBox> plugin) {
+    auto ctx = std::make_unique<TrContext>();
+    ctx->impl->bridge = std::make_shared<RustPluginBridge>(std::move(plugin));
+    ctx->impl->trunk_ctx.config.event_sink = std::make_shared<CxxEventSink>(ctx->impl->bridge);
+    ctx->impl->trunk_ctx.tb = gr::make_top_block("Trunking");
+    return ctx;
+}
+
+// ── Builder: finalize (setup_systems + plugin callbacks) ──
+
+void tr_finalize(TrContext &ctx) {
+    setup_systems(ctx.impl->trunk_ctx.config, ctx.impl->trunk_ctx.tb,
+                  ctx.impl->trunk_ctx.sources, ctx.impl->trunk_ctx.systems,
+                  ctx.impl->trunk_ctx.calls);
+
+    ctx.impl->bridge->setup_config(ctx.impl->trunk_ctx.sources,
+                                   ctx.impl->trunk_ctx.systems);
+    for (auto &sys : ctx.impl->trunk_ctx.systems) {
+        ctx.impl->bridge->setup_system(sys);
+    }
+    ctx.impl->bridge->start();
+}
+
+// ── Config builder implementations ──
+
+void tr_config_set_temp_dir(TrContext &ctx, rust::Str dir) {
+    ctx.impl->trunk_ctx.config.temp_dir = std::string(dir.data(), dir.size());
+}
+
+void tr_config_set_call_timeout(TrContext &ctx, double seconds) {
+    ctx.impl->trunk_ctx.config.call_timeout = std::chrono::duration<double>(seconds);
+}
+
+void tr_config_set_control_warn_rate(TrContext &ctx, int32_t rate) {
+    ctx.impl->trunk_ctx.config.control_message_warn_rate = rate;
+}
+
+void tr_config_set_control_retune_limit(TrContext &ctx, int32_t limit) {
+    ctx.impl->trunk_ctx.config.control_retune_limit = limit;
+}
+
+void tr_config_set_broadcast_signals(TrContext &ctx, bool enabled) {
+    ctx.impl->trunk_ctx.config.broadcast_signals = enabled;
+}
+
+void tr_config_set_soft_vocoder(TrContext &ctx, bool enabled) {
+    ctx.impl->trunk_ctx.config.soft_vocoder = enabled;
+}
+
+void tr_config_set_record_uu_v_calls(TrContext &ctx, bool enabled) {
+    ctx.impl->trunk_ctx.config.record_uu_v_calls = enabled;
+}
+
+void tr_config_set_new_call_from_update(TrContext &ctx, bool enabled) {
+    ctx.impl->trunk_ctx.config.new_call_from_update = enabled;
+}
+
+void tr_config_set_frequency_format(TrContext &ctx, int32_t format) {
+    ctx.impl->trunk_ctx.config.frequency_format = format;
+}
+
+void tr_config_set_default_mode(TrContext &ctx, rust::Str mode) {
+    ctx.impl->trunk_ctx.config.default_mode = std::string(mode.data(), mode.size());
+}
+
+void tr_config_set_debug_recorder(TrContext &ctx, bool enabled, rust::Str address, int32_t port) {
+    ctx.impl->trunk_ctx.config.debug_recorder = enabled;
+    ctx.impl->trunk_ctx.config.debug_recorder_address = std::string(address.data(), address.size());
+    ctx.impl->trunk_ctx.config.debug_recorder_port = port;
+}
+
+// ── Source builder implementations ──
+
+int32_t tr_add_source(TrContext &ctx, rust::Str driver, rust::Str device,
+                      double center, double rate, double error) {
+    std::string drv(driver.data(), driver.size());
+    std::string dev(device.data(), device.size());
+    auto source = std::make_shared<Source>(center, rate, error, drv, dev, ctx.impl->trunk_ctx.config);
+    source->init_shared();
+    int32_t idx = static_cast<int32_t>(ctx.impl->trunk_ctx.sources.size());
+    ctx.impl->trunk_ctx.sources.push_back(source);
+    return idx;
+}
+
+void tr_source_set_gain(TrContext &ctx, int32_t idx, double gain) {
+    ctx.impl->trunk_ctx.sources.at(idx)->set_gain(gain);
+}
+
+void tr_source_set_gain_by_name(TrContext &ctx, int32_t idx, rust::Str name, double gain) {
+    ctx.impl->trunk_ctx.sources.at(idx)->set_gain_by_name(
+        std::string(name.data(), name.size()), gain);
+}
+
+void tr_source_set_antenna(TrContext &ctx, int32_t idx, rust::Str antenna) {
+    ctx.impl->trunk_ctx.sources.at(idx)->set_antenna(
+        std::string(antenna.data(), antenna.size()));
+}
+
+void tr_source_set_freq_corr(TrContext &ctx, int32_t idx, double ppm) {
+    ctx.impl->trunk_ctx.sources.at(idx)->set_freq_corr(ppm);
+}
+
+void tr_source_set_gain_mode(TrContext &ctx, int32_t idx, bool agc) {
+    ctx.impl->trunk_ctx.sources.at(idx)->set_gain_mode(agc);
+}
+
+void tr_source_set_silence_frames(TrContext &ctx, int32_t idx, int32_t frames) {
+    ctx.impl->trunk_ctx.sources.at(idx)->set_silence_frames(frames);
+}
+
+void tr_source_set_signal_detector_threshold(TrContext &ctx, int32_t idx, float threshold) {
+    ctx.impl->trunk_ctx.sources.at(idx)->set_signal_detector_threshold(threshold);
+}
+
+void tr_source_create_digital_recorders(TrContext &ctx, int32_t idx, int32_t count) {
+    ctx.impl->trunk_ctx.sources.at(idx)->create_digital_recorders(ctx.impl->trunk_ctx.tb, count);
+}
+
+void tr_source_create_analog_recorders(TrContext &ctx, int32_t idx, int32_t count) {
+    ctx.impl->trunk_ctx.sources.at(idx)->create_analog_recorders(ctx.impl->trunk_ctx.tb, count);
+}
+
+void tr_source_create_sigmf_recorders(TrContext &ctx, int32_t idx, int32_t count) {
+    ctx.impl->trunk_ctx.sources.at(idx)->create_sigmf_recorders(ctx.impl->trunk_ctx.tb, count);
+}
+
+// ── System builder implementations ──
+
+// Forward declaration for system_type_from_string (from global_structs.h/cc)
+extern SystemType system_type_from_string(const std::string &s);
+
+int32_t tr_add_system(TrContext &ctx, rust::Str short_name, rust::Str system_type) {
+    int32_t sys_idx = static_cast<int32_t>(ctx.impl->trunk_ctx.systems.size());
+    auto system = System::make(sys_idx);
+    system->set_short_name(std::string(short_name.data(), short_name.size()));
+    std::string type_str(system_type.data(), system_type.size());
+    system->set_system_type(system_type_from_string(type_str));
+    ctx.impl->trunk_ctx.systems.push_back(system);
+    return sys_idx;
+}
+
+void tr_system_add_control_channel(TrContext &ctx, int32_t sys_idx, double freq) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->add_control_channel(freq);
+}
+
+void tr_system_add_channel(TrContext &ctx, int32_t sys_idx, double freq) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->add_channel(freq);
+}
+
+void tr_system_set_qpsk_mod(TrContext &ctx, int32_t sys_idx, bool qpsk) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_qpsk_mod(qpsk);
+}
+
+void tr_system_set_squelch_db(TrContext &ctx, int32_t sys_idx, double db) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_squelch_db(db);
+}
+
+void tr_system_set_analog_levels(TrContext &ctx, int32_t sys_idx, double level) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_analog_levels(level);
+}
+
+void tr_system_set_digital_levels(TrContext &ctx, int32_t sys_idx, double level) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_digital_levels(level);
+}
+
+void tr_system_set_tau(TrContext &ctx, int32_t sys_idx, float tau) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_tau(tau);
+}
+
+void tr_system_set_max_dev(TrContext &ctx, int32_t sys_idx, int32_t max_dev) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_max_dev(max_dev);
+}
+
+void tr_system_set_filter_width(TrContext &ctx, int32_t sys_idx, double width) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_filter_width(width);
+}
+
+void tr_system_set_conversation_mode(TrContext &ctx, int32_t sys_idx, bool mode) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_conversation_mode(mode);
+}
+
+void tr_system_set_record_unknown(TrContext &ctx, int32_t sys_idx, bool record) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_record_unknown(record);
+}
+
+void tr_system_set_min_duration(TrContext &ctx, int32_t sys_idx, double duration) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_min_duration(duration);
+}
+
+void tr_system_set_max_duration(TrContext &ctx, int32_t sys_idx, double duration) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_max_duration(duration);
+}
+
+void tr_system_set_min_tx_duration(TrContext &ctx, int32_t sys_idx, double duration) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_min_tx_duration(duration);
+}
+
+void tr_system_set_hide_encrypted(TrContext &ctx, int32_t sys_idx, bool hide) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_hideEncrypted(hide);
+}
+
+void tr_system_set_monitor_encrypted(TrContext &ctx, int32_t sys_idx, bool monitor) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_monitorEncrypted(monitor);
+}
+
+void tr_system_set_hide_unknown(TrContext &ctx, int32_t sys_idx, bool hide) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_hideUnknown(hide);
+}
+
+void tr_system_set_mdc_enabled(TrContext &ctx, int32_t sys_idx, bool enabled) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_mdc_enabled(enabled);
+}
+
+void tr_system_set_fsync_enabled(TrContext &ctx, int32_t sys_idx, bool enabled) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_fsync_enabled(enabled);
+}
+
+void tr_system_set_star_enabled(TrContext &ctx, int32_t sys_idx, bool enabled) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_star_enabled(enabled);
+}
+
+void tr_system_set_tps_enabled(TrContext &ctx, int32_t sys_idx, bool enabled) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_tps_enabled(enabled);
+}
+
+void tr_system_set_bandplan(TrContext &ctx, int32_t sys_idx, rust::Str bandplan) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_bandplan(
+        std::string(bandplan.data(), bandplan.size()));
+}
+
+void tr_system_set_bandfreq(TrContext &ctx, int32_t sys_idx, int32_t freq) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_bandfreq(freq);
+}
+
+void tr_system_set_bandplan_base(TrContext &ctx, int32_t sys_idx, double base) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_bandplan_base(base);
+}
+
+void tr_system_set_bandplan_high(TrContext &ctx, int32_t sys_idx, double high) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_bandplan_high(high);
+}
+
+void tr_system_set_bandplan_spacing(TrContext &ctx, int32_t sys_idx, double spacing) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_bandplan_spacing(spacing);
+}
+
+void tr_system_set_bandplan_offset(TrContext &ctx, int32_t sys_idx, int32_t offset) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_bandplan_offset(offset);
+}
+
+void tr_system_set_xor_mask(TrContext &ctx, int32_t sys_idx, uint64_t sys_id,
+                            uint64_t wacn, uint64_t nac) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_xor_mask(sys_id, wacn, nac);
+}
+
+void tr_system_set_multi_site(TrContext &ctx, int32_t sys_idx, bool multi_site) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_multiSite(multi_site);
+}
+
+void tr_system_set_multi_site_name(TrContext &ctx, int32_t sys_idx, rust::Str name) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_multiSiteSystemName(
+        std::string(name.data(), name.size()));
+}
+
+void tr_system_set_multi_site_number(TrContext &ctx, int32_t sys_idx, uint64_t number) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_multiSiteSystemNumber(number);
+}
+
+// ── Talkgroup/Channel builder implementations ──
+
+void tr_system_add_talkgroup(TrContext &ctx, int32_t sys_idx,
+                             int64_t id, rust::Str mode, int32_t priority, uint64_t preferred_nac) {
+    auto &sys = ctx.impl->trunk_ctx.systems.at(sys_idx);
+    std::string mode_str(mode.data(), mode.size());
+    auto tg = std::make_shared<Talkgroup>(sys->get_sys_num(), id, mode_str, priority, preferred_nac);
+    sys->add_talkgroup(tg);
+}
+
+void tr_system_add_conventional_channel(TrContext &ctx, int32_t sys_idx,
+                                        int64_t tg_number, double freq, double tone,
+                                        double squelch_db, bool signal_detection) {
+    auto &sys = ctx.impl->trunk_ctx.systems.at(sys_idx);
+    auto tg = std::make_shared<Talkgroup>(sys->get_sys_num(), tg_number, freq, tone, squelch_db, signal_detection);
+    sys->add_talkgroup(tg);
+    sys->add_channel(freq);
+}
+
+// ── Unit tag builder implementations ──
+
+void tr_system_add_unit_tag(TrContext &ctx, int32_t sys_idx,
+                            rust::Str pattern, rust::Str tag) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->add_unit_tag(
+        std::string(pattern.data(), pattern.size()),
+        std::string(tag.data(), tag.size()));
+}
+
+void tr_system_set_unit_tags_mode(TrContext &ctx, int32_t sys_idx, rust::Str mode) {
+    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_unit_tags_mode(
+        std::string(mode.data(), mode.size()));
+}
+
 #else // !TR_LIBRARY_MODE — stubs for dlopen plugin mode
 
 std::unique_ptr<TrContext> tr_create(rust::Str /*config_json*/,
                                      rust::Box<RustPluginBox> /*plugin*/) {
+    std::abort();
+}
+
+std::unique_ptr<TrContext> tr_create_from_builder(rust::Box<RustPluginBox> /*plugin*/) {
+    std::abort();
+}
+
+void tr_finalize(TrContext & /*ctx*/) {
     std::abort();
 }
 
@@ -715,6 +1020,66 @@ void tr_start(TrContext & /*ctx*/) {
 void tr_stop(TrContext & /*ctx*/) {
     std::abort();
 }
+
+// Builder stubs — all abort in plugin mode
+void tr_config_set_temp_dir(TrContext &, rust::Str) { std::abort(); }
+void tr_config_set_call_timeout(TrContext &, double) { std::abort(); }
+void tr_config_set_control_warn_rate(TrContext &, int32_t) { std::abort(); }
+void tr_config_set_control_retune_limit(TrContext &, int32_t) { std::abort(); }
+void tr_config_set_broadcast_signals(TrContext &, bool) { std::abort(); }
+void tr_config_set_soft_vocoder(TrContext &, bool) { std::abort(); }
+void tr_config_set_record_uu_v_calls(TrContext &, bool) { std::abort(); }
+void tr_config_set_new_call_from_update(TrContext &, bool) { std::abort(); }
+void tr_config_set_frequency_format(TrContext &, int32_t) { std::abort(); }
+void tr_config_set_default_mode(TrContext &, rust::Str) { std::abort(); }
+void tr_config_set_debug_recorder(TrContext &, bool, rust::Str, int32_t) { std::abort(); }
+int32_t tr_add_source(TrContext &, rust::Str, rust::Str, double, double, double) { std::abort(); }
+void tr_source_set_gain(TrContext &, int32_t, double) { std::abort(); }
+void tr_source_set_gain_by_name(TrContext &, int32_t, rust::Str, double) { std::abort(); }
+void tr_source_set_antenna(TrContext &, int32_t, rust::Str) { std::abort(); }
+void tr_source_set_freq_corr(TrContext &, int32_t, double) { std::abort(); }
+void tr_source_set_gain_mode(TrContext &, int32_t, bool) { std::abort(); }
+void tr_source_set_silence_frames(TrContext &, int32_t, int32_t) { std::abort(); }
+void tr_source_set_signal_detector_threshold(TrContext &, int32_t, float) { std::abort(); }
+void tr_source_create_digital_recorders(TrContext &, int32_t, int32_t) { std::abort(); }
+void tr_source_create_analog_recorders(TrContext &, int32_t, int32_t) { std::abort(); }
+void tr_source_create_sigmf_recorders(TrContext &, int32_t, int32_t) { std::abort(); }
+int32_t tr_add_system(TrContext &, rust::Str, rust::Str) { std::abort(); }
+void tr_system_add_control_channel(TrContext &, int32_t, double) { std::abort(); }
+void tr_system_add_channel(TrContext &, int32_t, double) { std::abort(); }
+void tr_system_set_qpsk_mod(TrContext &, int32_t, bool) { std::abort(); }
+void tr_system_set_squelch_db(TrContext &, int32_t, double) { std::abort(); }
+void tr_system_set_analog_levels(TrContext &, int32_t, double) { std::abort(); }
+void tr_system_set_digital_levels(TrContext &, int32_t, double) { std::abort(); }
+void tr_system_set_tau(TrContext &, int32_t, float) { std::abort(); }
+void tr_system_set_max_dev(TrContext &, int32_t, int32_t) { std::abort(); }
+void tr_system_set_filter_width(TrContext &, int32_t, double) { std::abort(); }
+void tr_system_set_conversation_mode(TrContext &, int32_t, bool) { std::abort(); }
+void tr_system_set_record_unknown(TrContext &, int32_t, bool) { std::abort(); }
+void tr_system_set_min_duration(TrContext &, int32_t, double) { std::abort(); }
+void tr_system_set_max_duration(TrContext &, int32_t, double) { std::abort(); }
+void tr_system_set_min_tx_duration(TrContext &, int32_t, double) { std::abort(); }
+void tr_system_set_hide_encrypted(TrContext &, int32_t, bool) { std::abort(); }
+void tr_system_set_monitor_encrypted(TrContext &, int32_t, bool) { std::abort(); }
+void tr_system_set_hide_unknown(TrContext &, int32_t, bool) { std::abort(); }
+void tr_system_set_mdc_enabled(TrContext &, int32_t, bool) { std::abort(); }
+void tr_system_set_fsync_enabled(TrContext &, int32_t, bool) { std::abort(); }
+void tr_system_set_star_enabled(TrContext &, int32_t, bool) { std::abort(); }
+void tr_system_set_tps_enabled(TrContext &, int32_t, bool) { std::abort(); }
+void tr_system_set_bandplan(TrContext &, int32_t, rust::Str) { std::abort(); }
+void tr_system_set_bandfreq(TrContext &, int32_t, int32_t) { std::abort(); }
+void tr_system_set_bandplan_base(TrContext &, int32_t, double) { std::abort(); }
+void tr_system_set_bandplan_high(TrContext &, int32_t, double) { std::abort(); }
+void tr_system_set_bandplan_spacing(TrContext &, int32_t, double) { std::abort(); }
+void tr_system_set_bandplan_offset(TrContext &, int32_t, int32_t) { std::abort(); }
+void tr_system_set_xor_mask(TrContext &, int32_t, uint64_t, uint64_t, uint64_t) { std::abort(); }
+void tr_system_set_multi_site(TrContext &, int32_t, bool) { std::abort(); }
+void tr_system_set_multi_site_name(TrContext &, int32_t, rust::Str) { std::abort(); }
+void tr_system_set_multi_site_number(TrContext &, int32_t, uint64_t) { std::abort(); }
+void tr_system_add_talkgroup(TrContext &, int32_t, int64_t, rust::Str, int32_t, uint64_t) { std::abort(); }
+void tr_system_add_conventional_channel(TrContext &, int32_t, int64_t, double, double, double, bool) { std::abort(); }
+void tr_system_add_unit_tag(TrContext &, int32_t, rust::Str, rust::Str) { std::abort(); }
+void tr_system_set_unit_tags_mode(TrContext &, int32_t, rust::Str) { std::abort(); }
 
 #endif // TR_LIBRARY_MODE
 

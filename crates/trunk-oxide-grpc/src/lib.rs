@@ -18,7 +18,7 @@ fn call_info(call: &TrCall) -> proto::CallInfo {
         call_get_freq, call_get_freq_error, call_get_is_analog, call_get_mode,
         call_get_monitoring_state, call_get_noise, call_get_phase2_tdma, call_get_priority,
         call_get_short_name, call_get_signal, call_get_start_time, call_get_state,
-        call_get_sys_num, call_get_talkgroup, call_get_talkgroup_display, call_get_talkgroup_tag,
+        call_get_sys_num, call_get_talkgroup,
         call_get_tdma_slot, call_is_conventional,
     };
     proto::CallInfo {
@@ -44,8 +44,6 @@ fn call_info(call: &TrCall) -> proto::CallInfo {
         start_time: call_get_start_time(call),
         elapsed: call_elapsed(call),
         short_name: call_get_short_name(call),
-        talkgroup_display: call_get_talkgroup_display(call),
-        talkgroup_tag: call_get_talkgroup_tag(call),
         state: i32::from(call_get_state(call).repr),
         monitoring_state: i32::from(call_get_monitoring_state(call).repr),
     }
@@ -104,11 +102,6 @@ fn convert_call_data(cd: &TrCallData) -> proto::CallData {
         talkgroup: cd.talkgroup,
         color_code: cd.color_code,
         patched_talkgroups: cd.patched_talkgroups.clone(),
-        talkgroup_tag: cd.talkgroup_tag.clone(),
-        talkgroup_alpha_tag: cd.talkgroup_alpha_tag.clone(),
-        talkgroup_description: cd.talkgroup_description.clone(),
-        talkgroup_display: cd.talkgroup_display.clone(),
-        talkgroup_group: cd.talkgroup_group.clone(),
         call_num: cd.call_num,
         freq: cd.freq,
         freq_error: cd.freq_error,

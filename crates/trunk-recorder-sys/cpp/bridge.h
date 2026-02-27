@@ -66,8 +66,6 @@ double call_get_current_length(const TrCall &call);
 int64_t call_get_start_time(const TrCall &call);
 int64_t call_elapsed(const TrCall &call);
 rust::String call_get_short_name(const TrCall &call);
-rust::String call_get_talkgroup_display(const TrCall &call);
-rust::String call_get_talkgroup_tag(const TrCall &call);
 TrState call_get_state(const TrCall &call);
 TrMonitoringState call_get_monitoring_state(const TrCall &call);
 
@@ -113,7 +111,83 @@ struct TrContext {
 // ── Lifecycle functions ──
 std::unique_ptr<TrContext> tr_create(rust::Str config_json,
                                      rust::Box<RustPluginBox> plugin);
+std::unique_ptr<TrContext> tr_create_from_builder(rust::Box<RustPluginBox> plugin);
+void tr_finalize(TrContext &ctx);
 void tr_start(TrContext &ctx);
 void tr_stop(TrContext &ctx);
+
+// ── Config builder functions ──
+void tr_config_set_temp_dir(TrContext &ctx, rust::Str dir);
+void tr_config_set_call_timeout(TrContext &ctx, double seconds);
+void tr_config_set_control_warn_rate(TrContext &ctx, int32_t rate);
+void tr_config_set_control_retune_limit(TrContext &ctx, int32_t limit);
+void tr_config_set_broadcast_signals(TrContext &ctx, bool enabled);
+void tr_config_set_soft_vocoder(TrContext &ctx, bool enabled);
+void tr_config_set_record_uu_v_calls(TrContext &ctx, bool enabled);
+void tr_config_set_new_call_from_update(TrContext &ctx, bool enabled);
+void tr_config_set_frequency_format(TrContext &ctx, int32_t format);
+void tr_config_set_default_mode(TrContext &ctx, rust::Str mode);
+void tr_config_set_debug_recorder(TrContext &ctx, bool enabled, rust::Str address, int32_t port);
+
+// ── Source builder functions ──
+int32_t tr_add_source(TrContext &ctx, rust::Str driver, rust::Str device,
+                      double center, double rate, double error);
+void tr_source_set_gain(TrContext &ctx, int32_t idx, double gain);
+void tr_source_set_gain_by_name(TrContext &ctx, int32_t idx, rust::Str name, double gain);
+void tr_source_set_antenna(TrContext &ctx, int32_t idx, rust::Str antenna);
+void tr_source_set_freq_corr(TrContext &ctx, int32_t idx, double ppm);
+void tr_source_set_gain_mode(TrContext &ctx, int32_t idx, bool agc);
+void tr_source_set_silence_frames(TrContext &ctx, int32_t idx, int32_t frames);
+void tr_source_set_signal_detector_threshold(TrContext &ctx, int32_t idx, float threshold);
+void tr_source_create_digital_recorders(TrContext &ctx, int32_t idx, int32_t count);
+void tr_source_create_analog_recorders(TrContext &ctx, int32_t idx, int32_t count);
+void tr_source_create_sigmf_recorders(TrContext &ctx, int32_t idx, int32_t count);
+
+// ── System builder functions ──
+int32_t tr_add_system(TrContext &ctx, rust::Str short_name, rust::Str system_type);
+void tr_system_add_control_channel(TrContext &ctx, int32_t sys_idx, double freq);
+void tr_system_add_channel(TrContext &ctx, int32_t sys_idx, double freq);
+void tr_system_set_qpsk_mod(TrContext &ctx, int32_t sys_idx, bool qpsk);
+void tr_system_set_squelch_db(TrContext &ctx, int32_t sys_idx, double db);
+void tr_system_set_analog_levels(TrContext &ctx, int32_t sys_idx, double level);
+void tr_system_set_digital_levels(TrContext &ctx, int32_t sys_idx, double level);
+void tr_system_set_tau(TrContext &ctx, int32_t sys_idx, float tau);
+void tr_system_set_max_dev(TrContext &ctx, int32_t sys_idx, int32_t max_dev);
+void tr_system_set_filter_width(TrContext &ctx, int32_t sys_idx, double width);
+void tr_system_set_conversation_mode(TrContext &ctx, int32_t sys_idx, bool mode);
+void tr_system_set_record_unknown(TrContext &ctx, int32_t sys_idx, bool record);
+void tr_system_set_min_duration(TrContext &ctx, int32_t sys_idx, double duration);
+void tr_system_set_max_duration(TrContext &ctx, int32_t sys_idx, double duration);
+void tr_system_set_min_tx_duration(TrContext &ctx, int32_t sys_idx, double duration);
+void tr_system_set_hide_encrypted(TrContext &ctx, int32_t sys_idx, bool hide);
+void tr_system_set_monitor_encrypted(TrContext &ctx, int32_t sys_idx, bool monitor);
+void tr_system_set_hide_unknown(TrContext &ctx, int32_t sys_idx, bool hide);
+void tr_system_set_mdc_enabled(TrContext &ctx, int32_t sys_idx, bool enabled);
+void tr_system_set_fsync_enabled(TrContext &ctx, int32_t sys_idx, bool enabled);
+void tr_system_set_star_enabled(TrContext &ctx, int32_t sys_idx, bool enabled);
+void tr_system_set_tps_enabled(TrContext &ctx, int32_t sys_idx, bool enabled);
+void tr_system_set_bandplan(TrContext &ctx, int32_t sys_idx, rust::Str bandplan);
+void tr_system_set_bandfreq(TrContext &ctx, int32_t sys_idx, int32_t freq);
+void tr_system_set_bandplan_base(TrContext &ctx, int32_t sys_idx, double base);
+void tr_system_set_bandplan_high(TrContext &ctx, int32_t sys_idx, double high);
+void tr_system_set_bandplan_spacing(TrContext &ctx, int32_t sys_idx, double spacing);
+void tr_system_set_bandplan_offset(TrContext &ctx, int32_t sys_idx, int32_t offset);
+void tr_system_set_xor_mask(TrContext &ctx, int32_t sys_idx, uint64_t sys_id,
+                            uint64_t wacn, uint64_t nac);
+void tr_system_set_multi_site(TrContext &ctx, int32_t sys_idx, bool multi_site);
+void tr_system_set_multi_site_name(TrContext &ctx, int32_t sys_idx, rust::Str name);
+void tr_system_set_multi_site_number(TrContext &ctx, int32_t sys_idx, uint64_t number);
+
+// ── Talkgroup/Channel builder functions ──
+void tr_system_add_talkgroup(TrContext &ctx, int32_t sys_idx,
+                             int64_t id, rust::Str mode, int32_t priority, uint64_t preferred_nac);
+void tr_system_add_conventional_channel(TrContext &ctx, int32_t sys_idx,
+                                        int64_t tg_number, double freq, double tone,
+                                        double squelch_db, bool signal_detection);
+
+// ── Unit tag builder functions ──
+void tr_system_add_unit_tag(TrContext &ctx, int32_t sys_idx,
+                            rust::Str pattern, rust::Str tag);
+void tr_system_set_unit_tags_mode(TrContext &ctx, int32_t sys_idx, rust::Str mode);
 
 } // namespace trunk_oxide

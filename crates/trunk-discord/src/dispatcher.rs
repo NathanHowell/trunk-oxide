@@ -210,11 +210,6 @@ impl Dispatcher {
 
         // Insert call record into DB
         let call_row_id = {
-            let tag = if call.talkgroup_tag.is_empty() {
-                &call.talkgroup_display
-            } else {
-                &call.talkgroup_tag
-            };
             let record = trunk_database::CallRecord {
                 talkgroup,
                 sys_num,
@@ -222,7 +217,7 @@ impl Dispatcher {
                 encrypted: call.encrypted,
                 emergency: call.emergency,
                 start_time: call.start_time,
-                tag: (*tag).clone(),
+                tag: call.talkgroup.to_string(),
                 short_name: call.short_name.clone(),
                 thread_id: Some(thread_id.get()),
                 embed_message_id: None,
@@ -288,13 +283,7 @@ impl Dispatcher {
             return Some(id);
         }
 
-        let tag = if call.talkgroup_tag.is_empty() {
-            call.talkgroup_display.clone()
-        } else {
-            call.talkgroup_tag.clone()
-        };
-
-        let thread_name = format!("TG {} - {} [{}]", call.talkgroup, tag, date_str);
+        let thread_name = format!("TG {} [{}]", call.talkgroup, date_str);
         let thread_name = if thread_name.len() > 100 {
             thread_name[..100].to_string()
         } else {

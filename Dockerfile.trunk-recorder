@@ -3,29 +3,44 @@
 
 FROM rust:trixie AS builder
 
+# Install gnuradio component libs (for linking) and build tools.
+# gnuradio-dev is extracted manually below to avoid pulling in the gnuradio
+# meta-package (which drags in Qt5, Qt6, PyQt, OpenMPI, python, etc.).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
     cmake \
-    gnuradio-dev \
     gr-osmosdr \
     libairspy-dev \
     libairspyhf-dev \
     libbladerf-dev \
-    libboost-all-dev \
-    libgmp-dev \
-    liborc-0.4-dev \
+    libboost-dev \
+    libboost-log-dev \
+    libfmt-dev \
+    libspdlog-dev \
+    libgnuradio-analog3.10.12 \
+    libgnuradio-audio3.10.12 \
+    libgnuradio-blocks3.10.12 \
+    libgnuradio-digital3.10.12 \
+    libgnuradio-fft3.10.12 \
+    libgnuradio-filter3.10.12 \
+    libgnuradio-pmt3.10.12 \
+    libgnuradio-runtime3.10.12 \
+    libgnuradio-uhd3.10.12 \
     libosmosdr-dev \
-    libpthread-stubs0-dev \
     librtlsdr-dev \
     libsoapysdr-dev \
     libuhd-dev \
     libusb-dev \
     libusb-1.0-0-dev \
-    libfmt-dev \
     mold \
     pkg-config \
-    && rm -rf /var/lib/apt/lists/*
+    protobuf-compiler \
+    && apt-get download gnuradio-dev \
+    && dpkg -x gnuradio-dev_*.deb / \
+    && rm gnuradio-dev_*.deb \
+    && rm -rf /var/lib/apt/lists/* \
+    && ldconfig
 
 # rust-lld does not support --require-defined; use mold for the final link
 ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-Clink-arg=-fuse-ld=mold"
@@ -113,10 +128,17 @@ FROM debian:trixie-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
-    gnuradio \
-    gr-osmosdr \
     libboost-log1.83.0 \
-    libsoapysdr0.8 \
+    libgnuradio-analog3.10.12 \
+    libgnuradio-audio3.10.12 \
+    libgnuradio-blocks3.10.12 \
+    libgnuradio-digital3.10.12 \
+    libgnuradio-fft3.10.12 \
+    libgnuradio-filter3.10.12 \
+    libgnuradio-pmt3.10.12 \
+    libgnuradio-runtime3.10.12 \
+    libgnuradio-uhd3.10.12 \
+    libgnuradio-osmosdr0.2.0t64 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=health-probe /ko-app/grpc-health-probe /usr/local/bin/grpc_health_probe

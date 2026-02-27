@@ -36,17 +36,35 @@ pub async fn run(
 
     let dispatcher_events = Arc::clone(&dispatcher);
     let event_handle = tokio::spawn(async move {
-        while let Ok(Some(event)) = event_stream.message().await {
-            dispatcher_events.handle_event(event).await;
+        loop {
+            match event_stream.message().await {
+                Ok(Some(event)) => dispatcher_events.handle_event(event).await,
+                Ok(None) => {
+                    tracing::info!("event stream closed by server");
+                    break;
+                }
+                Err(status) => {
+                    tracing::error!(%status, "event stream error");
+                    break;
+                }
+            }
         }
-        tracing::info!("event stream ended");
     });
 
     let audio_handle = tokio::spawn(async move {
-        while let Ok(Some(sample)) = audio_stream.message().await {
-            dispatcher.handle_audio(sample).await;
+        loop {
+            match audio_stream.message().await {
+                Ok(Some(sample)) => dispatcher.handle_audio(sample).await,
+                Ok(None) => {
+                    tracing::info!("audio stream closed by server");
+                    break;
+                }
+                Err(status) => {
+                    tracing::error!(%status, "audio stream error");
+                    break;
+                }
+            }
         }
-        tracing::info!("audio stream ended");
     });
 
     let (event_result, audio_result) = tokio::join!(event_handle, audio_handle);

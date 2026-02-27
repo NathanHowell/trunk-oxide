@@ -20,6 +20,7 @@ services:
       - ./conventional-channels.csv:/app/conventional-channels.csv:ro
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
+      - RUST_LOG=info
     healthcheck:
       test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr", "unix:///run/service/grpc.sock"]
       interval: 5s
@@ -87,6 +88,7 @@ services:
     command: ["--discord-token", "@/run/secrets/discord_token"]
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
+      - RUST_LOG=info
     healthcheck:
       test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr", "unix:///run/service/grpc.sock"]
       interval: 5s

@@ -282,6 +282,7 @@ impl TrunkOxide for TrunkOxideService {
         &self,
         _request: Request<()>,
     ) -> std::result::Result<Response<Self::SubscribeEventsStream>, Status> {
+        tracing::info!("client subscribed to events");
         let mut broadcast_rx = self.event_tx.subscribe();
         let (tx, rx) = tokio::sync::mpsc::channel(4096);
 
@@ -290,13 +291,17 @@ impl TrunkOxide for TrunkOxideService {
                 match broadcast_rx.recv().await {
                     Ok(event) => {
                         if tx.send(Ok(event)).await.is_err() {
+                            tracing::info!("event subscriber disconnected");
                             break;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!(skipped = n, "event subscriber lagged");
                     }
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Closed) => {
+                        tracing::warn!("event broadcast channel closed");
+                        break;
+                    }
                 }
             }
         });
@@ -308,6 +313,7 @@ impl TrunkOxide for TrunkOxideService {
         &self,
         _request: Request<()>,
     ) -> std::result::Result<Response<Self::SubscribeAudioStream>, Status> {
+        tracing::info!("client subscribed to audio");
         let mut broadcast_rx = self.audio_tx.subscribe();
         let (tx, rx) = tokio::sync::mpsc::channel(4096);
 
@@ -316,13 +322,17 @@ impl TrunkOxide for TrunkOxideService {
                 match broadcast_rx.recv().await {
                     Ok(sample) => {
                         if tx.send(Ok(sample)).await.is_err() {
+                            tracing::info!("audio subscriber disconnected");
                             break;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
                         tracing::warn!(skipped = n, "audio subscriber lagged");
                     }
-                    Err(broadcast::error::RecvError::Closed) => break,
+                    Err(broadcast::error::RecvError::Closed) => {
+                        tracing::warn!("audio broadcast channel closed");
+                        break;
+                    }
                 }
             }
         });
@@ -366,8 +376,40 @@ impl GrpcPlugin {
 
     fn send_event(&self, event: proto::plugin_event::Event) {
         if let Some(tx) = &self.event_tx {
+            let event_type = match &event {
+                proto::plugin_event::Event::Signal(_) => "signal",
+                proto::plugin_event::Event::CallStart(_) => "call_start",
+                proto::plugin_event::Event::CallEnd(_) => "call_end",
+                proto::plugin_event::Event::CallsActive(_) => "calls_active",
+                proto::plugin_event::Event::TrunkMessage(_) => "trunk_message",
+                proto::plugin_event::Event::Unit(_) => "unit",
+                proto::plugin_event::Event::SystemRates(_) => "system_rates",
+                proto::plugin_event::Event::SetupRecorder(_) => "setup_recorder",
+                proto::plugin_event::Event::SetupSystem(_) => "setup_system",
+                proto::plugin_event::Event::SetupSystems(_) => "setup_systems",
+                proto::plugin_event::Event::SetupSources(_) => "setup_sources",
+                proto::plugin_event::Event::SetupConfig(_) => "setup_config",
+            };
             let msg = proto::PluginEvent { event: Some(event) };
-            // broadcast::send fails only when there are no receivers — that's fine.
+
+            // Sanity-check: encode the message to verify it round-trips.
+            use prost::Message;
+            let encoded_len = msg.encoded_len();
+            let mut buf = Vec::with_capacity(encoded_len);
+            if let Err(e) = msg.encode(&mut buf) {
+                tracing::error!(event_type, error = %e, "failed to encode PluginEvent — dropping");
+                return;
+            }
+            if let Err(e) = proto::PluginEvent::decode(buf.as_slice()) {
+                tracing::error!(
+                    event_type,
+                    encoded_len,
+                    error = %e,
+                    "PluginEvent fails round-trip decode — dropping"
+                );
+                return;
+            }
+
             let _ = tx.send(msg);
         }
     }

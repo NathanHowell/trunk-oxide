@@ -26,6 +26,8 @@ COPY crates/trunk-recorder-sys/Cargo.toml crates/trunk-recorder-sys/Cargo.toml
 COPY crates/trunk-whisperer/Cargo.toml crates/trunk-whisperer/Cargo.toml
 COPY crates/trunk-oxide/Cargo.toml crates/trunk-oxide/Cargo.toml
 COPY crates/trunk-solver/Cargo.toml crates/trunk-solver/Cargo.toml
+COPY crates/trunk-database/Cargo.toml crates/trunk-database/Cargo.toml
+COPY crates/trunk-database/sql crates/trunk-database/sql
 
 # Create stub sources so cargo can resolve the workspace and cache dependencies
 RUN mkdir -p crates/trunk-discord/src \
@@ -43,16 +45,19 @@ RUN mkdir -p crates/trunk-discord/src \
     && mkdir -p crates/trunk-oxide/src \
     && echo "" > crates/trunk-oxide/src/lib.rs \
     && mkdir -p crates/trunk-solver/src \
-    && echo "fn main() {}" > crates/trunk-solver/src/main.rs
+    && echo "fn main() {}" > crates/trunk-solver/src/main.rs \
+    && mkdir -p crates/trunk-database/src \
+    && echo "" > crates/trunk-database/src/lib.rs
 
 RUN cargo build --release -p trunk-discord || true
 
 # Copy real sources and rebuild
 COPY crates/trunk-discord/src crates/trunk-discord/src
 COPY crates/trunk-oxide-proto/src crates/trunk-oxide-proto/src
+COPY crates/trunk-database/src crates/trunk-database/src
 
 # Touch sources to invalidate the stub build artifacts
-RUN touch crates/trunk-discord/src/main.rs crates/trunk-oxide-proto/src/lib.rs
+RUN touch crates/trunk-discord/src/main.rs crates/trunk-oxide-proto/src/lib.rs crates/trunk-database/src/lib.rs
 
 RUN cargo build --release -p trunk-discord
 

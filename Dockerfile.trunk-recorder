@@ -71,6 +71,7 @@ COPY crates/trunk-recorder-plugin/Cargo.toml crates/trunk-recorder-plugin/Cargo.
 COPY crates/trunk-whisperer/Cargo.toml crates/trunk-whisperer/Cargo.toml
 COPY crates/trunk-discord/Cargo.toml crates/trunk-discord/Cargo.toml
 COPY crates/trunk-solver/Cargo.toml crates/trunk-solver/Cargo.toml
+COPY crates/trunk-database/Cargo.toml crates/trunk-database/Cargo.toml
 
 # Create stub sources so cargo can resolve the workspace and cache dependencies
 RUN mkdir -p crates/trunk-oxide/src \
@@ -89,7 +90,9 @@ RUN mkdir -p crates/trunk-oxide/src \
     && mkdir -p crates/trunk-discord/src \
     && echo "fn main() {}" > crates/trunk-discord/src/main.rs \
     && mkdir -p crates/trunk-solver/src \
-    && echo "fn main() {}" > crates/trunk-solver/src/main.rs
+    && echo "fn main() {}" > crates/trunk-solver/src/main.rs \
+    && mkdir -p crates/trunk-database/src \
+    && echo "" > crates/trunk-database/src/lib.rs
 
 ENV TRUNK_RECORDER_LIB_DIR=/usr/local/lib
 

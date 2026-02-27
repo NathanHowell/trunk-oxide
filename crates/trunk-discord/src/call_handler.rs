@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
-use serenity::all::CreateEmbed;
+use serenity::all::{CreateEmbed, CreateEmbedFooter};
 use serenity::model::id::{ChannelId, MessageId};
 use tokio::sync::mpsc;
 use trunk_oxide_proto as proto;
@@ -26,6 +26,9 @@ pub struct CallHandlerConfig {
     pub tone_detection_duration_s: f32,
 }
 
+/// Max chars for embed description before we truncate from the front.
+const MAX_DESCRIPTION_LEN: usize = 3800;
+
 pub struct CallHandler {
     key: CallKey,
     call_info: proto::CallInfo,
@@ -37,9 +40,18 @@ pub struct CallHandler {
     resampler: Option<Resampler>,
     tone_detector: Option<ToneDetector>,
     notch_filter: Option<NotchFilter>,
-    thread_id: Option<ChannelId>,
-    current_message_id: Option<MessageId>,
-    current_message_text: String,
+    thread_id: ChannelId,
+
+    // Single-embed state
+    embed_message_id: Option<MessageId>,
+    transcription_text: String,
+    detected_tones: Vec<String>,
+    events: Vec<String>,
+    call_ended: bool,
+    call_end_duration: Option<f64>,
+    call_end_signal: Option<f64>,
+    start_time_str: String,
+    tag: String,
 }
 
 impl CallHandler {
@@ -63,6 +75,16 @@ impl CallHandler {
             None
         };
 
+        let start_time = DateTime::<Utc>::from_timestamp(call_info.start_time, 0)
+            .unwrap_or_else(Utc::now);
+        let start_time_str = start_time.format("%H:%M:%S UTC").to_string();
+
+        let tag = if call_info.talkgroup_tag.is_empty() {
+            call_info.talkgroup_display.clone()
+        } else {
+            call_info.talkgroup_tag.clone()
+        };
+
         Self {
             key,
             call_info,
@@ -74,18 +96,25 @@ impl CallHandler {
             resampler: None,
             tone_detector,
             notch_filter: None,
-            thread_id: Some(thread_id),
-            current_message_id: None,
-            current_message_text: String::new(),
+            thread_id,
+            embed_message_id: None,
+            transcription_text: String::new(),
+            detected_tones: Vec::new(),
+            events: Vec::new(),
+            call_ended: false,
+            call_end_duration: None,
+            call_end_signal: None,
+            start_time_str,
+            tag,
         }
     }
 
     pub async fn run(mut self) {
-        if let Err(e) = self.post_call_start().await {
+        if let Err(e) = self.send_initial_embed().await {
             tracing::error!(
                 talkgroup = self.key.talkgroup,
                 error = %e,
-                "failed to post call start"
+                "failed to post call embed"
             );
             return;
         }
@@ -127,40 +156,95 @@ impl CallHandler {
         }
     }
 
-    async fn post_call_start(&mut self) -> Result<()> {
-        let thread_id = self.thread_id.expect("thread_id must be set before run()");
-
-        let start_time =
-            DateTime::<Utc>::from_timestamp(self.call_info.start_time, 0).unwrap_or_else(Utc::now);
-        let time_str = start_time.format("%H:%M:%S UTC").to_string();
-
-        let tag = if self.call_info.talkgroup_tag.is_empty() {
-            &self.call_info.talkgroup_display
+    fn build_embed(&self) -> CreateEmbed {
+        let title = if self.call_ended {
+            format!("Call — {}", self.tag)
         } else {
-            &self.call_info.talkgroup_tag
+            format!("Call — {} ...", self.tag)
         };
 
-        let embed = CreateEmbed::new()
-            .title(format!("Call Started — {tag}"))
-            .colour(0x2ecc71_u32) // green
-            .field("Frequency", format!("{:.4} MHz", self.call_info.freq / 1_000_000.0), true)
-            .field("System", &self.call_info.short_name, true)
-            .field("Encrypted", if self.call_info.encrypted { "Yes" } else { "No" }, true)
-            .footer(serenity::all::CreateEmbedFooter::new(time_str));
+        let colour = if self.call_ended {
+            0x95a5a6_u32 // grey
+        } else {
+            0x2ecc71_u32 // green
+        };
 
-        self.discord.send_embed(thread_id, embed).await?;
+        let mut embed = CreateEmbed::new().title(title).colour(colour);
 
-        // Start a new message for transcription text
-        self.current_message_id = None;
-        self.current_message_text.clear();
+        // Description: transcription text (truncated from front if too long)
+        if !self.transcription_text.is_empty() {
+            let desc = if self.transcription_text.len() > MAX_DESCRIPTION_LEN {
+                let skip = self.transcription_text.len() - MAX_DESCRIPTION_LEN;
+                // Find next char boundary after skip point
+                let start = self.transcription_text[skip..]
+                    .char_indices()
+                    .next()
+                    .map_or(skip, |(i, _)| skip + i);
+                format!("...{}", &self.transcription_text[start..])
+            } else {
+                self.transcription_text.clone()
+            };
+            embed = embed.description(desc);
+        }
+
+        // Always-present fields
+        embed = embed
+            .field(
+                "Frequency",
+                format!("{:.4} MHz", self.call_info.freq / 1_000_000.0),
+                true,
+            )
+            .field("System", &self.call_info.short_name, true);
+
+        if self.call_info.encrypted {
+            embed = embed.field("Encrypted", "Yes", true);
+        }
+
+        // Tones (added when detected)
+        if !self.detected_tones.is_empty() {
+            embed = embed.field("Tones", self.detected_tones.join(", "), false);
+        }
+
+        // Signal/unit events
+        if !self.events.is_empty() {
+            embed = embed.field("Events", self.events.join("\n"), false);
+        }
+
+        // End-of-call fields
+        if let Some(duration) = self.call_end_duration {
+            embed = embed.field("Duration", format!("{duration:.1}s"), true);
+        }
+        if let Some(signal) = self.call_end_signal {
+            embed = embed.field("Signal", format!("{signal:.1} dB"), true);
+        }
+
+        embed = embed.footer(CreateEmbedFooter::new(&self.start_time_str));
+
+        embed
+    }
+
+    async fn send_initial_embed(&mut self) -> Result<()> {
+        let embed = self.build_embed();
+        let msg_id = self.discord.send_embed(self.thread_id, embed).await?;
+        self.embed_message_id = Some(msg_id);
 
         tracing::info!(
             talkgroup = self.key.talkgroup,
             sys_num = self.key.sys_num,
-            thread = %thread_id,
+            thread = %self.thread_id,
             "call started"
         );
 
+        Ok(())
+    }
+
+    async fn update_embed(&mut self) -> Result<()> {
+        if let Some(msg_id) = self.embed_message_id {
+            let embed = self.build_embed();
+            self.discord
+                .edit_embed(self.thread_id, msg_id, embed)
+                .await?;
+        }
         Ok(())
     }
 
@@ -216,19 +300,12 @@ impl CallHandler {
         let result = detector.finish();
 
         if !result.tones.is_empty() {
-            if let Some(thread_id) = self.thread_id {
-                let tone_list = result
-                    .tones
-                    .iter()
-                    .map(|t| format!("{t}"))
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                let embed = CreateEmbed::new()
-                    .title("Tones Detected")
-                    .colour(0xf39c12_u32) // amber
-                    .description(tone_list);
-                self.discord.send_embed(thread_id, embed).await?;
-            }
+            self.detected_tones = result
+                .tones
+                .iter()
+                .map(|t| format!("{t}"))
+                .collect();
+            self.update_embed().await?;
 
             // Strip dispatch tone samples from the front of the audio buffer
             let strip = result.tone_end_sample.min(self.audio_buffer.len());
@@ -258,65 +335,27 @@ impl CallHandler {
 
         let text = self.whisperer.transcribe(audio).await?;
         let text = text.trim();
-        if text.is_empty() {
+        if text.is_empty() || is_blank_audio(text) {
+            if !self.transcription_text.is_empty() {
+                // Indicate silence gap
+                self.transcription_text.push_str(" ...");
+                self.update_embed().await?;
+            }
             return Ok(());
         }
 
-        self.post_transcription(text).await
-    }
-
-    async fn post_transcription(&mut self, text: &str) -> Result<()> {
-        let Some(thread_id) = self.thread_id else {
-            return Ok(());
-        };
-
-        let new_text = if self.current_message_text.is_empty() {
-            text.to_string()
-        } else {
-            format!("{} {}", self.current_message_text, text)
-        };
-
-        if new_text.len() <= 2000 {
-            self.current_message_text = new_text;
-            if let Some(msg_id) = self.current_message_id {
-                self.discord
-                    .edit_message(thread_id, msg_id, &self.current_message_text)
-                    .await?;
-            } else {
-                let msg_id = self
-                    .discord
-                    .send_message(thread_id, &self.current_message_text)
-                    .await?;
-                self.current_message_id = Some(msg_id);
-            }
-        } else {
-            // Split at last word boundary before 2000 chars
-            let split_pos = find_word_boundary(&new_text, 2000);
-            let (first, rest) = new_text.split_at(split_pos);
-
-            if let Some(msg_id) = self.current_message_id {
-                self.discord.edit_message(thread_id, msg_id, first).await?;
-            } else {
-                self.discord.send_message(thread_id, first).await?;
-            }
-
-            self.current_message_text = rest.trim_start().to_string();
-            let msg_id = self
-                .discord
-                .send_message(thread_id, &self.current_message_text)
-                .await?;
-            self.current_message_id = Some(msg_id);
+        if !self.transcription_text.is_empty() {
+            self.transcription_text.push(' ');
         }
+        self.transcription_text.push_str(text);
+        self.update_embed().await?;
 
         Ok(())
     }
 
-    #[allow(clippy::needless_pass_by_ref_mut)]
     async fn post_event(&mut self, text: &str) -> Result<()> {
-        let Some(thread_id) = self.thread_id else {
-            return Ok(());
-        };
-        self.discord.send_message(thread_id, text).await?;
+        self.events.push(text.to_string());
+        self.update_embed().await?;
         Ok(())
     }
 
@@ -338,18 +377,13 @@ impl CallHandler {
             self.transcribe_and_post(audio).await?;
         }
 
-        // Post call summary
-        if let Some(thread_id) = self.thread_id {
-            if let Some(data) = &call_data {
-                let embed = CreateEmbed::new()
-                    .title("Call Ended")
-                    .colour(0xe74c3c_u32) // red
-                    .field("Duration", format!("{:.1}s", data.length), true)
-                    .field("Frequency", format!("{:.4} MHz", data.freq / 1_000_000.0), true)
-                    .field("Signal", format!("{:.1} dB", data.signal), true);
-                self.discord.send_embed(thread_id, embed).await?;
-            }
+        // Update embed with end-of-call data
+        self.call_ended = true;
+        if let Some(data) = &call_data {
+            self.call_end_duration = Some(data.length);
+            self.call_end_signal = Some(data.signal);
         }
+        self.update_embed().await?;
 
         tracing::info!(
             talkgroup = self.key.talkgroup,
@@ -371,15 +405,12 @@ fn decode_audio(bytes: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-fn find_word_boundary(text: &str, max_len: usize) -> usize {
-    if text.len() <= max_len {
-        return text.len();
-    }
-    // Find last char boundary at or before max_len
-    let mut pos = max_len;
-    while pos > 0 && !text.is_char_boundary(pos) {
-        pos -= 1;
-    }
-    // Find last space at or before that position
-    text[..pos].rfind(' ').unwrap_or(pos)
+/// Check if Whisper returned a "blank audio" placeholder.
+fn is_blank_audio(text: &str) -> bool {
+    let t = text.trim().to_lowercase();
+    t.contains("blank audio")
+        || t.contains("no speech")
+        || t == "..."
+        || t == "."
+        || t == "[silence]"
 }

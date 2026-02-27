@@ -47,14 +47,14 @@ impl DiscordClient {
         Ok(msg.id)
     }
 
-    pub async fn edit_message(
+    pub async fn edit_embed(
         &self,
         channel_id: ChannelId,
         message_id: MessageId,
-        text: &str,
+        embed: CreateEmbed,
     ) -> Result<()> {
         channel_id
-            .edit_message(&self.http, message_id, EditMessage::new().content(text))
+            .edit_message(&self.http, message_id, EditMessage::new().embed(embed))
             .await?;
         Ok(())
     }

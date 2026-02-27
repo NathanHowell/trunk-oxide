@@ -16,10 +16,10 @@ using json = nlohmann::json;
 
 // Forward declarations for functions provided by libtrunk-recorder.so
 bool load_config_from_string(const std::string &json_body, Config &config,
-                             gr::top_block_sptr &tb, std::vector<Source *> &sources,
+                             gr::top_block_sptr &tb, std::vector<std::shared_ptr<Source>> &sources,
                              std::vector<std::shared_ptr<System>> &systems);
 bool setup_systems(Config &config, gr::top_block_sptr &tb,
-                   std::vector<Source *> &sources, std::vector<std::shared_ptr<System>> &systems,
+                   std::vector<std::shared_ptr<Source>> &sources, std::vector<std::shared_ptr<System>> &systems,
                    std::vector<Call *> &calls);
 int monitor_messages(TrunkContext &ctx);
 #endif
@@ -338,13 +338,13 @@ public:
         return rust_plugin_setup_systems(*plugin_, slice);
     }
 
-    int setup_sources(std::vector<Source *> /*sources*/) {
+    int setup_sources(std::vector<std::shared_ptr<Source>> /*sources*/) {
         // Source has no virtual methods — we cannot safely call its accessors
         // from a dlopen'd plugin (the symbols aren't exported by trunk-recorder).
         return rust_plugin_setup_sources(*plugin_);
     }
 
-    int setup_config(std::vector<Source *> /*sources*/,
+    int setup_config(std::vector<std::shared_ptr<Source>> /*sources*/,
                      std::vector<std::shared_ptr<System>> systems) {
         // Source data omitted (non-virtual, see above); forward systems only.
         std::vector<TrSystem> sys_wrappers;
@@ -584,7 +584,7 @@ public:
         bridge_->setup_system(system);
     }
 
-    void setup_config(std::vector<Source *> sources,
+    void setup_config(std::vector<std::shared_ptr<Source>> sources,
                       std::vector<std::shared_ptr<System>> systems) override {
         bridge_->setup_config(std::move(sources), std::move(systems));
     }

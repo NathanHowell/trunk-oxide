@@ -17,9 +17,9 @@ using json = nlohmann::json;
 // Forward declarations for functions provided by libtrunk-recorder.so
 bool load_config_from_string(const std::string &json_body, Config &config,
                              gr::top_block_sptr &tb, std::vector<Source *> &sources,
-                             std::vector<System *> &systems);
+                             std::vector<std::shared_ptr<System>> &systems);
 bool setup_systems(Config &config, gr::top_block_sptr &tb,
-                   std::vector<Source *> &sources, std::vector<System *> &systems,
+                   std::vector<Source *> &sources, std::vector<std::shared_ptr<System>> &systems,
                    std::vector<Call *> &calls);
 int monitor_messages(TrunkContext &ctx);
 #endif
@@ -261,7 +261,7 @@ public:
 
     int signal(long unitId, const char *signaling_type,
                gr::blocks::SignalType sig_type,
-               Call *call, System *system, const std::shared_ptr<Recorder> &recorder) {
+               Call *call, const std::shared_ptr<System> &system, const std::shared_ptr<Recorder> &recorder) {
         auto sig_str = signaling_type
             ? rust::Str(signaling_type, std::strlen(signaling_type))
             : rust::Str("", 0);
@@ -318,15 +318,15 @@ public:
         return rust_plugin_setup_recorder(*plugin_, tr_rec);
     }
 
-    int setup_system(System *system) {
+    int setup_system(const std::shared_ptr<System> &system) {
         TrSystem tr_sys(system);
         return rust_plugin_setup_system(*plugin_, tr_sys);
     }
 
-    int setup_systems(std::vector<System *> systems) {
+    int setup_systems(std::vector<std::shared_ptr<System>> systems) {
         std::vector<TrSystem> wrappers;
         wrappers.reserve(systems.size());
-        for (auto *s : systems) {
+        for (auto &s : systems) {
             wrappers.emplace_back(s);
         }
         std::vector<const TrSystem *> ptrs;
@@ -345,11 +345,11 @@ public:
     }
 
     int setup_config(std::vector<Source *> /*sources*/,
-                     std::vector<System *> systems) {
+                     std::vector<std::shared_ptr<System>> systems) {
         // Source data omitted (non-virtual, see above); forward systems only.
         std::vector<TrSystem> sys_wrappers;
         sys_wrappers.reserve(systems.size());
-        for (auto *s : systems) {
+        for (auto &s : systems) {
             sys_wrappers.emplace_back(s);
         }
         std::vector<const TrSystem *> sys_ptrs;
@@ -363,7 +363,7 @@ public:
     }
 
     int trunk_message(std::vector<TrunkMessage> messages,
-                      System *system) {
+                      const std::shared_ptr<System> &system) {
         std::vector<TrTrunkMessage> msgs;
         msgs.reserve(messages.size());
         for (const auto &m : messages) {
@@ -375,10 +375,10 @@ public:
             tr_sys);
     }
 
-    int system_rates(std::vector<System *> systems, float timeDiff) {
+    int system_rates(std::vector<std::shared_ptr<System>> systems, float timeDiff) {
         std::vector<TrSystem> wrappers;
         wrappers.reserve(systems.size());
-        for (auto *s : systems) {
+        for (auto &s : systems) {
             wrappers.emplace_back(s);
         }
         std::vector<const TrSystem *> ptrs;
@@ -390,41 +390,41 @@ public:
         return rust_plugin_system_rates(*plugin_, slice, timeDiff);
     }
 
-    int unit_registration(System *sys, long source_id) {
+    int unit_registration(const std::shared_ptr<System> &sys, long source_id) {
         TrSystem tr_sys(sys);
         return rust_plugin_unit_registration(*plugin_, tr_sys, source_id);
     }
 
-    int unit_deregistration(System *sys, long source_id) {
+    int unit_deregistration(const std::shared_ptr<System> &sys, long source_id) {
         TrSystem tr_sys(sys);
         return rust_plugin_unit_deregistration(*plugin_, tr_sys, source_id);
     }
 
-    int unit_acknowledge_response(System *sys, long source_id) {
+    int unit_acknowledge_response(const std::shared_ptr<System> &sys, long source_id) {
         TrSystem tr_sys(sys);
         return rust_plugin_unit_acknowledge_response(*plugin_, tr_sys, source_id);
     }
 
-    int unit_group_affiliation(System *sys, long source_id,
+    int unit_group_affiliation(const std::shared_ptr<System> &sys, long source_id,
                                 long talkgroup_num) {
         TrSystem tr_sys(sys);
         return rust_plugin_unit_group_affiliation(
             *plugin_, tr_sys, source_id, talkgroup_num);
     }
 
-    int unit_data_grant(System *sys, long source_id) {
+    int unit_data_grant(const std::shared_ptr<System> &sys, long source_id) {
         TrSystem tr_sys(sys);
         return rust_plugin_unit_data_grant(*plugin_, tr_sys, source_id);
     }
 
-    int unit_answer_request(System *sys, long source_id,
+    int unit_answer_request(const std::shared_ptr<System> &sys, long source_id,
                             long talkgroup) {
         TrSystem tr_sys(sys);
         return rust_plugin_unit_answer_request(
             *plugin_, tr_sys, source_id, talkgroup);
     }
 
-    int unit_location(System *sys, long source_id,
+    int unit_location(const std::shared_ptr<System> &sys, long source_id,
                       long talkgroup_num) {
         TrSystem tr_sys(sys);
         return rust_plugin_unit_location(*plugin_, tr_sys, source_id, talkgroup_num);
@@ -516,11 +516,12 @@ public:
 
     int signal(long unitId, const char *signaling_type,
                gr::blocks::SignalType sig_type, Call *call,
-               System *system, const std::shared_ptr<Recorder> &recorder) override {
+               const std::shared_ptr<System> &system, const std::shared_ptr<Recorder> &recorder) override {
         return bridge_->signal(unitId, signaling_type, sig_type, call, system, recorder);
     }
 
-    void trunk_message(std::vector<TrunkMessage> messages, System *system) override {
+    void trunk_message(std::vector<TrunkMessage> messages,
+                       const std::shared_ptr<System> &system) override {
         bridge_->trunk_message(std::move(messages), system);
     }
 
@@ -528,7 +529,7 @@ public:
         bridge_->call_start(call);
     }
 
-    void conclude_call(Call *call, System *sys, Config /*config*/) override {
+    void conclude_call(Call *call, const std::shared_ptr<System> &sys, Config /*config*/) override {
         Call_Data_t call_info = {};
         call_info.status = INITIAL;
         call_info.error_count = 0;
@@ -579,45 +580,46 @@ public:
         bridge_->setup_recorder(recorder);
     }
 
-    void setup_system(System *system) override {
+    void setup_system(const std::shared_ptr<System> &system) override {
         bridge_->setup_system(system);
     }
 
-    void setup_config(std::vector<Source *> sources, std::vector<System *> systems) override {
+    void setup_config(std::vector<Source *> sources,
+                      std::vector<std::shared_ptr<System>> systems) override {
         bridge_->setup_config(std::move(sources), std::move(systems));
     }
 
-    void system_rates(std::vector<System *> systems, float timeDiff) override {
+    void system_rates(std::vector<std::shared_ptr<System>> systems, float timeDiff) override {
         bridge_->system_rates(std::move(systems), timeDiff);
     }
 
-    void unit_registration(System *system, long source_id) override {
+    void unit_registration(const std::shared_ptr<System> &system, long source_id) override {
         bridge_->unit_registration(system, source_id);
     }
 
-    void unit_deregistration(System *system, long source_id) override {
+    void unit_deregistration(const std::shared_ptr<System> &system, long source_id) override {
         bridge_->unit_deregistration(system, source_id);
     }
 
-    void unit_acknowledge_response(System *system, long source_id) override {
+    void unit_acknowledge_response(const std::shared_ptr<System> &system, long source_id) override {
         bridge_->unit_acknowledge_response(system, source_id);
     }
 
-    void unit_group_affiliation(System *system, long source_id,
+    void unit_group_affiliation(const std::shared_ptr<System> &system, long source_id,
                                 long talkgroup_num) override {
         bridge_->unit_group_affiliation(system, source_id, talkgroup_num);
     }
 
-    void unit_data_grant(System *system, long source_id) override {
+    void unit_data_grant(const std::shared_ptr<System> &system, long source_id) override {
         bridge_->unit_data_grant(system, source_id);
     }
 
-    void unit_answer_request(System *system, long source_id,
+    void unit_answer_request(const std::shared_ptr<System> &system, long source_id,
                              long talkgroup) override {
         bridge_->unit_answer_request(system, source_id, talkgroup);
     }
 
-    void unit_location(System *system, long source_id,
+    void unit_location(const std::shared_ptr<System> &system, long source_id,
                        long talkgroup_num) override {
         bridge_->unit_location(system, source_id, talkgroup_num);
     }
@@ -674,7 +676,7 @@ std::unique_ptr<TrContext> tr_create(rust::Str config_json,
     // Notify the plugin of the current configuration.
     ctx->impl->bridge->setup_config(ctx->impl->trunk_ctx.sources,
                                     ctx->impl->trunk_ctx.systems);
-    for (auto *sys : ctx->impl->trunk_ctx.systems) {
+    for (auto &sys : ctx->impl->trunk_ctx.systems) {
         ctx->impl->bridge->setup_system(sys);
     }
 

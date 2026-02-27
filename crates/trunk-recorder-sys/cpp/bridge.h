@@ -34,8 +34,8 @@ struct TrCall final {
 };
 
 struct TrSystem final {
-    System *ptr;
-    explicit TrSystem(System *p) : ptr(p) {}
+    std::shared_ptr<System> ptr;
+    explicit TrSystem(const std::shared_ptr<System> &p) : ptr(p) {}
 };
 
 struct TrRecorder final {

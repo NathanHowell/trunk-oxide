@@ -7,31 +7,24 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     ca-certificates \
     cmake \
-    curl \
     gnuradio-dev \
     gr-osmosdr \
     libairspy-dev \
     libairspyhf-dev \
     libbladerf-dev \
     libboost-all-dev \
-    libcurl4-openssl-dev \
     libgmp-dev \
-    libhackrf-dev \
     liborc-0.4-dev \
     libosmosdr-dev \
-    libprotobuf-dev \
     libpthread-stubs0-dev \
     librtlsdr-dev \
-    libsndfile1-dev \
     libsoapysdr-dev \
-    libssl-dev \
     libuhd-dev \
     libusb-dev \
     libusb-1.0-0-dev \
     libfmt-dev \
     mold \
     pkg-config \
-    protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
 # rust-lld does not support --require-defined; use mold for the final link
@@ -123,10 +116,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gnuradio \
     gr-osmosdr \
     libboost-log1.83.0 \
-    libcurl4 \
-    libsndfile1 \
     libsoapysdr0.8 \
-    sox \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=health-probe /ko-app/grpc-health-probe /usr/local/bin/grpc_health_probe

@@ -1,5 +1,6 @@
 mod aggregator;
 mod call_handler;
+mod channel_manager;
 mod config;
 mod discord;
 mod dispatcher;
@@ -114,6 +115,40 @@ async fn main() -> Result<()> {
     tracing::info!(path = %args.db_path.display(), hour, "opened initial database");
 
     let discord_client = Arc::new(discord::DiscordClient::new(&config.discord));
+
+    // Resolve existing channel mappings and start background reconciliation
+    let channel_lookup = channel_manager::new_lookup();
+    if let Some(guild_id) = config.discord.guild_id {
+        if !config.discord.groups.is_empty() {
+            match channel_manager::resolve_existing(
+                &discord_client,
+                guild_id,
+                &config.discord.groups,
+                &channel_lookup,
+            )
+            .await
+            {
+                Ok(existing_channels) => {
+                    let reconcile_discord = Arc::clone(&discord_client);
+                    let reconcile_groups = config.discord.groups.clone();
+                    let reconcile_lookup = Arc::clone(&channel_lookup);
+                    tokio::spawn(channel_manager::reconcile(
+                        reconcile_discord,
+                        guild_id,
+                        reconcile_groups,
+                        reconcile_lookup,
+                        existing_channels,
+                    ));
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "failed to resolve existing channels, using fallback");
+                }
+            }
+        }
+    } else if !config.discord.groups.is_empty() {
+        tracing::warn!("discord.groups configured but guild_id is missing, channel management disabled");
+    }
+
     let aggregator = Arc::new(aggregator::Aggregator::new(
         Arc::clone(&discord_client),
         config.discord.channel_id,
@@ -126,6 +161,7 @@ async fn main() -> Result<()> {
         aggregator,
         config.audio.buffer_duration_ms,
         config.discord.channel_id,
+        channel_lookup,
         config.audio.tone_detection,
         config.audio.tone_detection_duration_s,
         Arc::clone(&db),

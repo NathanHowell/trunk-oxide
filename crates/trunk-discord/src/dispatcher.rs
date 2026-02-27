@@ -15,6 +15,7 @@ use proto::plugin_event::Event;
 
 use crate::aggregator::{Aggregator, AggregatorMessage};
 use crate::call_handler::{CallHandler, CallHandlerConfig, CallMessage};
+use crate::channel_manager::ChannelLookup;
 use crate::discord::DiscordClient;
 use crate::grpc_whisperer::WhispererConnection;
 
@@ -40,6 +41,7 @@ pub struct Dispatcher {
     aggregator: Arc<Aggregator>,
     buffer_duration_ms: u64,
     channel_id: ChannelId,
+    channel_lookup: ChannelLookup,
     tone_detection: bool,
     tone_detection_duration_s: f32,
     db: Arc<Mutex<Database>>,
@@ -55,6 +57,7 @@ impl Dispatcher {
         aggregator: Arc<Aggregator>,
         buffer_duration_ms: u64,
         channel_id: ChannelId,
+        channel_lookup: ChannelLookup,
         tone_detection: bool,
         tone_detection_duration_s: f32,
         db: Arc<Mutex<Database>>,
@@ -69,6 +72,7 @@ impl Dispatcher {
             aggregator,
             buffer_duration_ms,
             channel_id,
+            channel_lookup,
             tone_detection,
             tone_detection_duration_s,
             db,
@@ -224,9 +228,17 @@ impl Dispatcher {
                         thread_name
                     };
 
+                    // Resolve target channel: check lookup for mapped channel, else fallback
+                    let target_channel = {
+                        let map = self.channel_lookup.read().await;
+                        map.get(&(call.short_name.clone(), call.talkgroup))
+                            .copied()
+                            .unwrap_or(self.channel_id)
+                    };
+
                     match self
                         .discord
-                        .create_call_thread(self.channel_id, &thread_name)
+                        .create_call_thread(target_channel, &thread_name)
                         .await
                     {
                         Ok(id) => {
@@ -351,18 +363,18 @@ impl Dispatcher {
     }
 
     async fn handle_unit(&self, event: proto::UnitEvent) {
-        if event.talkgroup != 0 {
-            if let Some(system) = &event.system {
-                let key = CallKey {
-                    sys_num: SysNum(system.sys_num),
-                    talkgroup: Talkgroup(event.talkgroup),
-                };
-                let calls = self.calls.read().await;
-                if let Some(tx) = calls.get(&key) {
-                    let text = format_unit_event(&event);
-                    let _ = tx.try_send(CallMessage::Event(text));
-                    return;
-                }
+        if event.talkgroup != 0
+            && let Some(system) = &event.system
+        {
+            let key = CallKey {
+                sys_num: SysNum(system.sys_num),
+                talkgroup: Talkgroup(event.talkgroup),
+            };
+            let calls = self.calls.read().await;
+            if let Some(tx) = calls.get(&key) {
+                let text = format_unit_event(&event);
+                let _ = tx.try_send(CallMessage::Event(text));
+                return;
             }
         }
         self.aggregator.send(AggregatorMessage::Unit(event));

@@ -204,10 +204,10 @@ impl AggregatorInner {
             tracing::error!(error = %e, "failed to ensure hourly thread");
             return;
         }
-        if let Some(thread_id) = self.current_thread_id {
-            if let Err(e) = self.discord.send_embed(thread_id, embed).await {
-                tracing::error!(error = %e, "failed to post setup event");
-            }
+        if let Some(thread_id) = self.current_thread_id
+            && let Err(e) = self.discord.send_embed(thread_id, embed).await
+        {
+            tracing::error!(error = %e, "failed to post setup event");
         }
     }
 
@@ -454,7 +454,7 @@ fn build_recorder_table(recorders: &HashMap<i32, proto::RecorderInfo>) -> String
     ids.sort();
 
     let mut table = String::from("```\n");
-    let _ = writeln!(table, "{:<4} {:<8} {:>12} {:>10} {}", "ID", "Type", "Freq (MHz)", "TG", "State");
+    let _ = writeln!(table, "{:<4} {:<8} {:>12} {:>10} State", "ID", "Type", "Freq (MHz)", "TG");
     for id in ids {
         let rec = &recorders[&id];
         let state = if rec.is_active {

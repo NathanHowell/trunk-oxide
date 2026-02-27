@@ -61,6 +61,7 @@ pub struct CallHandler {
 }
 
 impl CallHandler {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         call_info: proto::CallInfo,
         rx: mpsc::Receiver<CallMessage>,
@@ -203,10 +204,10 @@ impl CallHandler {
         }
 
         // End-of-call fields
-        if let Some(duration) = self.call_end_duration {
-            if !duration.is_zero() {
-                embed = embed.field("Duration", format!("{:.1}s", duration.as_secs_f64()), true);
-            }
+        if let Some(duration) = self.call_end_duration
+            && !duration.is_zero()
+        {
+            embed = embed.field("Duration", format!("{:.1}s", duration.as_secs_f64()), true);
         }
         if let Some(signal) = self.call_end_signal {
             embed = embed.field("Signal", signal.to_string(), true);

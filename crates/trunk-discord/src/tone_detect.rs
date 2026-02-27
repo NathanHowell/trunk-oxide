@@ -557,14 +557,13 @@ impl ToneDetector {
             tone_end_window = tone_end_window.max(end);
         }
 
-        if let Some((lt, end)) = detect_long_tone(&segments, hop_s) {
-            if !tones
+        if let Some((lt, end)) = detect_long_tone(&segments, hop_s)
+            && !tones
                 .iter()
                 .any(|t| matches!(t, DetectedTone::TwoTone { .. }))
-            {
-                tones.push(lt);
-                tone_end_window = tone_end_window.max(end);
-            }
+        {
+            tones.push(lt);
+            tone_end_window = tone_end_window.max(end);
         }
 
         if let Some((w, end)) = detect_warble(&self.window_freqs, hop_s) {

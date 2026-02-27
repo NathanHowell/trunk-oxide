@@ -1,9 +1,10 @@
 use anyhow::Result;
 use serenity::all::{
-    AutoArchiveDuration, ChannelType, CreateEmbed, CreateMessage, CreateThread, EditMessage,
+    AutoArchiveDuration, ChannelType, CreateChannel, CreateEmbed, CreateMessage, CreateThread,
+    EditMessage, GuildChannel,
 };
 use serenity::http::Http;
-use serenity::model::id::{ChannelId, MessageId};
+use serenity::model::id::{ChannelId, GuildId, MessageId};
 
 pub struct DiscordClient {
     http: Http,
@@ -56,5 +57,37 @@ impl DiscordClient {
             .edit_message(&self.http, message_id, EditMessage::new().embed(embed))
             .await?;
         Ok(())
+    }
+
+    pub async fn get_guild_channels(&self, guild_id: GuildId) -> Result<Vec<GuildChannel>> {
+        let channels = guild_id.channels(&self.http).await?;
+        Ok(channels.into_values().collect())
+    }
+
+    pub async fn create_category(&self, guild_id: GuildId, name: &str) -> Result<GuildChannel> {
+        let channel = guild_id
+            .create_channel(
+                &self.http,
+                CreateChannel::new(name).kind(ChannelType::Category),
+            )
+            .await?;
+        Ok(channel)
+    }
+
+    pub async fn create_text_channel(
+        &self,
+        guild_id: GuildId,
+        name: &str,
+        category_id: ChannelId,
+    ) -> Result<GuildChannel> {
+        let channel = guild_id
+            .create_channel(
+                &self.http,
+                CreateChannel::new(name)
+                    .kind(ChannelType::Text)
+                    .category(category_id),
+            )
+            .await?;
+        Ok(channel)
     }
 }

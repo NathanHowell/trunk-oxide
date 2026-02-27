@@ -1,5 +1,7 @@
 use anyhow::Result;
-use serenity::all::{AutoArchiveDuration, ChannelType, CreateMessage, CreateThread, EditMessage};
+use serenity::all::{
+    AutoArchiveDuration, ChannelType, CreateEmbed, CreateMessage, CreateThread, EditMessage,
+};
 use serenity::http::Http;
 use serenity::model::id::{ChannelId, MessageId};
 
@@ -30,6 +32,17 @@ impl DiscordClient {
     pub async fn send_message(&self, channel_id: ChannelId, text: &str) -> Result<MessageId> {
         let msg = channel_id
             .send_message(&self.http, CreateMessage::new().content(text))
+            .await?;
+        Ok(msg.id)
+    }
+
+    pub async fn send_embed(
+        &self,
+        channel_id: ChannelId,
+        embed: CreateEmbed,
+    ) -> Result<MessageId> {
+        let msg = channel_id
+            .send_message(&self.http, CreateMessage::new().embed(embed))
             .await?;
         Ok(msg.id)
     }

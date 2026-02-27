@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use serenity::all::CreateEmbed;
 use serenity::model::id::{ChannelId, MessageId};
 use tokio::sync::mpsc;
 use trunk_oxide_proto as proto;
@@ -131,19 +132,23 @@ impl CallHandler {
 
         let start_time =
             DateTime::<Utc>::from_timestamp(self.call_info.start_time, 0).unwrap_or_else(Utc::now);
-        let time_str = start_time.format("%H:%M:%S").to_string();
+        let time_str = start_time.format("%H:%M:%S UTC").to_string();
 
-        let info = format!(
-            "---\n**Call @ {time_str}** | Freq: {:.4} MHz | System: {} | Encrypted: {}",
-            self.call_info.freq / 1_000_000.0,
-            self.call_info.short_name,
-            if self.call_info.encrypted {
-                "Yes"
-            } else {
-                "No"
-            },
-        );
-        self.discord.send_message(thread_id, &info).await?;
+        let tag = if self.call_info.talkgroup_tag.is_empty() {
+            &self.call_info.talkgroup_display
+        } else {
+            &self.call_info.talkgroup_tag
+        };
+
+        let embed = CreateEmbed::new()
+            .title(format!("Call Started — {tag}"))
+            .colour(0x2ecc71_u32) // green
+            .field("Frequency", format!("{:.4} MHz", self.call_info.freq / 1_000_000.0), true)
+            .field("System", &self.call_info.short_name, true)
+            .field("Encrypted", if self.call_info.encrypted { "Yes" } else { "No" }, true)
+            .footer(serenity::all::CreateEmbedFooter::new(time_str));
+
+        self.discord.send_embed(thread_id, embed).await?;
 
         // Start a new message for transcription text
         self.current_message_id = None;
@@ -212,13 +217,17 @@ impl CallHandler {
 
         if !result.tones.is_empty() {
             if let Some(thread_id) = self.thread_id {
-                let msg = result
+                let tone_list = result
                     .tones
                     .iter()
-                    .map(|t| format!("**{t}**"))
+                    .map(|t| format!("{t}"))
                     .collect::<Vec<_>>()
-                    .join("\n");
-                self.discord.send_message(thread_id, &msg).await?;
+                    .join(", ");
+                let embed = CreateEmbed::new()
+                    .title("Tones Detected")
+                    .colour(0xf39c12_u32) // amber
+                    .description(tone_list);
+                self.discord.send_embed(thread_id, embed).await?;
             }
 
             // Strip dispatch tone samples from the front of the audio buffer
@@ -332,13 +341,13 @@ impl CallHandler {
         // Post call summary
         if let Some(thread_id) = self.thread_id {
             if let Some(data) = &call_data {
-                let summary = format!(
-                    "---\n**Call ended** | Duration: {:.1}s | Freq: {:.4} MHz | Signal: {:.1} dB",
-                    data.length,
-                    data.freq / 1_000_000.0,
-                    data.signal,
-                );
-                self.discord.send_message(thread_id, &summary).await?;
+                let embed = CreateEmbed::new()
+                    .title("Call Ended")
+                    .colour(0xe74c3c_u32) // red
+                    .field("Duration", format!("{:.1}s", data.length), true)
+                    .field("Frequency", format!("{:.4} MHz", data.freq / 1_000_000.0), true)
+                    .field("Signal", format!("{:.1} dB", data.signal), true);
+                self.discord.send_embed(thread_id, embed).await?;
             }
         }
 

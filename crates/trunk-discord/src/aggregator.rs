@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use chrono::Utc;
+use serenity::all::CreateEmbed;
 use serenity::model::id::ChannelId;
 use tokio::sync::mpsc;
 use tokio::time::{self, Duration};
@@ -107,21 +108,33 @@ impl AggregatorInner {
                 let text = format_setup_config(&e);
                 if self.last_setup_config.as_ref() != Some(&text) {
                     self.last_setup_config = Some(text.clone());
-                    self.post_immediately(&text).await;
+                    let embed = CreateEmbed::new()
+                        .title("Setup Config")
+                        .colour(0x3498db_u32)
+                        .description(text);
+                    self.post_embed(embed).await;
                 }
             }
             AggregatorMessage::SetupSystems(e) => {
                 let text = format_setup_systems(&e);
                 if self.last_setup_systems.as_ref() != Some(&text) {
                     self.last_setup_systems = Some(text.clone());
-                    self.post_immediately(&text).await;
+                    let embed = CreateEmbed::new()
+                        .title("Systems")
+                        .colour(0x3498db_u32)
+                        .description(text);
+                    self.post_embed(embed).await;
                 }
             }
             AggregatorMessage::SetupSources(e) => {
                 let text = format_setup_sources(&e);
                 if self.last_setup_sources.as_ref() != Some(&text) {
                     self.last_setup_sources = Some(text.clone());
-                    self.post_immediately(&text).await;
+                    let embed = CreateEmbed::new()
+                        .title("Sources")
+                        .colour(0x3498db_u32)
+                        .description(text);
+                    self.post_embed(embed).await;
                 }
             }
             AggregatorMessage::SetupSystem(e) => {
@@ -129,7 +142,11 @@ impl AggregatorInner {
                 let text = format_setup_system(&e);
                 if self.last_setup_system.get(&key) != Some(&text) {
                     self.last_setup_system.insert(key, text.clone());
-                    self.post_immediately(&text).await;
+                    let embed = CreateEmbed::new()
+                        .title("System")
+                        .colour(0x3498db_u32)
+                        .description(text);
+                    self.post_embed(embed).await;
                 }
             }
             AggregatorMessage::SetupRecorder(e) => {
@@ -137,7 +154,11 @@ impl AggregatorInner {
                 let text = format_setup_recorder(&e);
                 if self.last_setup_recorder.get(&key) != Some(&text) {
                     self.last_setup_recorder.insert(key, text.clone());
-                    self.post_immediately(&text).await;
+                    let embed = CreateEmbed::new()
+                        .title("Recorder")
+                        .colour(0x3498db_u32)
+                        .description(text);
+                    self.post_embed(embed).await;
                 }
             }
             // Signals are kept as individual lines (relatively rare)
@@ -170,13 +191,13 @@ impl AggregatorInner {
         }
     }
 
-    async fn post_immediately(&mut self, text: &str) {
+    async fn post_embed(&mut self, embed: CreateEmbed) {
         if let Err(e) = self.ensure_hourly_thread().await {
             tracing::error!(error = %e, "failed to ensure hourly thread");
             return;
         }
         if let Some(thread_id) = self.current_thread_id {
-            if let Err(e) = self.discord.send_message(thread_id, text).await {
+            if let Err(e) = self.discord.send_embed(thread_id, embed).await {
                 tracing::error!(error = %e, "failed to post setup event");
             }
         }
@@ -232,11 +253,15 @@ impl AggregatorInner {
             return;
         };
 
-        // Batch messages under Discord's 2000-char limit
+        // Batch lines into embed descriptions under Discord's 4096-char embed limit
         let mut batch = String::new();
         for line in self.buffer.drain(..) {
-            if batch.len() + line.len() + 1 > 2000 && !batch.is_empty() {
-                if let Err(e) = self.discord.send_message(thread_id, &batch).await {
+            if batch.len() + line.len() + 1 > 4000 && !batch.is_empty() {
+                let embed = CreateEmbed::new()
+                    .title("System Activity")
+                    .colour(0x95a5a6_u32) // grey
+                    .description(&batch);
+                if let Err(e) = self.discord.send_embed(thread_id, embed).await {
                     tracing::error!(error = %e, "failed to post aggregated events");
                 }
                 batch.clear();
@@ -248,7 +273,11 @@ impl AggregatorInner {
         }
 
         if !batch.is_empty() {
-            if let Err(e) = self.discord.send_message(thread_id, &batch).await {
+            let embed = CreateEmbed::new()
+                .title("System Activity")
+                .colour(0x95a5a6_u32) // grey
+                .description(batch);
+            if let Err(e) = self.discord.send_embed(thread_id, embed).await {
                 tracing::error!(error = %e, "failed to post aggregated events");
             }
         }
@@ -278,18 +307,18 @@ impl AggregatorInner {
 }
 
 fn format_setup_config(e: &proto::SetupConfigEvent) -> String {
-    let mut text = String::from("**Setup Config**\n");
+    let mut text = String::new();
     for sys in &e.systems {
         let _ = writeln!(
             text,
-            "  System: {} ({}) - type: {}",
+            "System: {} ({}) - type: {}",
             sys.short_name, sys.sys_num, sys.system_type
         );
     }
     for src in &e.sources {
         let _ = writeln!(
             text,
-            "  Source {}: {} @ {:.3} MHz",
+            "Source {}: {} @ {:.3} MHz",
             src.src_num,
             src.driver,
             src.center_freq / 1_000_000.0
@@ -299,11 +328,11 @@ fn format_setup_config(e: &proto::SetupConfigEvent) -> String {
 }
 
 fn format_setup_systems(e: &proto::SetupSystemsEvent) -> String {
-    let mut text = String::from("**Systems**\n");
+    let mut text = String::new();
     for sys in &e.systems {
         let _ = writeln!(
             text,
-            "  {} (sys_num={}, type={})",
+            "{} (sys_num={}, type={})",
             sys.short_name, sys.sys_num, sys.system_type
         );
     }
@@ -311,11 +340,11 @@ fn format_setup_systems(e: &proto::SetupSystemsEvent) -> String {
 }
 
 fn format_setup_sources(e: &proto::SetupSourcesEvent) -> String {
-    let mut text = String::from("**Sources**\n");
+    let mut text = String::new();
     for src in &e.sources {
         let _ = writeln!(
             text,
-            "  Source {}: {} @ {:.3} MHz (analog={}, digital={})",
+            "Source {}: {} @ {:.3} MHz (analog={}, digital={})",
             src.src_num,
             src.driver,
             src.center_freq / 1_000_000.0,
@@ -328,10 +357,10 @@ fn format_setup_sources(e: &proto::SetupSourcesEvent) -> String {
 
 fn format_setup_system(e: &proto::SetupSystemEvent) -> String {
     e.system.as_ref().map_or_else(
-        || "**System**: (no data)".to_string(),
+        || "(no data)".to_string(),
         |sys| {
             format!(
-                "**System**: {} (sys_num={}, type={})",
+                "{} (sys_num={}, type={})",
                 sys.short_name, sys.sys_num, sys.system_type
             )
         },
@@ -340,10 +369,10 @@ fn format_setup_system(e: &proto::SetupSystemEvent) -> String {
 
 fn format_setup_recorder(e: &proto::SetupRecorderEvent) -> String {
     e.recorder.as_ref().map_or_else(
-        || "**Recorder**: (no data)".to_string(),
+        || "(no data)".to_string(),
         |rec| {
             format!(
-                "**Recorder**: id={} type={} freq={:.4} MHz",
+                "id={} type={} freq={:.4} MHz",
                 rec.id,
                 rec.r#type,
                 rec.freq / 1_000_000.0

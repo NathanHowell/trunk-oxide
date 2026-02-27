@@ -2915,6 +2915,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "trunk-config"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "serde",
+ "toml",
+]
+
+[[package]]
 name = "trunk-database"
 version = "0.1.0"
 dependencies = [
@@ -2945,7 +2954,6 @@ dependencies = [
  "serenity",
  "tokio",
  "tokio-stream",
- "toml",
  "tonic",
  "tonic-health",
  "tonic-prost",
@@ -2953,6 +2961,7 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "trunk-config",
  "trunk-database",
  "trunk-oxide-proto",
  "trunk-whisperer-proto",

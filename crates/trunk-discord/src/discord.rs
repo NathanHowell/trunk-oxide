@@ -11,7 +11,7 @@ pub struct DiscordClient {
 }
 
 impl DiscordClient {
-    pub fn new(config: &crate::config::DiscordConfig) -> Self {
+    pub fn new(config: &trunk_config::DiscordConfig) -> Self {
         Self {
             http: Http::new(&config.bot_token),
         }

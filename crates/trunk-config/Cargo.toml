@@ -1,0 +1,13 @@
+[package]
+name = "trunk-config"
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+toml.workspace = true
+anyhow.workspace = true

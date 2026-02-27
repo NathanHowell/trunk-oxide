@@ -6,7 +6,7 @@ use serenity::model::id::{ChannelId, GuildId};
 use tokio::sync::RwLock;
 use tokio::time::{Duration, sleep};
 
-use crate::config::ChannelGroup;
+use trunk_config::ChannelGroup;
 use crate::discord::DiscordClient;
 
 /// Key for the talkgroup-to-channel lookup: (`system_short_name`, `talkgroup_id`).
@@ -53,7 +53,7 @@ pub async fn resolve_existing(
 
     for group in groups {
         // Resolve category: prefer pinned ID, fall back to name match
-        let category_id = if let Some(id) = group.id {
+        let category_id = if let Some(id) = group.id.map(|n| ChannelId::from(n.get())) {
             if channels_by_id.contains_key(&id) {
                 id
             } else {
@@ -69,7 +69,7 @@ pub async fn resolve_existing(
 
         for channel_mapping in &group.channels {
             // Resolve channel: prefer pinned ID, fall back to name match
-            let channel_id = if let Some(id) = channel_mapping.id {
+            let channel_id = if let Some(id) = channel_mapping.id.map(|n| ChannelId::from(n.get())) {
                 if channels_by_id.contains_key(&id) {
                     id
                 } else {
@@ -135,7 +135,7 @@ pub async fn reconcile(
 
     for group in &groups {
         // Ensure category exists: pinned ID > name match > create
-        let category_id = if let Some(id) = group.id {
+        let category_id = if let Some(id) = group.id.map(|n| ChannelId::from(n.get())) {
             if existing_by_id.contains_key(&id) {
                 id
             } else {
@@ -161,7 +161,7 @@ pub async fn reconcile(
 
         // Ensure each channel exists: pinned ID > name match > create
         for channel_mapping in &group.channels {
-            let channel_id = if let Some(id) = channel_mapping.id {
+            let channel_id = if let Some(id) = channel_mapping.id.map(|n| ChannelId::from(n.get())) {
                 if existing_by_id.contains_key(&id) {
                     id
                 } else {

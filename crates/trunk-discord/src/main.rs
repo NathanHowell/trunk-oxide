@@ -1,7 +1,6 @@
 mod aggregator;
 mod call_handler;
 mod channel_manager;
-mod config;
 mod discord;
 mod dispatcher;
 mod grpc_oxide;
@@ -15,7 +14,9 @@ use std::sync::Arc;
 use anyhow::Result;
 use clap::Parser;
 use opentelemetry::trace::TracerProvider;
+use serenity::model::id::{ChannelId, GuildId};
 use tokio::sync::Mutex;
+use trunk_config::Config;
 use tracing_subscriber::prelude::*;
 
 
@@ -72,10 +73,10 @@ fn init_tracing() -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
 
 async fn init_channel_manager(
     discord_client: &Arc<discord::DiscordClient>,
-    config: &config::DiscordConfig,
+    config: &trunk_config::DiscordConfig,
 ) -> channel_manager::ChannelLookup {
     let lookup = channel_manager::new_lookup();
-    if let Some(guild_id) = config.guild_id {
+    if let Some(guild_id) = config.guild_id.map(GuildId::from) {
         if !config.groups.is_empty() {
             match channel_manager::resolve_existing(discord_client, guild_id, &config.groups, &lookup)
                 .await
@@ -114,7 +115,13 @@ async fn main() -> Result<()> {
 
     let otel_provider = init_tracing();
 
-    let config = config::Config::load(&args.config, args.discord_token.as_deref())?;
+    let mut config = Config::load(&args.config)?;
+    let discord = config.discord.as_mut().expect("missing [discord] section in config");
+    if let Some(token) = args.discord_token.as_deref() {
+        token.trim().clone_into(&mut discord.bot_token);
+    } else if let Ok(token) = std::env::var("DISCORD_TOKEN") {
+        token.trim().clone_into(&mut discord.bot_token);
+    }
 
     let (reporter, health_service) = tonic_health::server::health_reporter();
     let health_listen_path = config.grpc.listen_path.clone();
@@ -138,10 +145,15 @@ async fn main() -> Result<()> {
         }
     });
 
+    let discord_config = config.discord.as_ref().expect("missing [discord] section in config");
+    let whisperer_config = config.whisperer.as_ref().expect("missing [whisperer] section in config");
+    let oxide_config = config.oxide.as_ref().expect("missing [oxide] section in config");
+    let fallback_channel_id = ChannelId::from(discord_config.channel_id.get());
+
     let whisperer =
-        grpc_whisperer::WhispererConnection::connect(config.whisperer.socket_path.clone()).await?;
+        grpc_whisperer::WhispererConnection::connect(whisperer_config.socket_path.clone()).await?;
     tracing::info!(
-        path = %config.whisperer.socket_path,
+        path = %whisperer_config.socket_path,
         "connected to trunk-whisperer"
     );
 
@@ -150,12 +162,12 @@ async fn main() -> Result<()> {
     let db = Arc::new(Mutex::new(db));
     tracing::info!(path = %args.db_path.display(), hour, "opened initial database");
 
-    let discord_client = Arc::new(discord::DiscordClient::new(&config.discord));
-    let channel_lookup = init_channel_manager(&discord_client, &config.discord).await;
+    let discord_client = Arc::new(discord::DiscordClient::new(discord_config));
+    let channel_lookup = init_channel_manager(&discord_client, discord_config).await;
 
     let aggregator = Arc::new(aggregator::Aggregator::new(
         Arc::clone(&discord_client),
-        config.discord.channel_id,
+        fallback_channel_id,
         Arc::clone(&db),
     ));
 
@@ -164,7 +176,7 @@ async fn main() -> Result<()> {
         Arc::clone(&discord_client),
         aggregator,
         config.audio.buffer_duration_ms,
-        config.discord.channel_id,
+        fallback_channel_id,
         channel_lookup,
         config.audio.tone_detection,
         config.audio.tone_detection_duration_s,
@@ -173,15 +185,15 @@ async fn main() -> Result<()> {
     ));
 
     discord_client
-        .send_message(config.discord.channel_id, "trunk-discord is now online.")
+        .send_message(fallback_channel_id, "trunk-discord is now online.")
         .await?;
 
     tracing::info!(
-        oxide_socket = %config.oxide.socket_path,
+        oxide_socket = %oxide_config.socket_path,
         "connecting to trunk-oxide"
     );
 
-    grpc_oxide::run(config.oxide.socket_path.clone(), dispatcher, reporter).await?;
+    grpc_oxide::run(oxide_config.socket_path.clone(), dispatcher, reporter).await?;
 
     if let Some(provider) = otel_provider {
         let _ = provider.shutdown();

@@ -406,15 +406,18 @@ fn decode_audio(bytes: &[u8]) -> Vec<f32> {
 }
 
 /// Check if Whisper returned a "blank audio" placeholder.
+/// Only matches when the entire transcription is a placeholder — not when
+/// real words like "silence" appear in normal speech.
 fn is_blank_audio(text: &str) -> bool {
     let t = text
         .trim()
         .trim_start_matches(['[', '('])
         .trim_end_matches([']', ')'])
+        .trim()
         .to_lowercase()
         .replace('_', " ");
-    t.contains("blank audio")
-        || t.contains("no speech")
+    t == "blank audio"
+        || t == "no speech"
         || t == "silence"
         || t == "..."
         || t == "."

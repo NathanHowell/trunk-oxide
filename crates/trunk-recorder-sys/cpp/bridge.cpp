@@ -708,6 +708,10 @@ std::unique_ptr<TrContext> tr_create(rust::Str config_json,
     for (auto *sys : ctx->impl->trunk_ctx.systems) {
         ctx->impl->bridge->setup_system(sys);
     }
+
+    // Start the Rust plugin (spawns the gRPC server).
+    ctx->impl->bridge->start();
+
     return ctx;
 }
 

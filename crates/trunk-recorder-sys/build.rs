@@ -92,7 +92,6 @@ fn main() {
     // Library mode: link against libtrunk-recorder.so and enable full lifecycle support
     if std::env::var("CARGO_FEATURE_LINK_SHARED").is_ok() {
         build.define("TR_LIBRARY_MODE", None);
-        build.define("TR_HEADLESS", None);
 
         // Add cmake.h compat stub for config.h's transitive include
         let cmake_stub = compat_dir.join("cmake.h");

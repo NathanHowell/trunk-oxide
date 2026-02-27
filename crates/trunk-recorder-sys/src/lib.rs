@@ -121,7 +121,6 @@ pub mod ffi {
         pub error_count: i64,
         pub freq: f64,
         pub length: f64,
-        pub filename: String,
     }
 
     #[derive(Debug, Clone)]
@@ -169,16 +168,8 @@ pub mod ffi {
         pub priority: i32,
         pub mode: bool,
         pub duplex: bool,
-        pub audio_archive: bool,
-        pub transmission_archive: bool,
-        pub call_log: bool,
-        pub compress_wav: bool,
-        pub filename: String,
-        pub status_filename: String,
-        pub converted: String,
         pub sys_num: i32,
         pub short_name: String,
-        pub upload_script: String,
         pub audio_type: String,
         pub tdma_slot: i32,
         pub length: f64,
@@ -187,8 +178,6 @@ pub mod ffi {
         pub transmission_error_list: Vec<TrCallError>,
         pub transmission_list: Vec<TrTransmission>,
         pub status: TrCallDataStatus,
-        pub process_call_time: i64,
-        pub retry_attempt: i32,
     }
 
     // ── Opaque C++ types ──
@@ -242,7 +231,6 @@ pub mod ffi {
         fn system_get_analog_levels(sys: &TrSystem) -> f64;
         fn system_get_digital_levels(sys: &TrSystem) -> f64;
         fn system_get_squelch_db(sys: &TrSystem) -> f64;
-        fn system_get_compress_wav(sys: &TrSystem) -> bool;
         fn system_get_conversation_mode(sys: &TrSystem) -> bool;
         fn system_get_message_count(sys: &TrSystem) -> i32;
         fn system_get_decode_rate(sys: &TrSystem) -> i32;

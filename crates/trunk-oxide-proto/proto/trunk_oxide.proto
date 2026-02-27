@@ -113,10 +113,9 @@ message SystemInfo {
   double analog_levels = 10;
   double digital_levels = 11;
   double squelch_db = 12;
-  bool compress_wav = 13;
-  bool conversation_mode = 14;
-  int32 message_count = 15;
-  int32 decode_rate = 16;
+  bool conversation_mode = 13;
+  int32 message_count = 14;
+  int32 decode_rate = 15;
 }
 
 // ── Recorder info ──
@@ -184,26 +183,16 @@ message CallData {
   int32 priority = 22;
   bool mode = 23;
   bool duplex = 24;
-  bool audio_archive = 25;
-  bool transmission_archive = 26;
-  bool call_log = 27;
-  bool compress_wav = 28;
-  string filename = 29;
-  string status_filename = 30;
-  string converted = 31;
-  int32 sys_num = 32;
-  string short_name = 33;
-  string upload_script = 34;
-  string audio_type = 35;
-  int32 tdma_slot = 36;
-  double length = 37;
-  bool phase2_tdma = 38;
-  repeated CallSource sources = 39;
-  repeated CallError errors = 40;
-  repeated Transmission transmissions = 41;
-  int32 status = 42;
-  int64 process_call_time = 43;
-  int32 retry_attempt = 44;
+  int32 sys_num = 25;
+  string short_name = 26;
+  string audio_type = 27;
+  int32 tdma_slot = 28;
+  double length = 29;
+  bool phase2_tdma = 30;
+  repeated CallSource sources = 31;
+  repeated CallError errors = 32;
+  repeated Transmission transmissions = 33;
+  int32 status = 34;
 }
 
 message Transmission {
@@ -218,7 +207,6 @@ message Transmission {
   int64 error_count = 9;
   double freq = 10;
   double length = 11;
-  string filename = 12;
 }
 
 message CallSource {

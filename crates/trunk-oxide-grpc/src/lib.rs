@@ -53,7 +53,7 @@ fn call_info(call: &TrCall) -> proto::CallInfo {
 
 fn system_info(sys: &TrSystem) -> proto::SystemInfo {
     use trunk_recorder_sys::ffi::{
-        system_get_analog_levels, system_get_bandplan, system_get_compress_wav,
+        system_get_analog_levels, system_get_bandplan,
         system_get_conversation_mode, system_get_decode_rate, system_get_digital_levels,
         system_get_message_count, system_get_nac, system_get_short_name, system_get_squelch_db,
         system_get_sys_id, system_get_sys_num, system_get_sys_rfss, system_get_sys_site_id,
@@ -72,7 +72,6 @@ fn system_info(sys: &TrSystem) -> proto::SystemInfo {
         analog_levels: system_get_analog_levels(sys),
         digital_levels: system_get_digital_levels(sys),
         squelch_db: system_get_squelch_db(sys),
-        compress_wav: system_get_compress_wav(sys),
         conversation_mode: system_get_conversation_mode(sys),
         message_count: system_get_message_count(sys),
         decode_rate: system_get_decode_rate(sys),
@@ -126,16 +125,8 @@ fn convert_call_data(cd: &TrCallData) -> proto::CallData {
         priority: cd.priority,
         mode: cd.mode,
         duplex: cd.duplex,
-        audio_archive: cd.audio_archive,
-        transmission_archive: cd.transmission_archive,
-        call_log: cd.call_log,
-        compress_wav: cd.compress_wav,
-        filename: cd.filename.clone(),
-        status_filename: cd.status_filename.clone(),
-        converted: cd.converted.clone(),
         sys_num: cd.sys_num,
         short_name: cd.short_name.clone(),
-        upload_script: cd.upload_script.clone(),
         audio_type: cd.audio_type.clone(),
         tdma_slot: cd.tdma_slot,
         length: cd.length,
@@ -178,12 +169,9 @@ fn convert_call_data(cd: &TrCallData) -> proto::CallData {
                 error_count: t.error_count,
                 freq: t.freq,
                 length: t.length,
-                filename: t.filename.clone(),
             })
             .collect(),
         status: i32::from(cd.status.repr),
-        process_call_time: cd.process_call_time,
-        retry_attempt: cd.retry_attempt,
     }
 }
 

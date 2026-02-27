@@ -45,7 +45,6 @@ WORKDIR /build
 COPY trunk-recorder trunk-recorder
 
 RUN cmake -S trunk-recorder -B trunk-recorder/build \
-        -DBUILD_SHARED_API=ON \
         -DCMAKE_INSTALL_LIBDIR=lib \
     && cmake --build trunk-recorder/build -j2 --target trunk_recorder_shared \
     && cp trunk-recorder/build/libtrunk-recorder.so /usr/local/lib/ \

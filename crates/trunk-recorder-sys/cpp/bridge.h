@@ -85,7 +85,6 @@ rust::String system_get_bandplan(const TrSystem &sys);
 double system_get_analog_levels(const TrSystem &sys);
 double system_get_digital_levels(const TrSystem &sys);
 double system_get_squelch_db(const TrSystem &sys);
-bool system_get_compress_wav(const TrSystem &sys);
 bool system_get_conversation_mode(const TrSystem &sys);
 int32_t system_get_message_count(const TrSystem &sys);
 int32_t system_get_decode_rate(const TrSystem &sys);

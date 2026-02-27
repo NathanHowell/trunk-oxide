@@ -149,7 +149,6 @@ static TrTransmission convert_transmission(const Transmission &tx) {
     out.error_count = tx.error_count;
     out.freq = tx.freq;
     out.length = tx.length;
-    out.filename = rust::String(tx.filename);
     return out;
 }
 
@@ -206,16 +205,8 @@ static TrCallData convert_call_data(const Call_Data_t &cd) {
     out.priority = cd.priority;
     out.mode = cd.mode;
     out.duplex = cd.duplex;
-    out.audio_archive = cd.audio_archive;
-    out.transmission_archive = cd.transmission_archive;
-    out.call_log = cd.call_log;
-    out.compress_wav = cd.compress_wav;
-    out.filename = rust::String(cd.filename);
-    out.status_filename = rust::String(cd.status_filename);
-    out.converted = rust::String(cd.converted);
     out.sys_num = cd.sys_num;
     out.short_name = rust::String(cd.short_name);
-    out.upload_script = rust::String(cd.upload_script);
     out.audio_type = rust::String(cd.audio_type);
     out.tdma_slot = cd.tdma_slot;
     out.length = cd.length;
@@ -240,8 +231,6 @@ static TrCallData convert_call_data(const Call_Data_t &cd) {
     out.transmission_list = std::move(transmissions);
 
     out.status = convert_call_data_status(cd.status);
-    out.process_call_time = static_cast<int64_t>(cd.process_call_time);
-    out.retry_attempt = cd.retry_attempt;
     return out;
 }
 
@@ -495,7 +484,6 @@ rust::String system_get_bandplan(const TrSystem &sys) { return rust::String(sys.
 double system_get_analog_levels(const TrSystem &sys) { return sys.ptr->get_analog_levels(); }
 double system_get_digital_levels(const TrSystem &sys) { return sys.ptr->get_digital_levels(); }
 double system_get_squelch_db(const TrSystem &sys) { return sys.ptr->get_squelch_db(); }
-bool system_get_compress_wav(const TrSystem &sys) { return sys.ptr->get_compress_wav(); }
 bool system_get_conversation_mode(const TrSystem &sys) { return sys.ptr->get_conversation_mode(); }
 int32_t system_get_message_count(const TrSystem &sys) { return sys.ptr->get_message_count(); }
 int32_t system_get_decode_rate(const TrSystem &sys) { return sys.ptr->get_decode_rate(); }
@@ -548,11 +536,8 @@ public:
     }
 
     void conclude_call(Call *call, System *sys, Config /*config*/) override {
-        // Build Call_Data_t directly (no Call_Concluder in headless/library mode)
         Call_Data_t call_info = {};
         call_info.status = INITIAL;
-        call_info.process_call_time = time(0);
-        call_info.retry_attempt = 0;
         call_info.error_count = 0;
         call_info.spike_count = 0;
         call_info.freq = call->get_freq();
@@ -572,12 +557,7 @@ public:
         call_info.transmission_list = call->get_transmissions();
         call_info.sys_num = sys->get_sys_num();
         call_info.short_name = sys->get_short_name();
-        call_info.upload_script = sys->get_upload_script();
-        call_info.audio_archive = sys->get_audio_archive();
-        call_info.transmission_archive = sys->get_transmission_archive();
-        call_info.call_log = sys->get_call_log();
         call_info.call_num = call->get_call_num();
-        call_info.compress_wav = sys->get_compress_wav();
         call_info.talkgroup = call->get_talkgroup();
         call_info.talkgroup_display = call->get_talkgroup_display();
         call_info.talkgroup_tag = call->get_talkgroup_tag();
@@ -594,10 +574,6 @@ public:
         } else {
             call_info.audio_type = "digital";
         }
-
-        std::memset(call_info.filename, 0, sizeof(call_info.filename));
-        std::memset(call_info.status_filename, 0, sizeof(call_info.status_filename));
-        std::memset(call_info.converted, 0, sizeof(call_info.converted));
 
         bridge_->call_end(call_info);
     }

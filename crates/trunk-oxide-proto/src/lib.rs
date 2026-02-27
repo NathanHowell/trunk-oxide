@@ -132,7 +132,6 @@ mod tests {
                 analog_levels: 0.0,
                 digital_levels: 1.0,
                 squelch_db: -50.0,
-                compress_wav: false,
                 conversation_mode: false,
                 message_count: 42,
                 decode_rate: 10,

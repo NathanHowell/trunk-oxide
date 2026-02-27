@@ -126,7 +126,6 @@ pub mod ffi {
     #[derive(Debug, Clone)]
     struct TrCallSource {
         pub source: i64,
-        pub time: i64,
         pub position: f64,
         pub emergency: bool,
         pub signal_system: String,
@@ -135,7 +134,6 @@ pub mod ffi {
 
     #[derive(Debug, Clone)]
     struct TrCallError {
-        pub time: i64,
         pub position: f64,
         pub total_len: f64,
         pub error_count: f64,

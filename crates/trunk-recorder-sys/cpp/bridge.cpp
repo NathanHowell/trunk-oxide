@@ -156,7 +156,6 @@ static TrTransmission convert_transmission(const Transmission &tx) {
 static TrCallSource convert_call_source(const Call_Source &cs) {
     TrCallSource out;
     out.source = cs.source;
-    out.time = cs.time;
     out.position = cs.position;
     out.emergency = cs.emergency;
     out.signal_system = rust::String(cs.signal_system);
@@ -166,7 +165,6 @@ static TrCallSource convert_call_source(const Call_Source &cs) {
 
 static TrCallError convert_call_error(const Call_Error &ce) {
     TrCallError out;
-    out.time = ce.time;
     out.position = ce.position;
     out.total_len = ce.total_len;
     out.error_count = ce.error_count;

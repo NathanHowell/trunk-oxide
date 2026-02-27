@@ -136,7 +136,6 @@ fn convert_call_data(cd: &TrCallData) -> proto::CallData {
             .iter()
             .map(|s| proto::CallSource {
                 source: s.source,
-                time: s.time,
                 position: s.position,
                 emergency: s.emergency,
                 signal_system: s.signal_system.clone(),
@@ -147,7 +146,6 @@ fn convert_call_data(cd: &TrCallData) -> proto::CallData {
             .transmission_error_list
             .iter()
             .map(|e| proto::CallError {
-                time: e.time,
                 position: e.position,
                 total_len: e.total_len,
                 error_count: e.error_count,

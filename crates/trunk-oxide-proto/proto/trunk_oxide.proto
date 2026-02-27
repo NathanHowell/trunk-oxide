@@ -223,19 +223,17 @@ message Transmission {
 
 message CallSource {
   int64 source = 1;
-  int64 time = 2;
-  double position = 3;
-  bool emergency = 4;
-  string signal_system = 5;
-  string tag = 6;
+  double position = 2;
+  bool emergency = 3;
+  string signal_system = 4;
+  string tag = 5;
 }
 
 message CallError {
-  int64 time = 1;
-  double position = 2;
-  double total_len = 3;
-  double error_count = 4;
-  double spike_count = 5;
+  double position = 1;
+  double total_len = 2;
+  double error_count = 3;
+  double spike_count = 4;
 }
 
 // ── Trunk message ──

@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
 use serenity::model::id::ChannelId;
@@ -33,8 +34,20 @@ struct ThreadCacheKey {
     date: String, // "YYYY-MM-DD"
 }
 
+struct ActiveCall {
+    tx: mpsc::Sender<CallMessage>,
+    started_at: Instant,
+}
+
+/// Maximum time a call can be active before being reaped.
+/// This is a safety net for C++ bugs that fail to emit CallEndEvent.
+const MAX_CALL_AGE: Duration = Duration::from_secs(10 * 60);
+
+/// How often to check for stuck calls.
+const REAP_INTERVAL: Duration = Duration::from_secs(60);
+
 pub struct Dispatcher {
-    calls: RwLock<HashMap<CallKey, mpsc::Sender<CallMessage>>>,
+    calls: RwLock<HashMap<CallKey, ActiveCall>>,
     thread_cache: RwLock<HashMap<ThreadCacheKey, ChannelId>>,
     whisperer: WhispererConnection,
     discord: Arc<DiscordClient>,
@@ -128,8 +141,8 @@ impl Dispatcher {
         };
 
         let calls = self.calls.read().await;
-        if let Some(tx) = calls.get(&key) {
-            let _ = tx.try_send(CallMessage::Audio {
+        if let Some(active) = calls.get(&key) {
+            let _ = active.tx.try_send(CallMessage::Audio {
                 samples: sample.samples,
                 sample_rate: sample.sample_rate,
             });
@@ -279,7 +292,10 @@ impl Dispatcher {
 
         tokio::spawn(handler.run().instrument(span));
 
-        self.calls.write().await.insert(key, tx);
+        self.calls.write().await.insert(key, ActiveCall {
+            tx,
+            started_at: Instant::now(),
+        });
     }
 
     async fn resolve_or_create_thread(
@@ -348,12 +364,49 @@ impl Dispatcher {
             talkgroup: Talkgroup(call_data.talkgroup),
         };
 
-        let tx = self.calls.write().await.remove(&key);
-        if let Some(tx) = tx {
-            let _ = tx
+        let active = self.calls.write().await.remove(&key);
+        if let Some(active) = active {
+            let _ = active.tx
                 .send(CallMessage::End(event.call_data.map(Box::new)))
                 .await;
         }
+    }
+
+    /// Reap calls that have been active longer than `MAX_CALL_AGE` without
+    /// receiving a CallEndEvent. Safety net for C++ bugs that fail to emit
+    /// conclude_call.
+    async fn reap_stuck_calls(&self) {
+        let now = Instant::now();
+        let mut calls = self.calls.write().await;
+        calls.retain(|key, active| {
+            let age = now.duration_since(active.started_at);
+            if age > MAX_CALL_AGE {
+                tracing::warn!(
+                    sys_num = key.sys_num.0,
+                    talkgroup = key.talkgroup.0,
+                    age_secs = age.as_secs(),
+                    "reaping stuck call (no CallEnd received)"
+                );
+                // Send End with no CallData so the handler cleans up
+                let _ = active.tx.try_send(CallMessage::End(None));
+                false
+            } else {
+                true
+            }
+        });
+    }
+
+    /// Spawn a background task that periodically reaps stuck calls.
+    pub fn spawn_reaper(self: &Arc<Self>) {
+        let dispatcher = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(REAP_INTERVAL);
+            interval.tick().await; // first tick is immediate, skip it
+            loop {
+                interval.tick().await;
+                dispatcher.reap_stuck_calls().await;
+            }
+        });
     }
 
     async fn handle_signal(&self, event: proto::SignalEvent) {
@@ -363,9 +416,9 @@ impl Dispatcher {
                 talkgroup: Talkgroup(call.talkgroup),
             };
             let calls = self.calls.read().await;
-            if let Some(tx) = calls.get(&key) {
+            if let Some(active) = calls.get(&key) {
                 let text = format_signal_event(&event);
-                let _ = tx.try_send(CallMessage::Event(text));
+                let _ = active.tx.try_send(CallMessage::Event(text));
                 return;
             }
         }
@@ -382,9 +435,9 @@ impl Dispatcher {
                 talkgroup: Talkgroup(event.talkgroup),
             };
             let calls = self.calls.read().await;
-            if let Some(tx) = calls.get(&key) {
+            if let Some(active) = calls.get(&key) {
                 let text = format_unit_event(&event);
-                let _ = tx.try_send(CallMessage::Event(text));
+                let _ = active.tx.try_send(CallMessage::Event(text));
                 return;
             }
         }

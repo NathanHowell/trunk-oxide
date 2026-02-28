@@ -184,6 +184,8 @@ async fn main() -> Result<()> {
         args.db_path,
     ));
 
+    dispatcher.spawn_reaper();
+
     discord_client
         .send_message(fallback_channel_id, "trunk-discord is now online.")
         .await?;

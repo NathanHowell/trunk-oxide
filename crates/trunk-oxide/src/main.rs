@@ -4,9 +4,12 @@
 //! libtrunk-recorder.so, reads the TOML config file, and routes all events
 //! through the gRPC plugin to downstream consumers.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
 use anyhow::{Context, Result};
 use clap::Parser;
-use trunk_oxide::TrunkRecorderBuilder;
+use trunk_oxide::{CallManagerConfig, TrunkRecorderBuilder};
 use trunk_oxide_grpc::GrpcPlugin;
 use opentelemetry::trace::TracerProvider;
 use tracing_subscriber::prelude::*;
@@ -96,11 +99,27 @@ fn main() -> Result<()> {
         plugin.set_talkgroups(tg_map);
     }
 
-    let recorder = TrunkRecorderBuilder::from_config(&config, plugin)
+    let call_mgr_config = {
+        let rec = config.recorder.as_ref();
+        CallManagerConfig {
+            call_timeout: rec.map_or(3.0, |r| r.call_timeout),
+            new_call_from_update: rec.map_or(true, |r| r.new_call_from_update),
+            record_uu_v_calls: rec.map_or(true, |r| r.record_uu_v_calls),
+        }
+    };
+
+    let mut recorder = TrunkRecorderBuilder::from_config(&config, plugin)
         .context("failed to initialize trunk-recorder")?
-        .start();
+        .start(call_mgr_config);
 
     tracing::info!("trunk-recorder engine running, press Ctrl+C to stop");
+
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let monitor_shutdown = Arc::clone(&shutdown);
+
+    let monitor_handle = std::thread::spawn(move || {
+        recorder.run_monitor(&monitor_shutdown)
+    });
 
     // Block until SIGINT
     let rt = tokio::runtime::Builder::new_current_thread()
@@ -112,8 +131,8 @@ fn main() -> Result<()> {
             .expect("failed to install signal handler");
     });
 
-    tracing::info!("shutting down");
-    drop(recorder);
+    shutdown.store(true, Ordering::Relaxed);
+    monitor_handle.join().unwrap()?;
 
     if let Some(provider) = otel_provider {
         let _ = provider.shutdown();

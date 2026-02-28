@@ -6,20 +6,25 @@
 
 #include <cstdlib>
 #include <cstring>
-#include <thread>
+#include <map>
 
 #include "trunk-recorder/trunk_context.h"
+#include "trunk-recorder/call_state_manager.h"
 #include "trunk-recorder/event_sink.h"
+#include "trunk-recorder/formatter.h"
 #include "trunk-recorder/source.h"
+#include "trunk-recorder/systems/p25_parser.h"
+#include "trunk-recorder/systems/smartnet_parser.h"
 #include "trunk-recorder/systems/system.h"
 #include "trunk-recorder/talkgroup.h"
 #include "trunk-recorder/unit_tags_ota.h"
+#include "trunk-recorder/autotune.h"
+#include "trunk-recorder/recorders/p25_recorder.h"
 
 // Forward declarations for functions provided by libtrunk-recorder.so
 bool setup_systems(Config &config, gr::top_block_sptr &tb,
                    std::vector<std::shared_ptr<Source>> &sources, std::vector<std::shared_ptr<System>> &systems,
                    std::vector<std::shared_ptr<Call>> &calls);
-int monitor_messages(TrunkContext &ctx);
 void set_logging_level(std::string log_level);
 
 namespace trunk_oxide {
@@ -624,8 +629,14 @@ private:
 
 struct TrContextImpl {
     TrunkContext trunk_ctx;
-    std::thread monitor_thread;
     std::shared_ptr<RustPluginBridge> bridge;
+
+    // Parsers — created eagerly during tr_finalize
+    std::map<int, std::unique_ptr<SmartnetParser>> smartnet_parsers;
+    std::unique_ptr<P25Parser> p25_parser;
+
+    // CallStateManager — created eagerly during tr_finalize for conventional call management
+    std::unique_ptr<CallStateManager> call_mgr;
 };
 
 TrContext::TrContext() : impl(std::make_unique<TrContextImpl>()) {}
@@ -634,27 +645,6 @@ TrContext::TrContext(TrContext &&) noexcept = default;
 TrContext &TrContext::operator=(TrContext &&) noexcept = default;
 
 // ── Lifecycle function implementations ──
-
-void tr_start(TrContext &ctx) {
-    // Set Boost log level from RUST_LOG, defaulting to info.
-    // trunk-recorder's config.cc normally does this, but we bypass that path.
-    const char *env = std::getenv("RUST_LOG");
-    set_logging_level(env ? std::string(env) : "info");
-
-    ctx.impl->trunk_ctx.tb->start();
-    ctx.impl->monitor_thread = std::thread([&ctx] {
-        ctx.impl->trunk_ctx.exit_code = monitor_messages(ctx.impl->trunk_ctx);
-    });
-}
-
-void tr_stop(TrContext &ctx) {
-    ctx.impl->trunk_ctx.exit_flag = 1;
-    if (ctx.impl->monitor_thread.joinable()) {
-        ctx.impl->monitor_thread.join();
-    }
-    ctx.impl->trunk_ctx.tb->stop();
-    ctx.impl->trunk_ctx.tb->wait();
-}
 
 // ── Builder: create empty context ──
 
@@ -672,6 +662,26 @@ void tr_finalize(TrContext &ctx) {
     setup_systems(ctx.impl->trunk_ctx.config, ctx.impl->trunk_ctx.tb,
                   ctx.impl->trunk_ctx.sources, ctx.impl->trunk_ctx.systems,
                   ctx.impl->trunk_ctx.calls);
+
+    // Eagerly create parsers based on configured system types
+    for (auto &system : ctx.impl->trunk_ctx.systems) {
+        if (system->get_system_type() == SYS_SMARTNET) {
+            ctx.impl->smartnet_parsers[system->get_sys_num()] =
+                std::make_unique<SmartnetParser>(system);
+        }
+        if (system->get_system_type() == SYS_P25 && !ctx.impl->p25_parser) {
+            ctx.impl->p25_parser = std::make_unique<P25Parser>();
+        }
+    }
+
+    // Create CallStateManager for conventional call management via tick_conventional
+    ctx.impl->call_mgr = std::make_unique<CallStateManager>(
+        ctx.impl->trunk_ctx.config, ctx.impl->trunk_ctx.sources);
+    // Move pre-existing conventional calls into the manager
+    for (auto &call : ctx.impl->trunk_ctx.calls) {
+        ctx.impl->call_mgr->active_calls_mut().push_back(std::move(call));
+    }
+    ctx.impl->trunk_ctx.calls.clear();
 
     ctx.impl->bridge->setup_config(ctx.impl->trunk_ctx.sources,
                                    ctx.impl->trunk_ctx.systems);
@@ -954,6 +964,691 @@ void tr_system_add_unit_tag(TrContext &ctx, int32_t sys_idx,
 void tr_system_set_unit_tags_mode(TrContext &ctx, int32_t sys_idx, rust::Str mode) {
     ctx.impl->trunk_ctx.systems.at(sys_idx)->set_unit_tags_mode(
         std::string(mode.data(), mode.size()));
+}
+
+// ── Reverse conversion: TrTrunkMessage → C++ TrunkMessage ──
+
+static MessageType convert_message_type_back(TrMessageType mt) {
+    switch (mt) {
+        case TrMessageType::Grant: return GRANT;
+        case TrMessageType::Status: return STATUS;
+        case TrMessageType::Update: return UPDATE;
+        case TrMessageType::ControlChannel: return CONTROL_CHANNEL;
+        case TrMessageType::Registration: return REGISTRATION;
+        case TrMessageType::Deregistration: return DEREGISTRATION;
+        case TrMessageType::Affiliation: return AFFILIATION;
+        case TrMessageType::Sysid: return SYSID;
+        case TrMessageType::Acknowledge: return ACKNOWLEDGE;
+        case TrMessageType::Location: return LOCATION;
+        case TrMessageType::PatchAdd: return PATCH_ADD;
+        case TrMessageType::PatchDelete: return PATCH_DELETE;
+        case TrMessageType::DataGrant: return DATA_GRANT;
+        case TrMessageType::UuAnsReq: return UU_ANS_REQ;
+        case TrMessageType::UuVGrant: return UU_V_GRANT;
+        case TrMessageType::UuVUpdate: return UU_V_UPDATE;
+        case TrMessageType::InvalidCcMessage: return INVALID_CC_MESSAGE;
+        case TrMessageType::Tdulc: return TDULC;
+        default: return UNKNOWN;
+    }
+}
+
+static CallState convert_state_back(TrState s) {
+    switch (s) {
+        case TrState::Recording: return RECORDING;
+        default: return MONITORING;
+    }
+}
+
+static MonitoringState convert_monitoring_state_back(TrMonitoringState ms) {
+    switch (ms) {
+        case TrMonitoringState::UnknownTg: return UNKNOWN_TG;
+        case TrMonitoringState::IgnoredTg: return IGNORED_TG;
+        case TrMonitoringState::NoSource: return NO_SOURCE;
+        case TrMonitoringState::NoRecorder: return NO_RECORDER;
+        case TrMonitoringState::Encrypted: return ENCRYPTED;
+        case TrMonitoringState::Duplicate: return DUPLICATE;
+        case TrMonitoringState::Superseded: return SUPERSEDED;
+        default: return UNSPECIFIED;
+    }
+}
+
+static TrunkMessage convert_trunk_message_back(const TrTrunkMessage &msg) {
+    TrunkMessage out;
+    out.message_type = convert_message_type_back(msg.message_type);
+    out.meta = std::string(msg.meta.data(), msg.meta.size());
+    out.freq = msg.freq;
+    out.talkgroup = msg.talkgroup;
+    out.encrypted = msg.encrypted;
+    out.emergency = msg.emergency;
+    out.duplex = msg.duplex;
+    out.mode = msg.mode;
+    out.priority = msg.priority;
+    out.tdma_slot = msg.tdma_slot;
+    out.phase2_tdma = msg.phase2_tdma;
+    out.source = msg.source;
+    out.sys_num = msg.sys_num;
+    out.sys_id = msg.sys_id;
+    out.sys_rfss = msg.sys_rfss;
+    out.sys_site_id = msg.sys_site_id;
+    out.nac = msg.nac;
+    out.wacn = msg.wacn;
+    out.patch_data.sg = msg.patch_data.sg;
+    out.patch_data.ga1 = msg.patch_data.ga1;
+    out.patch_data.ga2 = msg.patch_data.ga2;
+    out.patch_data.ga3 = msg.patch_data.ga3;
+    out.opcode = msg.opcode;
+    return out;
+}
+
+// ── Helper: find system by sys_num ──
+
+static std::shared_ptr<System> find_system_by_num(TrContext &ctx, int sys_num) {
+    for (auto &sys : ctx.impl->trunk_ctx.systems) {
+        if (sys->get_sys_num() == sys_num) {
+            return sys;
+        }
+    }
+    return nullptr;
+}
+
+// ── Phase A: Loop Control ──
+
+void tr_start_gnuradio(TrContext &ctx) {
+    const char *env = std::getenv("RUST_LOG");
+    set_logging_level(env ? std::string(env) : "info");
+    ctx.impl->trunk_ctx.tb->start();
+}
+
+void tr_stop_gnuradio(TrContext &ctx) {
+    ctx.impl->trunk_ctx.tb->stop();
+    ctx.impl->trunk_ctx.tb->wait();
+}
+
+// ── Phase B: Message Draining ──
+
+rust::Vec<TrTrunkMessage> tr_context_drain_messages(TrContext &ctx) {
+    rust::Vec<TrTrunkMessage> result;
+    auto &systems = ctx.impl->trunk_ctx.systems;
+    auto &config = ctx.impl->trunk_ctx.config;
+    auto &sources = ctx.impl->trunk_ctx.sources;
+    auto &tb = ctx.impl->trunk_ctx.tb;
+
+    for (auto &system : systems) {
+        if (system->get_system_type() != SYS_P25 && system->get_system_type() != SYS_SMARTNET) {
+            continue;
+        }
+
+        gr::message::sptr msg;
+        msg = system->get_msg_queue()->delete_head_nowait();
+        while (msg != nullptr) {
+            system->set_message_count(system->get_message_count() + 1);
+
+            std::vector<TrunkMessage> trunk_messages;
+
+            if (system->get_system_type() == SYS_SMARTNET) {
+                auto &smartnet_parser = ctx.impl->smartnet_parsers[system->get_sys_num()];
+                trunk_messages = smartnet_parser->parse_message(msg, system);
+            } else if (system->get_system_type() == SYS_P25) {
+                trunk_messages = ctx.impl->p25_parser->parse_message(msg, system);
+            }
+
+            // Handle C++-internal message types and fire plugin notifications
+            for (auto &message : trunk_messages) {
+                switch (message.message_type) {
+                case CONTROL_CHANNEL:
+                    system->add_control_channel(message.freq);
+                    break;
+                case PATCH_ADD:
+                    system->update_active_talkgroup_patches(message.patch_data);
+                    break;
+                case PATCH_DELETE:
+                    system->delete_talkgroup_patch(message.patch_data);
+                    break;
+                case TDULC:
+                    system->retune_trunking(tb, sources);
+                    if (system->get_source() && system->get_source()->get_autotune_source() && system->get_system_type() == SYS_P25) {
+                        autotune_control_channel(system, false);
+                    }
+                    break;
+                case INVALID_CC_MESSAGE:
+                {
+                    int msg_count = system->get_message_count();
+                    if (msg_count > 1) {
+                        system->set_message_count(msg_count - 1);
+                    }
+                    break;
+                }
+                case REGISTRATION:
+                    config.event_sink->unit_registration(system, message.source);
+                    break;
+                case DEREGISTRATION:
+                    config.event_sink->unit_deregistration(system, message.source);
+                    break;
+                case AFFILIATION:
+                    config.event_sink->unit_group_affiliation(system, message.source, message.talkgroup);
+                    break;
+                case ACKNOWLEDGE:
+                    config.event_sink->unit_acknowledge_response(system, message.source);
+                    break;
+                case LOCATION:
+                    config.event_sink->unit_location(system, message.source, message.talkgroup);
+                    break;
+                case DATA_GRANT:
+                    config.event_sink->unit_data_grant(system, message.source);
+                    break;
+                case UU_ANS_REQ:
+                    config.event_sink->unit_answer_request(system, message.source, message.talkgroup);
+                    break;
+                case SYSID:
+                    if ((system->get_system_type() == SYS_P25) || (system->get_system_type() == SYS_CONVENTIONAL_P25)) {
+                        if (system->update_sysid(message)) {
+                            config.event_sink->setup_system(system);
+                        }
+                    }
+                    break;
+                case STATUS:
+                    if (system->update_status(message)) {
+                        config.event_sink->setup_system(system);
+                    }
+                    break;
+                default:
+                    break;
+                }
+            }
+
+            // Fire trunk_message plugin notification for all messages
+            config.event_sink->trunk_message(trunk_messages, system);
+
+            // Convert all messages to Rust types for return
+            for (const auto &m : trunk_messages) {
+                result.push_back(convert_trunk_message(m));
+            }
+
+            if (msg->type() == -1) {
+                BOOST_LOG_TRIVIAL(error) << "[" << system->get_short_name() << "]\t process_data_unit timeout";
+            }
+
+            msg.reset();
+            msg = system->get_msg_queue()->delete_head_nowait();
+        }
+    }
+
+    return result;
+}
+
+void tr_context_process_conventional_queues(TrContext &ctx) {
+    for (auto &sys : ctx.impl->trunk_ctx.systems) {
+        for (auto &ar : sys->get_conventional_recorders()) {
+            ar->process_message_queues();
+        }
+    }
+}
+
+void tr_context_check_conventional_detection(TrContext &ctx) {
+    for (auto &source : ctx.impl->trunk_ctx.sources) {
+        source->enable_detected_recorders();
+    }
+}
+
+void tr_context_check_decode_rates(TrContext &ctx, float time_diff) {
+    auto &config = ctx.impl->trunk_ctx.config;
+    auto &tb = ctx.impl->trunk_ctx.tb;
+    auto &sources = ctx.impl->trunk_ctx.sources;
+    auto &systems = ctx.impl->trunk_ctx.systems;
+
+    config.event_sink->setup_config(sources, systems);
+    config.event_sink->system_rates(systems, time_diff);
+
+    for (auto &sys : systems) {
+        if (!is_conventional(sys->get_system_type())) {
+            int msgs_decoded_per_second = std::floor(sys->get_message_count() / time_diff);
+            sys->set_decode_rate(msgs_decoded_per_second);
+
+            if (msgs_decoded_per_second < 2) {
+                if (config.control_retune_limit > 0) {
+                    sys->set_retune_attempts(sys->get_retune_attempts() + 1);
+                    if (sys->get_retune_attempts() > config.control_retune_limit) {
+                        BOOST_LOG_TRIVIAL(error) << "[" << sys->get_short_name() << "]\t"
+                                                 << "Control channel retune limit exceeded after " << sys->get_retune_attempts() << " tries - Terminating trunk recorder";
+                        throw std::runtime_error("Control channel retune limit exceeded");
+                    }
+                }
+                if (sys->control_channel_count() > 1) {
+                    sys->retune_trunking(tb, sources);
+                    if (sys->get_source() && sys->get_source()->get_autotune_source() && sys->get_system_type() == SYS_P25) {
+                        autotune_control_channel(sys, false);
+                    }
+                } else {
+                    BOOST_LOG_TRIVIAL(error) << "[" << sys->get_short_name() << "]\tThere is only one control channel defined";
+                }
+            } else {
+                sys->set_retune_attempts(0);
+            }
+
+            if (msgs_decoded_per_second < config.control_message_warn_rate) {
+                BOOST_LOG_TRIVIAL(error) << "[" << sys->get_short_name() << "]\tfreq: " << format_freq(sys->get_current_control_channel()) << "\tControl Channel Message Decode Rate: " << msgs_decoded_per_second << "/sec, count:  " << sys->get_message_count();
+            } else if (config.control_message_warn_rate == -1) {
+                BOOST_LOG_TRIVIAL(info) << "[" << sys->get_short_name() << "]\tfreq: " << format_freq(sys->get_current_control_channel()) << "\tControl Channel Message Decode Rate: " << msgs_decoded_per_second << "/sec, count:  " << sys->get_message_count();
+            }
+        }
+        sys->set_message_count(0);
+    }
+}
+
+void tr_context_check_sources(TrContext &ctx) {
+    for (auto &source : ctx.impl->trunk_ctx.sources) {
+        if (!source->got_samples()) {
+            BOOST_LOG_TRIVIAL(error) << "Source " << source->get_num() << " has stopped receiving samples - Terminating trunk recorder";
+            throw std::runtime_error("Source stopped receiving samples");
+        }
+    }
+}
+
+void tr_context_clear_stale_patches(TrContext &ctx) {
+    for (auto &system : ctx.impl->trunk_ctx.systems) {
+        if (system->get_system_type() == SYS_P25) {
+            system->clear_stale_talkgroup_patches();
+        }
+    }
+}
+
+void tr_context_print_status(TrContext &ctx) {
+    auto &sources = ctx.impl->trunk_ctx.sources;
+    auto &systems = ctx.impl->trunk_ctx.systems;
+
+    // Gather all active calls from the call manager
+    auto &calls = ctx.impl->call_mgr->active_calls_mut();
+
+    BOOST_LOG_TRIVIAL(info) << "Active Calls: " << calls.size();
+    for (auto &call : calls) {
+        auto recorder = call->get_recorder();
+        std::string loghdr = log_header(call->get_short_name(), call->get_call_num(), call->get_talkgroup(), call->get_freq());
+        if (call->get_state() == MONITORING) {
+            BOOST_LOG_TRIVIAL(info) << loghdr << "Elapsed: " << std::setw(4) << call->elapsed().count() << " State: " << format_state(call->get_state(), call->get_monitoring_state());
+        } else {
+            if (call->is_conventional()) {
+                bool is_enabled = call->get_recorder()->is_enabled();
+                BOOST_LOG_TRIVIAL(info) << loghdr << "Elapsed: " << std::setw(4) << call->elapsed().count() << " State: " << format_state(call->get_state()) << " Enabled: " << is_enabled;
+            } else {
+                BOOST_LOG_TRIVIAL(info) << loghdr << "Elapsed: " << std::setw(4) << call->elapsed().count() << " State: " << format_state(call->get_state());
+            }
+        }
+        if (recorder) {
+            BOOST_LOG_TRIVIAL(info) << "\t[ " << std::setw(2) << recorder->get_num() << " ] State: " << format_state(recorder->get_state());
+        }
+    }
+
+    BOOST_LOG_TRIVIAL(info) << "Active Patches: ";
+    for (auto &sys : systems) {
+        sys->print_active_talkgroup_patches();
+    }
+
+    BOOST_LOG_TRIVIAL(info) << "Control Channel Decode Rates: ";
+    for (auto &sys : systems) {
+        if (!is_conventional(sys->get_system_type())) {
+            BOOST_LOG_TRIVIAL(info) << "[" << sys->get_short_name() << "]\t" << format_freq(sys->get_current_control_channel()) << "\t" << sys->get_decode_rate() << " msg/sec";
+            if ((sys->get_source()->get_autotune_source()) && (sys->get_system_type() == SYS_P25)) {
+                autotune_control_channel(sys);
+            }
+        }
+    }
+
+    BOOST_LOG_TRIVIAL(info) << "Recorders: ";
+    for (auto &source : sources) {
+        source->print_recorders();
+    }
+}
+
+void tr_context_tick_conventional(TrContext &ctx) {
+    // Only tick conventional calls managed by the C++ CallStateManager.
+    // Trunked calls are managed by Rust's CallManager.
+    auto &calls = ctx.impl->call_mgr->active_calls_mut();
+    auto &config = ctx.impl->trunk_ctx.config;
+    bool ended_call = false;
+
+    for (auto it = calls.begin(); it != calls.end();) {
+        auto &call = *it;
+        if (call->is_conventional()) {
+            // Conventional call management — same logic as CallStateManager::manage_conventional_call
+            if (!call->get_recorder()) {
+                ++it;
+                continue;
+            }
+
+            if (call->get_current_length() > 0) {
+                if (call->get_recorder()->is_idle()) {
+                    call->set_noise(call->get_recorder()->get_pwr());
+                    call->increase_idle_count();
+                } else {
+                    call->set_signal(call->get_recorder()->get_pwr());
+                    if (call->get_idle_count() > 0) {
+                        call->reset_idle_count();
+                    }
+                }
+
+                if (call->get_idle_count() > config.call_timeout.count()) {
+                    auto recorder = call->get_recorder();
+                    call->conclude_call();
+                    call->restart_call();
+                    if (recorder) {
+                        config.event_sink->setup_recorder(recorder);
+                        config.event_sink->call_start(call);
+                    }
+                } else if ((call->get_current_length() > call->get_system()->get_max_duration()) && (call->get_system()->get_max_duration() > 0)) {
+                    auto recorder = call->get_recorder();
+                    call->conclude_call();
+                    call->restart_call();
+                    if (recorder) {
+                        config.event_sink->setup_recorder(recorder);
+                        config.event_sink->call_start(call);
+                    }
+                }
+            } else if (!call->get_recorder()->is_active()) {
+                auto recorder = call->get_recorder();
+                recorder->start(call);
+                call->set_state(RECORDING);
+                config.event_sink->call_start(call);
+            }
+
+            ++it;
+        } else {
+            ++it;
+        }
+    }
+
+    if (ended_call) {
+        config.event_sink->calls_active(calls);
+    }
+}
+
+// ── Phase C: Call Management — additional call accessors ──
+
+double call_since_last_update_secs(const TrCall &call) {
+    return call.ptr->since_last_update().count();
+}
+
+bool call_get_system_multi_site(const TrCall &call) {
+    return call.ptr->get_system()->get_multiSite();
+}
+
+uint64_t call_get_system_wacn(const TrCall &call) {
+    return call.ptr->get_system()->get_wacn();
+}
+
+uint64_t call_get_system_nac(const TrCall &call) {
+    return call.ptr->get_system()->get_nac();
+}
+
+int32_t call_get_system_rfss(const TrCall &call) {
+    return call.ptr->get_system()->get_sys_rfss();
+}
+
+int32_t call_get_system_site_id(const TrCall &call) {
+    return call.ptr->get_system()->get_sys_site_id();
+}
+
+rust::String call_get_system_multi_site_name(const TrCall &call) {
+    return rust::String(call.ptr->get_system()->get_multiSiteSystemName());
+}
+
+uint64_t call_get_system_multi_site_number(const TrCall &call) {
+    return call.ptr->get_system()->get_multiSiteSystemNumber();
+}
+
+uint64_t call_system_get_preferred_nac(const TrCall &call, int64_t talkgroup) {
+    auto tg = call.ptr->get_system()->find_talkgroup(talkgroup);
+    if (tg) {
+        return tg->get_preferredNAC();
+    }
+    return 0;
+}
+
+// ── Phase C: Call Management — additional recorder accessors ──
+
+double recorder_since_last_write_secs(const TrRecorder &rec) {
+    return rec.ptr->since_last_write().count();
+}
+
+int32_t recorder_get_type(const TrRecorder &rec) {
+    return static_cast<int32_t>(rec.ptr->get_type());
+}
+
+// ── Phase C: Call Management — lifecycle operations ──
+
+std::unique_ptr<TrCall> tr_context_create_call(TrContext &ctx, const TrTrunkMessage &msg) {
+    auto cpp_msg = convert_trunk_message_back(msg);
+    auto sys = find_system_by_num(ctx, msg.sys_num);
+    if (!sys) {
+        throw std::runtime_error("System not found for sys_num");
+    }
+    auto call = Call::make(cpp_msg, sys, ctx.impl->trunk_ctx.config);
+    return std::make_unique<TrCall>(call);
+}
+
+bool tr_context_try_start_recording(TrContext &ctx, TrCall &call, const TrTrunkMessage &msg) {
+    auto cpp_msg = convert_trunk_message_back(msg);
+    auto sys = call.ptr->get_system();
+    auto &config = ctx.impl->trunk_ctx.config;
+    auto &sources = ctx.impl->trunk_ctx.sources;
+
+    auto talkgroup = sys->find_talkgroup(call.ptr->get_talkgroup());
+
+    bool source_found = false;
+    bool recorder_found = false;
+    bool override_record_unknown = false;
+
+    std::shared_ptr<Recorder> recorder;
+    std::shared_ptr<Recorder> debug_recorder;
+    std::shared_ptr<Recorder> sigmf_recorder;
+
+    if (!talkgroup) {
+        for (auto &TGID : sys->get_talkgroup_patch(call.ptr->get_talkgroup())) {
+            if (sys->find_talkgroup(TGID) != nullptr) {
+                override_record_unknown = true;
+                std::string loghdr = log_header(call.ptr->get_short_name(), call.ptr->get_call_num(), call.ptr->get_talkgroup(), call.ptr->get_freq());
+                BOOST_LOG_TRIVIAL(info) << loghdr << "\u001b[33mEnabling recording of TG not in Talkgroup File due to active supergroup patch\u001b[0m ";
+            }
+        }
+    }
+
+    if (!talkgroup && (sys->get_record_unknown() == false) && override_record_unknown == false) {
+        call.ptr->set_state(MONITORING);
+        call.ptr->set_monitoring_state(UNKNOWN_TG);
+        if (sys->get_hideUnknown() == false) {
+            std::string loghdr = log_header(call.ptr->get_short_name(), call.ptr->get_call_num(), call.ptr->get_talkgroup(), call.ptr->get_freq());
+            BOOST_LOG_TRIVIAL(info) << loghdr << "\u001b[33mNot Recording: TG not in Talkgroup File\u001b[0m ";
+        }
+        return false;
+    }
+
+    if (call.ptr->get_encrypted() == true || (talkgroup && (talkgroup->mode.compare("E") == 0 || talkgroup->mode.compare("TE") == 0 || talkgroup->mode.compare("DE") == 0))) {
+        if (talkgroup && (talkgroup->mode.compare("E") == 0 || talkgroup->mode.compare("TE") == 0 || talkgroup->mode.compare("DE") == 0)) {
+            call.ptr->set_encrypted(true);
+        }
+        if (!sys->get_monitorEncrypted()) {
+            call.ptr->set_state(MONITORING);
+            call.ptr->set_monitoring_state(ENCRYPTED);
+            if (sys->get_hideEncrypted() == false) {
+                long unit_id = call.ptr->get_current_source_id();
+                std::string tag = sys->find_unit_tag(unit_id);
+                if (tag != "") {
+                    tag = " (\033[0;34m" + tag + "\033[0m)";
+                }
+                std::string loghdr = log_header(sys->get_short_name(), call.ptr->get_call_num(), call.ptr->get_talkgroup(), call.ptr->get_freq());
+                BOOST_LOG_TRIVIAL(info) << loghdr << "\u001b[31mNot Recording: ENCRYPTED\u001b[0m - src: " << unit_id << tag;
+            }
+            return false;
+        }
+    }
+
+    for (auto &source : sources) {
+        if ((source->get_min_hz() <= call.ptr->get_freq()) &&
+            (source->get_max_hz() >= call.ptr->get_freq())) {
+            source_found = true;
+
+            if (talkgroup) {
+                int priority = talkgroup->get_priority();
+                for (auto &TGID : sys->get_talkgroup_patch(call.ptr->get_talkgroup())) {
+                    if (sys->find_talkgroup(TGID) != nullptr) {
+                        if (sys->find_talkgroup(TGID)->get_priority() < priority) {
+                            priority = sys->find_talkgroup(TGID)->get_priority();
+                            BOOST_LOG_TRIVIAL(info) << "Temporarily increased priority of talkgroup " << call.ptr->get_talkgroup() << " to " << sys->find_talkgroup(TGID)->get_priority() << " due to active patch with talkgroup " << TGID;
+                        }
+                    }
+                }
+                if (talkgroup->mode.compare("A") == 0) {
+                    recorder = source->get_analog_recorder(talkgroup, priority, call.ptr);
+                    call.ptr->set_is_analog(true);
+                } else {
+                    recorder = source->get_digital_recorder(talkgroup, priority, call.ptr);
+                }
+            } else {
+                std::string loghdr = log_header(call.ptr->get_short_name(), call.ptr->get_call_num(), call.ptr->get_talkgroup(), call.ptr->get_freq());
+                BOOST_LOG_TRIVIAL(info) << loghdr << "TG not in Talkgroup File ";
+
+                if ((config.default_mode == "analog") && (sys->get_system_type() == SYS_SMARTNET)) {
+                    recorder = source->get_analog_recorder(call.ptr);
+                    call.ptr->set_is_analog(true);
+                } else {
+                    recorder = source->get_digital_recorder(call.ptr);
+                }
+            }
+
+            if (recorder) {
+                if (cpp_msg.meta.length()) {
+                    BOOST_LOG_TRIVIAL(trace) << cpp_msg.meta;
+                }
+
+                if (recorder->start(call.ptr)) {
+                    call.ptr->set_recorder(recorder);
+                    call.ptr->set_state(RECORDING);
+                    config.event_sink->setup_recorder(recorder);
+                    recorder_found = true;
+                } else {
+                    call.ptr->set_state(MONITORING);
+                    recorder_found = false;
+                    return false;
+                }
+            } else {
+                return false;
+            }
+
+            debug_recorder = source->get_debug_recorder();
+            if (debug_recorder) {
+                debug_recorder->start(call.ptr);
+                call.ptr->set_debug_recorder(debug_recorder);
+                call.ptr->set_debug_recording(true);
+                config.event_sink->setup_recorder(debug_recorder);
+                recorder_found = true;
+            }
+
+            sigmf_recorder = source->get_sigmf_recorder();
+            if (sigmf_recorder) {
+                sigmf_recorder->start(call.ptr);
+                call.ptr->set_sigmf_recorder(sigmf_recorder);
+                call.ptr->set_sigmf_recording(true);
+                config.event_sink->setup_recorder(sigmf_recorder);
+                recorder_found = true;
+            }
+
+            if (recorder_found) {
+                return true;
+            }
+        }
+    }
+
+    if (!source_found) {
+        call.ptr->set_state(MONITORING);
+        call.ptr->set_monitoring_state(NO_SOURCE);
+        std::string loghdr = log_header(call.ptr->get_short_name(), call.ptr->get_call_num(), call.ptr->get_talkgroup(), call.ptr->get_freq());
+        BOOST_LOG_TRIVIAL(error) << loghdr << "\u001b[36mNot Recording: no source covering Freq\u001b[0m";
+        return false;
+    }
+    return false;
+}
+
+bool tr_call_update(TrCall &call, const TrTrunkMessage &msg) {
+    auto cpp_msg = convert_trunk_message_back(msg);
+    return call.ptr->update(cpp_msg);
+}
+
+void tr_call_set_state(TrCall &call, TrState state) {
+    call.ptr->set_state(convert_state_back(state));
+}
+
+void tr_call_set_monitoring_state(TrCall &call, TrMonitoringState state) {
+    call.ptr->set_monitoring_state(convert_monitoring_state_back(state));
+}
+
+void tr_call_set_encrypted(TrCall &call, bool encrypted) {
+    call.ptr->set_encrypted(encrypted);
+}
+
+void tr_call_conclude(TrCall &call) {
+    call.ptr->conclude_call();
+}
+
+// ── Phase C: Call Management — call-level recorder accessors ──
+
+double call_recorder_since_last_write_secs(const TrCall &call) {
+    auto recorder = call.ptr->get_recorder();
+    if (!recorder) {
+        return 1e9; // no recorder → effectively infinite (never triggers timeout alone)
+    }
+    return recorder->since_last_write().count();
+}
+
+void call_process_recorder_queue(const TrCall &call) {
+    auto recorder = call.ptr->get_recorder();
+    if (!recorder) return;
+    if (recorder->get_type() == P25 || recorder->get_type() == P25C) {
+        auto p25_rec = std::dynamic_pointer_cast<p25_recorder>(recorder);
+        if (p25_rec && p25_rec->is_active()) {
+            p25_rec->process_message_queues();
+        }
+    }
+}
+
+// ── Phase C: Call Management — system lookup by sys_num ──
+
+rust::String tr_context_get_system_multi_site_name(const TrContext &ctx, int32_t sys_num) {
+    for (auto &sys : ctx.impl->trunk_ctx.systems) {
+        if (sys->get_sys_num() == sys_num) {
+            return rust::String(sys->get_multiSiteSystemName());
+        }
+    }
+    return rust::String("");
+}
+
+// ── Phase C: Call Management — event firing ──
+
+void tr_context_fire_call_start(TrContext &ctx, const TrCall &call) {
+    ctx.impl->trunk_ctx.config.event_sink->call_start(call.ptr);
+}
+
+void tr_context_fire_calls_active(TrContext &ctx, rust::Slice<const TrCall *const> calls) {
+    std::vector<std::shared_ptr<Call>> call_ptrs;
+    call_ptrs.reserve(calls.size());
+    for (auto *c : calls) {
+        call_ptrs.push_back(c->ptr);
+    }
+    ctx.impl->trunk_ctx.config.event_sink->calls_active(std::move(call_ptrs));
+}
+
+void tr_context_fire_setup_recorder(TrContext &ctx, const TrCall &call) {
+    auto recorder = call.ptr->get_recorder();
+    if (recorder) {
+        ctx.impl->trunk_ctx.config.event_sink->setup_recorder(recorder);
+    }
+}
+
+void tr_recorder_process_queue(const TrRecorder &rec) {
+    if (rec.ptr && (rec.ptr->get_type() == P25 || rec.ptr->get_type() == P25C)) {
+        auto p25_rec = std::dynamic_pointer_cast<p25_recorder>(rec.ptr);
+        if (p25_rec && p25_rec->is_active()) {
+            p25_rec->process_message_queues();
+        }
+    }
 }
 
 } // namespace trunk_oxide

@@ -238,8 +238,6 @@ pub mod ffi {
         // ── Lifecycle functions ──
         fn tr_create_from_builder(plugin: Box<RustPluginBox>) -> Result<UniquePtr<TrContext>>;
         fn tr_finalize(ctx: Pin<&mut TrContext>) -> Result<()>;
-        fn tr_start(ctx: Pin<&mut TrContext>);
-        fn tr_stop(ctx: Pin<&mut TrContext>);
 
         // ── Config builder functions ──
         fn tr_config_set_temp_dir(ctx: Pin<&mut TrContext>, dir: &str);
@@ -314,6 +312,57 @@ pub mod ffi {
         fn tr_system_add_unit_tag(ctx: Pin<&mut TrContext>, sys_idx: i32,
                                   pattern: &str, tag: &str);
         fn tr_system_set_unit_tags_mode(ctx: Pin<&mut TrContext>, sys_idx: i32, mode: &str);
+
+        // ── Phase A: Loop Control ──
+        fn tr_start_gnuradio(ctx: Pin<&mut TrContext>);
+        fn tr_stop_gnuradio(ctx: Pin<&mut TrContext>);
+
+        // ── Phase B: Message Draining ──
+        fn tr_context_drain_messages(ctx: Pin<&mut TrContext>) -> Vec<TrTrunkMessage>;
+        fn tr_context_process_conventional_queues(ctx: Pin<&mut TrContext>);
+        fn tr_context_check_conventional_detection(ctx: Pin<&mut TrContext>);
+        fn tr_context_check_decode_rates(ctx: Pin<&mut TrContext>, time_diff: f32) -> Result<()>;
+        fn tr_context_check_sources(ctx: Pin<&mut TrContext>) -> Result<()>;
+        fn tr_context_clear_stale_patches(ctx: Pin<&mut TrContext>);
+        fn tr_context_print_status(ctx: Pin<&mut TrContext>);
+        fn tr_context_tick_conventional(ctx: Pin<&mut TrContext>);
+
+        // ── Phase C: Call Management — additional accessors ──
+        fn call_since_last_update_secs(call: &TrCall) -> f64;
+        fn call_get_system_multi_site(call: &TrCall) -> bool;
+        fn call_get_system_wacn(call: &TrCall) -> u64;
+        fn call_get_system_nac(call: &TrCall) -> u64;
+        fn call_get_system_rfss(call: &TrCall) -> i32;
+        fn call_get_system_site_id(call: &TrCall) -> i32;
+        fn call_get_system_multi_site_name(call: &TrCall) -> String;
+        fn call_get_system_multi_site_number(call: &TrCall) -> u64;
+        fn call_system_get_preferred_nac(call: &TrCall, talkgroup: i64) -> u64;
+
+        // ── Phase C: Call Management — additional recorder accessors ──
+        fn recorder_since_last_write_secs(rec: &TrRecorder) -> f64;
+        fn recorder_get_type(rec: &TrRecorder) -> i32;
+
+        // ── Phase C: Call Management — lifecycle operations ──
+        fn tr_context_create_call(ctx: Pin<&mut TrContext>, msg: &TrTrunkMessage) -> UniquePtr<TrCall>;
+        fn tr_context_try_start_recording(ctx: Pin<&mut TrContext>, call: Pin<&mut TrCall>, msg: &TrTrunkMessage) -> bool;
+        fn tr_call_update(call: Pin<&mut TrCall>, msg: &TrTrunkMessage) -> bool;
+        fn tr_call_set_state(call: Pin<&mut TrCall>, state: TrState);
+        fn tr_call_set_monitoring_state(call: Pin<&mut TrCall>, state: TrMonitoringState);
+        fn tr_call_set_encrypted(call: Pin<&mut TrCall>, encrypted: bool);
+        fn tr_call_conclude(call: Pin<&mut TrCall>);
+
+        // ── Phase C: Call Management — call-level recorder accessors ──
+        fn call_recorder_since_last_write_secs(call: &TrCall) -> f64;
+        fn call_process_recorder_queue(call: &TrCall);
+
+        // ── Phase C: Call Management — system lookup by sys_num ──
+        fn tr_context_get_system_multi_site_name(ctx: &TrContext, sys_num: i32) -> String;
+
+        // ── Phase C: Call Management — event firing ──
+        fn tr_context_fire_call_start(ctx: Pin<&mut TrContext>, call: &TrCall);
+        fn tr_context_fire_calls_active(ctx: Pin<&mut TrContext>, calls: &[*const TrCall]);
+        fn tr_context_fire_setup_recorder(ctx: Pin<&mut TrContext>, call: &TrCall);
+        fn tr_recorder_process_queue(rec: &TrRecorder);
     }
 
     // ── Rust functions callable from C++ (plugin callbacks) ──

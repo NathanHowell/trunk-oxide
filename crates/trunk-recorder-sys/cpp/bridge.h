@@ -111,8 +111,6 @@ struct TrContext {
 // ── Lifecycle functions ──
 std::unique_ptr<TrContext> tr_create_from_builder(rust::Box<RustPluginBox> plugin);
 void tr_finalize(TrContext &ctx);
-void tr_start(TrContext &ctx);
-void tr_stop(TrContext &ctx);
 
 // ── Config builder functions ──
 void tr_config_set_temp_dir(TrContext &ctx, rust::Str dir);
@@ -187,5 +185,56 @@ void tr_system_add_conventional_channel(TrContext &ctx, int32_t sys_idx,
 void tr_system_add_unit_tag(TrContext &ctx, int32_t sys_idx,
                             rust::Str pattern, rust::Str tag);
 void tr_system_set_unit_tags_mode(TrContext &ctx, int32_t sys_idx, rust::Str mode);
+
+// ── Phase A: Loop Control ──
+void tr_start_gnuradio(TrContext &ctx);
+void tr_stop_gnuradio(TrContext &ctx);
+
+// ── Phase B: Message Draining ──
+rust::Vec<TrTrunkMessage> tr_context_drain_messages(TrContext &ctx);
+void tr_context_process_conventional_queues(TrContext &ctx);
+void tr_context_check_conventional_detection(TrContext &ctx);
+void tr_context_check_decode_rates(TrContext &ctx, float time_diff);
+void tr_context_check_sources(TrContext &ctx);
+void tr_context_clear_stale_patches(TrContext &ctx);
+void tr_context_print_status(TrContext &ctx);
+void tr_context_tick_conventional(TrContext &ctx);
+
+// ── Phase C: Call Management — additional accessors ──
+double call_since_last_update_secs(const TrCall &call);
+bool call_get_system_multi_site(const TrCall &call);
+uint64_t call_get_system_wacn(const TrCall &call);
+uint64_t call_get_system_nac(const TrCall &call);
+int32_t call_get_system_rfss(const TrCall &call);
+int32_t call_get_system_site_id(const TrCall &call);
+rust::String call_get_system_multi_site_name(const TrCall &call);
+uint64_t call_get_system_multi_site_number(const TrCall &call);
+uint64_t call_system_get_preferred_nac(const TrCall &call, int64_t talkgroup);
+
+// ── Phase C: Call Management — additional recorder accessors ──
+double recorder_since_last_write_secs(const TrRecorder &rec);
+int32_t recorder_get_type(const TrRecorder &rec);
+
+// ── Phase C: Call Management — lifecycle operations ──
+std::unique_ptr<TrCall> tr_context_create_call(TrContext &ctx, const TrTrunkMessage &msg);
+bool tr_context_try_start_recording(TrContext &ctx, TrCall &call, const TrTrunkMessage &msg);
+bool tr_call_update(TrCall &call, const TrTrunkMessage &msg);
+void tr_call_set_state(TrCall &call, TrState state);
+void tr_call_set_monitoring_state(TrCall &call, TrMonitoringState state);
+void tr_call_set_encrypted(TrCall &call, bool encrypted);
+void tr_call_conclude(TrCall &call);
+
+// ── Phase C: Call Management — call-level recorder accessors ──
+double call_recorder_since_last_write_secs(const TrCall &call);
+void call_process_recorder_queue(const TrCall &call);
+
+// ── Phase C: Call Management — system lookup by sys_num ──
+rust::String tr_context_get_system_multi_site_name(const TrContext &ctx, int32_t sys_num);
+
+// ── Phase C: Call Management — event firing ──
+void tr_context_fire_call_start(TrContext &ctx, const TrCall &call);
+void tr_context_fire_calls_active(TrContext &ctx, rust::Slice<const TrCall *const> calls);
+void tr_context_fire_setup_recorder(TrContext &ctx, const TrCall &call);
+void tr_recorder_process_queue(const TrRecorder &rec);
 
 } // namespace trunk_oxide

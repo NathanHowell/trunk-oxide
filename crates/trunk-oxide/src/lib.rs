@@ -6,6 +6,14 @@
 //!
 //! Events flow: SDR → C++ gnuradio graph → cxx callbacks → Plugin trait impl
 
+mod call_manager;
+
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
+
+pub use call_manager::CallManagerConfig;
+use call_manager::CallManager;
 use trunk_config::{Config, FrequencyFormat, Modulation, SourceDriver, SystemType};
 use trunk_recorder_sys::ffi;
 use trunk_recorder_sys::RustPluginCallbacks;
@@ -21,7 +29,13 @@ pub struct TrunkRecorderBuilder {
 /// A running trunk-recorder instance. Stops automatically on drop.
 pub struct TrunkRecorder {
     ctx: cxx::UniquePtr<ffi::TrContext>,
+    call_mgr_config: CallManagerConfig,
 }
+
+// Safety: TrContext is used exclusively from a single thread (the monitor thread).
+// All FFI calls happen on that thread — no concurrent access.
+#[allow(unsafe_code)]
+unsafe impl Send for TrunkRecorder {}
 
 impl TrunkRecorderBuilder {
     /// Build from a parsed TOML config using the builder FFI.
@@ -286,19 +300,82 @@ impl TrunkRecorderBuilder {
         Ok(Self { ctx })
     }
 
-    /// Start the gnuradio flowgraph and monitor thread.
+    /// Start the gnuradio flowgraph (without the C++ monitor thread).
     ///
-    /// The plugin's callbacks will be invoked from the C++ monitor thread.
-    /// Use a channel-based plugin (e.g. sending events via `tokio::sync::mpsc`)
-    /// to bridge callbacks into async Rust.
-    pub fn start(mut self) -> TrunkRecorder {
-        ffi::tr_start(self.ctx.pin_mut());
-        TrunkRecorder { ctx: self.ctx }
+    /// After calling this, use [`TrunkRecorder::run_monitor`] on a dedicated
+    /// thread to drive the main loop from Rust.
+    pub fn start(mut self, call_mgr_config: CallManagerConfig) -> TrunkRecorder {
+        ffi::tr_start_gnuradio(self.ctx.pin_mut());
+        TrunkRecorder {
+            ctx: self.ctx,
+            call_mgr_config,
+        }
+    }
+}
+
+impl TrunkRecorder {
+    /// Run the monitor loop on the current thread until `shutdown` is set.
+    ///
+    /// This replaces the C++ `monitor_messages` function. Fatal errors from
+    /// decode-rate or source checks propagate as `Err`.
+    pub fn run_monitor(&mut self, shutdown: &AtomicBool) -> anyhow::Result<()> {
+        let mut call_mgr = CallManager::new(self.call_mgr_config.clone());
+
+        let mut last_tick = Instant::now();
+        let mut last_decode_check = Instant::now();
+        let mut last_conv_check = Instant::now();
+        let mut last_status = Instant::now();
+
+        loop {
+            if shutdown.load(Ordering::Relaxed) {
+                tracing::info!("shutting down");
+                call_mgr.conclude_all(self.ctx.pin_mut());
+                thread::sleep(Duration::from_secs(5));
+                return Ok(());
+            }
+
+            ffi::tr_context_process_conventional_queues(self.ctx.pin_mut());
+            call_mgr.process_recorder_queues();
+
+            let messages = ffi::tr_context_drain_messages(self.ctx.pin_mut());
+            for msg in &messages {
+                call_mgr.handle_message(self.ctx.pin_mut(), msg);
+            }
+
+            let now = Instant::now();
+
+            if now - last_conv_check >= Duration::from_millis(100) {
+                ffi::tr_context_check_conventional_detection(self.ctx.pin_mut());
+                last_conv_check = now;
+            }
+
+            if now - last_tick >= Duration::from_secs(1) {
+                call_mgr.tick(self.ctx.pin_mut());
+                ffi::tr_context_tick_conventional(self.ctx.pin_mut());
+                last_tick = now;
+            }
+
+            thread::sleep(Duration::from_millis(10));
+
+            let decode_elapsed = now - last_decode_check;
+            if decode_elapsed >= Duration::from_secs(3) {
+                let time_diff = decode_elapsed.as_secs_f32();
+                ffi::tr_context_check_decode_rates(self.ctx.pin_mut(), time_diff)?;
+                ffi::tr_context_check_sources(self.ctx.pin_mut())?;
+                last_decode_check = Instant::now();
+                ffi::tr_context_clear_stale_patches(self.ctx.pin_mut());
+            }
+
+            if now - last_status > Duration::from_secs(200) {
+                last_status = now;
+                ffi::tr_context_print_status(self.ctx.pin_mut());
+            }
+        }
     }
 }
 
 impl Drop for TrunkRecorder {
     fn drop(&mut self) {
-        ffi::tr_stop(self.ctx.pin_mut());
+        ffi::tr_stop_gnuradio(self.ctx.pin_mut());
     }
 }

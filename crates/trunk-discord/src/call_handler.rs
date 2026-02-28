@@ -387,6 +387,25 @@ impl CallHandler {
             self.call_end_duration = Some(Duration::from_secs_f64(data.length));
             self.call_end_signal = data.signal.map(SignalDb);
         }
+
+        // Delete the embed if the call produced nothing useful
+        let has_content = !self.transcription_text.is_empty()
+            || !self.detected_tones.is_empty()
+            || !self.events.is_empty();
+        if !has_content {
+            if let Some(msg_id) = self.embed_message_id {
+                if let Err(e) = self
+                    .discord
+                    .delete_message(self.post_channel, msg_id)
+                    .await
+                {
+                    tracing::warn!(error = %e, "failed to delete empty call embed");
+                }
+            }
+            tracing::info!("call ended (empty, deleted embed)");
+            return Ok(());
+        }
+
         self.update_embed().await?;
 
         // Persist final call state to DB

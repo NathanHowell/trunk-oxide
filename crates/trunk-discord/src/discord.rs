@@ -59,6 +59,17 @@ impl DiscordClient {
         Ok(())
     }
 
+    pub async fn delete_message(
+        &self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+    ) -> Result<()> {
+        channel_id
+            .delete_message(&self.http, message_id)
+            .await?;
+        Ok(())
+    }
+
     pub async fn get_guild_channels(&self, guild_id: GuildId) -> Result<Vec<GuildChannel>> {
         let channels = guild_id.channels(&self.http).await?;
         Ok(channels.into_values().collect())

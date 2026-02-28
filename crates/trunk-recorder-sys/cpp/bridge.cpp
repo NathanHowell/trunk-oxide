@@ -6,22 +6,20 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <thread>
 
-#ifdef TR_LIBRARY_MODE
 #include "trunk-recorder/trunk_context.h"
 #include "trunk-recorder/event_sink.h"
 #include "trunk-recorder/source.h"
 #include "trunk-recorder/systems/system.h"
 #include "trunk-recorder/talkgroup.h"
 #include "trunk-recorder/unit_tags_ota.h"
-#include <thread>
 
 // Forward declarations for functions provided by libtrunk-recorder.so
 bool setup_systems(Config &config, gr::top_block_sptr &tb,
                    std::vector<std::shared_ptr<Source>> &sources, std::vector<std::shared_ptr<System>> &systems,
                    std::vector<std::shared_ptr<Call>> &calls);
 int monitor_messages(TrunkContext &ctx);
-#endif
 
 namespace trunk_oxide {
 
@@ -496,7 +494,6 @@ double recorder_get_current_length(const TrRecorder &rec) { return rec.ptr->get_
 // ── CxxEventSink: EventSink subclass that delegates to RustPluginBridge ──
 // Used in library mode to route trunk-recorder events to Rust callbacks.
 
-#ifdef TR_LIBRARY_MODE
 class CxxEventSink : public EventSink {
 public:
     explicit CxxEventSink(std::shared_ptr<RustPluginBridge> bridge)
@@ -627,19 +624,14 @@ public:
 private:
     std::shared_ptr<RustPluginBridge> bridge_;
 };
-#endif // TR_LIBRARY_MODE
 
 // ── TrContext pimpl implementation ──
 
-#ifdef TR_LIBRARY_MODE
 struct TrContextImpl {
     TrunkContext trunk_ctx;
     std::thread monitor_thread;
     std::shared_ptr<RustPluginBridge> bridge;
 };
-#else
-struct TrContextImpl {};
-#endif
 
 TrContext::TrContext() : impl(std::make_unique<TrContextImpl>()) {}
 TrContext::~TrContext() = default;
@@ -647,8 +639,6 @@ TrContext::TrContext(TrContext &&) noexcept = default;
 TrContext &TrContext::operator=(TrContext &&) noexcept = default;
 
 // ── Lifecycle function implementations ──
-
-#ifdef TR_LIBRARY_MODE
 
 void tr_start(TrContext &ctx) {
     ctx.impl->trunk_ctx.tb->start();
@@ -965,85 +955,5 @@ void tr_system_set_unit_tags_mode(TrContext &ctx, int32_t sys_idx, rust::Str mod
     ctx.impl->trunk_ctx.systems.at(sys_idx)->set_unit_tags_mode(
         std::string(mode.data(), mode.size()));
 }
-
-#else // !TR_LIBRARY_MODE — stubs for dlopen plugin mode
-
-std::unique_ptr<TrContext> tr_create_from_builder(rust::Box<RustPluginBox> /*plugin*/) {
-    std::abort();
-}
-
-void tr_finalize(TrContext & /*ctx*/) {
-    std::abort();
-}
-
-void tr_start(TrContext & /*ctx*/) {
-    std::abort();
-}
-
-void tr_stop(TrContext & /*ctx*/) {
-    std::abort();
-}
-
-// Builder stubs — all abort in plugin mode
-void tr_config_set_temp_dir(TrContext &, rust::Str) { std::abort(); }
-void tr_config_set_call_timeout(TrContext &, double) { std::abort(); }
-void tr_config_set_control_warn_rate(TrContext &, int32_t) { std::abort(); }
-void tr_config_set_control_retune_limit(TrContext &, int32_t) { std::abort(); }
-void tr_config_set_broadcast_signals(TrContext &, bool) { std::abort(); }
-void tr_config_set_soft_vocoder(TrContext &, bool) { std::abort(); }
-void tr_config_set_record_uu_v_calls(TrContext &, bool) { std::abort(); }
-void tr_config_set_new_call_from_update(TrContext &, bool) { std::abort(); }
-void tr_config_set_frequency_format(TrContext &, int32_t) { std::abort(); }
-void tr_config_set_default_mode(TrContext &, rust::Str) { std::abort(); }
-void tr_config_set_debug_recorder(TrContext &, bool, rust::Str, int32_t) { std::abort(); }
-int32_t tr_add_source(TrContext &, rust::Str, rust::Str, double, double, double) { std::abort(); }
-void tr_source_set_gain(TrContext &, int32_t, double) { std::abort(); }
-void tr_source_set_gain_by_name(TrContext &, int32_t, rust::Str, double) { std::abort(); }
-void tr_source_set_antenna(TrContext &, int32_t, rust::Str) { std::abort(); }
-void tr_source_set_freq_corr(TrContext &, int32_t, double) { std::abort(); }
-void tr_source_set_gain_mode(TrContext &, int32_t, bool) { std::abort(); }
-void tr_source_set_silence_frames(TrContext &, int32_t, int32_t) { std::abort(); }
-void tr_source_set_signal_detector_threshold(TrContext &, int32_t, float) { std::abort(); }
-void tr_source_create_digital_recorders(TrContext &, int32_t, int32_t) { std::abort(); }
-void tr_source_create_analog_recorders(TrContext &, int32_t, int32_t) { std::abort(); }
-void tr_source_create_sigmf_recorders(TrContext &, int32_t, int32_t) { std::abort(); }
-int32_t tr_add_system(TrContext &, rust::Str, rust::Str) { std::abort(); }
-void tr_system_add_control_channel(TrContext &, int32_t, double) { std::abort(); }
-void tr_system_add_channel(TrContext &, int32_t, double) { std::abort(); }
-void tr_system_set_qpsk_mod(TrContext &, int32_t, bool) { std::abort(); }
-void tr_system_set_squelch_db(TrContext &, int32_t, double) { std::abort(); }
-void tr_system_set_analog_levels(TrContext &, int32_t, double) { std::abort(); }
-void tr_system_set_digital_levels(TrContext &, int32_t, double) { std::abort(); }
-void tr_system_set_tau(TrContext &, int32_t, float) { std::abort(); }
-void tr_system_set_max_dev(TrContext &, int32_t, int32_t) { std::abort(); }
-void tr_system_set_filter_width(TrContext &, int32_t, double) { std::abort(); }
-void tr_system_set_conversation_mode(TrContext &, int32_t, bool) { std::abort(); }
-void tr_system_set_record_unknown(TrContext &, int32_t, bool) { std::abort(); }
-void tr_system_set_min_duration(TrContext &, int32_t, double) { std::abort(); }
-void tr_system_set_max_duration(TrContext &, int32_t, double) { std::abort(); }
-void tr_system_set_min_tx_duration(TrContext &, int32_t, double) { std::abort(); }
-void tr_system_set_hide_encrypted(TrContext &, int32_t, bool) { std::abort(); }
-void tr_system_set_monitor_encrypted(TrContext &, int32_t, bool) { std::abort(); }
-void tr_system_set_hide_unknown(TrContext &, int32_t, bool) { std::abort(); }
-void tr_system_set_mdc_enabled(TrContext &, int32_t, bool) { std::abort(); }
-void tr_system_set_fsync_enabled(TrContext &, int32_t, bool) { std::abort(); }
-void tr_system_set_star_enabled(TrContext &, int32_t, bool) { std::abort(); }
-void tr_system_set_tps_enabled(TrContext &, int32_t, bool) { std::abort(); }
-void tr_system_set_bandplan(TrContext &, int32_t, rust::Str) { std::abort(); }
-void tr_system_set_bandfreq(TrContext &, int32_t, int32_t) { std::abort(); }
-void tr_system_set_bandplan_base(TrContext &, int32_t, double) { std::abort(); }
-void tr_system_set_bandplan_high(TrContext &, int32_t, double) { std::abort(); }
-void tr_system_set_bandplan_spacing(TrContext &, int32_t, double) { std::abort(); }
-void tr_system_set_bandplan_offset(TrContext &, int32_t, int32_t) { std::abort(); }
-void tr_system_set_xor_mask(TrContext &, int32_t, uint64_t, uint64_t, uint64_t) { std::abort(); }
-void tr_system_set_multi_site(TrContext &, int32_t, bool) { std::abort(); }
-void tr_system_set_multi_site_name(TrContext &, int32_t, rust::Str) { std::abort(); }
-void tr_system_set_multi_site_number(TrContext &, int32_t, uint64_t) { std::abort(); }
-void tr_system_add_talkgroup(TrContext &, int32_t, int64_t, rust::Str, int32_t, uint64_t) { std::abort(); }
-void tr_system_add_conventional_channel(TrContext &, int32_t, int64_t, double, double, double, bool) { std::abort(); }
-void tr_system_add_unit_tag(TrContext &, int32_t, rust::Str, rust::Str) { std::abort(); }
-void tr_system_set_unit_tags_mode(TrContext &, int32_t, rust::Str) { std::abort(); }
-
-#endif // TR_LIBRARY_MODE
 
 } // namespace trunk_oxide

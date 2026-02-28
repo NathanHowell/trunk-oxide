@@ -12,8 +12,6 @@ members = [
     "crates/trunk-discord",
     "crates/trunk-solver",
 ]
-# trunk-oxide enables link-shared on trunk-recorder-sys which conflicts
-# with the dlopen plugin build. Exclude it from the default build.
 default-members = [
     "crates/trunk-recorder-sys",
     "crates/trunk-oxide-proto",

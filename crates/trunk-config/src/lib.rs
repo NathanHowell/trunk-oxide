@@ -5,6 +5,7 @@ pub mod source;
 pub mod system;
 
 use std::collections::HashMap;
+use std::path::Path;
 
 use anyhow::Result;
 use serde::Deserialize;
@@ -42,9 +43,49 @@ pub struct Config {
 
 impl Config {
     /// Load and parse a TOML config file.
+    ///
+    /// For systems with a `talkgroup_file`, talkgroups are loaded from the CSV
+    /// and then any inline `[[system.<name>.talkgroup]]` entries are applied as
+    /// overlays — only explicitly-set TOML fields override CSV values.
     pub fn load(path: &str) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let config: Self = toml::from_str(&content)?;
+        let mut config: Self = toml::from_str(&content)?;
+
+        // Check if any system uses talkgroup_file
+        let needs_resolve = config
+            .system
+            .values()
+            .any(|sys| sys.talkgroup_file.is_some());
+
+        if needs_resolve {
+            let config_dir = Path::new(path)
+                .parent()
+                .unwrap_or(Path::new("."));
+
+            // Re-parse raw TOML to detect which talkgroup fields were explicitly set
+            let raw: toml::Value = toml::from_str(&content)?;
+            let raw_systems = raw
+                .get("system")
+                .and_then(|v| v.as_table());
+
+            for (name, sys) in &mut config.system {
+                if sys.talkgroup_file.is_some() {
+                    let raw_talkgroups = raw_systems
+                        .and_then(|s| s.get(name))
+                        .and_then(|v| v.get("talkgroup"))
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.as_slice())
+                        .unwrap_or_default();
+
+                    sys.talkgroup = system::resolve_talkgroups(
+                        config_dir,
+                        sys.talkgroup_file.as_deref(),
+                        raw_talkgroups,
+                    )?;
+                }
+            }
+        }
+
         Ok(config)
     }
 }
@@ -259,6 +300,144 @@ channel_id = 123456789
         assert_eq!(config.system.len(), 1);
         assert!(config.oxide.is_some());
         assert!(config.discord.is_some());
+    }
+
+    #[test]
+    fn parse_csv_talkgroups() {
+        use std::path::Path;
+        let csv_path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../smco-talkgroups.csv"));
+        let tgs = crate::system::load_talkgroups_csv(csv_path).unwrap();
+        assert!(tgs.len() > 50, "expected 50+ talkgroups, got {}", tgs.len());
+
+        let tg865 = &tgs[&865];
+        assert_eq!(tg865.id, 865);
+        assert_eq!(tg865.mode, "D");
+        assert_eq!(tg865.alpha_tag, "SMC SO Pat 1");
+        assert_eq!(tg865.tag, "Law Dispatch");
+        assert_eq!(tg865.group, "County Sheriff");
+        assert_eq!(tg865.priority, 1);
+    }
+
+    #[test]
+    fn csv_with_toml_overlay() {
+        // Write a temp CSV
+        let dir = std::env::temp_dir().join("trunk-config-test-overlay");
+        let _ = std::fs::create_dir_all(&dir);
+        let csv_path = dir.join("talkgroups.csv");
+        std::fs::write(
+            &csv_path,
+            "Decimal,Hex,Mode,Alpha Tag,Description,Tag,Category,Priority\n\
+             100,64,D,TG 100,Test talkgroup 100,Law Dispatch,Police,5\n\
+             200,C8,D,TG 200,Test talkgroup 200,Fire,Fire Dept,3\n",
+        )
+        .unwrap();
+
+        let config_path = dir.join("config.toml");
+        std::fs::write(
+            &config_path,
+            format!(
+                r#"
+[system.test]
+type = "p25"
+talkgroup_file = "{}"
+
+# Override just priority for TG 100
+[[system.test.talkgroup]]
+id = 100
+priority = 0
+
+# Add a new TG not in CSV
+[[system.test.talkgroup]]
+id = 999
+mode = "E"
+alpha_tag = "New TG"
+"#,
+                csv_path.file_name().unwrap().to_str().unwrap()
+            ),
+        )
+        .unwrap();
+
+        let config = Config::load(config_path.to_str().unwrap()).unwrap();
+        let sys = &config.system["test"];
+
+        // TG 100: priority overridden, other fields from CSV
+        let tg100 = sys.talkgroup.iter().find(|t| t.id == 100).unwrap();
+        assert_eq!(tg100.priority, 0); // overridden
+        assert_eq!(tg100.alpha_tag, "TG 100"); // from CSV
+        assert_eq!(tg100.description, "Test talkgroup 100"); // from CSV
+        assert_eq!(tg100.tag, "Law Dispatch"); // from CSV
+        assert_eq!(tg100.group, "Police"); // from CSV
+        assert_eq!(tg100.mode, "D"); // from CSV
+
+        // TG 200: untouched, all from CSV
+        let tg200 = sys.talkgroup.iter().find(|t| t.id == 200).unwrap();
+        assert_eq!(tg200.alpha_tag, "TG 200");
+        assert_eq!(tg200.priority, 3);
+
+        // TG 999: new entry from TOML only
+        let tg999 = sys.talkgroup.iter().find(|t| t.id == 999).unwrap();
+        assert_eq!(tg999.mode, "E");
+        assert_eq!(tg999.alpha_tag, "New TG");
+        assert_eq!(tg999.priority, 0); // default
+
+        // Sorted by ID
+        let ids: Vec<i64> = sys.talkgroup.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![100, 200, 999]);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn toml_only_talkgroups_no_csv() {
+        let toml = r#"
+[system.test]
+type = "p25"
+
+[[system.test.talkgroup]]
+id = 42
+mode = "D"
+alpha_tag = "Direct TG"
+priority = 1
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let sys = &config.system["test"];
+        assert_eq!(sys.talkgroup.len(), 1);
+        assert_eq!(sys.talkgroup[0].id, 42);
+        assert_eq!(sys.talkgroup[0].alpha_tag, "Direct TG");
+        assert_eq!(sys.talkgroup[0].priority, 1);
+    }
+
+    #[test]
+    fn csv_only_no_toml_talkgroups() {
+        let dir = std::env::temp_dir().join("trunk-config-test-csv-only");
+        let _ = std::fs::create_dir_all(&dir);
+        let csv_path = dir.join("talkgroups.csv");
+        std::fs::write(
+            &csv_path,
+            "Decimal,Mode,Alpha Tag,Description,Tag,Category,Priority\n\
+             300,D,TG 300,Test,Law,Police,2\n",
+        )
+        .unwrap();
+
+        let config_path = dir.join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[system.test]
+type = "p25"
+talkgroup_file = "talkgroups.csv"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load(config_path.to_str().unwrap()).unwrap();
+        let sys = &config.system["test"];
+        assert_eq!(sys.talkgroup.len(), 1);
+        assert_eq!(sys.talkgroup[0].id, 300);
+        assert_eq!(sys.talkgroup[0].alpha_tag, "TG 300");
+        assert_eq!(sys.talkgroup[0].priority, 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

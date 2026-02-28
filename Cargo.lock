@@ -2919,6 +2919,7 @@ name = "trunk-config"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "csv",
  "serde",
  "toml",
 ]

@@ -1,3 +1,7 @@
+use std::collections::HashMap;
+use std::path::Path;
+
+use anyhow::{Context, Result};
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -58,6 +62,10 @@ pub struct SystemConfig {
     // Talkgroup display (for C++ console logging)
     #[serde(default)]
     pub talkgroup_display_format: TalkgroupDisplayFormat,
+
+    // Talkgroups — CSV file (RadioReference export) with optional TOML overrides
+    #[serde(default)]
+    pub talkgroup_file: Option<String>,
 
     // Talkgroups (inline)
     #[serde(default)]
@@ -216,4 +224,169 @@ const fn default_filter_width() -> f64 {
 }
 const fn default_true() -> bool {
     true
+}
+
+// ── CSV talkgroup parsing ──
+
+/// Parse a RadioReference-format talkgroup CSV into a map keyed by talkgroup ID.
+pub(crate) fn load_talkgroups_csv(path: &Path) -> Result<HashMap<i64, TalkgroupConfig>> {
+    let mut reader = csv::ReaderBuilder::new()
+        .flexible(true)
+        .trim(csv::Trim::All)
+        .from_path(path)
+        .with_context(|| format!("failed to open talkgroup CSV: {}", path.display()))?;
+
+    // Map header names to column indices
+    let headers = reader.headers()?.clone();
+    let mut col_decimal = None;
+    let mut col_mode = None;
+    let mut col_alpha_tag = None;
+    let mut col_description = None;
+    let mut col_tag = None;
+    let mut col_category = None;
+    let mut col_priority = None;
+    let mut col_preferred_nac = None;
+
+    for (i, h) in headers.iter().enumerate() {
+        match h {
+            "Decimal" => col_decimal = Some(i),
+            "Mode" => col_mode = Some(i),
+            "Alpha Tag" => col_alpha_tag = Some(i),
+            "Description" => col_description = Some(i),
+            "Tag" => col_tag = Some(i),
+            "Category" => col_category = Some(i),
+            "Priority" => col_priority = Some(i),
+            "Preferred NAC" => col_preferred_nac = Some(i),
+            _ => {} // Hex, Comment, etc. — ignored
+        }
+    }
+
+    let col_decimal =
+        col_decimal.context("talkgroup CSV missing required 'Decimal' column")?;
+
+    let mut talkgroups = HashMap::new();
+
+    for result in reader.records() {
+        let record = result?;
+        let id_str = record.get(col_decimal).unwrap_or("").trim();
+        if id_str.is_empty() {
+            continue;
+        }
+        let id: i64 = id_str
+            .parse()
+            .with_context(|| format!("invalid talkgroup ID: {id_str:?}"))?;
+
+        let get = |col: Option<usize>| -> String {
+            col.and_then(|i| record.get(i))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default()
+        };
+
+        let mode = {
+            let m = get(col_mode);
+            if m.is_empty() {
+                default_talkgroup_mode()
+            } else {
+                m
+            }
+        };
+
+        let priority: i32 = col_priority
+            .and_then(|i| record.get(i))
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
+
+        let preferred_nac: u64 = col_preferred_nac
+            .and_then(|i| record.get(i))
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0);
+
+        talkgroups.insert(
+            id,
+            TalkgroupConfig {
+                id,
+                mode,
+                alpha_tag: get(col_alpha_tag),
+                description: get(col_description),
+                tag: get(col_tag),
+                group: get(col_category),
+                priority,
+                preferred_nac,
+            },
+        );
+    }
+
+    Ok(talkgroups)
+}
+
+/// Apply a TOML table overlay onto a `TalkgroupConfig`, setting only
+/// the fields that are explicitly present in the table.
+fn apply_overlay(tg: &mut TalkgroupConfig, table: &toml::Table) {
+    if let Some(v) = table.get("mode").and_then(|v| v.as_str()) {
+        tg.mode = v.to_string();
+    }
+    if let Some(v) = table.get("alpha_tag").and_then(|v| v.as_str()) {
+        tg.alpha_tag = v.to_string();
+    }
+    if let Some(v) = table.get("description").and_then(|v| v.as_str()) {
+        tg.description = v.to_string();
+    }
+    if let Some(v) = table.get("tag").and_then(|v| v.as_str()) {
+        tg.tag = v.to_string();
+    }
+    if let Some(v) = table.get("group").and_then(|v| v.as_str()) {
+        tg.group = v.to_string();
+    }
+    if let Some(v) = table.get("priority").and_then(|v| v.as_integer()) {
+        tg.priority = v as i32;
+    }
+    if let Some(v) = table.get("preferred_nac").and_then(|v| v.as_integer()) {
+        tg.preferred_nac = v as u64;
+    }
+}
+
+/// Resolve talkgroups from a CSV base (if any) with TOML overlays applied on top.
+pub(crate) fn resolve_talkgroups(
+    config_dir: &Path,
+    talkgroup_file: Option<&str>,
+    overlays: &[toml::Value],
+) -> Result<Vec<TalkgroupConfig>> {
+    // Load CSV base
+    let mut map: HashMap<i64, TalkgroupConfig> = match talkgroup_file {
+        Some(file) => {
+            let csv_path = config_dir.join(file);
+            load_talkgroups_csv(&csv_path)?
+        }
+        None => HashMap::new(),
+    };
+
+    // Apply TOML overlays
+    for overlay in overlays {
+        let table = overlay
+            .as_table()
+            .context("talkgroup entry must be a TOML table")?;
+
+        let id = table
+            .get("id")
+            .and_then(|v| v.as_integer())
+            .context("talkgroup entry missing required 'id' field")?;
+
+        let tg = map.entry(id).or_insert_with(|| TalkgroupConfig {
+            id,
+            mode: default_talkgroup_mode(),
+            alpha_tag: String::new(),
+            description: String::new(),
+            tag: String::new(),
+            group: String::new(),
+            priority: 0,
+            preferred_nac: 0,
+        });
+
+        apply_overlay(tg, table);
+    }
+
+    // Sort by ID for deterministic output
+    let mut talkgroups: Vec<TalkgroupConfig> = map.into_values().collect();
+    talkgroups.sort_by_key(|tg| tg.id);
+    Ok(talkgroups)
 }

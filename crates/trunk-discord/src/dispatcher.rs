@@ -191,31 +191,42 @@ impl Dispatcher {
 
         let key = CallKey { sys_num, talkgroup };
 
-        // Look up or create a per-talkgroup-per-day thread
-        let start_time =
-            DateTime::<Utc>::from_timestamp(call.start_time, 0).unwrap_or_else(Utc::now);
-        let date_str = start_time.format("%Y-%m-%d").to_string();
-
-        let cache_key = ThreadCacheKey {
-            sys_num,
-            talkgroup,
-            date: date_str.clone(),
+        // Resolve target channel: mapped channels get direct posts, fallback uses threads
+        let mapped_channel = {
+            let map = self.channel_lookup.read().await;
+            map.get(&(call.short_name.clone(), call.talkgroup)).copied()
         };
 
-        // Check in-memory cache first, then DB
-        let thread_id = {
-            let cache = self.thread_cache.read().await;
-            cache.get(&cache_key).copied()
-        };
-
-        let thread_id = if let Some(id) = thread_id {
-            Some(id)
+        let post_channel = if let Some(channel) = mapped_channel {
+            // Mapped channel — post directly, no thread
+            channel
         } else {
-            self.resolve_or_create_thread(&call, sys_num, talkgroup, cache_key, &date_str)
-                .await
-        };
+            // Fallback — create/reuse a per-talkgroup-per-day thread
+            let start_time =
+                DateTime::<Utc>::from_timestamp(call.start_time, 0).unwrap_or_else(Utc::now);
+            let date_str = start_time.format("%Y-%m-%d").to_string();
 
-        let Some(thread_id) = thread_id else { return };
+            let cache_key = ThreadCacheKey {
+                sys_num,
+                talkgroup,
+                date: date_str.clone(),
+            };
+
+            let thread_id = {
+                let cache = self.thread_cache.read().await;
+                cache.get(&cache_key).copied()
+            };
+
+            let thread_id = if let Some(id) = thread_id {
+                Some(id)
+            } else {
+                self.resolve_or_create_thread(&call, sys_num, talkgroup, cache_key, &date_str)
+                    .await
+            };
+
+            let Some(thread_id) = thread_id else { return };
+            thread_id
+        };
 
         // Insert call record into DB
         let call_row_id = {
@@ -228,7 +239,7 @@ impl Dispatcher {
                 start_time: call.start_time,
                 tag: call.talkgroup.to_string(),
                 short_name: call.short_name.clone(),
-                thread_id: Some(thread_id.get()),
+                thread_id: Some(post_channel.get()),
                 embed_message_id: None,
             };
             let db = self.db.lock().await;
@@ -261,7 +272,7 @@ impl Dispatcher {
                 tone_detection: self.tone_detection,
                 tone_detection_duration_s: self.tone_detection_duration_s,
             },
-            thread_id,
+            post_channel,
             Arc::clone(&self.db),
             call_row_id,
         );
@@ -299,17 +310,9 @@ impl Dispatcher {
             thread_name
         };
 
-        // Resolve target channel: check lookup for mapped channel, else fallback
-        let target_channel = {
-            let map = self.channel_lookup.read().await;
-            map.get(&(call.short_name.clone(), call.talkgroup))
-                .copied()
-                .unwrap_or(self.channel_id)
-        };
-
         match self
             .discord
-            .create_call_thread(target_channel, &thread_name)
+            .create_call_thread(self.channel_id, &thread_name)
             .await
         {
             Ok(id) => {

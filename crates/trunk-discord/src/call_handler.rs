@@ -42,7 +42,7 @@ pub struct CallHandler {
     resampler: Option<Resampler>,
     tone_detector: Option<ToneDetector>,
     notch_filter: Option<NotchFilter>,
-    thread_id: ChannelId,
+    post_channel: ChannelId,
 
     // Single-embed state
     embed_message_id: Option<MessageId>,
@@ -68,7 +68,7 @@ impl CallHandler {
         whisperer: WhispererConnection,
         discord: Arc<DiscordClient>,
         config: CallHandlerConfig,
-        thread_id: ChannelId,
+        post_channel: ChannelId,
         db: Arc<Mutex<Database>>,
         call_row_id: Option<CallRowId>,
     ) -> Self {
@@ -99,7 +99,7 @@ impl CallHandler {
             resampler: None,
             tone_detector,
             notch_filter: None,
-            thread_id,
+            post_channel,
             embed_message_id: None,
             transcription_text: String::new(),
             detected_tones: Vec::new(),
@@ -216,10 +216,10 @@ impl CallHandler {
 
     async fn send_initial_embed(&mut self) -> Result<()> {
         let embed = self.build_embed();
-        let msg_id = self.discord.send_embed(self.thread_id, embed).await?;
+        let msg_id = self.discord.send_embed(self.post_channel, embed).await?;
         self.embed_message_id = Some(msg_id);
 
-        tracing::info!(thread = %self.thread_id, "call started");
+        tracing::info!(thread = %self.post_channel, "call started");
 
         Ok(())
     }
@@ -229,7 +229,7 @@ impl CallHandler {
         if let Some(msg_id) = self.embed_message_id {
             let embed = self.build_embed();
             self.discord
-                .edit_embed(self.thread_id, msg_id, embed)
+                .edit_embed(self.post_channel, msg_id, embed)
                 .await?;
         }
         Ok(())

@@ -87,7 +87,11 @@ impl CallHandler {
             .unwrap_or_else(Utc::now);
         let start_time_str = start_time.format("%H:%M:%S UTC").to_string();
 
-        let tag = call_info.talkgroup.to_string();
+        let tag = if call_info.talkgroup_alpha_tag.is_empty() {
+            call_info.talkgroup.to_string()
+        } else {
+            call_info.talkgroup_alpha_tag.clone()
+        };
 
         Self {
             call_info,
@@ -182,8 +186,13 @@ impl CallHandler {
 
         // Always-present fields
         embed = embed
+            .field("Talkgroup", self.call_info.talkgroup.to_string(), true)
             .field("Frequency", Freq(self.call_info.freq).to_string(), true)
             .field("System", &self.call_info.short_name, true);
+
+        if !self.call_info.talkgroup_tag.is_empty() {
+            embed = embed.field("Category", &self.call_info.talkgroup_tag, true);
+        }
 
         if self.call_info.encrypted {
             embed = embed.field("Encrypted", "Yes", true);

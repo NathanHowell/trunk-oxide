@@ -403,10 +403,13 @@ fn format_signal_event(event: &proto::SignalEvent) -> String {
         },
     );
 
-    format!(
-        "**Signal**: unit {} - {} ({})",
-        event.unit_id, signal_type, event.signaling_type,
-    )
+    let unit = if event.unit_alias.is_empty() {
+        format!("unit {}", event.unit_id)
+    } else {
+        format!("{} ({})", event.unit_alias, event.unit_id)
+    };
+
+    format!("**Signal**: {unit} - {signal_type} ({})", event.signaling_type)
 }
 
 fn format_unit_event(event: &proto::UnitEvent) -> String {
@@ -420,8 +423,11 @@ fn format_unit_event(event: &proto::UnitEvent) -> String {
         },
     );
 
-    format!(
-        "**Unit**: {} - source {} (tg {})",
-        event_type, event.source_id, event.talkgroup,
-    )
+    let source = if event.source_alias.is_empty() {
+        format!("source {}", event.source_id)
+    } else {
+        format!("{} ({})", event.source_alias, event.source_id)
+    };
+
+    format!("**Unit**: {event_type} - {source} (tg {})", event.talkgroup)
 }

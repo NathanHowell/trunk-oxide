@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
@@ -10,45 +12,16 @@ pub use trunk_oxide_proto as proto;
 
 use proto::trunk_oxide_server::{TrunkOxide, TrunkOxideServer};
 
-// ── Conversion helpers ──
+// ── Talkgroup metadata for enrichment ──
 
-fn call_info(call: &TrCall) -> proto::CallInfo {
-    use trunk_recorder_sys::ffi::{
-        call_elapsed, call_get_call_num, call_get_conversation_mode, call_get_current_length,
-        call_get_current_source_id, call_get_duplex, call_get_emergency, call_get_encrypted,
-        call_get_freq, call_get_freq_error, call_get_is_analog, call_get_mode,
-        call_get_monitoring_state, call_get_noise, call_get_phase2_tdma, call_get_priority,
-        call_get_short_name, call_get_signal, call_get_start_time, call_get_state,
-        call_get_sys_num, call_get_talkgroup,
-        call_get_tdma_slot, call_is_conventional,
-    };
-    proto::CallInfo {
-        talkgroup: call_get_talkgroup(call),
-        call_num: call_get_call_num(call),
-        sys_num: call_get_sys_num(call),
-        freq: call_get_freq(call),
-        signal: { let s = call_get_signal(call); if s >= 998.0 { None } else { Some(s) } },
-        noise: { let n = call_get_noise(call); if n >= 998.0 { None } else { Some(n) } },
-        freq_error: call_get_freq_error(call),
-        encrypted: call_get_encrypted(call),
-        emergency: call_get_emergency(call),
-        is_analog: call_get_is_analog(call),
-        is_conventional: call_is_conventional(call),
-        phase2_tdma: call_get_phase2_tdma(call),
-        tdma_slot: call_get_tdma_slot(call),
-        priority: call_get_priority(call),
-        mode: call_get_mode(call),
-        duplex: call_get_duplex(call),
-        conversation_mode: call_get_conversation_mode(call),
-        current_source_id: call_get_current_source_id(call),
-        current_length: call_get_current_length(call),
-        start_time: call_get_start_time(call),
-        elapsed: call_elapsed(call),
-        short_name: call_get_short_name(call),
-        state: i32::from(call_get_state(call).repr),
-        monitoring_state: i32::from(call_get_monitoring_state(call).repr),
-    }
+#[derive(Debug, Clone)]
+pub struct TalkgroupMeta {
+    pub alpha_tag: String,
+    pub tag: String,
+    pub group: String,
 }
+
+// ── Conversion helpers ──
 
 fn system_info(sys: &TrSystem) -> proto::SystemInfo {
     use trunk_recorder_sys::ffi::{
@@ -350,6 +323,10 @@ pub struct GrpcPlugin {
     runtime: Option<tokio::runtime::Runtime>,
     audio_tx: Option<broadcast::Sender<proto::AudioSample>>,
     event_tx: Option<broadcast::Sender<proto::PluginEvent>>,
+    /// (short_name, talkgroup_id) → metadata from config CSVs
+    talkgroups: HashMap<(String, i64), TalkgroupMeta>,
+    /// (sys_num, radio_id) → OTA-discovered alias
+    unit_aliases: HashMap<(i32, i64), String>,
 }
 
 impl GrpcPlugin {
@@ -359,7 +336,64 @@ impl GrpcPlugin {
             runtime: None,
             audio_tx: None,
             event_tx: None,
+            talkgroups: HashMap::new(),
+            unit_aliases: HashMap::new(),
         }
+    }
+
+    /// Populate talkgroup metadata lookup from config data.
+    pub fn set_talkgroups(&mut self, talkgroups: HashMap<(String, i64), TalkgroupMeta>) {
+        self.talkgroups = talkgroups;
+    }
+
+    fn call_info(&self, call: &TrCall) -> proto::CallInfo {
+        use trunk_recorder_sys::ffi::{
+            call_elapsed, call_get_call_num, call_get_conversation_mode, call_get_current_length,
+            call_get_current_source_id, call_get_duplex, call_get_emergency, call_get_encrypted,
+            call_get_freq, call_get_freq_error, call_get_is_analog, call_get_mode,
+            call_get_monitoring_state, call_get_noise, call_get_phase2_tdma, call_get_priority,
+            call_get_short_name, call_get_signal, call_get_start_time, call_get_state,
+            call_get_sys_num, call_get_talkgroup, call_get_tdma_slot, call_is_conventional,
+        };
+        let short_name = call_get_short_name(call);
+        let talkgroup = call_get_talkgroup(call);
+        let meta = self.talkgroups.get(&(short_name.clone(), talkgroup));
+        proto::CallInfo {
+            talkgroup,
+            call_num: call_get_call_num(call),
+            sys_num: call_get_sys_num(call),
+            freq: call_get_freq(call),
+            signal: { let s = call_get_signal(call); if s >= 998.0 { None } else { Some(s) } },
+            noise: { let n = call_get_noise(call); if n >= 998.0 { None } else { Some(n) } },
+            freq_error: call_get_freq_error(call),
+            encrypted: call_get_encrypted(call),
+            emergency: call_get_emergency(call),
+            is_analog: call_get_is_analog(call),
+            is_conventional: call_is_conventional(call),
+            phase2_tdma: call_get_phase2_tdma(call),
+            tdma_slot: call_get_tdma_slot(call),
+            priority: call_get_priority(call),
+            mode: call_get_mode(call),
+            duplex: call_get_duplex(call),
+            conversation_mode: call_get_conversation_mode(call),
+            current_source_id: call_get_current_source_id(call),
+            current_length: call_get_current_length(call),
+            start_time: call_get_start_time(call),
+            elapsed: call_elapsed(call),
+            short_name,
+            talkgroup_alpha_tag: meta.map_or_else(String::new, |m| m.alpha_tag.clone()),
+            talkgroup_tag: meta.map_or_else(String::new, |m| m.tag.clone()),
+            talkgroup_group: meta.map_or_else(String::new, |m| m.group.clone()),
+            state: i32::from(call_get_state(call).repr),
+            monitoring_state: i32::from(call_get_monitoring_state(call).repr),
+        }
+    }
+
+    fn unit_alias(&self, sys_num: i32, unit_id: i64) -> String {
+        self.unit_aliases
+            .get(&(sys_num, unit_id))
+            .cloned()
+            .unwrap_or_default()
     }
 
     fn send_event(&self, event: proto::plugin_event::Event) {
@@ -376,11 +410,14 @@ impl GrpcPlugin {
         source_id: i64,
         talkgroup: i64,
     ) {
+        use trunk_recorder_sys::ffi::system_get_sys_num;
+        let sys_num = system_get_sys_num(system);
         self.send_event(proto::plugin_event::Event::Unit(proto::UnitEvent {
             r#type: event_type as i32,
             system: Some(system_info(system)),
             source_id,
             talkgroup,
+            source_alias: self.unit_alias(sys_num, source_id),
         }));
     }
 }
@@ -467,13 +504,16 @@ impl RustPluginCallbacks for GrpcPlugin {
         system: Option<&TrSystem>,
         recorder: Option<&TrRecorder>,
     ) -> i32 {
+        use trunk_recorder_sys::ffi::system_get_sys_num;
+        let sys_num = system.map_or(0, system_get_sys_num);
         self.send_event(proto::plugin_event::Event::Signal(proto::SignalEvent {
             unit_id,
             signaling_type: signaling_type.to_string(),
             signal_type: convert_signal_type(sig_type),
-            call: call.map(call_info),
+            call: call.map(|c| self.call_info(c)),
             system: system.map(system_info),
             recorder: recorder.map(recorder_info),
+            unit_alias: self.unit_alias(sys_num, unit_id),
         }));
         0
     }
@@ -510,7 +550,7 @@ impl RustPluginCallbacks for GrpcPlugin {
     fn call_start(&mut self, call: &TrCall) -> i32 {
         self.send_event(proto::plugin_event::Event::CallStart(
             proto::CallStartEvent {
-                call: Some(call_info(call)),
+                call: Some(self.call_info(call)),
             },
         ));
         0
@@ -527,7 +567,7 @@ impl RustPluginCallbacks for GrpcPlugin {
         let refs = ptr_slice_to_refs(calls);
         self.send_event(proto::plugin_event::Event::CallsActive(
             proto::CallsActiveEvent {
-                calls: refs.iter().map(|c| call_info(c)).collect(),
+                calls: refs.iter().map(|c| self.call_info(c)).collect(),
             },
         ));
         0
@@ -665,6 +705,10 @@ impl RustPluginCallbacks for GrpcPlugin {
         source: &str,
         talkgroup_id: i64,
     ) -> i32 {
+        use trunk_recorder_sys::ffi::system_get_sys_num;
+        let sys_num = system_get_sys_num(system);
+        self.unit_aliases
+            .insert((sys_num, radio_id), alias.to_string());
         self.send_event(proto::plugin_event::Event::UnitAlias(
             proto::UnitAliasEvent {
                 system: Some(system_info(system)),

@@ -173,6 +173,7 @@ mod tests {
                             ..Default::default()
                         }),
                         recorder: None,
+                        unit_alias: String::new(),
                     })),
                 },
             ),

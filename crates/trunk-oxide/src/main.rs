@@ -62,7 +62,41 @@ fn main() -> Result<()> {
 
     let config = trunk_config::Config::load(config_path)
         .context("failed to load TOML config")?;
-    let recorder = TrunkRecorderBuilder::from_config(&config, GrpcPlugin::new())
+
+    let mut plugin = GrpcPlugin::new();
+
+    // Build talkgroup metadata lookup from config
+    {
+        use std::collections::HashMap;
+        use trunk_oxide_grpc::TalkgroupMeta;
+
+        let mut tg_map = HashMap::new();
+        for (short_name, sys) in &config.system {
+            for tg in &sys.talkgroup {
+                tg_map.insert(
+                    (short_name.clone(), tg.id),
+                    TalkgroupMeta {
+                        alpha_tag: tg.alpha_tag.clone(),
+                        tag: tg.tag.clone(),
+                        group: tg.group.clone(),
+                    },
+                );
+            }
+            for ch in &sys.channel {
+                tg_map.insert(
+                    (short_name.clone(), ch.id),
+                    TalkgroupMeta {
+                        alpha_tag: ch.alpha_tag.clone(),
+                        tag: ch.tag.clone(),
+                        group: ch.group.clone(),
+                    },
+                );
+            }
+        }
+        plugin.set_talkgroups(tg_map);
+    }
+
+    let recorder = TrunkRecorderBuilder::from_config(&config, plugin)
         .context("failed to initialize trunk-recorder")?
         .start();
 

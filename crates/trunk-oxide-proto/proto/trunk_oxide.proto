@@ -66,6 +66,7 @@ message SignalEvent {
   CallInfo call = 4;
   SystemInfo system = 5;
   RecorderInfo recorder = 6;
+  string unit_alias = 7; // OTA-discovered friendly name, if known
 }
 
 // ── Call info (live snapshot from Call*) ──
@@ -93,9 +94,11 @@ message CallInfo {
   int64 start_time = 20;
   int64 elapsed = 21;
   string short_name = 22;
-  reserved 23, 24; // removed: talkgroup_display, talkgroup_tag
+  string talkgroup_alpha_tag = 23; // e.g. "SMC SO Pat 1"
+  string talkgroup_tag = 24;       // e.g. "Law Dispatch"
   int32 state = 25;
   int32 monitoring_state = 26;
+  string talkgroup_group = 27;     // e.g. "County Sheriff"
 }
 
 // ── System type ──
@@ -320,6 +323,7 @@ message UnitEvent {
   SystemInfo system = 2;
   int64 source_id = 3;
   int64 talkgroup = 4; // only set for affiliation, answer_request, location
+  string source_alias = 5; // OTA-discovered friendly name, if known
 }
 
 message SystemRatesEvent {

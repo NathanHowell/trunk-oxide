@@ -20,6 +20,7 @@ bool setup_systems(Config &config, gr::top_block_sptr &tb,
                    std::vector<std::shared_ptr<Source>> &sources, std::vector<std::shared_ptr<System>> &systems,
                    std::vector<std::shared_ptr<Call>> &calls);
 int monitor_messages(TrunkContext &ctx);
+void set_logging_level(std::string log_level);
 
 namespace trunk_oxide {
 
@@ -641,6 +642,11 @@ TrContext &TrContext::operator=(TrContext &&) noexcept = default;
 // ── Lifecycle function implementations ──
 
 void tr_start(TrContext &ctx) {
+    // Set Boost log level from RUST_LOG, defaulting to info.
+    // trunk-recorder's config.cc normally does this, but we bypass that path.
+    const char *env = std::getenv("RUST_LOG");
+    set_logging_level(env ? std::string(env) : "info");
+
     ctx.impl->trunk_ctx.tb->start();
     ctx.impl->monitor_thread = std::thread([&ctx] {
         ctx.impl->trunk_ctx.exit_code = monitor_messages(ctx.impl->trunk_ctx);

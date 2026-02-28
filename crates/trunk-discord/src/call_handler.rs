@@ -185,8 +185,16 @@ impl CallHandler {
         }
 
         // Always-present fields
+        let tg_display = if self.call_info.talkgroup_alpha_tag.is_empty() {
+            self.call_info.talkgroup.to_string()
+        } else {
+            format!(
+                "{} — {}",
+                self.call_info.talkgroup, self.call_info.talkgroup_alpha_tag
+            )
+        };
         embed = embed
-            .field("Talkgroup", self.call_info.talkgroup.to_string(), true)
+            .field("Talkgroup", tg_display, true)
             .field("Frequency", Freq(self.call_info.freq).to_string(), true)
             .field("System", &self.call_info.short_name, true);
 

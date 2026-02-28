@@ -44,25 +44,25 @@ pub struct Config {
 impl Config {
     /// Load and parse a TOML config file.
     ///
-    /// For systems with a `talkgroup_file`, talkgroups are loaded from the CSV
-    /// and then any inline `[[system.<name>.talkgroup]]` entries are applied as
-    /// overlays — only explicitly-set TOML fields override CSV values.
+    /// For systems with a `talkgroup_file` or `channel_file`, entries are loaded
+    /// from the CSV and then any inline TOML entries are applied as overlays —
+    /// only explicitly-set TOML fields override CSV values.
     pub fn load(path: &str) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
         let mut config: Self = toml::from_str(&content)?;
 
-        // Check if any system uses talkgroup_file
+        // Check if any system uses CSV files
         let needs_resolve = config
             .system
             .values()
-            .any(|sys| sys.talkgroup_file.is_some());
+            .any(|sys| sys.talkgroup_file.is_some() || sys.channel_file.is_some());
 
         if needs_resolve {
             let config_dir = Path::new(path)
                 .parent()
                 .unwrap_or(Path::new("."));
 
-            // Re-parse raw TOML to detect which talkgroup fields were explicitly set
+            // Re-parse raw TOML to detect which fields were explicitly set
             let raw: toml::Value = toml::from_str(&content)?;
             let raw_systems = raw
                 .get("system")
@@ -81,6 +81,21 @@ impl Config {
                         config_dir,
                         sys.talkgroup_file.as_deref(),
                         raw_talkgroups,
+                    )?;
+                }
+
+                if sys.channel_file.is_some() {
+                    let raw_channels = raw_systems
+                        .and_then(|s| s.get(name))
+                        .and_then(|v| v.get("channel"))
+                        .and_then(|v| v.as_array())
+                        .map(|a| a.as_slice())
+                        .unwrap_or_default();
+
+                    sys.channel = system::resolve_channels(
+                        config_dir,
+                        sys.channel_file.as_deref(),
+                        raw_channels,
                     )?;
                 }
             }
@@ -436,6 +451,97 @@ talkgroup_file = "talkgroups.csv"
         assert_eq!(sys.talkgroup[0].id, 300);
         assert_eq!(sys.talkgroup[0].alpha_tag, "TG 300");
         assert_eq!(sys.talkgroup[0].priority, 2);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn channel_file_csv() {
+        let dir = std::env::temp_dir().join("trunk-config-test-channels");
+        let _ = std::fs::create_dir_all(&dir);
+        let csv_path = dir.join("channels.csv");
+        std::fs::write(
+            &csv_path,
+            "TG Number,Frequency,Tone,Alpha Tag,Description,Tag,Category\n\
+             1,488337500,162.2,Menlo Pk PD,Menlo Park PD Dispatch,Law Dispatch,Menlo Park\n\
+             2,489087500,162.2,Atherton PD,Atherton PD Dispatch,Law Dispatch,Atherton\n",
+        )
+        .unwrap();
+
+        let config_path = dir.join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[system.conv]
+type = "conventional"
+channel_file = "channels.csv"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load(config_path.to_str().unwrap()).unwrap();
+        let sys = &config.system["conv"];
+        assert_eq!(sys.channel.len(), 2);
+
+        let ch1 = &sys.channel[0];
+        assert_eq!(ch1.id, 1);
+        assert!((ch1.freq - 488_337_500.0).abs() < f64::EPSILON);
+        assert!((ch1.tone - 162.2).abs() < f64::EPSILON);
+        assert_eq!(ch1.alpha_tag, "Menlo Pk PD");
+        assert_eq!(ch1.group, "Menlo Park");
+
+        let ch2 = &sys.channel[1];
+        assert_eq!(ch2.id, 2);
+        assert_eq!(ch2.alpha_tag, "Atherton PD");
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn channel_file_with_overlay() {
+        let dir = std::env::temp_dir().join("trunk-config-test-channel-overlay");
+        let _ = std::fs::create_dir_all(&dir);
+        let csv_path = dir.join("channels.csv");
+        std::fs::write(
+            &csv_path,
+            "TG Number,Frequency,Tone,Alpha Tag,Description,Tag,Category\n\
+             1,488337500,162.2,Menlo Pk PD,Menlo Park PD Dispatch,Law Dispatch,Menlo Park\n",
+        )
+        .unwrap();
+
+        let config_path = dir.join("config.toml");
+        std::fs::write(
+            &config_path,
+            r#"
+[system.conv]
+type = "conventional"
+channel_file = "channels.csv"
+
+# Override squelch for channel 1
+[[system.conv.channel]]
+id = 1
+squelch_db = -40.0
+
+# Add a new channel not in CSV
+[[system.conv.channel]]
+id = 99
+freq = 500000000.0
+alpha_tag = "Custom Ch"
+"#,
+        )
+        .unwrap();
+
+        let config = Config::load(config_path.to_str().unwrap()).unwrap();
+        let sys = &config.system["conv"];
+        assert_eq!(sys.channel.len(), 2);
+
+        let ch1 = sys.channel.iter().find(|c| c.id == 1).unwrap();
+        assert!((ch1.squelch_db - -40.0).abs() < f64::EPSILON); // overridden
+        assert_eq!(ch1.alpha_tag, "Menlo Pk PD"); // from CSV
+
+        let ch99 = sys.channel.iter().find(|c| c.id == 99).unwrap();
+        assert!((ch99.freq - 500_000_000.0).abs() < f64::EPSILON);
+        assert_eq!(ch99.alpha_tag, "Custom Ch");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

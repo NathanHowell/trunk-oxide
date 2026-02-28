@@ -14,7 +14,7 @@ services:
       - /dev/rtlsdr3
     volumes:
       - oxide-socket:/run/service
-      - ./trunk-recorder.conf:/app/config.json:ro
+      - ./config.toml:/app/config.toml:ro
       - ./smco-talkgroups.csv:/app/smco-talkgroups.csv:ro
       - ./svrcs-talkgroups.csv:/app/svrcs-talkgroups.csv:ro
       - ./conventional-channels.csv:/app/conventional-channels.csv:ro

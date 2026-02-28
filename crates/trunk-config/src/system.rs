@@ -35,6 +35,10 @@ pub struct SystemConfig {
     #[serde(default)]
     pub control_channels: Vec<f64>,
 
+    // Conventional system channels — CSV file with optional TOML overrides
+    #[serde(default)]
+    pub channel_file: Option<String>,
+
     // Conventional system channels (inline)
     #[serde(default)]
     pub channel: Vec<ChannelConfig>,
@@ -171,6 +175,7 @@ fn default_talkgroup_mode() -> String {
 #[derive(Debug, Clone, Deserialize)]
 pub struct ChannelConfig {
     pub id: i64,
+    #[serde(default)]
     pub freq: f64,
     #[serde(default)]
     pub tone: f64,
@@ -389,4 +394,162 @@ pub(crate) fn resolve_talkgroups(
     let mut talkgroups: Vec<TalkgroupConfig> = map.into_values().collect();
     talkgroups.sort_by_key(|tg| tg.id);
     Ok(talkgroups)
+}
+
+// ── CSV conventional channel parsing ──
+
+/// Parse a conventional channel CSV into a map keyed by channel ID (TG Number).
+pub(crate) fn load_channels_csv(path: &Path) -> Result<HashMap<i64, ChannelConfig>> {
+    let mut reader = csv::ReaderBuilder::new()
+        .flexible(true)
+        .trim(csv::Trim::All)
+        .from_path(path)
+        .with_context(|| format!("failed to open channel CSV: {}", path.display()))?;
+
+    let headers = reader.headers()?.clone();
+    let mut col_tg_number = None;
+    let mut col_frequency = None;
+    let mut col_tone = None;
+    let mut col_alpha_tag = None;
+    let mut col_description = None;
+    let mut col_tag = None;
+    let mut col_category = None;
+
+    for (i, h) in headers.iter().enumerate() {
+        match h {
+            "TG Number" => col_tg_number = Some(i),
+            "Frequency" => col_frequency = Some(i),
+            "Tone" => col_tone = Some(i),
+            "Alpha Tag" => col_alpha_tag = Some(i),
+            "Description" => col_description = Some(i),
+            "Tag" => col_tag = Some(i),
+            "Category" => col_category = Some(i),
+            _ => {}
+        }
+    }
+
+    let col_tg_number =
+        col_tg_number.context("channel CSV missing required 'TG Number' column")?;
+    let col_frequency =
+        col_frequency.context("channel CSV missing required 'Frequency' column")?;
+
+    let mut channels = HashMap::new();
+
+    for result in reader.records() {
+        let record = result?;
+        let id_str = record.get(col_tg_number).unwrap_or("").trim();
+        if id_str.is_empty() {
+            continue;
+        }
+        let id: i64 = id_str
+            .parse()
+            .with_context(|| format!("invalid channel ID: {id_str:?}"))?;
+
+        let freq: f64 = record
+            .get(col_frequency)
+            .unwrap_or("0")
+            .trim()
+            .parse()
+            .unwrap_or(0.0);
+
+        let get = |col: Option<usize>| -> String {
+            col.and_then(|i| record.get(i))
+                .map(|s| s.trim().to_string())
+                .unwrap_or_default()
+        };
+
+        let tone: f64 = col_tone
+            .and_then(|i| record.get(i))
+            .and_then(|s| s.trim().parse().ok())
+            .unwrap_or(0.0);
+
+        channels.insert(
+            id,
+            ChannelConfig {
+                id,
+                freq,
+                tone,
+                alpha_tag: get(col_alpha_tag),
+                description: get(col_description),
+                tag: get(col_tag),
+                group: get(col_category),
+                squelch_db: default_squelch(),
+                signal_detection: false,
+            },
+        );
+    }
+
+    Ok(channels)
+}
+
+/// Apply a TOML table overlay onto a `ChannelConfig`.
+fn apply_channel_overlay(ch: &mut ChannelConfig, table: &toml::Table) {
+    if let Some(v) = table.get("freq").and_then(|v| v.as_float()) {
+        ch.freq = v;
+    }
+    if let Some(v) = table.get("tone").and_then(|v| v.as_float()) {
+        ch.tone = v;
+    }
+    if let Some(v) = table.get("alpha_tag").and_then(|v| v.as_str()) {
+        ch.alpha_tag = v.to_string();
+    }
+    if let Some(v) = table.get("description").and_then(|v| v.as_str()) {
+        ch.description = v.to_string();
+    }
+    if let Some(v) = table.get("tag").and_then(|v| v.as_str()) {
+        ch.tag = v.to_string();
+    }
+    if let Some(v) = table.get("group").and_then(|v| v.as_str()) {
+        ch.group = v.to_string();
+    }
+    if let Some(v) = table.get("squelch_db").and_then(|v| v.as_float()) {
+        ch.squelch_db = v;
+    }
+    if let Some(v) = table.get("signal_detection").and_then(|v| v.as_bool()) {
+        ch.signal_detection = v;
+    }
+}
+
+/// Resolve channels from a CSV base (if any) with TOML overlays applied on top.
+pub(crate) fn resolve_channels(
+    config_dir: &Path,
+    channel_file: Option<&str>,
+    overlays: &[toml::Value],
+) -> Result<Vec<ChannelConfig>> {
+    let mut map: HashMap<i64, ChannelConfig> = match channel_file {
+        Some(file) => {
+            let csv_path = config_dir.join(file);
+            load_channels_csv(&csv_path)?
+        }
+        None => HashMap::new(),
+    };
+
+    for overlay in overlays {
+        let table = overlay
+            .as_table()
+            .context("channel entry must be a TOML table")?;
+
+        let id = table
+            .get("id")
+            .and_then(|v| v.as_integer())
+            .context("channel entry missing required 'id' field")?;
+
+        let ch = map.entry(id).or_insert_with(|| ChannelConfig {
+            id,
+            freq: 0.0,
+            tone: 0.0,
+            alpha_tag: String::new(),
+            description: String::new(),
+            tag: String::new(),
+            group: String::new(),
+            squelch_db: default_squelch(),
+            signal_detection: false,
+        });
+
+        apply_channel_overlay(ch, table);
+    }
+
+    let mut channels: Vec<ChannelConfig> = map.into_values().collect();
+    channels.sort_by_key(|ch| ch.id);
+    Ok(channels)
 }

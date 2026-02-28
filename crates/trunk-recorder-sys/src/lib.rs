@@ -46,12 +46,6 @@ pub mod ffi {
     enum TrState {
         Monitoring = 0,
         Recording = 1,
-        Inactive = 2,
-        Active = 3,
-        Idle = 4,
-        Stopped = 6,
-        Available = 7,
-        Ignore = 8,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]

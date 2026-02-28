@@ -67,16 +67,10 @@ static TrMessageType convert_message_type(MessageType mt) {
     }
 }
 
-static TrState convert_state(State s) {
+static TrState convert_state(CallState s) {
     switch (s) {
         case MONITORING: return TrState::Monitoring;
         case RECORDING: return TrState::Recording;
-        case INACTIVE: return TrState::Inactive;
-        case ACTIVE: return TrState::Active;
-        case IDLE: return TrState::Idle;
-        case STOPPED: return TrState::Stopped;
-        case AVAILABLE: return TrState::Available;
-        case IGNORE: return TrState::Ignore;
         default: return TrState::Monitoring;
     }
 }

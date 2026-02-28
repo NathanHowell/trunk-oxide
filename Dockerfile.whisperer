@@ -21,7 +21,6 @@ COPY crates/trunk-whisperer/proto crates/trunk-whisperer/proto
 # Stub workspace members that trunk-whisperer doesn't depend on
 COPY crates/trunk-oxide-grpc/Cargo.toml crates/trunk-oxide-grpc/Cargo.toml
 COPY crates/trunk-oxide-proto/Cargo.toml crates/trunk-oxide-proto/Cargo.toml
-COPY crates/trunk-recorder-plugin/Cargo.toml crates/trunk-recorder-plugin/Cargo.toml
 COPY crates/trunk-recorder-sys/Cargo.toml crates/trunk-recorder-sys/Cargo.toml
 COPY crates/trunk-discord/Cargo.toml crates/trunk-discord/Cargo.toml
 COPY crates/trunk-oxide/Cargo.toml crates/trunk-oxide/Cargo.toml
@@ -35,8 +34,6 @@ RUN mkdir -p crates/trunk-whisperer/src \
     && echo "" > crates/trunk-oxide-grpc/src/lib.rs \
     && mkdir -p crates/trunk-oxide-proto/src \
     && echo "" > crates/trunk-oxide-proto/src/lib.rs \
-    && mkdir -p crates/trunk-recorder-plugin/src \
-    && echo "" > crates/trunk-recorder-plugin/src/lib.rs \
     && mkdir -p crates/trunk-recorder-sys/src \
     && echo "" > crates/trunk-recorder-sys/src/lib.rs \
     && mkdir -p crates/trunk-discord/src \

@@ -2987,7 +2987,6 @@ dependencies = [
  "tracing-subscriber",
  "trunk-config",
  "trunk-oxide-grpc",
- "trunk-recorder-plugin",
  "trunk-recorder-sys",
  "wild",
 ]
@@ -2998,14 +2997,12 @@ version = "0.1.0"
 dependencies = [
  "prost",
  "prost-types",
- "serde_json",
  "tokio",
  "tokio-stream",
  "tonic",
  "tonic-health",
  "tracing",
  "trunk-oxide-proto",
- "trunk-recorder-plugin",
  "trunk-recorder-sys",
 ]
 
@@ -3018,14 +3015,6 @@ dependencies = [
  "tonic",
  "tonic-prost",
  "tonic-prost-build",
-]
-
-[[package]]
-name = "trunk-recorder-plugin"
-version = "0.1.0"
-dependencies = [
- "serde_json",
- "trunk-recorder-sys",
 ]
 
 [[package]]

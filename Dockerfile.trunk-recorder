@@ -74,7 +74,6 @@ COPY crates/trunk-oxide-proto/proto crates/trunk-oxide-proto/proto
 COPY crates/trunk-recorder-sys/Cargo.toml crates/trunk-recorder-sys/Cargo.toml
 COPY crates/trunk-recorder-sys/build.rs crates/trunk-recorder-sys/build.rs
 COPY crates/trunk-recorder-sys/cpp crates/trunk-recorder-sys/cpp
-COPY crates/trunk-recorder-plugin/Cargo.toml crates/trunk-recorder-plugin/Cargo.toml
 COPY crates/trunk-config/Cargo.toml crates/trunk-config/Cargo.toml
 
 # Stub workspace members not needed for this build
@@ -96,8 +95,6 @@ RUN mkdir -p crates/trunk-oxide/src \
     && echo "" > crates/trunk-oxide-proto/src/lib.rs \
     && mkdir -p crates/trunk-recorder-sys/src \
     && echo "" > crates/trunk-recorder-sys/src/lib.rs \
-    && mkdir -p crates/trunk-recorder-plugin/src \
-    && echo "" > crates/trunk-recorder-plugin/src/lib.rs \
     && mkdir -p crates/trunk-whisperer/src \
     && echo "fn main() {}" > crates/trunk-whisperer/src/main.rs \
     && mkdir -p crates/trunk-discord/src \
@@ -116,14 +113,12 @@ ENV TRUNK_RECORDER_LIB_DIR=/usr/local/lib
 RUN cargo build --release -p trunk-oxide || true
 
 COPY crates/trunk-recorder-sys/src crates/trunk-recorder-sys/src
-COPY crates/trunk-recorder-plugin/src crates/trunk-recorder-plugin/src
 COPY crates/trunk-oxide-proto/src crates/trunk-oxide-proto/src
 COPY crates/trunk-oxide-grpc/src crates/trunk-oxide-grpc/src
 COPY crates/trunk-config/src crates/trunk-config/src
 COPY crates/trunk-oxide/src crates/trunk-oxide/src
 
 RUN touch crates/trunk-recorder-sys/src/lib.rs \
-    crates/trunk-recorder-plugin/src/lib.rs \
     crates/trunk-oxide-proto/src/lib.rs \
     crates/trunk-oxide-grpc/src/lib.rs \
     crates/trunk-config/src/lib.rs \

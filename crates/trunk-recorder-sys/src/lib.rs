@@ -332,7 +332,6 @@ pub mod ffi {
         // instantiation needed by bridge.cpp.
         fn drop_rust_plugin_box(plugin: Box<RustPluginBox>);
 
-        fn rust_plugin_parse_config(plugin: &mut RustPluginBox, json_str: &str) -> i32;
         fn rust_plugin_start(plugin: &mut RustPluginBox) -> i32;
         fn rust_plugin_stop(plugin: &mut RustPluginBox) -> i32;
         fn rust_plugin_poll_one(plugin: &mut RustPluginBox) -> i32;
@@ -441,10 +440,7 @@ fn drop_rust_plugin_box(_plugin: Box<RustPluginBox>) {
 }
 
 /// Trait that downstream crates implement to receive plugin callbacks.
-/// This is the raw FFI-level trait; the safe `Plugin` trait in trunk-recorder-plugin
-/// wraps this with ergonomic types.
 pub trait RustPluginCallbacks: Send {
-    fn parse_config(&mut self, json_str: &str) -> i32;
     fn start(&mut self) -> i32;
     fn stop(&mut self) -> i32;
     fn poll_one(&mut self) -> i32;
@@ -501,10 +497,6 @@ pub trait RustPluginCallbacks: Send {
 }
 
 // ── Trampoline functions from C++ → Rust via cxx ──
-
-fn rust_plugin_parse_config(plugin: &mut RustPluginBox, json_str: &str) -> i32 {
-    plugin.inner.parse_config(json_str)
-}
 
 fn rust_plugin_start(plugin: &mut RustPluginBox) -> i32 {
     plugin.inner.start()

@@ -7,8 +7,8 @@
 //! Events flow: SDR → C++ gnuradio graph → cxx callbacks → Plugin trait impl
 
 use trunk_config::{Config, FrequencyFormat, Modulation, SourceDriver, SystemType};
-use trunk_recorder_plugin::Plugin;
 use trunk_recorder_sys::ffi;
+use trunk_recorder_sys::RustPluginCallbacks;
 
 /// Configures and initializes a trunk-recorder instance without starting it.
 ///
@@ -32,11 +32,11 @@ impl TrunkRecorderBuilder {
     /// # Errors
     ///
     /// Returns an error if an SDR source fails to open or system setup fails.
-    pub fn from_config<P: Plugin + 'static>(
+    pub fn from_config<P: RustPluginCallbacks + 'static>(
         config: &Config,
         plugin: P,
     ) -> anyhow::Result<Self> {
-        let plugin_box = trunk_recorder_plugin::into_plugin_box(plugin);
+        let plugin_box = trunk_recorder_sys::RustPluginBox::new(Box::new(plugin));
         let mut ctx = ffi::tr_create_from_builder(Box::new(plugin_box))?;
 
         // ── Config ──

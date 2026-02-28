@@ -2,7 +2,6 @@
 resolver = "3"
 members = [
     "crates/trunk-recorder-sys",
-    "crates/trunk-recorder-plugin",
     "crates/trunk-oxide-proto",
     "crates/trunk-oxide-grpc",
     "crates/trunk-oxide",
@@ -17,7 +16,6 @@ members = [
 # with the dlopen plugin build. Exclude it from the default build.
 default-members = [
     "crates/trunk-recorder-sys",
-    "crates/trunk-recorder-plugin",
     "crates/trunk-oxide-proto",
     "crates/trunk-oxide-grpc",
     "crates/trunk-database",
@@ -50,7 +48,6 @@ must_use_candidate = "allow"
 
 [workspace.dependencies]
 trunk-recorder-sys = { path = "crates/trunk-recorder-sys" }
-trunk-recorder-plugin = { path = "crates/trunk-recorder-plugin" }
 trunk-oxide = { path = "crates/trunk-oxide" }
 trunk-oxide-proto = { path = "crates/trunk-oxide-proto" }
 trunk-oxide-grpc = { path = "crates/trunk-oxide-grpc" }

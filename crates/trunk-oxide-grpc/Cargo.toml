@@ -9,7 +9,6 @@ workspace = true
 
 [dependencies]
 trunk-recorder-sys.workspace = true
-trunk-recorder-plugin.workspace = true
 trunk-oxide-proto.workspace = true
 tonic.workspace = true
 tonic-health.workspace = true
@@ -17,5 +16,4 @@ prost.workspace = true
 prost-types.workspace = true
 tokio = { workspace = true, features = ["net"] }
 tokio-stream.workspace = true
-serde_json.workspace = true
 tracing.workspace = true

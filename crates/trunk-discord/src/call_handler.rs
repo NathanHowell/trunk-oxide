@@ -151,9 +151,9 @@ impl CallHandler {
 
     fn build_embed(&self) -> CreateEmbed {
         let title = if self.call_ended {
-            format!("Call — {}", self.tag)
+            self.tag.clone()
         } else {
-            format!("Call — {} ...", self.tag)
+            format!("{} ...", self.tag)
         };
 
         let colour = if self.call_ended {

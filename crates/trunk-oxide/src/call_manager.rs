@@ -6,7 +6,7 @@ use cxx::UniquePtr;
 use trunk_config::{DefaultMode, SystemType, TalkgroupMode};
 use trunk_recorder_sys::ffi::{
     self, TrCall, TrCallData, TrCallDataStatus, TrContext, TrMessageType, TrMonitoringState,
-    TrState, TrTrunkMessage,
+    TrState, TrTrunkMessage, TrUnitEventType,
 };
 
 /// Recording policy for a single talkgroup.
@@ -34,6 +34,8 @@ pub struct CallManagerConfig {
     pub new_call_from_update: bool,
     pub record_uu_v_calls: bool,
     pub default_mode: DefaultMode,
+    pub control_retune_limit: i32,
+    pub control_warn_rate: i32,
     pub systems: HashMap<i32, SystemPolicy>,
 }
 
@@ -53,6 +55,10 @@ struct CallEntry {
 pub struct CallManager {
     calls: Vec<CallEntry>,
     config: CallManagerConfig,
+    /// Per-system raw gr::message count (for decode rate calculation).
+    message_counts: HashMap<i32, i32>,
+    /// Per-system consecutive retune attempt counter.
+    retune_attempts: HashMap<i32, i32>,
 }
 
 struct MultiSiteResult {
@@ -67,6 +73,8 @@ impl CallManager {
         Self {
             calls: Vec::new(),
             config,
+            message_counts: HashMap::new(),
+            retune_attempts: HashMap::new(),
         }
     }
 
@@ -206,8 +214,84 @@ impl CallManager {
 
     // ── Message dispatch ──
 
-    pub fn handle_message(&mut self, ctx: Pin<&mut TrContext>, msg: &TrTrunkMessage) {
+    pub fn handle_message(&mut self, mut ctx: Pin<&mut TrContext>, msg: &TrTrunkMessage) {
+        // Count every raw message for decode rate calculation.
+        *self.message_counts.entry(msg.sys_num).or_insert(0) += 1;
+
         match msg.message_type {
+            // ── Counter adjustment ──
+            TrMessageType::InvalidCcMessage => {
+                if let Some(count) = self.message_counts.get_mut(&msg.sys_num) {
+                    if *count > 1 {
+                        *count -= 1;
+                    }
+                }
+            }
+
+            // ── System state mutations ──
+            TrMessageType::ControlChannel => {
+                ffi::tr_system_add_control_channel_runtime(ctx, msg.sys_num, msg.freq);
+            }
+            TrMessageType::PatchAdd => {
+                ffi::tr_system_update_patches(ctx, msg.sys_num, &msg.patch_data);
+            }
+            TrMessageType::PatchDelete => {
+                ffi::tr_system_delete_patch(ctx, msg.sys_num, &msg.patch_data);
+            }
+            TrMessageType::Tdulc => {
+                ffi::tr_system_retune(ctx, msg.sys_num);
+            }
+
+            // ── System identity (once-only, fire setup_system if changed) ──
+            TrMessageType::Sysid => {
+                if ffi::tr_system_update_sysid(ctx.as_mut(), msg) {
+                    ffi::tr_context_fire_setup_system(ctx, msg.sys_num);
+                }
+            }
+            TrMessageType::Status => {
+                if ffi::tr_system_update_status(ctx.as_mut(), msg) {
+                    ffi::tr_context_fire_setup_system(ctx, msg.sys_num);
+                }
+            }
+
+            // ── Unit-level plugin events ──
+            TrMessageType::Registration => {
+                ffi::tr_context_fire_unit_event(
+                    ctx, msg.sys_num, TrUnitEventType::Registration, msg.source, 0,
+                );
+            }
+            TrMessageType::Deregistration => {
+                ffi::tr_context_fire_unit_event(
+                    ctx, msg.sys_num, TrUnitEventType::Deregistration, msg.source, 0,
+                );
+            }
+            TrMessageType::Affiliation => {
+                ffi::tr_context_fire_unit_event(
+                    ctx, msg.sys_num, TrUnitEventType::Affiliation, msg.source, msg.talkgroup,
+                );
+            }
+            TrMessageType::Acknowledge => {
+                ffi::tr_context_fire_unit_event(
+                    ctx, msg.sys_num, TrUnitEventType::Acknowledge, msg.source, 0,
+                );
+            }
+            TrMessageType::Location => {
+                ffi::tr_context_fire_unit_event(
+                    ctx, msg.sys_num, TrUnitEventType::Location, msg.source, msg.talkgroup,
+                );
+            }
+            TrMessageType::DataGrant => {
+                ffi::tr_context_fire_unit_event(
+                    ctx, msg.sys_num, TrUnitEventType::DataGrant, msg.source, 0,
+                );
+            }
+            TrMessageType::UuAnsReq => {
+                ffi::tr_context_fire_unit_event(
+                    ctx, msg.sys_num, TrUnitEventType::AnswerRequest, msg.source, msg.talkgroup,
+                );
+            }
+
+            // ── Call-related messages (existing logic) ──
             TrMessageType::Grant => self.handle_grant(ctx, msg, true),
             TrMessageType::Update => {
                 if self.config.new_call_from_update {
@@ -226,8 +310,7 @@ impl CallManager {
                     self.handle_update(ctx, msg);
                 }
             }
-            // All other message types (CONTROL_CHANNEL, REGISTRATION, PATCH_*, etc.)
-            // are handled inside C++ by tr_context_drain_messages.
+
             _ => {}
         }
     }
@@ -668,6 +751,69 @@ impl CallManager {
     }
 
     // ── Shutdown ──
+
+    /// Check decode rates for all trunked systems and retune if needed.
+    /// Called every ~3 seconds from `run_monitor`.
+    pub fn check_decode_rates(
+        &mut self,
+        mut ctx: Pin<&mut TrContext>,
+        time_diff: f32,
+    ) -> anyhow::Result<()> {
+        ffi::tr_context_fire_setup_config(ctx.as_mut());
+        ffi::tr_context_fire_system_rates(ctx.as_mut(), time_diff);
+
+        for (&sys_num, policy) in &self.config.systems {
+            if !policy.system_type.is_trunked() {
+                continue;
+            }
+
+            let count = self.message_counts.remove(&sys_num).unwrap_or(0);
+            let decode_rate = (count as f32 / time_diff).floor() as i32;
+            ffi::tr_system_set_decode_rate(ctx.as_mut(), sys_num, decode_rate);
+
+            if decode_rate < 2 {
+                let attempts = self.retune_attempts.entry(sys_num).or_insert(0);
+                *attempts += 1;
+                if self.config.control_retune_limit > 0
+                    && *attempts > self.config.control_retune_limit
+                {
+                    anyhow::bail!(
+                        "Control channel retune limit exceeded after {} tries for sys {}",
+                        attempts,
+                        sys_num
+                    );
+                }
+                if ffi::tr_system_control_channel_count(ctx.as_mut(), sys_num) > 1 {
+                    ffi::tr_system_retune(ctx.as_mut(), sys_num);
+                } else {
+                    tracing::error!(sys_num, "only one control channel defined");
+                }
+            } else {
+                self.retune_attempts.insert(sys_num, 0);
+            }
+
+            if decode_rate < self.config.control_warn_rate {
+                let freq = ffi::tr_system_get_current_control_channel(ctx.as_mut(), sys_num);
+                tracing::warn!(
+                    sys_num,
+                    freq_mhz = freq / 1e6,
+                    decode_rate,
+                    count,
+                    "low decode rate",
+                );
+            } else if self.config.control_warn_rate == -1 {
+                let freq = ffi::tr_system_get_current_control_channel(ctx.as_mut(), sys_num);
+                tracing::info!(
+                    sys_num,
+                    freq_mhz = freq / 1e6,
+                    decode_rate,
+                    count,
+                    "decode rate",
+                );
+            }
+        }
+        Ok(())
+    }
 
     pub fn conclude_all(&mut self, mut ctx: Pin<&mut TrContext>) {
         for entry in &mut self.calls {

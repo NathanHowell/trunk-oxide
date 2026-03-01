@@ -334,6 +334,8 @@ impl TrunkRecorderBuilder {
             new_call_from_update: rec.map_or(true, |r| r.new_call_from_update),
             record_uu_v_calls: rec.map_or(true, |r| r.record_uu_v_calls),
             default_mode: rec.map_or(DefaultMode::default(), |r| r.default_mode),
+            control_retune_limit: rec.map_or(0, |r| r.control_retune_limit),
+            control_warn_rate: rec.map_or(10, |r| r.control_warn_rate),
             systems: system_policies,
         };
 
@@ -411,7 +413,7 @@ impl TrunkRecorder {
             let decode_elapsed = now - last_decode_check;
             if decode_elapsed >= Duration::from_secs(3) {
                 let time_diff = decode_elapsed.as_secs_f32();
-                ffi::tr_context_check_decode_rates(self.ctx.pin_mut(), time_diff)?;
+                call_mgr.check_decode_rates(self.ctx.pin_mut(), time_diff)?;
                 ffi::tr_context_check_sources(self.ctx.pin_mut())?;
                 last_decode_check = Instant::now();
                 ffi::tr_context_clear_stale_patches(self.ctx.pin_mut());

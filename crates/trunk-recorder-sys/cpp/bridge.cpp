@@ -920,6 +920,134 @@ static std::shared_ptr<System> find_system_by_num(TrContext &ctx, int sys_num) {
     return nullptr;
 }
 
+// ── Phase B: Message Routing (called from Rust handle_message) ──
+
+void tr_system_add_control_channel_runtime(TrContext &ctx, int32_t sys_num, double freq) {
+    auto sys = find_system_by_num(ctx, sys_num);
+    if (sys) {
+        sys->add_control_channel(freq);
+    }
+}
+
+void tr_system_update_patches(TrContext &ctx, int32_t sys_num, const TrPatchData &pd) {
+    auto sys = find_system_by_num(ctx, sys_num);
+    if (sys) {
+        PatchData cpd;
+        cpd.sg = pd.sg;
+        cpd.ga1 = pd.ga1;
+        cpd.ga2 = pd.ga2;
+        cpd.ga3 = pd.ga3;
+        sys->update_active_talkgroup_patches(cpd);
+    }
+}
+
+void tr_system_delete_patch(TrContext &ctx, int32_t sys_num, const TrPatchData &pd) {
+    auto sys = find_system_by_num(ctx, sys_num);
+    if (sys) {
+        PatchData cpd;
+        cpd.sg = pd.sg;
+        cpd.ga1 = pd.ga1;
+        cpd.ga2 = pd.ga2;
+        cpd.ga3 = pd.ga3;
+        sys->delete_talkgroup_patch(cpd);
+    }
+}
+
+void tr_system_retune(TrContext &ctx, int32_t sys_num) {
+    auto sys = find_system_by_num(ctx, sys_num);
+    if (!sys) return;
+    auto &tb = ctx.impl->trunk_ctx.tb;
+    auto &sources = ctx.impl->trunk_ctx.sources;
+    sys->retune_trunking(tb, sources);
+    if (sys->get_source() && sys->get_source()->get_autotune_source() && sys->get_system_type() == SYS_P25) {
+        autotune_control_channel(sys, false);
+    }
+}
+
+bool tr_system_update_sysid(TrContext &ctx, const TrTrunkMessage &msg) {
+    auto sys = find_system_by_num(ctx, msg.sys_num);
+    if (!sys) return false;
+    if (sys->get_system_type() != SYS_P25 && sys->get_system_type() != SYS_CONVENTIONAL_P25) {
+        return false;
+    }
+    auto tm = convert_trunk_message_back(msg);
+    return sys->update_sysid(tm);
+}
+
+bool tr_system_update_status(TrContext &ctx, const TrTrunkMessage &msg) {
+    auto sys = find_system_by_num(ctx, msg.sys_num);
+    if (!sys) return false;
+    auto tm = convert_trunk_message_back(msg);
+    return sys->update_status(tm);
+}
+
+void tr_context_fire_unit_event(TrContext &ctx, int32_t sys_num,
+    TrUnitEventType type, int64_t source_id, int64_t talkgroup) {
+    auto sys = find_system_by_num(ctx, sys_num);
+    if (!sys) return;
+    auto &event_sink = ctx.impl->trunk_ctx.config.event_sink;
+    switch (type) {
+        case TrUnitEventType::Registration:
+            event_sink->unit_registration(sys, source_id);
+            break;
+        case TrUnitEventType::Deregistration:
+            event_sink->unit_deregistration(sys, source_id);
+            break;
+        case TrUnitEventType::Affiliation:
+            event_sink->unit_group_affiliation(sys, source_id, talkgroup);
+            break;
+        case TrUnitEventType::Acknowledge:
+            event_sink->unit_acknowledge_response(sys, source_id);
+            break;
+        case TrUnitEventType::Location:
+            event_sink->unit_location(sys, source_id, talkgroup);
+            break;
+        case TrUnitEventType::DataGrant:
+            event_sink->unit_data_grant(sys, source_id);
+            break;
+        case TrUnitEventType::AnswerRequest:
+            event_sink->unit_answer_request(sys, source_id, talkgroup);
+            break;
+    }
+}
+
+void tr_context_fire_setup_system(TrContext &ctx, int32_t sys_num) {
+    auto sys = find_system_by_num(ctx, sys_num);
+    if (sys) {
+        ctx.impl->trunk_ctx.config.event_sink->setup_system(sys);
+    }
+}
+
+// ── Phase B: Decode Rate Checking (called from Rust check_decode_rates) ──
+
+void tr_system_set_decode_rate(TrContext &ctx, int32_t sys_num, int32_t rate) {
+    auto sys = find_system_by_num(ctx, sys_num);
+    if (sys) {
+        sys->set_decode_rate(rate);
+    }
+}
+
+int32_t tr_system_control_channel_count(TrContext &ctx, int32_t sys_num) {
+    auto sys = find_system_by_num(ctx, sys_num);
+    return sys ? sys->control_channel_count() : 0;
+}
+
+double tr_system_get_current_control_channel(TrContext &ctx, int32_t sys_num) {
+    auto sys = find_system_by_num(ctx, sys_num);
+    return sys ? sys->get_current_control_channel() : 0.0;
+}
+
+void tr_context_fire_setup_config(TrContext &ctx) {
+    auto &config = ctx.impl->trunk_ctx.config;
+    config.event_sink->setup_config(ctx.impl->trunk_ctx.sources,
+                                    ctx.impl->trunk_ctx.systems);
+}
+
+void tr_context_fire_system_rates(TrContext &ctx, float time_diff) {
+    auto &config = ctx.impl->trunk_ctx.config;
+    config.event_sink->system_rates(ctx.impl->trunk_ctx.systems, time_diff);
+}
+
 // ── Phase A: Loop Control ──
 
 void tr_start_gnuradio(TrContext &ctx) {
@@ -939,8 +1067,6 @@ rust::Vec<TrTrunkMessage> tr_context_drain_messages(TrContext &ctx) {
     rust::Vec<TrTrunkMessage> result;
     auto &systems = ctx.impl->trunk_ctx.systems;
     auto &config = ctx.impl->trunk_ctx.config;
-    auto &sources = ctx.impl->trunk_ctx.sources;
-    auto &tb = ctx.impl->trunk_ctx.tb;
 
     for (auto &system : systems) {
         if (system->get_system_type() != SYS_P25 && system->get_system_type() != SYS_SMARTNET) {
@@ -950,8 +1076,6 @@ rust::Vec<TrTrunkMessage> tr_context_drain_messages(TrContext &ctx) {
         gr::message::sptr msg;
         msg = system->get_msg_queue()->delete_head_nowait();
         while (msg != nullptr) {
-            system->set_message_count(system->get_message_count() + 1);
-
             std::vector<TrunkMessage> trunk_messages;
 
             if (system->get_system_type() == SYS_SMARTNET) {
@@ -959,70 +1083,6 @@ rust::Vec<TrTrunkMessage> tr_context_drain_messages(TrContext &ctx) {
                 trunk_messages = smartnet_parser->parse_message(msg, system);
             } else if (system->get_system_type() == SYS_P25) {
                 trunk_messages = ctx.impl->p25_parser->parse_message(msg, system);
-            }
-
-            // Handle C++-internal message types and fire plugin notifications
-            for (auto &message : trunk_messages) {
-                switch (message.message_type) {
-                case CONTROL_CHANNEL:
-                    system->add_control_channel(message.freq);
-                    break;
-                case PATCH_ADD:
-                    system->update_active_talkgroup_patches(message.patch_data);
-                    break;
-                case PATCH_DELETE:
-                    system->delete_talkgroup_patch(message.patch_data);
-                    break;
-                case TDULC:
-                    system->retune_trunking(tb, sources);
-                    if (system->get_source() && system->get_source()->get_autotune_source() && system->get_system_type() == SYS_P25) {
-                        autotune_control_channel(system, false);
-                    }
-                    break;
-                case INVALID_CC_MESSAGE:
-                {
-                    int msg_count = system->get_message_count();
-                    if (msg_count > 1) {
-                        system->set_message_count(msg_count - 1);
-                    }
-                    break;
-                }
-                case REGISTRATION:
-                    config.event_sink->unit_registration(system, message.source);
-                    break;
-                case DEREGISTRATION:
-                    config.event_sink->unit_deregistration(system, message.source);
-                    break;
-                case AFFILIATION:
-                    config.event_sink->unit_group_affiliation(system, message.source, message.talkgroup);
-                    break;
-                case ACKNOWLEDGE:
-                    config.event_sink->unit_acknowledge_response(system, message.source);
-                    break;
-                case LOCATION:
-                    config.event_sink->unit_location(system, message.source, message.talkgroup);
-                    break;
-                case DATA_GRANT:
-                    config.event_sink->unit_data_grant(system, message.source);
-                    break;
-                case UU_ANS_REQ:
-                    config.event_sink->unit_answer_request(system, message.source, message.talkgroup);
-                    break;
-                case SYSID:
-                    if ((system->get_system_type() == SYS_P25) || (system->get_system_type() == SYS_CONVENTIONAL_P25)) {
-                        if (system->update_sysid(message)) {
-                            config.event_sink->setup_system(system);
-                        }
-                    }
-                    break;
-                case STATUS:
-                    if (system->update_status(message)) {
-                        config.event_sink->setup_system(system);
-                    }
-                    break;
-                default:
-                    break;
-                }
             }
 
             // Fire trunk_message plugin notification for all messages
@@ -1056,51 +1116,6 @@ void tr_context_process_conventional_queues(TrContext &ctx) {
 void tr_context_check_conventional_detection(TrContext &ctx) {
     for (auto &source : ctx.impl->trunk_ctx.sources) {
         source->enable_detected_recorders();
-    }
-}
-
-void tr_context_check_decode_rates(TrContext &ctx, float time_diff) {
-    auto &config = ctx.impl->trunk_ctx.config;
-    auto &tb = ctx.impl->trunk_ctx.tb;
-    auto &sources = ctx.impl->trunk_ctx.sources;
-    auto &systems = ctx.impl->trunk_ctx.systems;
-
-    config.event_sink->setup_config(sources, systems);
-    config.event_sink->system_rates(systems, time_diff);
-
-    for (auto &sys : systems) {
-        if (!is_conventional(sys->get_system_type())) {
-            int msgs_decoded_per_second = std::floor(sys->get_message_count() / time_diff);
-            sys->set_decode_rate(msgs_decoded_per_second);
-
-            if (msgs_decoded_per_second < 2) {
-                if (config.control_retune_limit > 0) {
-                    sys->set_retune_attempts(sys->get_retune_attempts() + 1);
-                    if (sys->get_retune_attempts() > config.control_retune_limit) {
-                        BOOST_LOG_TRIVIAL(error) << "[" << sys->get_short_name() << "]\t"
-                                                 << "Control channel retune limit exceeded after " << sys->get_retune_attempts() << " tries - Terminating trunk recorder";
-                        throw std::runtime_error("Control channel retune limit exceeded");
-                    }
-                }
-                if (sys->control_channel_count() > 1) {
-                    sys->retune_trunking(tb, sources);
-                    if (sys->get_source() && sys->get_source()->get_autotune_source() && sys->get_system_type() == SYS_P25) {
-                        autotune_control_channel(sys, false);
-                    }
-                } else {
-                    BOOST_LOG_TRIVIAL(error) << "[" << sys->get_short_name() << "]\tThere is only one control channel defined";
-                }
-            } else {
-                sys->set_retune_attempts(0);
-            }
-
-            if (msgs_decoded_per_second < config.control_message_warn_rate) {
-                BOOST_LOG_TRIVIAL(error) << "[" << sys->get_short_name() << "]\tfreq: " << format_freq(sys->get_current_control_channel()) << "\tControl Channel Message Decode Rate: " << msgs_decoded_per_second << "/sec, count:  " << sys->get_message_count();
-            } else if (config.control_message_warn_rate == -1) {
-                BOOST_LOG_TRIVIAL(info) << "[" << sys->get_short_name() << "]\tfreq: " << format_freq(sys->get_current_control_channel()) << "\tControl Channel Message Decode Rate: " << msgs_decoded_per_second << "/sec, count:  " << sys->get_message_count();
-            }
-        }
-        sys->set_message_count(0);
     }
 }
 

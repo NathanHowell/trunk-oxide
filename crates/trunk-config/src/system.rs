@@ -17,6 +17,12 @@ pub enum SystemType {
     P25,
 }
 
+impl SystemType {
+    pub fn is_trunked(self) -> bool {
+        matches!(self, Self::P25 | Self::Smartnet)
+    }
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Modulation {

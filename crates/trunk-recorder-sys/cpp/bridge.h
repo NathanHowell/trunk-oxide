@@ -195,10 +195,28 @@ void tr_stop_gnuradio(TrContext &ctx);
 rust::Vec<TrTrunkMessage> tr_context_drain_messages(TrContext &ctx);
 void tr_context_process_conventional_queues(TrContext &ctx);
 void tr_context_check_conventional_detection(TrContext &ctx);
-void tr_context_check_decode_rates(TrContext &ctx, float time_diff);
 void tr_context_check_sources(TrContext &ctx);
 void tr_context_clear_stale_patches(TrContext &ctx);
 void tr_context_print_status(TrContext &ctx, rust::Slice<const TrCall *const> calls);
+
+// ── Phase B: Message Routing (called from Rust handle_message) ──
+enum class TrUnitEventType : uint8_t;
+void tr_system_add_control_channel_runtime(TrContext &ctx, int32_t sys_num, double freq);
+void tr_system_update_patches(TrContext &ctx, int32_t sys_num, const TrPatchData &pd);
+void tr_system_delete_patch(TrContext &ctx, int32_t sys_num, const TrPatchData &pd);
+void tr_system_retune(TrContext &ctx, int32_t sys_num);
+bool tr_system_update_sysid(TrContext &ctx, const TrTrunkMessage &msg);
+bool tr_system_update_status(TrContext &ctx, const TrTrunkMessage &msg);
+void tr_context_fire_unit_event(TrContext &ctx, int32_t sys_num,
+    TrUnitEventType type, int64_t source_id, int64_t talkgroup);
+void tr_context_fire_setup_system(TrContext &ctx, int32_t sys_num);
+
+// ── Phase B: Decode Rate Checking (called from Rust check_decode_rates) ──
+void tr_system_set_decode_rate(TrContext &ctx, int32_t sys_num, int32_t rate);
+int32_t tr_system_control_channel_count(TrContext &ctx, int32_t sys_num);
+double tr_system_get_current_control_channel(TrContext &ctx, int32_t sys_num);
+void tr_context_fire_setup_config(TrContext &ctx);
+void tr_context_fire_system_rates(TrContext &ctx, float time_diff);
 
 // ── Conventional call management — recorder status (null-guarded) ──
 bool call_has_recorder(const TrCall &call);

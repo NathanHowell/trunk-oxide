@@ -61,6 +61,17 @@ pub mod ffi {
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum TrUnitEventType {
+        Registration = 0,
+        Deregistration = 1,
+        Affiliation = 2,
+        Acknowledge = 3,
+        Location = 4,
+        DataGrant = 5,
+        AnswerRequest = 6,
+    }
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum TrCallDataStatus {
         Initial = 0,
         Success = 1,
@@ -344,10 +355,27 @@ pub mod ffi {
         fn tr_context_drain_messages(ctx: Pin<&mut TrContext>) -> Vec<TrTrunkMessage>;
         fn tr_context_process_conventional_queues(ctx: Pin<&mut TrContext>);
         fn tr_context_check_conventional_detection(ctx: Pin<&mut TrContext>);
-        fn tr_context_check_decode_rates(ctx: Pin<&mut TrContext>, time_diff: f32) -> Result<()>;
         fn tr_context_check_sources(ctx: Pin<&mut TrContext>) -> Result<()>;
         fn tr_context_clear_stale_patches(ctx: Pin<&mut TrContext>);
         fn tr_context_print_status(ctx: Pin<&mut TrContext>, calls: &[*const TrCall]);
+
+        // ── Phase B: Message Routing (called from Rust handle_message) ──
+        fn tr_system_add_control_channel_runtime(ctx: Pin<&mut TrContext>, sys_num: i32, freq: f64);
+        fn tr_system_update_patches(ctx: Pin<&mut TrContext>, sys_num: i32, pd: &TrPatchData);
+        fn tr_system_delete_patch(ctx: Pin<&mut TrContext>, sys_num: i32, pd: &TrPatchData);
+        fn tr_system_retune(ctx: Pin<&mut TrContext>, sys_num: i32);
+        fn tr_system_update_sysid(ctx: Pin<&mut TrContext>, msg: &TrTrunkMessage) -> bool;
+        fn tr_system_update_status(ctx: Pin<&mut TrContext>, msg: &TrTrunkMessage) -> bool;
+        fn tr_context_fire_unit_event(ctx: Pin<&mut TrContext>, sys_num: i32,
+            event_type: TrUnitEventType, source_id: i64, talkgroup: i64);
+        fn tr_context_fire_setup_system(ctx: Pin<&mut TrContext>, sys_num: i32);
+
+        // ── Phase B: Decode Rate Checking (called from Rust check_decode_rates) ──
+        fn tr_system_set_decode_rate(ctx: Pin<&mut TrContext>, sys_num: i32, rate: i32);
+        fn tr_system_control_channel_count(ctx: Pin<&mut TrContext>, sys_num: i32) -> i32;
+        fn tr_system_get_current_control_channel(ctx: Pin<&mut TrContext>, sys_num: i32) -> f64;
+        fn tr_context_fire_setup_config(ctx: Pin<&mut TrContext>);
+        fn tr_context_fire_system_rates(ctx: Pin<&mut TrContext>, time_diff: f32);
 
         // ── Conventional call management — recorder status (null-guarded) ──
         fn call_has_recorder(call: &TrCall) -> bool;

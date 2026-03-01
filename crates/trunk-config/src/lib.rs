@@ -11,12 +11,12 @@ use anyhow::Result;
 use serde::Deserialize;
 
 pub use discord::{ChannelGroup, ChannelMapping, DiscordConfig, NonZeroU64, TalkgroupSelector};
-pub use recorder::{DebugRecorderConfig, FrequencyFormat, RecorderConfig};
+pub use recorder::{DebugRecorderConfig, DefaultMode, FrequencyFormat, RecorderConfig};
 pub use service::{AudioConfig, GrpcConfig, OxideConfig, WhispererConfig};
 pub use source::{SourceConfig, SourceDriver};
 pub use system::{
     ChannelConfig, Modulation, SystemConfig, SystemType, TalkgroupConfig, TalkgroupDisplayFormat,
-    UnitTagEntry, UnitTagsSettings,
+    TalkgroupMode, UnitTagEntry, UnitTagsSettings,
 };
 
 #[derive(Debug, Deserialize)]
@@ -250,7 +250,7 @@ priority = 1
         assert_eq!(sys.talkgroup.len(), 1);
         let tg = &sys.talkgroup[0];
         assert_eq!(tg.id, 865);
-        assert_eq!(tg.mode, "D");
+        assert_eq!(tg.mode, crate::TalkgroupMode::Digital);
         assert_eq!(tg.alpha_tag, "SMC SO Pat 1");
         assert_eq!(tg.priority, 1);
     }
@@ -326,7 +326,7 @@ channel_id = 123456789
 
         let tg865 = &tgs[&865];
         assert_eq!(tg865.id, 865);
-        assert_eq!(tg865.mode, "D");
+        assert_eq!(tg865.mode, crate::TalkgroupMode::Digital);
         assert_eq!(tg865.alpha_tag, "SMC SO Pat 1");
         assert_eq!(tg865.tag, "Law Dispatch");
         assert_eq!(tg865.group, "County Sheriff");
@@ -382,7 +382,7 @@ alpha_tag = "New TG"
         assert_eq!(tg100.description, "Test talkgroup 100"); // from CSV
         assert_eq!(tg100.tag, "Law Dispatch"); // from CSV
         assert_eq!(tg100.group, "Police"); // from CSV
-        assert_eq!(tg100.mode, "D"); // from CSV
+        assert_eq!(tg100.mode, crate::TalkgroupMode::Digital); // from CSV
 
         // TG 200: untouched, all from CSV
         let tg200 = sys.talkgroup.iter().find(|t| t.id == 200).unwrap();
@@ -391,7 +391,7 @@ alpha_tag = "New TG"
 
         // TG 999: new entry from TOML only
         let tg999 = sys.talkgroup.iter().find(|t| t.id == 999).unwrap();
-        assert_eq!(tg999.mode, "E");
+        assert_eq!(tg999.mode, crate::TalkgroupMode::Encrypted);
         assert_eq!(tg999.alpha_tag, "New TG");
         assert_eq!(tg999.priority, 0); // default
 

@@ -1422,148 +1422,6 @@ std::unique_ptr<TrCall> tr_context_create_call(TrContext &ctx, const TrTrunkMess
     return std::make_unique<TrCall>(call);
 }
 
-bool tr_context_try_start_recording(TrContext &ctx, TrCall &call, const TrTrunkMessage &msg) {
-    auto cpp_msg = convert_trunk_message_back(msg);
-    auto sys = call.ptr->get_system();
-    auto &config = ctx.impl->trunk_ctx.config;
-    auto &sources = ctx.impl->trunk_ctx.sources;
-
-    auto talkgroup = sys->find_talkgroup(call.ptr->get_talkgroup());
-
-    bool source_found = false;
-    bool recorder_found = false;
-    bool override_record_unknown = false;
-
-    std::shared_ptr<Recorder> recorder;
-    std::shared_ptr<Recorder> debug_recorder;
-    std::shared_ptr<Recorder> sigmf_recorder;
-
-    if (!talkgroup) {
-        for (auto &TGID : sys->get_talkgroup_patch(call.ptr->get_talkgroup())) {
-            if (sys->find_talkgroup(TGID) != nullptr) {
-                override_record_unknown = true;
-                std::string loghdr = log_header(call.ptr->get_short_name(), call.ptr->get_call_num(), call.ptr->get_talkgroup(), call.ptr->get_freq());
-                BOOST_LOG_TRIVIAL(info) << loghdr << "\u001b[33mEnabling recording of TG not in Talkgroup File due to active supergroup patch\u001b[0m ";
-            }
-        }
-    }
-
-    if (!talkgroup && (sys->get_record_unknown() == false) && override_record_unknown == false) {
-        call.ptr->set_state(MONITORING);
-        call.ptr->set_monitoring_state(UNKNOWN_TG);
-        if (sys->get_hideUnknown() == false) {
-            std::string loghdr = log_header(call.ptr->get_short_name(), call.ptr->get_call_num(), call.ptr->get_talkgroup(), call.ptr->get_freq());
-            BOOST_LOG_TRIVIAL(info) << loghdr << "\u001b[33mNot Recording: TG not in Talkgroup File\u001b[0m ";
-        }
-        return false;
-    }
-
-    if (call.ptr->get_encrypted() == true || (talkgroup && (talkgroup->mode.compare("E") == 0 || talkgroup->mode.compare("TE") == 0 || talkgroup->mode.compare("DE") == 0))) {
-        if (talkgroup && (talkgroup->mode.compare("E") == 0 || talkgroup->mode.compare("TE") == 0 || talkgroup->mode.compare("DE") == 0)) {
-            call.ptr->set_encrypted(true);
-        }
-        if (!sys->get_monitorEncrypted()) {
-            call.ptr->set_state(MONITORING);
-            call.ptr->set_monitoring_state(ENCRYPTED);
-            if (sys->get_hideEncrypted() == false) {
-                long unit_id = call.ptr->get_current_source_id();
-                std::string tag = sys->find_unit_tag(unit_id);
-                if (tag != "") {
-                    tag = " (\033[0;34m" + tag + "\033[0m)";
-                }
-                std::string loghdr = log_header(sys->get_short_name(), call.ptr->get_call_num(), call.ptr->get_talkgroup(), call.ptr->get_freq());
-                BOOST_LOG_TRIVIAL(info) << loghdr << "\u001b[31mNot Recording: ENCRYPTED\u001b[0m - src: " << unit_id << tag;
-            }
-            return false;
-        }
-    }
-
-    for (auto &source : sources) {
-        if ((source->get_min_hz() <= call.ptr->get_freq()) &&
-            (source->get_max_hz() >= call.ptr->get_freq())) {
-            source_found = true;
-
-            if (talkgroup) {
-                int priority = talkgroup->get_priority();
-                for (auto &TGID : sys->get_talkgroup_patch(call.ptr->get_talkgroup())) {
-                    if (sys->find_talkgroup(TGID) != nullptr) {
-                        if (sys->find_talkgroup(TGID)->get_priority() < priority) {
-                            priority = sys->find_talkgroup(TGID)->get_priority();
-                            BOOST_LOG_TRIVIAL(info) << "Temporarily increased priority of talkgroup " << call.ptr->get_talkgroup() << " to " << sys->find_talkgroup(TGID)->get_priority() << " due to active patch with talkgroup " << TGID;
-                        }
-                    }
-                }
-                if (talkgroup->mode.compare("A") == 0) {
-                    recorder = source->get_analog_recorder(talkgroup, priority, call.ptr);
-                    call.ptr->set_is_analog(true);
-                } else {
-                    recorder = source->get_digital_recorder(talkgroup, priority, call.ptr);
-                }
-            } else {
-                std::string loghdr = log_header(call.ptr->get_short_name(), call.ptr->get_call_num(), call.ptr->get_talkgroup(), call.ptr->get_freq());
-                BOOST_LOG_TRIVIAL(info) << loghdr << "TG not in Talkgroup File ";
-
-                if ((config.default_mode == "analog") && (sys->get_system_type() == SYS_SMARTNET)) {
-                    recorder = source->get_analog_recorder(call.ptr);
-                    call.ptr->set_is_analog(true);
-                } else {
-                    recorder = source->get_digital_recorder(call.ptr);
-                }
-            }
-
-            if (recorder) {
-                if (cpp_msg.meta.length()) {
-                    BOOST_LOG_TRIVIAL(trace) << cpp_msg.meta;
-                }
-
-                if (recorder->start(call.ptr)) {
-                    call.ptr->set_recorder(recorder);
-                    call.ptr->set_state(RECORDING);
-                    config.event_sink->setup_recorder(recorder);
-                    recorder_found = true;
-                } else {
-                    call.ptr->set_state(MONITORING);
-                    recorder_found = false;
-                    return false;
-                }
-            } else {
-                return false;
-            }
-
-            debug_recorder = source->get_debug_recorder();
-            if (debug_recorder) {
-                debug_recorder->start(call.ptr);
-                call.ptr->set_debug_recorder(debug_recorder);
-                call.ptr->set_debug_recording(true);
-                config.event_sink->setup_recorder(debug_recorder);
-                recorder_found = true;
-            }
-
-            sigmf_recorder = source->get_sigmf_recorder();
-            if (sigmf_recorder) {
-                sigmf_recorder->start(call.ptr);
-                call.ptr->set_sigmf_recorder(sigmf_recorder);
-                call.ptr->set_sigmf_recording(true);
-                config.event_sink->setup_recorder(sigmf_recorder);
-                recorder_found = true;
-            }
-
-            if (recorder_found) {
-                return true;
-            }
-        }
-    }
-
-    if (!source_found) {
-        call.ptr->set_state(MONITORING);
-        call.ptr->set_monitoring_state(NO_SOURCE);
-        std::string loghdr = log_header(call.ptr->get_short_name(), call.ptr->get_call_num(), call.ptr->get_talkgroup(), call.ptr->get_freq());
-        BOOST_LOG_TRIVIAL(error) << loghdr << "\u001b[36mNot Recording: no source covering Freq\u001b[0m";
-        return false;
-    }
-    return false;
-}
-
 bool tr_call_update(TrCall &call, const TrTrunkMessage &msg) {
     auto cpp_msg = convert_trunk_message_back(msg);
     return call.ptr->update(cpp_msg);
@@ -1579,6 +1437,101 @@ void tr_call_set_monitoring_state(TrCall &call, TrMonitoringState state) {
 
 void tr_call_set_encrypted(TrCall &call, bool encrypted) {
     call.ptr->set_encrypted(encrypted);
+}
+
+void call_set_is_analog(TrCall &call, bool is_analog) {
+    call.ptr->set_is_analog(is_analog);
+}
+
+rust::Vec<int64_t> tr_context_get_talkgroup_patch(
+    const TrContext &ctx, int32_t sys_num, int64_t talkgroup) {
+    rust::Vec<int64_t> result;
+    for (auto &sys : ctx.impl->trunk_ctx.systems) {
+        if (sys->get_sys_num() == sys_num) {
+            for (auto &tg_id : sys->get_talkgroup_patch(talkgroup)) {
+                result.push_back(tg_id);
+            }
+            break;
+        }
+    }
+    return result;
+}
+
+TrAcquireResult tr_context_acquire_recorder(TrContext &ctx, TrCall &call, bool is_analog, int32_t priority) {
+    auto &config = ctx.impl->trunk_ctx.config;
+    auto &sources = ctx.impl->trunk_ctx.sources;
+
+    for (auto &source : sources) {
+        if (source->get_min_hz() > call.ptr->get_freq() ||
+            source->get_max_hz() < call.ptr->get_freq()) {
+            continue;
+        }
+
+        // Source covers this frequency
+        int32_t available = is_analog
+            ? source->get_num_available_analog_recorders()
+            : source->get_num_available_digital_recorders();
+
+        // Priority check: -1 means disabled, priority > available means insufficient recorders
+        if (priority == -1 || priority > available) {
+            TrAcquireResult res;
+            res.started = false;
+            res.available = available;
+            return res;
+        }
+
+        // Allocate a recorder
+        std::shared_ptr<Recorder> recorder = is_analog
+            ? source->get_analog_recorder(call.ptr)
+            : source->get_digital_recorder(call.ptr);
+
+        if (!recorder) {
+            TrAcquireResult res;
+            res.started = false;
+            res.available = available;
+            return res;
+        }
+
+        if (!recorder->start(call.ptr)) {
+            TrAcquireResult res;
+            res.started = false;
+            res.available = available;
+            return res;
+        }
+
+        call.ptr->set_recorder(recorder);
+        call.ptr->set_state(RECORDING);
+        config.event_sink->setup_recorder(recorder);
+
+        // Debug recorder
+        auto debug_recorder = source->get_debug_recorder();
+        if (debug_recorder) {
+            debug_recorder->start(call.ptr);
+            call.ptr->set_debug_recorder(debug_recorder);
+            call.ptr->set_debug_recording(true);
+            config.event_sink->setup_recorder(debug_recorder);
+        }
+
+        // SigMF recorder
+        auto sigmf_recorder = source->get_sigmf_recorder();
+        if (sigmf_recorder) {
+            sigmf_recorder->start(call.ptr);
+            call.ptr->set_sigmf_recorder(sigmf_recorder);
+            call.ptr->set_sigmf_recording(true);
+            config.event_sink->setup_recorder(sigmf_recorder);
+        }
+
+        TrAcquireResult res;
+        res.started = true;
+        res.available = available;
+        return res;
+    }
+
+    // No source covers this frequency
+    TrAcquireResult res;
+    res.started = false;
+    res.available = -1;
+    return res;
 }
 
 void tr_call_conclude(TrCall &call) {

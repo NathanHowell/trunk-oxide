@@ -12,9 +12,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
-pub use call_manager::CallManagerConfig;
+pub use call_manager::{CallManagerConfig, SystemPolicy, TalkgroupPolicy};
 use call_manager::CallManager;
-use trunk_config::{Config, FrequencyFormat, Modulation, SourceDriver, SystemType};
+use std::collections::HashMap;
+
+use trunk_config::{Config, DefaultMode, FrequencyFormat, Modulation, SourceDriver, SystemType};
 use trunk_recorder_sys::ffi;
 use trunk_recorder_sys::RustPluginCallbacks;
 
@@ -24,6 +26,7 @@ use trunk_recorder_sys::RustPluginCallbacks;
 /// begin receiving radio traffic.
 pub struct TrunkRecorderBuilder {
     ctx: cxx::UniquePtr<ffi::TrContext>,
+    call_mgr_config: CallManagerConfig,
 }
 
 /// A running trunk-recorder instance. Stops automatically on drop.
@@ -70,7 +73,7 @@ impl TrunkRecorderBuilder {
                     FrequencyFormat::Hz => 1,
                 },
             );
-            ffi::tr_config_set_default_mode(ctx.pin_mut(), &rec.default_mode);
+            ffi::tr_config_set_default_mode(ctx.pin_mut(), rec.default_mode.as_str());
             ffi::tr_config_set_debug_recorder(
                 ctx.pin_mut(),
                 rec.debug.enabled,
@@ -157,6 +160,7 @@ impl TrunkRecorderBuilder {
         }
 
         // ── Systems ──
+        let mut system_policies = HashMap::new();
         for (short_name, sys) in &config.system {
             let type_str = match sys.system_type {
                 SystemType::Conventional => "conventional",
@@ -266,7 +270,7 @@ impl TrunkRecorderBuilder {
                     ctx.pin_mut(),
                     sys_idx,
                     tg.id,
-                    &tg.mode,
+                    tg.mode.as_str(),
                     tg.priority,
                     tg.preferred_nac,
                 );
@@ -292,23 +296,62 @@ impl TrunkRecorderBuilder {
             if let Some(settings) = &sys.unit_tags {
                 ffi::tr_system_set_unit_tags_mode(ctx.pin_mut(), sys_idx, &settings.mode);
             }
+
+            // Build recording policy for this system
+            let talkgroups = sys
+                .talkgroup
+                .iter()
+                .map(|tg| {
+                    (
+                        tg.id,
+                        TalkgroupPolicy {
+                            mode: tg.mode,
+                            priority: tg.priority,
+                        },
+                    )
+                })
+                .collect();
+
+            system_policies.insert(
+                sys_idx,
+                SystemPolicy {
+                    system_type: sys.system_type,
+                    record_unknown: sys.record_unknown,
+                    hide_unknown: sys.hide_unknown_talkgroups,
+                    hide_encrypted: sys.hide_encrypted,
+                    monitor_encrypted: sys.monitor_encrypted,
+                    talkgroups,
+                },
+            );
         }
 
         // ── Finalize: setup_systems + plugin callbacks ──
         ffi::tr_finalize(ctx.pin_mut())?;
 
-        Ok(Self { ctx })
+        let rec = config.recorder.as_ref();
+        let call_mgr_config = CallManagerConfig {
+            call_timeout: rec.map_or(3.0, |r| r.call_timeout),
+            new_call_from_update: rec.map_or(true, |r| r.new_call_from_update),
+            record_uu_v_calls: rec.map_or(true, |r| r.record_uu_v_calls),
+            default_mode: rec.map_or(DefaultMode::default(), |r| r.default_mode),
+            systems: system_policies,
+        };
+
+        Ok(Self {
+            ctx,
+            call_mgr_config,
+        })
     }
 
     /// Start the gnuradio flowgraph (without the C++ monitor thread).
     ///
     /// After calling this, use [`TrunkRecorder::run_monitor`] on a dedicated
     /// thread to drive the main loop from Rust.
-    pub fn start(mut self, call_mgr_config: CallManagerConfig) -> TrunkRecorder {
+    pub fn start(mut self) -> TrunkRecorder {
         ffi::tr_start_gnuradio(self.ctx.pin_mut());
         TrunkRecorder {
             ctx: self.ctx,
-            call_mgr_config,
+            call_mgr_config: self.call_mgr_config,
         }
     }
 }

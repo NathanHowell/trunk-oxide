@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::fmt;
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -145,14 +146,80 @@ pub enum TalkgroupDisplayFormat {
     TagId,
 }
 
+/// Recording mode for a talkgroup.
+///
+/// Values match the RadioReference CSV "Mode" column.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TalkgroupMode {
+    /// Analog voice ("A")
+    Analog,
+    /// Digital voice ("D") — default
+    #[default]
+    Digital,
+    /// Encrypted ("E")
+    Encrypted,
+    /// Trunked encrypted ("TE")
+    TrunkedEncrypted,
+    /// Digital encrypted ("DE")
+    DigitalEncrypted,
+}
+
+impl TalkgroupMode {
+    pub fn is_encrypted(self) -> bool {
+        matches!(
+            self,
+            Self::Encrypted | Self::TrunkedEncrypted | Self::DigitalEncrypted
+        )
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Analog => "A",
+            Self::Digital => "D",
+            Self::Encrypted => "E",
+            Self::TrunkedEncrypted => "TE",
+            Self::DigitalEncrypted => "DE",
+        }
+    }
+}
+
+impl fmt::Display for TalkgroupMode {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for TalkgroupMode {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Ok(TalkgroupMode::from_str(&s))
+    }
+}
+
+impl TalkgroupMode {
+    fn from_str(s: &str) -> Self {
+        match s {
+            "A" => Self::Analog,
+            "D" => Self::Digital,
+            "E" => Self::Encrypted,
+            "TE" => Self::TrunkedEncrypted,
+            "DE" => Self::DigitalEncrypted,
+            _ => Self::Digital, // unknown modes default to digital
+        }
+    }
+}
+
 /// Talkgroup entry for trunked systems.
 /// Descriptive fields stay in Rust for enrichment.
 /// Operational fields are passed to C++ for recording decisions.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TalkgroupConfig {
     pub id: i64,
-    #[serde(default = "default_talkgroup_mode")]
-    pub mode: String,
+    #[serde(default)]
+    pub mode: TalkgroupMode,
     #[serde(default)]
     pub alpha_tag: String,
     #[serde(default)]
@@ -165,10 +232,6 @@ pub struct TalkgroupConfig {
     pub priority: i32,
     #[serde(default)]
     pub preferred_nac: u64,
-}
-
-fn default_talkgroup_mode() -> String {
-    "D".to_string()
 }
 
 /// Channel entry for conventional systems.
@@ -290,9 +353,9 @@ pub(crate) fn load_talkgroups_csv(path: &Path) -> Result<HashMap<i64, TalkgroupC
         let mode = {
             let m = get(col_mode);
             if m.is_empty() {
-                default_talkgroup_mode()
+                TalkgroupMode::default()
             } else {
-                m
+                TalkgroupMode::from_str(&m)
             }
         };
 
@@ -328,7 +391,7 @@ pub(crate) fn load_talkgroups_csv(path: &Path) -> Result<HashMap<i64, TalkgroupC
 /// the fields that are explicitly present in the table.
 fn apply_overlay(tg: &mut TalkgroupConfig, table: &toml::Table) {
     if let Some(v) = table.get("mode").and_then(|v| v.as_str()) {
-        tg.mode = v.to_string();
+        tg.mode = TalkgroupMode::from_str(v);
     }
     if let Some(v) = table.get("alpha_tag").and_then(|v| v.as_str()) {
         tg.alpha_tag = v.to_string();
@@ -378,7 +441,7 @@ pub(crate) fn resolve_talkgroups(
 
         let tg = map.entry(id).or_insert_with(|| TalkgroupConfig {
             id,
-            mode: default_talkgroup_mode(),
+            mode: TalkgroupMode::default(),
             alpha_tag: String::new(),
             description: String::new(),
             tag: String::new(),

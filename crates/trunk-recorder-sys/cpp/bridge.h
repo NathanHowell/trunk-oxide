@@ -238,8 +238,14 @@ int32_t recorder_get_type(const TrRecorder &rec);
 
 // ── Phase C: Call Management — lifecycle operations ──
 std::unique_ptr<TrCall> tr_context_create_call(TrContext &ctx, const TrTrunkMessage &msg);
-bool tr_context_try_start_recording(TrContext &ctx, TrCall &call, const TrTrunkMessage &msg);
 bool tr_call_update(TrCall &call, const TrTrunkMessage &msg);
+void call_set_is_analog(TrCall &call, bool is_analog);
+
+// ── Phase C: Call Management — recording policy support ──
+struct TrAcquireResult;
+rust::Vec<int64_t> tr_context_get_talkgroup_patch(
+    const TrContext &ctx, int32_t sys_num, int64_t talkgroup);
+TrAcquireResult tr_context_acquire_recorder(TrContext &ctx, TrCall &call, bool is_analog, int32_t priority);
 void tr_call_set_state(TrCall &call, TrState state);
 void tr_call_set_monitoring_state(TrCall &call, TrMonitoringState state);
 void tr_call_set_encrypted(TrCall &call, bool encrypted);

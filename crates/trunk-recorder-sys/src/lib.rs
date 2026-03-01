@@ -174,6 +174,12 @@ pub mod ffi {
         pub pwr_db: f64,   // power at transition time
     }
 
+    #[derive(Debug, Clone)]
+    struct TrAcquireResult {
+        pub started: bool,
+        pub available: i32,  // -1 = no source covering frequency
+    }
+
     // ── Opaque C++ types ──
 
     unsafe extern "C++" {
@@ -371,12 +377,16 @@ pub mod ffi {
 
         // ── Phase C: Call Management — lifecycle operations ──
         fn tr_context_create_call(ctx: Pin<&mut TrContext>, msg: &TrTrunkMessage) -> UniquePtr<TrCall>;
-        fn tr_context_try_start_recording(ctx: Pin<&mut TrContext>, call: Pin<&mut TrCall>, msg: &TrTrunkMessage) -> bool;
         fn tr_call_update(call: Pin<&mut TrCall>, msg: &TrTrunkMessage) -> bool;
         fn tr_call_set_state(call: Pin<&mut TrCall>, state: TrState);
         fn tr_call_set_monitoring_state(call: Pin<&mut TrCall>, state: TrMonitoringState);
         fn tr_call_set_encrypted(call: Pin<&mut TrCall>, encrypted: bool);
+        fn call_set_is_analog(call: Pin<&mut TrCall>, is_analog: bool);
         fn tr_call_conclude(call: Pin<&mut TrCall>);
+
+        // ── Phase C: Call Management — recording policy support ──
+        fn tr_context_get_talkgroup_patch(ctx: &TrContext, sys_num: i32, talkgroup: i64) -> Vec<i64>;
+        fn tr_context_acquire_recorder(ctx: Pin<&mut TrContext>, call: Pin<&mut TrCall>, is_analog: bool, priority: i32) -> TrAcquireResult;
 
         // ── Phase C: Call Management — call-level recorder accessors ──
         fn call_recorder_since_last_write_secs(call: &TrCall) -> f64;

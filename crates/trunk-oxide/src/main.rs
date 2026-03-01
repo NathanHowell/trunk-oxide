@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use trunk_oxide::{CallManagerConfig, TrunkRecorderBuilder};
+use trunk_oxide::TrunkRecorderBuilder;
 use trunk_oxide_grpc::GrpcPlugin;
 use opentelemetry::trace::TracerProvider;
 use tracing_subscriber::prelude::*;
@@ -99,18 +99,9 @@ fn main() -> Result<()> {
         plugin.set_talkgroups(tg_map);
     }
 
-    let call_mgr_config = {
-        let rec = config.recorder.as_ref();
-        CallManagerConfig {
-            call_timeout: rec.map_or(3.0, |r| r.call_timeout),
-            new_call_from_update: rec.map_or(true, |r| r.new_call_from_update),
-            record_uu_v_calls: rec.map_or(true, |r| r.record_uu_v_calls),
-        }
-    };
-
     let mut recorder = TrunkRecorderBuilder::from_config(&config, plugin)
         .context("failed to initialize trunk-recorder")?
-        .start(call_mgr_config);
+        .start();
 
     tracing::info!("trunk-recorder engine running, press Ctrl+C to stop");
 

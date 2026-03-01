@@ -8,6 +8,23 @@ fn default_temp_dir() -> String {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DefaultMode {
+    Analog,
+    #[default]
+    Digital,
+}
+
+impl DefaultMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Analog => "analog",
+            Self::Digital => "digital",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct RecorderConfig {
@@ -29,8 +46,8 @@ pub struct RecorderConfig {
     pub new_call_from_update: bool,
     #[serde(default = "default_frequency_format")]
     pub frequency_format: FrequencyFormat,
-    #[serde(default = "default_mode")]
-    pub default_mode: String,
+    #[serde(default)]
+    pub default_mode: DefaultMode,
     #[serde(default)]
     pub debug: DebugRecorderConfig,
 }
@@ -64,9 +81,6 @@ const fn default_true() -> bool {
 }
 const fn default_frequency_format() -> FrequencyFormat {
     FrequencyFormat::Mhz
-}
-fn default_mode() -> String {
-    "digital".to_string()
 }
 fn default_debug_address() -> String {
     "127.0.0.1".to_string()

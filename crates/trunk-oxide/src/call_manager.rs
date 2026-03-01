@@ -1,10 +1,30 @@
+use std::collections::HashMap;
 use std::pin::Pin;
 use std::time::Instant;
 
 use cxx::UniquePtr;
+use trunk_config::{DefaultMode, SystemType, TalkgroupMode};
 use trunk_recorder_sys::ffi::{
     self, TrCall, TrContext, TrMessageType, TrMonitoringState, TrState, TrTrunkMessage,
 };
+
+/// Recording policy for a single talkgroup.
+#[derive(Clone)]
+pub struct TalkgroupPolicy {
+    pub mode: TalkgroupMode,
+    pub priority: i32,
+}
+
+/// Recording policy for a single system.
+#[derive(Clone)]
+pub struct SystemPolicy {
+    pub system_type: SystemType,
+    pub record_unknown: bool,
+    pub hide_unknown: bool,
+    pub hide_encrypted: bool,
+    pub monitor_encrypted: bool,
+    pub talkgroups: HashMap<i64, TalkgroupPolicy>,
+}
 
 /// Configuration extracted from trunk-config for call management decisions.
 #[derive(Clone)]
@@ -12,6 +32,8 @@ pub struct CallManagerConfig {
     pub call_timeout: f64,
     pub new_call_from_update: bool,
     pub record_uu_v_calls: bool,
+    pub default_mode: DefaultMode,
+    pub systems: HashMap<i32, SystemPolicy>,
 }
 
 /// A single active call tracked by the Rust CallManager.
@@ -111,7 +133,7 @@ impl CallManager {
 
         if multisite.is_superseding {
             let recording_started =
-                ffi::tr_context_try_start_recording(ctx.as_mut(), new_call.pin_mut(), msg);
+                self.try_start_recording(&mut ctx, &mut new_call, msg);
 
             if recording_started {
                 if let Some(orig_idx) = multisite.original_idx {
@@ -129,7 +151,7 @@ impl CallManager {
             ffi::tr_call_set_monitoring_state(new_call.pin_mut(), TrMonitoringState::Duplicate);
         } else {
             let recording_started =
-                ffi::tr_context_try_start_recording(ctx.as_mut(), new_call.pin_mut(), msg);
+                self.try_start_recording(&mut ctx, &mut new_call, msg);
             if recording_started && !is_grant_message {
                 tracing::info!(
                     talkgroup = msg.talkgroup,
@@ -172,6 +194,146 @@ impl CallManager {
                 }
             }
         }
+    }
+
+    // ── Recording policy ──
+
+    fn try_start_recording(
+        &self,
+        ctx: &mut Pin<&mut TrContext>,
+        call: &mut UniquePtr<TrCall>,
+        msg: &TrTrunkMessage,
+    ) -> bool {
+        let sys_num = msg.sys_num;
+        let tg_id = msg.talkgroup;
+
+        let sys_policy = match self.config.systems.get(&sys_num) {
+            Some(sp) => sp,
+            None => return false,
+        };
+
+        let tg_policy = sys_policy.talkgroups.get(&tg_id);
+
+        // Query runtime patch data from C++
+        let patch_tgs = ffi::tr_context_get_talkgroup_patch(ctx, sys_num, tg_id);
+
+        // 1. Unknown TG check
+        if tg_policy.is_none() {
+            let patched_with_known = patch_tgs
+                .iter()
+                .any(|&ptg| sys_policy.talkgroups.contains_key(&ptg));
+
+            if !sys_policy.record_unknown && !patched_with_known {
+                ffi::tr_call_set_state(call.pin_mut(), TrState::Monitoring);
+                ffi::tr_call_set_monitoring_state(
+                    call.pin_mut(),
+                    TrMonitoringState::UnknownTg,
+                );
+                if !sys_policy.hide_unknown {
+                    tracing::info!(
+                        talkgroup = tg_id,
+                        sys_num,
+                        "not recording: TG not in talkgroup file"
+                    );
+                }
+                return false;
+            }
+        }
+
+        // 2. Encryption check
+        let is_encrypted =
+            msg.encrypted || tg_policy.map_or(false, |tg| tg.mode.is_encrypted());
+        if is_encrypted {
+            ffi::tr_call_set_encrypted(call.pin_mut(), true);
+            if !sys_policy.monitor_encrypted {
+                ffi::tr_call_set_state(call.pin_mut(), TrState::Monitoring);
+                ffi::tr_call_set_monitoring_state(
+                    call.pin_mut(),
+                    TrMonitoringState::Encrypted,
+                );
+                if !sys_policy.hide_encrypted {
+                    tracing::info!(
+                        talkgroup = tg_id,
+                        sys_num,
+                        "not recording: encrypted"
+                    );
+                }
+                return false;
+            }
+        }
+
+        // 3. Determine recorder type (analog vs digital)
+        let is_analog = if let Some(tg) = tg_policy {
+            tg.mode == TalkgroupMode::Analog
+        } else {
+            self.config.default_mode == DefaultMode::Analog
+                && sys_policy.system_type == SystemType::Smartnet
+        };
+        if is_analog {
+            ffi::call_set_is_analog(call.pin_mut(), true);
+        }
+
+        // 4. Calculate priority (best among patched TGs)
+        let priority = if let Some(tg) = tg_policy {
+            let mut p = tg.priority;
+            for &ptg_id in &patch_tgs {
+                if let Some(ptg) = sys_policy.talkgroups.get(&ptg_id) {
+                    if ptg.priority >= 0 && ptg.priority < p {
+                        p = ptg.priority;
+                    }
+                }
+            }
+            p
+        } else {
+            0 // default priority for unknown TGs
+        };
+
+        // 5. Priority = -1 means disabled
+        if priority == -1 {
+            ffi::tr_call_set_state(call.pin_mut(), TrState::Monitoring);
+            ffi::tr_call_set_monitoring_state(
+                call.pin_mut(),
+                TrMonitoringState::IgnoredTg,
+            );
+            tracing::info!(talkgroup = tg_id, sys_num, "not recording: priority disabled (-1)");
+            return false;
+        }
+
+        // 6. Acquire recorder (C++ handles source finding, allocation, start)
+        let result =
+            ffi::tr_context_acquire_recorder(ctx.as_mut(), call.pin_mut(), is_analog, priority);
+
+        if result.available < 0 {
+            ffi::tr_call_set_state(call.pin_mut(), TrState::Monitoring);
+            ffi::tr_call_set_monitoring_state(
+                call.pin_mut(),
+                TrMonitoringState::NoSource,
+            );
+            tracing::error!(talkgroup = tg_id, sys_num, "not recording: no source covering freq");
+            return false;
+        }
+
+        if !result.started {
+            if priority > result.available {
+                ffi::tr_call_set_state(call.pin_mut(), TrState::Monitoring);
+                ffi::tr_call_set_monitoring_state(
+                    call.pin_mut(),
+                    TrMonitoringState::NoRecorder,
+                );
+                tracing::error!(
+                    talkgroup = tg_id,
+                    sys_num,
+                    priority,
+                    available = result.available,
+                    "not recording: priority exceeds available recorders"
+                );
+            } else {
+                ffi::tr_call_set_state(call.pin_mut(), TrState::Monitoring);
+            }
+            return false;
+        }
+
+        true
     }
 
     // ── Multisite duplicate detection ──

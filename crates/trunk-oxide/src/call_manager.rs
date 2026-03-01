@@ -1,4 +1,5 @@
 use std::pin::Pin;
+use std::time::Instant;
 
 use cxx::UniquePtr;
 use trunk_recorder_sys::ffi::{
@@ -16,6 +17,9 @@ pub struct CallManagerConfig {
 /// A single active call tracked by the Rust CallManager.
 struct CallEntry {
     call: UniquePtr<TrCall>,
+    /// When the squelch last closed (idle start) for conventional calls.
+    /// None means the call is currently active (squelch open).
+    idle_since: Option<Instant>,
 }
 
 /// Manages all call lifecycle: creation, update, timeout, and conclusion.
@@ -137,6 +141,7 @@ impl CallManager {
 
         self.calls.push(CallEntry {
             call: new_call,
+            idle_since: None,
         });
 
         let last = self.calls.last().unwrap();
@@ -304,7 +309,7 @@ impl CallManager {
 
     /// Add a conventional call drained from C++ during startup.
     pub fn add_call(&mut self, call: UniquePtr<TrCall>) {
-        self.calls.push(CallEntry { call });
+        self.calls.push(CallEntry { call, idle_since: None });
     }
 
     /// Collect raw pointers to all tracked calls (for passing to C++ print_status / calls_active).
@@ -312,7 +317,7 @@ impl CallManager {
         self.calls.iter().map(|e| &*e.call as *const TrCall).collect()
     }
 
-    /// Manage conventional call idle detection, conclude+restart, and initial recording.
+    /// Manage conventional call idle detection via squelch events, conclude+restart, and initial recording.
     fn tick_conventional(&mut self, mut ctx: Pin<&mut TrContext>) {
         for entry in &mut self.calls {
             if !ffi::call_is_conventional(&*entry.call) {
@@ -322,29 +327,35 @@ impl CallManager {
                 continue;
             }
 
+            // Drain squelch events that accumulated since last tick
+            let events = ffi::call_drain_squelch_events(&*entry.call);
+            for ev in &events {
+                if ev.muted {
+                    // Squelch closed — signal went away
+                    ffi::call_set_noise(entry.call.pin_mut(), ev.pwr_db);
+                    if entry.idle_since.is_none() {
+                        entry.idle_since = Some(Instant::now());
+                    }
+                } else {
+                    // Squelch opened — signal detected
+                    ffi::call_set_signal(entry.call.pin_mut(), ev.pwr_db);
+                    entry.idle_since = None;
+                }
+            }
+
             let length = ffi::call_get_current_length(&*entry.call);
             if length > 0.0 {
-                // Recording in progress — track idle/signal state
-                if ffi::call_get_recorder_is_idle(&*entry.call) {
-                    let pwr = ffi::call_get_recorder_pwr(&*entry.call);
-                    ffi::call_set_noise(entry.call.pin_mut(), pwr);
-                    ffi::call_increase_idle_count(entry.call.pin_mut());
-                } else {
-                    let pwr = ffi::call_get_recorder_pwr(&*entry.call);
-                    ffi::call_set_signal(entry.call.pin_mut(), pwr);
-                    if ffi::call_get_idle_count(&*entry.call) > 0 {
-                        ffi::call_reset_idle_count(entry.call.pin_mut());
-                    }
-                }
-
-                let idle_count = ffi::call_get_idle_count(&*entry.call) as f64;
+                // Check idle timeout using Rust-side timestamps
+                let idle_timed_out = entry
+                    .idle_since
+                    .map(|t| t.elapsed().as_secs_f64() > self.config.call_timeout)
+                    .unwrap_or(false);
                 let max_dur = ffi::call_get_system_max_duration(&*entry.call);
-                if idle_count > self.config.call_timeout
-                    || (max_dur > 0.0 && length > max_dur)
-                {
+                if idle_timed_out || (max_dur > 0.0 && length > max_dur) {
                     // Conclude current recording, restart for next transmission
                     ffi::tr_call_conclude(entry.call.pin_mut());
                     ffi::call_restart(entry.call.pin_mut());
+                    entry.idle_since = None;
                     ffi::tr_context_fire_setup_recorder(ctx.as_mut(), &*entry.call);
                     ffi::tr_context_fire_call_start(ctx.as_mut(), &*entry.call);
                 }

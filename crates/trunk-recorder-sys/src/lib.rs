@@ -167,6 +167,13 @@ pub mod ffi {
         pub status: TrCallDataStatus,
     }
 
+    #[derive(Debug, Clone)]
+    struct TrSquelchEvent {
+        pub call_num: i64,
+        pub muted: bool,   // true = squelch closed (idle), false = squelch open (active)
+        pub pwr_db: f64,   // power at transition time
+    }
+
     // ── Opaque C++ types ──
 
     unsafe extern "C++" {
@@ -328,14 +335,7 @@ pub mod ffi {
 
         // ── Conventional call management — recorder status (null-guarded) ──
         fn call_has_recorder(call: &TrCall) -> bool;
-        fn call_get_recorder_is_idle(call: &TrCall) -> bool;
         fn call_get_recorder_is_active(call: &TrCall) -> bool;
-        fn call_get_recorder_pwr(call: &TrCall) -> f64;
-
-        // ── Conventional call management — idle tracking ──
-        fn call_get_idle_count(call: &TrCall) -> i32;
-        fn call_increase_idle_count(call: Pin<&mut TrCall>);
-        fn call_reset_idle_count(call: Pin<&mut TrCall>);
 
         // ── Conventional call management — signal/noise ──
         fn call_set_signal(call: Pin<&mut TrCall>, s: f64);
@@ -347,6 +347,9 @@ pub mod ffi {
         // ── Conventional call management — lifecycle ──
         fn call_restart(call: Pin<&mut TrCall>);
         fn call_start_initial_recording(call: Pin<&mut TrCall>);
+
+        // ── Conventional call management — squelch event drain ──
+        fn call_drain_squelch_events(call: &TrCall) -> Vec<TrSquelchEvent>;
 
         // ── Conventional call management — context-level ──
         fn tr_context_take_next_conventional_call(ctx: Pin<&mut TrContext>) -> UniquePtr<TrCall>;

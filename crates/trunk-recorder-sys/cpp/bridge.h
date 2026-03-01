@@ -23,6 +23,7 @@ struct TrTransmission;
 struct TrCallSource;
 struct TrCallError;
 struct TrCallData;
+struct TrSquelchEvent;
 struct RustPluginBox;
 
 // ── Opaque wrapper types that cxx sees ──
@@ -201,14 +202,7 @@ void tr_context_print_status(TrContext &ctx, rust::Slice<const TrCall *const> ca
 
 // ── Conventional call management — recorder status (null-guarded) ──
 bool call_has_recorder(const TrCall &call);
-bool call_get_recorder_is_idle(const TrCall &call);
 bool call_get_recorder_is_active(const TrCall &call);
-double call_get_recorder_pwr(const TrCall &call);
-
-// ── Conventional call management — idle tracking ──
-int32_t call_get_idle_count(const TrCall &call);
-void call_increase_idle_count(TrCall &call);
-void call_reset_idle_count(TrCall &call);
 
 // ── Conventional call management — signal/noise ──
 void call_set_signal(TrCall &call, double s);
@@ -220,6 +214,9 @@ double call_get_system_max_duration(const TrCall &call);
 // ── Conventional call management — lifecycle ──
 void call_restart(TrCall &call);
 void call_start_initial_recording(TrCall &call);
+
+// ── Conventional call management — squelch event drain ──
+rust::Vec<TrSquelchEvent> call_drain_squelch_events(const TrCall &call);
 
 // ── Conventional call management — context-level ──
 std::unique_ptr<TrCall> tr_context_take_next_conventional_call(TrContext &ctx);

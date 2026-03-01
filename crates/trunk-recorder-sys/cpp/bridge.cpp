@@ -1295,33 +1295,9 @@ bool call_has_recorder(const TrCall &call) {
     return call.ptr->get_recorder() != nullptr;
 }
 
-bool call_get_recorder_is_idle(const TrCall &call) {
-    auto rec = call.ptr->get_recorder();
-    return rec ? rec->is_idle() : false;
-}
-
 bool call_get_recorder_is_active(const TrCall &call) {
     auto rec = call.ptr->get_recorder();
     return rec ? rec->is_active() : false;
-}
-
-double call_get_recorder_pwr(const TrCall &call) {
-    auto rec = call.ptr->get_recorder();
-    return rec ? rec->get_pwr() : 0.0;
-}
-
-// ── Conventional call management — idle tracking ──
-
-int32_t call_get_idle_count(const TrCall &call) {
-    return call.ptr->get_idle_count();
-}
-
-void call_increase_idle_count(TrCall &call) {
-    call.ptr->increase_idle_count();
-}
-
-void call_reset_idle_count(TrCall &call) {
-    call.ptr->reset_idle_count();
 }
 
 // ── Conventional call management — signal/noise ──
@@ -1351,6 +1327,23 @@ void call_start_initial_recording(TrCall &call) {
     if (rec) {
         rec->start(call.ptr);
     }
+}
+
+// ── Conventional call management — squelch event drain ──
+
+rust::Vec<TrSquelchEvent> call_drain_squelch_events(const TrCall &call) {
+    rust::Vec<TrSquelchEvent> result;
+    auto rec = call.ptr->get_recorder();
+    if (!rec) return result;
+    auto events = rec->drain_squelch_events();
+    for (const auto &ev : events) {
+        TrSquelchEvent out;
+        out.call_num = call.ptr->get_call_num();
+        out.muted = ev.muted;
+        out.pwr_db = ev.pwr_db;
+        result.push_back(out);
+    }
+    return result;
 }
 
 // ── Conventional call management — context-level ──

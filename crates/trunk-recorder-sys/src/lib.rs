@@ -324,8 +324,32 @@ pub mod ffi {
         fn tr_context_check_decode_rates(ctx: Pin<&mut TrContext>, time_diff: f32) -> Result<()>;
         fn tr_context_check_sources(ctx: Pin<&mut TrContext>) -> Result<()>;
         fn tr_context_clear_stale_patches(ctx: Pin<&mut TrContext>);
-        fn tr_context_print_status(ctx: Pin<&mut TrContext>);
-        fn tr_context_tick_conventional(ctx: Pin<&mut TrContext>);
+        fn tr_context_print_status(ctx: Pin<&mut TrContext>, calls: &[*const TrCall]);
+
+        // ── Conventional call management — recorder status (null-guarded) ──
+        fn call_has_recorder(call: &TrCall) -> bool;
+        fn call_get_recorder_is_idle(call: &TrCall) -> bool;
+        fn call_get_recorder_is_active(call: &TrCall) -> bool;
+        fn call_get_recorder_pwr(call: &TrCall) -> f64;
+
+        // ── Conventional call management — idle tracking ──
+        fn call_get_idle_count(call: &TrCall) -> i32;
+        fn call_increase_idle_count(call: Pin<&mut TrCall>);
+        fn call_reset_idle_count(call: Pin<&mut TrCall>);
+
+        // ── Conventional call management — signal/noise ──
+        fn call_set_signal(call: Pin<&mut TrCall>, s: f64);
+        fn call_set_noise(call: Pin<&mut TrCall>, n: f64);
+
+        // ── Conventional call management — system info ──
+        fn call_get_system_max_duration(call: &TrCall) -> f64;
+
+        // ── Conventional call management — lifecycle ──
+        fn call_restart(call: Pin<&mut TrCall>);
+        fn call_start_initial_recording(call: Pin<&mut TrCall>);
+
+        // ── Conventional call management — context-level ──
+        fn tr_context_take_next_conventional_call(ctx: Pin<&mut TrContext>) -> UniquePtr<TrCall>;
 
         // ── Phase C: Call Management — additional accessors ──
         fn call_since_last_update_secs(call: &TrCall) -> f64;

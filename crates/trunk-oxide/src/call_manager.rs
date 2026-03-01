@@ -18,9 +18,11 @@ struct CallEntry {
     call: UniquePtr<TrCall>,
 }
 
-/// Manages trunked call lifecycle: creation, update, timeout, and conclusion.
+/// Manages all call lifecycle: creation, update, timeout, and conclusion.
 ///
-/// Conventional calls remain in C++ and are managed by `tr_context_tick_conventional`.
+/// Trunked calls are dynamic (from control channel messages) and get erased on
+/// timeout. Conventional calls are static (created at startup), never erased,
+/// and cycle between recording states via conclude+restart.
 pub struct CallManager {
     calls: Vec<CallEntry>,
     config: CallManagerConfig,
@@ -284,8 +286,10 @@ impl CallManager {
         if ended_call {
             let ptrs: Vec<*const TrCall> =
                 self.calls.iter().map(|e| &*e.call as *const TrCall).collect();
-            ffi::tr_context_fire_calls_active(ctx, &ptrs);
+            ffi::tr_context_fire_calls_active(ctx.as_mut(), &ptrs);
         }
+
+        self.tick_conventional(ctx);
     }
 
     // ── Process P25 recorder message queues ──
@@ -293,6 +297,63 @@ impl CallManager {
     pub fn process_recorder_queues(&self) {
         for entry in &self.calls {
             ffi::call_process_recorder_queue(&*entry.call);
+        }
+    }
+
+    // ── Conventional call management ──
+
+    /// Add a conventional call drained from C++ during startup.
+    pub fn add_call(&mut self, call: UniquePtr<TrCall>) {
+        self.calls.push(CallEntry { call });
+    }
+
+    /// Collect raw pointers to all tracked calls (for passing to C++ print_status / calls_active).
+    pub fn call_ptrs(&self) -> Vec<*const TrCall> {
+        self.calls.iter().map(|e| &*e.call as *const TrCall).collect()
+    }
+
+    /// Manage conventional call idle detection, conclude+restart, and initial recording.
+    fn tick_conventional(&mut self, mut ctx: Pin<&mut TrContext>) {
+        for entry in &mut self.calls {
+            if !ffi::call_is_conventional(&*entry.call) {
+                continue;
+            }
+            if !ffi::call_has_recorder(&*entry.call) {
+                continue;
+            }
+
+            let length = ffi::call_get_current_length(&*entry.call);
+            if length > 0.0 {
+                // Recording in progress — track idle/signal state
+                if ffi::call_get_recorder_is_idle(&*entry.call) {
+                    let pwr = ffi::call_get_recorder_pwr(&*entry.call);
+                    ffi::call_set_noise(entry.call.pin_mut(), pwr);
+                    ffi::call_increase_idle_count(entry.call.pin_mut());
+                } else {
+                    let pwr = ffi::call_get_recorder_pwr(&*entry.call);
+                    ffi::call_set_signal(entry.call.pin_mut(), pwr);
+                    if ffi::call_get_idle_count(&*entry.call) > 0 {
+                        ffi::call_reset_idle_count(entry.call.pin_mut());
+                    }
+                }
+
+                let idle_count = ffi::call_get_idle_count(&*entry.call) as f64;
+                let max_dur = ffi::call_get_system_max_duration(&*entry.call);
+                if idle_count > self.config.call_timeout
+                    || (max_dur > 0.0 && length > max_dur)
+                {
+                    // Conclude current recording, restart for next transmission
+                    ffi::tr_call_conclude(entry.call.pin_mut());
+                    ffi::call_restart(entry.call.pin_mut());
+                    ffi::tr_context_fire_setup_recorder(ctx.as_mut(), &*entry.call);
+                    ffi::tr_context_fire_call_start(ctx.as_mut(), &*entry.call);
+                }
+            } else if !ffi::call_get_recorder_is_active(&*entry.call) {
+                // No recording yet and recorder not active — start initial recording
+                ffi::call_start_initial_recording(entry.call.pin_mut());
+                ffi::tr_call_set_state(entry.call.pin_mut(), TrState::Recording);
+                ffi::tr_context_fire_call_start(ctx.as_mut(), &*entry.call);
+            }
         }
     }
 

@@ -321,6 +321,15 @@ impl TrunkRecorder {
     pub fn run_monitor(&mut self, shutdown: &AtomicBool) -> anyhow::Result<()> {
         let mut call_mgr = CallManager::new(self.call_mgr_config.clone());
 
+        // Drain conventional calls created by C++ setup_systems during tr_finalize
+        loop {
+            let call = ffi::tr_context_take_next_conventional_call(self.ctx.pin_mut());
+            if call.is_null() {
+                break;
+            }
+            call_mgr.add_call(call);
+        }
+
         let mut last_tick = Instant::now();
         let mut last_decode_check = Instant::now();
         let mut last_conv_check = Instant::now();
@@ -351,7 +360,6 @@ impl TrunkRecorder {
 
             if now - last_tick >= Duration::from_secs(1) {
                 call_mgr.tick(self.ctx.pin_mut());
-                ffi::tr_context_tick_conventional(self.ctx.pin_mut());
                 last_tick = now;
             }
 
@@ -368,7 +376,8 @@ impl TrunkRecorder {
 
             if now - last_status > Duration::from_secs(200) {
                 last_status = now;
-                ffi::tr_context_print_status(self.ctx.pin_mut());
+                let ptrs = call_mgr.call_ptrs();
+                ffi::tr_context_print_status(self.ctx.pin_mut(), &ptrs);
             }
         }
     }

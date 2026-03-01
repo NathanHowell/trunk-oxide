@@ -197,8 +197,32 @@ void tr_context_check_conventional_detection(TrContext &ctx);
 void tr_context_check_decode_rates(TrContext &ctx, float time_diff);
 void tr_context_check_sources(TrContext &ctx);
 void tr_context_clear_stale_patches(TrContext &ctx);
-void tr_context_print_status(TrContext &ctx);
-void tr_context_tick_conventional(TrContext &ctx);
+void tr_context_print_status(TrContext &ctx, rust::Slice<const TrCall *const> calls);
+
+// ── Conventional call management — recorder status (null-guarded) ──
+bool call_has_recorder(const TrCall &call);
+bool call_get_recorder_is_idle(const TrCall &call);
+bool call_get_recorder_is_active(const TrCall &call);
+double call_get_recorder_pwr(const TrCall &call);
+
+// ── Conventional call management — idle tracking ──
+int32_t call_get_idle_count(const TrCall &call);
+void call_increase_idle_count(TrCall &call);
+void call_reset_idle_count(TrCall &call);
+
+// ── Conventional call management — signal/noise ──
+void call_set_signal(TrCall &call, double s);
+void call_set_noise(TrCall &call, double n);
+
+// ── Conventional call management — system info ──
+double call_get_system_max_duration(const TrCall &call);
+
+// ── Conventional call management — lifecycle ──
+void call_restart(TrCall &call);
+void call_start_initial_recording(TrCall &call);
+
+// ── Conventional call management — context-level ──
+std::unique_ptr<TrCall> tr_context_take_next_conventional_call(TrContext &ctx);
 
 // ── Phase C: Call Management — additional accessors ──
 double call_since_last_update_secs(const TrCall &call);

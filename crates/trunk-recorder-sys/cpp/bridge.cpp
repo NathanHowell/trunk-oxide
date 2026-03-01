@@ -9,7 +9,7 @@
 #include <map>
 
 #include "trunk-recorder/trunk_context.h"
-#include "trunk-recorder/call_state_manager.h"
+#include "trunk-recorder/call_conventional.h"
 #include "trunk-recorder/event_sink.h"
 #include "trunk-recorder/formatter.h"
 #include "trunk-recorder/source.h"
@@ -635,8 +635,6 @@ struct TrContextImpl {
     std::map<int, std::unique_ptr<SmartnetParser>> smartnet_parsers;
     std::unique_ptr<P25Parser> p25_parser;
 
-    // CallStateManager — created eagerly during tr_finalize for conventional call management
-    std::unique_ptr<CallStateManager> call_mgr;
 };
 
 TrContext::TrContext() : impl(std::make_unique<TrContextImpl>()) {}
@@ -674,14 +672,8 @@ void tr_finalize(TrContext &ctx) {
         }
     }
 
-    // Create CallStateManager for conventional call management via tick_conventional
-    ctx.impl->call_mgr = std::make_unique<CallStateManager>(
-        ctx.impl->trunk_ctx.config, ctx.impl->trunk_ctx.sources);
-    // Move pre-existing conventional calls into the manager
-    for (auto &call : ctx.impl->trunk_ctx.calls) {
-        ctx.impl->call_mgr->active_calls_mut().push_back(std::move(call));
-    }
-    ctx.impl->trunk_ctx.calls.clear();
+    // Conventional calls remain in trunk_ctx.calls for Rust to drain
+    // via tr_context_take_next_conventional_call after finalize.
 
     ctx.impl->bridge->setup_config(ctx.impl->trunk_ctx.sources,
                                    ctx.impl->trunk_ctx.systems);
@@ -1252,15 +1244,13 @@ void tr_context_clear_stale_patches(TrContext &ctx) {
     }
 }
 
-void tr_context_print_status(TrContext &ctx) {
+void tr_context_print_status(TrContext &ctx, rust::Slice<const TrCall *const> calls) {
     auto &sources = ctx.impl->trunk_ctx.sources;
     auto &systems = ctx.impl->trunk_ctx.systems;
 
-    // Gather all active calls from the call manager
-    auto &calls = ctx.impl->call_mgr->active_calls_mut();
-
     BOOST_LOG_TRIVIAL(info) << "Active Calls: " << calls.size();
-    for (auto &call : calls) {
+    for (auto *tr_call : calls) {
+        auto &call = tr_call->ptr;
         auto recorder = call->get_recorder();
         std::string loghdr = log_header(call->get_short_name(), call->get_call_num(), call->get_talkgroup(), call->get_freq());
         if (call->get_state() == MONITORING) {
@@ -1299,66 +1289,80 @@ void tr_context_print_status(TrContext &ctx) {
     }
 }
 
-void tr_context_tick_conventional(TrContext &ctx) {
-    // Only tick conventional calls managed by the C++ CallStateManager.
-    // Trunked calls are managed by Rust's CallManager.
-    auto &calls = ctx.impl->call_mgr->active_calls_mut();
-    auto &config = ctx.impl->trunk_ctx.config;
-    bool ended_call = false;
+// ── Conventional call management — recorder status (null-guarded) ──
 
-    for (auto it = calls.begin(); it != calls.end();) {
-        auto &call = *it;
-        if (call->is_conventional()) {
-            // Conventional call management — same logic as CallStateManager::manage_conventional_call
-            if (!call->get_recorder()) {
-                ++it;
-                continue;
-            }
+bool call_has_recorder(const TrCall &call) {
+    return call.ptr->get_recorder() != nullptr;
+}
 
-            if (call->get_current_length() > 0) {
-                if (call->get_recorder()->is_idle()) {
-                    call->set_noise(call->get_recorder()->get_pwr());
-                    call->increase_idle_count();
-                } else {
-                    call->set_signal(call->get_recorder()->get_pwr());
-                    if (call->get_idle_count() > 0) {
-                        call->reset_idle_count();
-                    }
-                }
+bool call_get_recorder_is_idle(const TrCall &call) {
+    auto rec = call.ptr->get_recorder();
+    return rec ? rec->is_idle() : false;
+}
 
-                if (call->get_idle_count() > config.call_timeout.count()) {
-                    auto recorder = call->get_recorder();
-                    call->conclude_call();
-                    call->restart_call();
-                    if (recorder) {
-                        config.event_sink->setup_recorder(recorder);
-                        config.event_sink->call_start(call);
-                    }
-                } else if ((call->get_current_length() > call->get_system()->get_max_duration()) && (call->get_system()->get_max_duration() > 0)) {
-                    auto recorder = call->get_recorder();
-                    call->conclude_call();
-                    call->restart_call();
-                    if (recorder) {
-                        config.event_sink->setup_recorder(recorder);
-                        config.event_sink->call_start(call);
-                    }
-                }
-            } else if (!call->get_recorder()->is_active()) {
-                auto recorder = call->get_recorder();
-                recorder->start(call);
-                call->set_state(RECORDING);
-                config.event_sink->call_start(call);
-            }
+bool call_get_recorder_is_active(const TrCall &call) {
+    auto rec = call.ptr->get_recorder();
+    return rec ? rec->is_active() : false;
+}
 
-            ++it;
-        } else {
-            ++it;
-        }
+double call_get_recorder_pwr(const TrCall &call) {
+    auto rec = call.ptr->get_recorder();
+    return rec ? rec->get_pwr() : 0.0;
+}
+
+// ── Conventional call management — idle tracking ──
+
+int32_t call_get_idle_count(const TrCall &call) {
+    return call.ptr->get_idle_count();
+}
+
+void call_increase_idle_count(TrCall &call) {
+    call.ptr->increase_idle_count();
+}
+
+void call_reset_idle_count(TrCall &call) {
+    call.ptr->reset_idle_count();
+}
+
+// ── Conventional call management — signal/noise ──
+
+void call_set_signal(TrCall &call, double s) {
+    call.ptr->set_signal(s);
+}
+
+void call_set_noise(TrCall &call, double n) {
+    call.ptr->set_noise(n);
+}
+
+// ── Conventional call management — system info ──
+
+double call_get_system_max_duration(const TrCall &call) {
+    return call.ptr->get_system()->get_max_duration();
+}
+
+// ── Conventional call management — lifecycle ──
+
+void call_restart(TrCall &call) {
+    call.ptr->restart_call();
+}
+
+void call_start_initial_recording(TrCall &call) {
+    auto rec = call.ptr->get_recorder();
+    if (rec) {
+        rec->start(call.ptr);
     }
+}
 
-    if (ended_call) {
-        config.event_sink->calls_active(calls);
+// ── Conventional call management — context-level ──
+
+std::unique_ptr<TrCall> tr_context_take_next_conventional_call(TrContext &ctx) {
+    auto &calls = ctx.impl->trunk_ctx.calls;
+    if (calls.empty()) {
+        return nullptr;
     }
+    auto call_ptr = std::move(calls.back());
+    calls.pop_back();
+    return std::make_unique<TrCall>(call_ptr);
 }
 
 // ── Phase C: Call Management — additional call accessors ──

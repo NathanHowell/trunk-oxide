@@ -5,7 +5,8 @@ use std::time::Instant;
 use cxx::UniquePtr;
 use trunk_config::{DefaultMode, SystemType, TalkgroupMode};
 use trunk_recorder_sys::ffi::{
-    self, TrCall, TrContext, TrMessageType, TrMonitoringState, TrState, TrTrunkMessage,
+    self, TrCall, TrCallData, TrCallDataStatus, TrContext, TrMessageType, TrMonitoringState,
+    TrState, TrTrunkMessage,
 };
 
 /// Recording policy for a single talkgroup.
@@ -69,6 +70,140 @@ impl CallManager {
         }
     }
 
+    // ── Call data construction ──
+
+    fn build_call_data(call: &TrCall) -> TrCallData {
+        let is_analog = ffi::call_get_is_analog(call);
+        let phase2_tdma = ffi::call_get_phase2_tdma(call);
+        let audio_type = if is_analog {
+            "analog"
+        } else if phase2_tdma {
+            "digital tdma"
+        } else {
+            "digital"
+        };
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+
+        TrCallData {
+            talkgroup: ffi::call_get_talkgroup(call),
+            color_code: 0,
+            patched_talkgroups: ffi::call_get_patched_talkgroups(call),
+            call_num: ffi::call_get_call_num(call),
+            freq: ffi::call_get_freq(call),
+            freq_error: ffi::call_get_freq_error(call),
+            source_num: 0,
+            recorder_num: ffi::call_get_recorder_num(call),
+            signal: ffi::call_get_signal(call),
+            noise: ffi::call_get_noise(call),
+            start_time: ffi::call_get_start_time(call),
+            stop_time: now,
+            error_count: 0,
+            spike_count: 0,
+            encrypted: ffi::call_get_encrypted(call),
+            emergency: ffi::call_get_emergency(call),
+            priority: ffi::call_get_priority(call),
+            mode: ffi::call_get_mode(call),
+            duplex: ffi::call_get_duplex(call),
+            sys_num: ffi::call_get_sys_num(call),
+            short_name: ffi::call_get_short_name(call),
+            audio_type: audio_type.into(),
+            tdma_slot: ffi::call_get_tdma_slot(call),
+            length: 0.0, // filled by caller with metrics
+            phase2_tdma,
+            transmission_source_list: Vec::new(),
+            transmission_error_list: Vec::new(),
+            transmission_list: Vec::new(), // filled by caller
+            status: TrCallDataStatus::Initial,
+        }
+    }
+
+    // ── Call conclusion (replaces C++ Call_impl::conclude_call) ──
+
+    fn conclude_call(ctx: &mut Pin<&mut TrContext>, call: &mut UniquePtr<TrCall>) {
+        let state = ffi::call_get_state(&**call);
+        let monitoring = ffi::call_get_monitoring_state(&**call);
+
+        let should_stop_recording = state == TrState::Recording
+            || (state == TrState::Monitoring && monitoring == TrMonitoringState::Superseded);
+
+        if should_stop_recording {
+            let metrics = ffi::call_stop_recording(call.pin_mut());
+            if metrics.has_recorder {
+                // For conventional calls, update signal/noise from recorder power
+                if ffi::call_is_conventional(&**call) {
+                    if metrics.recorder_idle {
+                        ffi::call_set_noise(call.pin_mut(), metrics.recorder_pwr);
+                    } else {
+                        ffi::call_set_signal(call.pin_mut(), metrics.recorder_pwr);
+                    }
+                }
+
+                let short_name = ffi::call_get_short_name(&**call);
+                let call_num = ffi::call_get_call_num(&**call);
+                let talkgroup = ffi::call_get_talkgroup(&**call);
+                let elapsed = ffi::call_elapsed(&**call);
+                tracing::info!(
+                    %short_name,
+                    call_num,
+                    talkgroup,
+                    elapsed,
+                    final_length = metrics.final_length,
+                    "concluding recorded call"
+                );
+
+                if metrics.is_dmr {
+                    // DMR: fire call_end twice, once per TDMA slot
+                    for slot in 0..2i32 {
+                        let mut data = Self::build_call_data(&**call);
+                        data.tdma_slot = slot;
+                        data.length = metrics.final_length;
+                        data.freq_error = metrics.freq_error;
+                        data.transmission_list =
+                            ffi::call_get_dmr_transmission_list(&**call, slot);
+                        ffi::tr_context_fire_call_end(ctx.as_mut(), &data);
+                    }
+                } else {
+                    let mut data = Self::build_call_data(&**call);
+                    data.length = metrics.final_length;
+                    data.freq_error = metrics.freq_error;
+                    data.transmission_list = ffi::call_get_transmission_list(&**call);
+                    ffi::tr_context_fire_call_end(ctx.as_mut(), &data);
+                }
+            }
+        } else if state == TrState::Monitoring {
+            // Monitored-only calls: still notify plugin that the call ended
+            let data = Self::build_call_data(&**call);
+            ffi::tr_context_fire_call_end(ctx.as_mut(), &data);
+        }
+    }
+
+    // ── Source tracking update (replaces C++ Call_impl::update + add_source) ──
+
+    fn update_call_source(
+        ctx: &mut Pin<&mut TrContext>,
+        call: &mut UniquePtr<TrCall>,
+        msg: &TrTrunkMessage,
+    ) -> bool {
+        ffi::call_touch(call.pin_mut());
+
+        let src = msg.source;
+        if src == -1 {
+            return false;
+        }
+        let curr = ffi::call_get_current_source_id(&**call);
+        if src == curr {
+            return false;
+        }
+
+        ffi::call_set_current_source_id(call.pin_mut(), src);
+        ffi::call_recorder_set_source(call.pin_mut(), src);
+        ffi::tr_context_fire_signal(ctx.as_mut(), src, &**call);
+        true
+    }
+
     // ── Message dispatch ──
 
     pub fn handle_message(&mut self, ctx: Pin<&mut TrContext>, msg: &TrTrunkMessage) {
@@ -116,7 +251,8 @@ impl CallManager {
                 && ffi::call_get_phase2_tdma(call) == msg.phase2_tdma
             {
                 call_found = true;
-                let source_updated = ffi::tr_call_update(entry.call.pin_mut(), msg);
+                let source_updated =
+                    Self::update_call_source(&mut ctx, &mut entry.call, msg);
                 if source_updated {
                     ffi::tr_context_fire_call_start(ctx.as_mut(), &*entry.call);
                 }
@@ -143,7 +279,7 @@ impl CallManager {
                         orig.call.pin_mut(),
                         TrMonitoringState::Superseded,
                     );
-                    ffi::tr_call_conclude(orig.call.pin_mut());
+                    Self::conclude_call(&mut ctx, &mut orig.call);
                 }
             }
         } else if multisite.is_duplicate {
@@ -188,7 +324,8 @@ impl CallManager {
                     ffi::tr_call_set_encrypted(entry.call.pin_mut(), true);
                 }
 
-                let source_updated = ffi::tr_call_update(entry.call.pin_mut(), msg);
+                let source_updated =
+                    Self::update_call_source(&mut ctx, &mut entry.call, msg);
                 if source_updated {
                     ffi::tr_context_fire_call_start(ctx.as_mut(), &*entry.call);
                 }
@@ -423,7 +560,7 @@ impl CallManager {
             match state {
                 TrState::Monitoring => {
                     if since_update > timeout {
-                        ffi::tr_call_conclude(entry.call.pin_mut());
+                        Self::conclude_call(&mut ctx, &mut entry.call);
                         ended_call = true;
                         return false; // remove
                     }
@@ -432,7 +569,7 @@ impl CallManager {
                     // Check both recorder idle time and control channel update time
                     let since_write = ffi::call_recorder_since_last_write_secs(call);
                     if since_write > timeout || since_update > timeout {
-                        ffi::tr_call_conclude(entry.call.pin_mut());
+                        Self::conclude_call(&mut ctx, &mut entry.call);
                         ffi::tr_context_fire_setup_recorder(ctx.as_mut(), &*entry.call);
                         ended_call = true;
                         return false;
@@ -440,7 +577,7 @@ impl CallManager {
                 }
                 _ => {
                     if since_update > timeout {
-                        ffi::tr_call_conclude(entry.call.pin_mut());
+                        Self::conclude_call(&mut ctx, &mut entry.call);
                         ended_call = true;
                         return false;
                     }
@@ -515,7 +652,7 @@ impl CallManager {
                 let max_dur = ffi::call_get_system_max_duration(&*entry.call);
                 if idle_timed_out || (max_dur > 0.0 && length > max_dur) {
                     // Conclude current recording, restart for next transmission
-                    ffi::tr_call_conclude(entry.call.pin_mut());
+                    Self::conclude_call(&mut ctx, &mut entry.call);
                     ffi::call_restart(entry.call.pin_mut());
                     entry.idle_since = None;
                     ffi::tr_context_fire_setup_recorder(ctx.as_mut(), &*entry.call);
@@ -535,7 +672,7 @@ impl CallManager {
     pub fn conclude_all(&mut self, mut ctx: Pin<&mut TrContext>) {
         for entry in &mut self.calls {
             if ffi::call_get_state(&*entry.call) != TrState::Monitoring {
-                ffi::tr_call_conclude(entry.call.pin_mut());
+                Self::conclude_call(&mut ctx, &mut entry.call);
             }
         }
         self.calls.clear();

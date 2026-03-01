@@ -180,6 +180,16 @@ pub mod ffi {
         pub available: i32,  // -1 = no source covering frequency
     }
 
+    #[derive(Debug, Clone)]
+    struct TrStopRecordingResult {
+        pub final_length: f64,
+        pub freq_error: i32,
+        pub recorder_pwr: f64,
+        pub recorder_idle: bool,
+        pub has_recorder: bool,
+        pub is_dmr: bool,
+    }
+
     // ── Opaque C++ types ──
 
     unsafe extern "C++" {
@@ -377,12 +387,10 @@ pub mod ffi {
 
         // ── Phase C: Call Management — lifecycle operations ──
         fn tr_context_create_call(ctx: Pin<&mut TrContext>, msg: &TrTrunkMessage) -> UniquePtr<TrCall>;
-        fn tr_call_update(call: Pin<&mut TrCall>, msg: &TrTrunkMessage) -> bool;
         fn tr_call_set_state(call: Pin<&mut TrCall>, state: TrState);
         fn tr_call_set_monitoring_state(call: Pin<&mut TrCall>, state: TrMonitoringState);
         fn tr_call_set_encrypted(call: Pin<&mut TrCall>, encrypted: bool);
         fn call_set_is_analog(call: Pin<&mut TrCall>, is_analog: bool);
-        fn tr_call_conclude(call: Pin<&mut TrCall>);
 
         // ── Phase C: Call Management — recording policy support ──
         fn tr_context_get_talkgroup_patch(ctx: &TrContext, sys_num: i32, talkgroup: i64) -> Vec<i64>;
@@ -395,10 +403,24 @@ pub mod ffi {
         // ── Phase C: Call Management — system lookup by sys_num ──
         fn tr_context_get_system_multi_site_name(ctx: &TrContext, sys_num: i32) -> String;
 
+        // ── Phase C: Call Management — conclude recording (recorder mechanics) ──
+        fn call_stop_recording(call: Pin<&mut TrCall>) -> TrStopRecordingResult;
+        fn call_get_transmission_list(call: &TrCall) -> Vec<TrTransmission>;
+        fn call_get_dmr_transmission_list(call: &TrCall, slot: i32) -> Vec<TrTransmission>;
+        fn call_get_recorder_num(call: &TrCall) -> i32;
+        fn call_get_patched_talkgroups(call: &TrCall) -> Vec<u64>;
+
+        // ── Phase C: Call Management — update source tracking ──
+        fn call_touch(call: Pin<&mut TrCall>);
+        fn call_set_current_source_id(call: Pin<&mut TrCall>, src: i64);
+        fn call_recorder_set_source(call: Pin<&mut TrCall>, src: i64);
+
         // ── Phase C: Call Management — event firing ──
         fn tr_context_fire_call_start(ctx: Pin<&mut TrContext>, call: &TrCall);
         fn tr_context_fire_calls_active(ctx: Pin<&mut TrContext>, calls: &[*const TrCall]);
         fn tr_context_fire_setup_recorder(ctx: Pin<&mut TrContext>, call: &TrCall);
+        fn tr_context_fire_signal(ctx: Pin<&mut TrContext>, src: i64, call: &TrCall);
+        fn tr_context_fire_call_end(ctx: Pin<&mut TrContext>, data: &TrCallData);
         fn tr_recorder_process_queue(rec: &TrRecorder);
     }
 

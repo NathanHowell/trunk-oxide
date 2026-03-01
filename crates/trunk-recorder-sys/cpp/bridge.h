@@ -238,7 +238,6 @@ int32_t recorder_get_type(const TrRecorder &rec);
 
 // ── Phase C: Call Management — lifecycle operations ──
 std::unique_ptr<TrCall> tr_context_create_call(TrContext &ctx, const TrTrunkMessage &msg);
-bool tr_call_update(TrCall &call, const TrTrunkMessage &msg);
 void call_set_is_analog(TrCall &call, bool is_analog);
 
 // ── Phase C: Call Management — recording policy support ──
@@ -249,7 +248,19 @@ TrAcquireResult tr_context_acquire_recorder(TrContext &ctx, TrCall &call, bool i
 void tr_call_set_state(TrCall &call, TrState state);
 void tr_call_set_monitoring_state(TrCall &call, TrMonitoringState state);
 void tr_call_set_encrypted(TrCall &call, bool encrypted);
-void tr_call_conclude(TrCall &call);
+
+// ── Phase C: Call Management — conclude recording (recorder mechanics) ──
+struct TrStopRecordingResult;
+TrStopRecordingResult call_stop_recording(TrCall &call);
+rust::Vec<TrTransmission> call_get_transmission_list(const TrCall &call);
+rust::Vec<TrTransmission> call_get_dmr_transmission_list(const TrCall &call, int32_t slot);
+int32_t call_get_recorder_num(const TrCall &call);
+rust::Vec<uint64_t> call_get_patched_talkgroups(const TrCall &call);
+
+// ── Phase C: Call Management — update source tracking ──
+void call_touch(TrCall &call);
+void call_set_current_source_id(TrCall &call, int64_t src);
+void call_recorder_set_source(TrCall &call, int64_t src);
 
 // ── Phase C: Call Management — call-level recorder accessors ──
 double call_recorder_since_last_write_secs(const TrCall &call);
@@ -262,6 +273,8 @@ rust::String tr_context_get_system_multi_site_name(const TrContext &ctx, int32_t
 void tr_context_fire_call_start(TrContext &ctx, const TrCall &call);
 void tr_context_fire_calls_active(TrContext &ctx, rust::Slice<const TrCall *const> calls);
 void tr_context_fire_setup_recorder(TrContext &ctx, const TrCall &call);
+void tr_context_fire_signal(TrContext &ctx, int64_t src, const TrCall &call);
+void tr_context_fire_call_end(TrContext &ctx, const TrCallData &data);
 void tr_recorder_process_queue(const TrRecorder &rec);
 
 } // namespace trunk_oxide

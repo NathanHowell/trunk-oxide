@@ -12,6 +12,7 @@
 #include "trunk-recorder/call_conventional.h"
 #include "trunk-recorder/event_sink.h"
 #include "trunk-recorder/formatter.h"
+#include "trunk-recorder/recorders/dmr_recorder.h"
 #include "trunk-recorder/source.h"
 #include "trunk-recorder/systems/p25_parser.h"
 #include "trunk-recorder/systems/smartnet_parser.h"
@@ -94,16 +95,6 @@ static TrMonitoringState convert_monitoring_state(MonitoringState ms) {
     }
 }
 
-static TrCallDataStatus convert_call_data_status(Call_Data_Status s) {
-    switch (s) {
-        case INITIAL: return TrCallDataStatus::Initial;
-        case SUCCESS: return TrCallDataStatus::Success;
-        case RETRY: return TrCallDataStatus::Retry;
-        case FAILED: return TrCallDataStatus::Failed;
-        default: return TrCallDataStatus::Initial;
-    }
-}
-
 // ── Struct conversion helpers ──
 
 static TrTrunkMessage convert_trunk_message(const TrunkMessage &msg) {
@@ -147,81 +138,6 @@ static TrTransmission convert_transmission(const Transmission &tx) {
     out.error_count = tx.error_count;
     out.freq = tx.freq;
     out.length = tx.length;
-    return out;
-}
-
-static TrCallSource convert_call_source(const Call_Source &cs) {
-    TrCallSource out;
-    out.source = cs.source;
-    out.position = cs.position;
-    out.emergency = cs.emergency;
-    out.signal_system = rust::String(cs.signal_system);
-    out.tag = rust::String(cs.tag);
-    return out;
-}
-
-static TrCallError convert_call_error(const Call_Error &ce) {
-    TrCallError out;
-    out.position = ce.position;
-    out.total_len = ce.total_len;
-    out.error_count = ce.error_count;
-    out.spike_count = ce.spike_count;
-    return out;
-}
-
-static TrCallData convert_call_data(const Call_Data_t &cd) {
-    TrCallData out;
-    out.talkgroup = cd.talkgroup;
-    out.color_code = cd.color_code;
-
-    rust::Vec<uint64_t> patched;
-    for (auto tg : cd.patched_talkgroups) {
-        patched.push_back(tg);
-    }
-    out.patched_talkgroups = std::move(patched);
-
-    out.call_num = cd.call_num;
-    out.freq = cd.freq;
-    out.freq_error = cd.freq_error;
-    out.source_num = cd.source_num;
-    out.recorder_num = cd.recorder_num;
-    out.signal = cd.signal;
-    out.noise = cd.noise;
-    out.start_time = cd.start_time;
-    out.stop_time = cd.stop_time;
-    out.error_count = cd.error_count;
-    out.spike_count = cd.spike_count;
-    out.encrypted = cd.encrypted;
-    out.emergency = cd.emergency;
-    out.priority = cd.priority;
-    out.mode = cd.mode;
-    out.duplex = cd.duplex;
-    out.sys_num = cd.sys_num;
-    out.short_name = rust::String(cd.short_name);
-    out.audio_type = rust::String(cd.audio_type);
-    out.tdma_slot = cd.tdma_slot;
-    out.length = cd.length;
-    out.phase2_tdma = cd.phase2_tdma;
-
-    rust::Vec<TrCallSource> sources;
-    for (const auto &s : cd.transmission_source_list) {
-        sources.push_back(convert_call_source(s));
-    }
-    out.transmission_source_list = std::move(sources);
-
-    rust::Vec<TrCallError> errors;
-    for (const auto &e : cd.transmission_error_list) {
-        errors.push_back(convert_call_error(e));
-    }
-    out.transmission_error_list = std::move(errors);
-
-    rust::Vec<TrTransmission> transmissions;
-    for (const auto &t : cd.transmission_list) {
-        transmissions.push_back(convert_transmission(t));
-    }
-    out.transmission_list = std::move(transmissions);
-
-    out.status = convert_call_data_status(cd.status);
     return out;
 }
 
@@ -275,11 +191,6 @@ public:
     int call_start(const std::shared_ptr<Call> &call) {
         TrCall tr_call(call);
         return rust_plugin_call_start(*plugin_, tr_call);
-    }
-
-    int call_end(Call_Data_t call_info) {
-        TrCallData data = convert_call_data(call_info);
-        return rust_plugin_call_end(*plugin_, data);
     }
 
     int calls_active(std::vector<std::shared_ptr<Call>> calls) {
@@ -424,6 +335,8 @@ public:
             alias.talkgroup_id);
     }
 
+    RustPluginBox &plugin() { return *plugin_; }
+
 private:
     rust::Box<RustPluginBox> plugin_;
 };
@@ -523,45 +436,9 @@ public:
         bridge_->call_start(call);
     }
 
-    void conclude_call(const std::shared_ptr<Call> &call, const std::shared_ptr<System> &sys, Config /*config*/) override {
-        Call_Data_t call_info = {};
-        call_info.status = INITIAL;
-        call_info.error_count = 0;
-        call_info.spike_count = 0;
-        call_info.freq = call->get_freq();
-        call_info.freq_error = call->get_freq_error();
-        call_info.signal = call->get_signal();
-        call_info.noise = call->get_noise();
-        if (call->get_recorder()) {
-            call_info.recorder_num = call->get_recorder()->get_num();
-        }
-        call_info.encrypted = call->get_encrypted();
-        call_info.emergency = call->get_emergency();
-        call_info.priority = call->get_priority();
-        call_info.mode = call->get_mode();
-        call_info.duplex = call->get_duplex();
-        call_info.tdma_slot = call->get_tdma_slot();
-        call_info.phase2_tdma = call->get_phase2_tdma();
-        call_info.transmission_list = call->get_transmissions();
-        call_info.sys_num = sys->get_sys_num();
-        call_info.short_name = sys->get_short_name();
-        call_info.call_num = call->get_call_num();
-        call_info.talkgroup = call->get_talkgroup();
-        call_info.patched_talkgroups = sys->get_talkgroup_patch(call_info.talkgroup);
-        call_info.color_code = 0;
-        call_info.start_time = call->get_start_time();
-        call_info.stop_time = time(0);
-        call_info.length = call->get_current_length();
-
-        if (call->get_is_analog()) {
-            call_info.audio_type = "analog";
-        } else if (call->get_phase2_tdma()) {
-            call_info.audio_type = "digital tdma";
-        } else {
-            call_info.audio_type = "digital";
-        }
-
-        bridge_->call_end(call_info);
+    void conclude_call(const std::shared_ptr<Call> & /*call*/, const std::shared_ptr<System> & /*sys*/, Config /*config*/) override {
+        // Call conclusion is now orchestrated in Rust (CallManager::conclude_call).
+        // This virtual override is kept for the EventSink interface but is no longer called.
     }
 
     void calls_active(std::vector<std::shared_ptr<Call>> calls) override {
@@ -1422,11 +1299,6 @@ std::unique_ptr<TrCall> tr_context_create_call(TrContext &ctx, const TrTrunkMess
     return std::make_unique<TrCall>(call);
 }
 
-bool tr_call_update(TrCall &call, const TrTrunkMessage &msg) {
-    auto cpp_msg = convert_trunk_message_back(msg);
-    return call.ptr->update(cpp_msg);
-}
-
 void tr_call_set_state(TrCall &call, TrState state) {
     call.ptr->set_state(convert_state_back(state));
 }
@@ -1534,8 +1406,85 @@ TrAcquireResult tr_context_acquire_recorder(TrContext &ctx, TrCall &call, bool i
     return res;
 }
 
-void tr_call_conclude(TrCall &call) {
-    call.ptr->conclude_call();
+// ── Phase C: Call Management — conclude recording (recorder mechanics) ──
+
+TrStopRecordingResult call_stop_recording(TrCall &call) {
+    TrStopRecordingResult result = {};
+    auto rec = call.ptr->get_recorder();
+    if (!rec) {
+        return result;  // has_recorder = false
+    }
+    result.has_recorder = true;
+    result.final_length = rec->get_current_length();
+    result.freq_error = rec->get_freq_error();
+    result.recorder_pwr = rec->get_pwr();
+    result.recorder_idle = rec->is_idle();
+    result.is_dmr = (call.ptr->get_system()->get_system_type() == SYS_CONVENTIONAL_DMR);
+
+    rec->stop();
+
+    if (auto sigmf = call.ptr->get_sigmf_recorder()) {
+        if (call.ptr->get_sigmf_recording()) sigmf->stop();
+    }
+    if (auto debug = call.ptr->get_debug_recorder()) {
+        if (call.ptr->get_debug_recording()) debug->stop();
+    }
+    return result;
+}
+
+rust::Vec<TrTransmission> call_get_transmission_list(const TrCall &call) {
+    rust::Vec<TrTransmission> result;
+    auto rec = call.ptr->get_recorder();
+    if (!rec) return result;
+    for (const auto &tx : rec->get_transmission_list()) {
+        result.push_back(convert_transmission(tx));
+    }
+    return result;
+}
+
+rust::Vec<TrTransmission> call_get_dmr_transmission_list(const TrCall &call, int32_t slot) {
+    rust::Vec<TrTransmission> result;
+    auto rec = call.ptr->get_recorder();
+    if (!rec) return result;
+    auto dmr_rec = std::dynamic_pointer_cast<dmr_recorder>(rec);
+    if (!dmr_rec) return result;
+    for (const auto &tx : dmr_rec->get_transmission_list(slot)) {
+        result.push_back(convert_transmission(tx));
+    }
+    return result;
+}
+
+int32_t call_get_recorder_num(const TrCall &call) {
+    auto rec = call.ptr->get_recorder();
+    return rec ? rec->get_num() : 0;
+}
+
+rust::Vec<uint64_t> call_get_patched_talkgroups(const TrCall &call) {
+    rust::Vec<uint64_t> result;
+    auto sys = call.ptr->get_system();
+    if (sys) {
+        for (auto tg : sys->get_talkgroup_patch(call.ptr->get_talkgroup())) {
+            result.push_back(tg);
+        }
+    }
+    return result;
+}
+
+// ── Phase C: Call Management — update source tracking ──
+
+void call_touch(TrCall &call) {
+    call.ptr->set_last_update();
+}
+
+void call_set_current_source_id(TrCall &call, int64_t src) {
+    call.ptr->set_current_source_id(src);
+}
+
+void call_recorder_set_source(TrCall &call, int64_t src) {
+    if (call.ptr->get_state() == RECORDING) {
+        auto rec = call.ptr->get_recorder();
+        if (rec) rec->set_source(src);
+    }
 }
 
 // ── Phase C: Call Management — call-level recorder accessors ──
@@ -1590,6 +1539,16 @@ void tr_context_fire_setup_recorder(TrContext &ctx, const TrCall &call) {
     if (recorder) {
         ctx.impl->trunk_ctx.config.event_sink->setup_recorder(recorder);
     }
+}
+
+void tr_context_fire_signal(TrContext &ctx, int64_t src, const TrCall &call) {
+    ctx.impl->trunk_ctx.config.event_sink->signal(
+        src, nullptr, gr::blocks::SignalType::Normal,
+        call.ptr, call.ptr->get_system(), nullptr);
+}
+
+void tr_context_fire_call_end(TrContext &ctx, const TrCallData &data) {
+    rust_plugin_call_end(ctx.impl->bridge->plugin(), data);
 }
 
 void tr_recorder_process_queue(const TrRecorder &rec) {

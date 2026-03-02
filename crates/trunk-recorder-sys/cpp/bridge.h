@@ -259,10 +259,12 @@ std::unique_ptr<TrCall> tr_context_create_call(TrContext &ctx, const TrTrunkMess
 void call_set_is_analog(TrCall &call, bool is_analog);
 
 // ── Phase C: Call Management — recording policy support ──
-struct TrAcquireResult;
 rust::Vec<int64_t> tr_context_get_talkgroup_patch(
     const TrContext &ctx, int32_t sys_num, int64_t talkgroup);
-TrAcquireResult tr_context_acquire_recorder(TrContext &ctx, TrCall &call, bool is_analog, int32_t priority);
+int32_t tr_context_source_count(const TrContext &ctx);
+bool tr_source_covers_freq(const TrContext &ctx, int32_t source_idx, double freq);
+int32_t tr_source_available_recorders(const TrContext &ctx, int32_t source_idx, bool is_analog);
+bool tr_source_start_recording(TrContext &ctx, int32_t source_idx, TrCall &call, bool is_analog);
 void tr_call_set_state(TrCall &call, TrState state);
 void tr_call_set_monitoring_state(TrCall &call, TrMonitoringState state);
 void tr_call_set_encrypted(TrCall &call, bool encrypted);

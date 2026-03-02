@@ -1344,81 +1344,63 @@ rust::Vec<int64_t> tr_context_get_talkgroup_patch(
     return result;
 }
 
-TrAcquireResult tr_context_acquire_recorder(TrContext &ctx, TrCall &call, bool is_analog, int32_t priority) {
-    auto &config = ctx.impl->trunk_ctx.config;
+int32_t tr_context_source_count(const TrContext &ctx) {
+    return static_cast<int32_t>(ctx.impl->trunk_ctx.sources.size());
+}
+
+bool tr_source_covers_freq(const TrContext &ctx, int32_t source_idx, double freq) {
     auto &sources = ctx.impl->trunk_ctx.sources;
+    if (source_idx < 0 || source_idx >= static_cast<int32_t>(sources.size())) return false;
+    auto &source = sources[source_idx];
+    return source->get_min_hz() <= freq && freq <= source->get_max_hz();
+}
 
-    for (auto &source : sources) {
-        if (source->get_min_hz() > call.ptr->get_freq() ||
-            source->get_max_hz() < call.ptr->get_freq()) {
-            continue;
-        }
+int32_t tr_source_available_recorders(const TrContext &ctx, int32_t source_idx, bool is_analog) {
+    auto &sources = ctx.impl->trunk_ctx.sources;
+    if (source_idx < 0 || source_idx >= static_cast<int32_t>(sources.size())) return 0;
+    auto &source = sources[source_idx];
+    return is_analog
+        ? source->get_num_available_analog_recorders()
+        : source->get_num_available_digital_recorders();
+}
 
-        // Source covers this frequency
-        int32_t available = is_analog
-            ? source->get_num_available_analog_recorders()
-            : source->get_num_available_digital_recorders();
+bool tr_source_start_recording(TrContext &ctx, int32_t source_idx, TrCall &call, bool is_analog) {
+    auto &sources = ctx.impl->trunk_ctx.sources;
+    if (source_idx < 0 || source_idx >= static_cast<int32_t>(sources.size())) return false;
+    auto &source = sources[source_idx];
+    auto &config = ctx.impl->trunk_ctx.config;
 
-        // Priority check: -1 means disabled, priority > available means insufficient recorders
-        if (priority == -1 || priority > available) {
-            TrAcquireResult res;
-            res.started = false;
-            res.available = available;
-            return res;
-        }
+    std::shared_ptr<Recorder> recorder = is_analog
+        ? source->get_analog_recorder(call.ptr)
+        : source->get_digital_recorder(call.ptr);
 
-        // Allocate a recorder
-        std::shared_ptr<Recorder> recorder = is_analog
-            ? source->get_analog_recorder(call.ptr)
-            : source->get_digital_recorder(call.ptr);
-
-        if (!recorder) {
-            TrAcquireResult res;
-            res.started = false;
-            res.available = available;
-            return res;
-        }
-
-        if (!recorder->start(call.ptr)) {
-            TrAcquireResult res;
-            res.started = false;
-            res.available = available;
-            return res;
-        }
-
-        call.ptr->set_recorder(recorder);
-        call.ptr->set_state(RECORDING);
-        config.event_sink->setup_recorder(recorder);
-
-        // Debug recorder
-        auto debug_recorder = source->get_debug_recorder();
-        if (debug_recorder) {
-            debug_recorder->start(call.ptr);
-            call.ptr->set_debug_recorder(debug_recorder);
-            call.ptr->set_debug_recording(true);
-            config.event_sink->setup_recorder(debug_recorder);
-        }
-
-        // SigMF recorder
-        auto sigmf_recorder = source->get_sigmf_recorder();
-        if (sigmf_recorder) {
-            sigmf_recorder->start(call.ptr);
-            call.ptr->set_sigmf_recorder(sigmf_recorder);
-            call.ptr->set_sigmf_recording(true);
-            config.event_sink->setup_recorder(sigmf_recorder);
-        }
-
-        TrAcquireResult res;
-        res.started = true;
-        res.available = available;
-        return res;
+    if (!recorder || !recorder->start(call.ptr)) {
+        return false;
     }
 
-    // No source covers this frequency
-    TrAcquireResult res;
-    res.started = false;
-    res.available = -1;
-    return res;
+    call.ptr->set_recorder(recorder);
+    call.ptr->set_state(RECORDING);
+    config.event_sink->setup_recorder(recorder);
+
+    // Debug recorder
+    auto debug_recorder = source->get_debug_recorder();
+    if (debug_recorder) {
+        debug_recorder->start(call.ptr);
+        call.ptr->set_debug_recorder(debug_recorder);
+        call.ptr->set_debug_recording(true);
+        config.event_sink->setup_recorder(debug_recorder);
+    }
+
+    // SigMF recorder
+    auto sigmf_recorder = source->get_sigmf_recorder();
+    if (sigmf_recorder) {
+        sigmf_recorder->start(call.ptr);
+        call.ptr->set_sigmf_recorder(sigmf_recorder);
+        call.ptr->set_sigmf_recording(true);
+        config.event_sink->setup_recorder(sigmf_recorder);
+    }
+
+    return true;
 }
 
 // ── Phase C: Call Management — conclude recording (recorder mechanics) ──

@@ -519,22 +519,19 @@ impl CallManager {
             return false;
         }
 
-        // 6. Acquire recorder (C++ handles source finding, allocation, start)
-        let result =
-            ffi::tr_context_acquire_recorder(ctx.as_mut(), call.pin_mut(), is_analog, priority);
+        // 6. Find source and acquire recorder
+        let source_count = ffi::tr_context_source_count(&*ctx);
+        let freq = ffi::call_get_freq(&**call);
+        let mut found_source = false;
 
-        if result.available < 0 {
-            ffi::tr_call_set_state(call.pin_mut(), TrState::Monitoring);
-            ffi::tr_call_set_monitoring_state(
-                call.pin_mut(),
-                TrMonitoringState::NoSource,
-            );
-            tracing::error!(talkgroup = tg_id, sys_num, "not recording: no source covering freq");
-            return false;
-        }
+        for source_idx in 0..source_count {
+            if !ffi::tr_source_covers_freq(&*ctx, source_idx, freq) {
+                continue;
+            }
+            found_source = true;
 
-        if !result.started {
-            if priority > result.available {
+            let available = ffi::tr_source_available_recorders(&*ctx, source_idx, is_analog);
+            if priority > available {
                 ffi::tr_call_set_state(call.pin_mut(), TrState::Monitoring);
                 ffi::tr_call_set_monitoring_state(
                     call.pin_mut(),
@@ -544,16 +541,35 @@ impl CallManager {
                     talkgroup = tg_id,
                     sys_num,
                     priority,
-                    available = result.available,
+                    available,
                     "not recording: priority exceeds available recorders"
                 );
-            } else {
-                ffi::tr_call_set_state(call.pin_mut(), TrState::Monitoring);
+                return false;
             }
+
+            if ffi::tr_source_start_recording(
+                ctx.as_mut(),
+                source_idx,
+                call.pin_mut(),
+                is_analog,
+            ) {
+                return true;
+            }
+
+            // Recorder allocation or start failed
+            ffi::tr_call_set_state(call.pin_mut(), TrState::Monitoring);
             return false;
         }
 
-        true
+        if !found_source {
+            ffi::tr_call_set_state(call.pin_mut(), TrState::Monitoring);
+            ffi::tr_call_set_monitoring_state(
+                call.pin_mut(),
+                TrMonitoringState::NoSource,
+            );
+            tracing::error!(talkgroup = tg_id, sys_num, "not recording: no source covering freq");
+        }
+        false
     }
 
     // ── Multisite duplicate detection ──

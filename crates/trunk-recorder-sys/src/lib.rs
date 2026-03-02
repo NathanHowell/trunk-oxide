@@ -186,12 +186,6 @@ pub mod ffi {
     }
 
     #[derive(Debug, Clone)]
-    struct TrAcquireResult {
-        pub started: bool,
-        pub available: i32,  // -1 = no source covering frequency
-    }
-
-    #[derive(Debug, Clone)]
     struct TrStopRecordingResult {
         pub final_length: f64,
         pub freq_error: i32,
@@ -422,7 +416,10 @@ pub mod ffi {
 
         // ── Phase C: Call Management — recording policy support ──
         fn tr_context_get_talkgroup_patch(ctx: &TrContext, sys_num: i32, talkgroup: i64) -> Vec<i64>;
-        fn tr_context_acquire_recorder(ctx: Pin<&mut TrContext>, call: Pin<&mut TrCall>, is_analog: bool, priority: i32) -> TrAcquireResult;
+        fn tr_context_source_count(ctx: &TrContext) -> i32;
+        fn tr_source_covers_freq(ctx: &TrContext, source_idx: i32, freq: f64) -> bool;
+        fn tr_source_available_recorders(ctx: &TrContext, source_idx: i32, is_analog: bool) -> i32;
+        fn tr_source_start_recording(ctx: Pin<&mut TrContext>, source_idx: i32, call: Pin<&mut TrCall>, is_analog: bool) -> bool;
 
         // ── Phase C: Call Management — call-level recorder accessors ──
         fn call_recorder_since_last_write_secs(call: &TrCall) -> f64;

@@ -25,6 +25,7 @@ struct TrCallError;
 struct TrCallData;
 struct TrCallInfo;
 struct TrCallMetadata;
+struct TrSystemInfo;
 struct TrSquelchEvent;
 struct RustPluginBox;
 
@@ -50,23 +51,6 @@ struct TrRecorder final {
 int32_t call_get_freq_error(const TrCall &call);
 double call_get_current_length(const TrCall &call);
 
-// ── System accessor wrappers ──
-int32_t system_get_sys_num(const TrSystem &sys);
-uint64_t system_get_sys_id(const TrSystem &sys);
-rust::String system_get_short_name(const TrSystem &sys);
-int32_t system_get_system_type(const TrSystem &sys);
-uint64_t system_get_wacn(const TrSystem &sys);
-uint64_t system_get_nac(const TrSystem &sys);
-int32_t system_get_sys_rfss(const TrSystem &sys);
-int32_t system_get_sys_site_id(const TrSystem &sys);
-rust::String system_get_bandplan(const TrSystem &sys);
-double system_get_analog_levels(const TrSystem &sys);
-double system_get_digital_levels(const TrSystem &sys);
-double system_get_squelch_db(const TrSystem &sys);
-bool system_get_conversation_mode(const TrSystem &sys);
-int32_t system_get_message_count(const TrSystem &sys);
-int32_t system_get_decode_rate(const TrSystem &sys);
-
 // ── Recorder accessor wrappers ──
 int32_t recorder_get_num(const TrRecorder &rec);
 double recorder_get_freq(const TrRecorder &rec);
@@ -88,6 +72,9 @@ struct TrContext {
     TrContext(TrContext &&) noexcept;
     TrContext &operator=(TrContext &&) noexcept;
 };
+
+// ── System info bulk read (replaces 15 individual system_get_* functions) ──
+TrSystemInfo tr_context_get_system_info(TrContext &ctx, int32_t sys_num);
 
 // ── Lifecycle functions ──
 std::unique_ptr<TrContext> tr_create_from_builder(rust::Box<RustPluginBox> plugin);
@@ -176,27 +163,25 @@ rust::Vec<TrTrunkMessage> tr_context_drain_messages(TrContext &ctx);
 void tr_context_process_conventional_queues(TrContext &ctx);
 void tr_context_check_conventional_detection(TrContext &ctx);
 void tr_context_check_sources(TrContext &ctx);
-void tr_context_clear_stale_patches(TrContext &ctx);
 void tr_context_print_status(TrContext &ctx, rust::Slice<const TrCall *const> calls);
 
 // ── Phase B: Message Routing (called from Rust handle_message) ──
 enum class TrUnitEventType : uint8_t;
 void tr_system_add_control_channel_runtime(TrContext &ctx, int32_t sys_num, double freq);
-void tr_system_update_patches(TrContext &ctx, int32_t sys_num, const TrPatchData &pd);
-void tr_system_delete_patch(TrContext &ctx, int32_t sys_num, const TrPatchData &pd);
 void tr_system_retune(TrContext &ctx, int32_t sys_num);
 bool tr_system_update_sysid(TrContext &ctx, const TrTrunkMessage &msg);
 bool tr_system_update_status(TrContext &ctx, const TrTrunkMessage &msg);
-void tr_context_fire_unit_event(TrContext &ctx, int32_t sys_num,
+void tr_context_fire_unit_event(TrContext &ctx, const TrSystemInfo &info,
     TrUnitEventType type, int64_t source_id, int64_t talkgroup);
-void tr_context_fire_setup_system(TrContext &ctx, int32_t sys_num);
+void tr_context_fire_setup_system(TrContext &ctx, const TrSystemInfo &info);
 
 // ── Phase B: Decode Rate Checking (called from Rust check_decode_rates) ──
-void tr_system_set_decode_rate(TrContext &ctx, int32_t sys_num, int32_t rate);
 int32_t tr_system_control_channel_count(TrContext &ctx, int32_t sys_num);
 double tr_system_get_current_control_channel(TrContext &ctx, int32_t sys_num);
-void tr_context_fire_setup_config(TrContext &ctx);
-void tr_context_fire_system_rates(TrContext &ctx, float time_diff);
+void tr_context_fire_trunk_message(TrContext &ctx, rust::Slice<const TrTrunkMessage> messages,
+    const TrSystemInfo &info);
+void tr_context_fire_setup_config(TrContext &ctx, rust::Slice<const TrSystemInfo> infos);
+void tr_context_fire_system_rates(TrContext &ctx, rust::Slice<const TrSystemInfo> infos, float time_diff);
 
 // ── Conventional call management — recorder status (null-guarded) ──
 bool call_has_recorder(const TrCall &call);
@@ -226,8 +211,6 @@ std::unique_ptr<TrCall> tr_context_create_call(TrContext &ctx, const TrTrunkMess
 TrCallMetadata call_get_metadata(const TrCall &call);
 
 // ── Phase C: Call Management — recording policy support ──
-rust::Vec<int64_t> tr_context_get_talkgroup_patch(
-    const TrContext &ctx, int32_t sys_num, int64_t talkgroup);
 int32_t tr_context_source_count(const TrContext &ctx);
 bool tr_source_covers_freq(const TrContext &ctx, int32_t source_idx, double freq);
 int32_t tr_source_available_recorders(const TrContext &ctx, int32_t source_idx, bool is_analog);
@@ -239,7 +222,6 @@ TrStopRecordingResult call_stop_recording(TrCall &call);
 rust::Vec<TrTransmission> call_get_transmission_list(const TrCall &call);
 rust::Vec<TrTransmission> call_get_dmr_transmission_list(const TrCall &call, int32_t slot);
 int32_t call_get_recorder_num(const TrCall &call);
-rust::Vec<uint64_t> call_get_patched_talkgroups(const TrCall &call);
 
 // ── Phase C: Call Management — update source tracking ──
 void call_recorder_set_source(TrCall &call, int64_t src);

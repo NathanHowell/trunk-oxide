@@ -124,6 +124,29 @@ static TrTransmission convert_transmission(const Transmission &tx) {
     return out;
 }
 
+// ── System info bulk read (replaces 15 individual system_get_* functions) ──
+
+static TrSystemInfo build_system_info(System &sys) {
+    TrSystemInfo info;
+    info.sys_num = sys.get_sys_num();
+    info.sys_id = sys.get_sys_id();
+    info.short_name = rust::String(sys.get_short_name());
+    // Map C++ SystemType enum (0-based) to proto SystemType enum (1-based, 0 = UNSPECIFIED)
+    info.system_type = static_cast<int32_t>(sys.get_system_type()) + 1;
+    info.wacn = sys.get_wacn();
+    info.nac = sys.get_nac();
+    info.rfss = sys.get_sys_rfss();
+    info.site_id = sys.get_sys_site_id();
+    info.bandplan = rust::String(sys.get_bandplan());
+    info.analog_levels = sys.get_analog_levels();
+    info.digital_levels = sys.get_digital_levels();
+    info.squelch_db = sys.get_squelch_db();
+    info.conversation_mode = sys.get_conversation_mode();
+    info.message_count = 0;  // Rust owns message count
+    info.decode_rate = 0;    // Rust owns decode rate
+    return info;
+}
+
 // ── RustPluginBridge: delegates all plugin callbacks to Rust via FFI ──
 
 class RustPluginBridge {
@@ -143,13 +166,6 @@ public:
         return rust_plugin_poll_one(*plugin_);
     }
 
-    // signal() bypassed — Rust calls rust_plugin_signal directly via tr_context_fire_signal
-    int signal(long /*unitId*/, const char * /*signaling_type*/,
-               gr::blocks::SignalType /*sig_type*/,
-               const std::shared_ptr<Call> & /*call*/, const std::shared_ptr<System> & /*system*/, const std::shared_ptr<Recorder> & /*recorder*/) {
-        return 0;
-    }
-
     int audio_stream(const std::shared_ptr<Call> &call, const std::shared_ptr<Recorder> &recorder,
                      int16_t *samples, int sampleCount) {
         TrCall tr_call(call);
@@ -161,131 +177,25 @@ public:
             tr_rec, slice);
     }
 
-    // call_start() bypassed — Rust calls rust_plugin_call_start directly via tr_context_fire_call_start
-    int call_start(const std::shared_ptr<Call> & /*call*/) {
-        return 0;
-    }
-
-    // calls_active() bypassed — Rust calls rust_plugin_calls_active directly via tr_context_fire_calls_active
-    int calls_active(std::vector<std::shared_ptr<Call>> /*calls*/) {
-        return 0;
-    }
-
     int setup_recorder(const std::shared_ptr<Recorder> &recorder) {
         TrRecorder tr_rec(recorder);
         return rust_plugin_setup_recorder(*plugin_, tr_rec);
     }
 
     int setup_system(const std::shared_ptr<System> &system) {
-        TrSystem tr_sys(system);
-        return rust_plugin_setup_system(*plugin_, tr_sys);
-    }
-
-    int setup_systems(std::vector<std::shared_ptr<System>> systems) {
-        std::vector<TrSystem> wrappers;
-        wrappers.reserve(systems.size());
-        for (auto &s : systems) {
-            wrappers.emplace_back(s);
-        }
-        std::vector<const TrSystem *> ptrs;
-        ptrs.reserve(wrappers.size());
-        for (auto &w : wrappers) {
-            ptrs.push_back(&w);
-        }
-        rust::Slice<const TrSystem *const> slice(ptrs.data(), ptrs.size());
-        return rust_plugin_setup_systems(*plugin_, slice);
-    }
-
-    int setup_sources(std::vector<std::shared_ptr<Source>> /*sources*/) {
-        // Source has no virtual methods — we cannot safely call its accessors
-        // from a dlopen'd plugin (the symbols aren't exported by trunk-recorder).
-        return rust_plugin_setup_sources(*plugin_);
+        auto info = build_system_info(*system);
+        return rust_plugin_setup_system(*plugin_, info);
     }
 
     int setup_config(std::vector<std::shared_ptr<Source>> /*sources*/,
                      std::vector<std::shared_ptr<System>> systems) {
-        // Source data omitted (non-virtual, see above); forward systems only.
-        std::vector<TrSystem> sys_wrappers;
-        sys_wrappers.reserve(systems.size());
+        std::vector<TrSystemInfo> infos;
+        infos.reserve(systems.size());
         for (auto &s : systems) {
-            sys_wrappers.emplace_back(s);
+            infos.push_back(build_system_info(*s));
         }
-        std::vector<const TrSystem *> sys_ptrs;
-        sys_ptrs.reserve(sys_wrappers.size());
-        for (auto &w : sys_wrappers) {
-            sys_ptrs.push_back(&w);
-        }
-
-        rust::Slice<const TrSystem *const> sys_slice(sys_ptrs.data(), sys_ptrs.size());
-        return rust_plugin_setup_config(*plugin_, sys_slice);
-    }
-
-    int trunk_message(std::vector<TrunkMessage> messages,
-                      const std::shared_ptr<System> &system) {
-        std::vector<TrTrunkMessage> msgs;
-        msgs.reserve(messages.size());
-        for (const auto &m : messages) {
-            msgs.push_back(convert_trunk_message(m));
-        }
-        TrSystem tr_sys(system);
-        return rust_plugin_trunk_message(*plugin_,
-            rust::Slice<const TrTrunkMessage>(msgs.data(), msgs.size()),
-            tr_sys);
-    }
-
-    int system_rates(std::vector<std::shared_ptr<System>> systems, float timeDiff) {
-        std::vector<TrSystem> wrappers;
-        wrappers.reserve(systems.size());
-        for (auto &s : systems) {
-            wrappers.emplace_back(s);
-        }
-        std::vector<const TrSystem *> ptrs;
-        ptrs.reserve(wrappers.size());
-        for (auto &w : wrappers) {
-            ptrs.push_back(&w);
-        }
-        rust::Slice<const TrSystem *const> slice(ptrs.data(), ptrs.size());
-        return rust_plugin_system_rates(*plugin_, slice, timeDiff);
-    }
-
-    int unit_registration(const std::shared_ptr<System> &sys, long source_id) {
-        TrSystem tr_sys(sys);
-        return rust_plugin_unit_registration(*plugin_, tr_sys, source_id);
-    }
-
-    int unit_deregistration(const std::shared_ptr<System> &sys, long source_id) {
-        TrSystem tr_sys(sys);
-        return rust_plugin_unit_deregistration(*plugin_, tr_sys, source_id);
-    }
-
-    int unit_acknowledge_response(const std::shared_ptr<System> &sys, long source_id) {
-        TrSystem tr_sys(sys);
-        return rust_plugin_unit_acknowledge_response(*plugin_, tr_sys, source_id);
-    }
-
-    int unit_group_affiliation(const std::shared_ptr<System> &sys, long source_id,
-                                long talkgroup_num) {
-        TrSystem tr_sys(sys);
-        return rust_plugin_unit_group_affiliation(
-            *plugin_, tr_sys, source_id, talkgroup_num);
-    }
-
-    int unit_data_grant(const std::shared_ptr<System> &sys, long source_id) {
-        TrSystem tr_sys(sys);
-        return rust_plugin_unit_data_grant(*plugin_, tr_sys, source_id);
-    }
-
-    int unit_answer_request(const std::shared_ptr<System> &sys, long source_id,
-                            long talkgroup) {
-        TrSystem tr_sys(sys);
-        return rust_plugin_unit_answer_request(
-            *plugin_, tr_sys, source_id, talkgroup);
-    }
-
-    int unit_location(const std::shared_ptr<System> &sys, long source_id,
-                      long talkgroup_num) {
-        TrSystem tr_sys(sys);
-        return rust_plugin_unit_location(*plugin_, tr_sys, source_id, talkgroup_num);
+        rust::Slice<const TrSystemInfo> slice(infos.data(), infos.size());
+        return rust_plugin_setup_config(*plugin_, slice);
     }
 
     int unit_alias_discovered(const std::shared_ptr<System> &sys, const OTAAlias &alias) {
@@ -311,27 +221,6 @@ double call_get_current_length(const TrCall &call) {
     auto rec = call.ptr->get_recorder();
     return rec ? rec->get_current_length() : 0.0;
 }
-
-// ── System accessor implementations ──
-
-int32_t system_get_sys_num(const TrSystem &sys) { return sys.ptr->get_sys_num(); }
-uint64_t system_get_sys_id(const TrSystem &sys) { return sys.ptr->get_sys_id(); }
-rust::String system_get_short_name(const TrSystem &sys) { return rust::String(sys.ptr->get_short_name()); }
-int32_t system_get_system_type(const TrSystem &sys) {
-    // Map C++ SystemType enum (0-based) to proto SystemType enum (1-based, 0 = UNSPECIFIED)
-    return static_cast<int32_t>(sys.ptr->get_system_type()) + 1;
-}
-uint64_t system_get_wacn(const TrSystem &sys) { return sys.ptr->get_wacn(); }
-uint64_t system_get_nac(const TrSystem &sys) { return sys.ptr->get_nac(); }
-int32_t system_get_sys_rfss(const TrSystem &sys) { return sys.ptr->get_sys_rfss(); }
-int32_t system_get_sys_site_id(const TrSystem &sys) { return sys.ptr->get_sys_site_id(); }
-rust::String system_get_bandplan(const TrSystem &sys) { return rust::String(sys.ptr->get_bandplan()); }
-double system_get_analog_levels(const TrSystem &sys) { return sys.ptr->get_analog_levels(); }
-double system_get_digital_levels(const TrSystem &sys) { return sys.ptr->get_digital_levels(); }
-double system_get_squelch_db(const TrSystem &sys) { return sys.ptr->get_squelch_db(); }
-bool system_get_conversation_mode(const TrSystem &sys) { return sys.ptr->get_conversation_mode(); }
-int32_t system_get_message_count(const TrSystem &sys) { return sys.ptr->get_message_count(); }
-int32_t system_get_decode_rate(const TrSystem &sys) { return sys.ptr->get_decode_rate(); }
 
 // ── Recorder accessor implementations ──
 
@@ -365,76 +254,8 @@ public:
         bridge_->poll_one();
     }
 
-    int signal(long unitId, const char *signaling_type,
-               gr::blocks::SignalType sig_type, const std::shared_ptr<Call> &call,
-               const std::shared_ptr<System> &system, const std::shared_ptr<Recorder> &recorder) override {
-        return bridge_->signal(unitId, signaling_type, sig_type, call, system, recorder);
-    }
-
-    void trunk_message(std::vector<TrunkMessage> messages,
-                       const std::shared_ptr<System> &system) override {
-        bridge_->trunk_message(std::move(messages), system);
-    }
-
-    void call_start(const std::shared_ptr<Call> &call) override {
-        bridge_->call_start(call);
-    }
-
-    void conclude_call(const std::shared_ptr<Call> & /*call*/, const std::shared_ptr<System> & /*sys*/, Config /*config*/) override {
-        // Call conclusion is now orchestrated in Rust (CallManager::conclude_call).
-        // This virtual override is kept for the EventSink interface but is no longer called.
-    }
-
-    void calls_active(std::vector<std::shared_ptr<Call>> calls) override {
-        bridge_->calls_active(std::move(calls));
-    }
-
     void setup_recorder(const std::shared_ptr<Recorder> &recorder) override {
         bridge_->setup_recorder(recorder);
-    }
-
-    void setup_system(const std::shared_ptr<System> &system) override {
-        bridge_->setup_system(system);
-    }
-
-    void setup_config(std::vector<std::shared_ptr<Source>> sources,
-                      std::vector<std::shared_ptr<System>> systems) override {
-        bridge_->setup_config(std::move(sources), std::move(systems));
-    }
-
-    void system_rates(std::vector<std::shared_ptr<System>> systems, float timeDiff) override {
-        bridge_->system_rates(std::move(systems), timeDiff);
-    }
-
-    void unit_registration(const std::shared_ptr<System> &system, long source_id) override {
-        bridge_->unit_registration(system, source_id);
-    }
-
-    void unit_deregistration(const std::shared_ptr<System> &system, long source_id) override {
-        bridge_->unit_deregistration(system, source_id);
-    }
-
-    void unit_acknowledge_response(const std::shared_ptr<System> &system, long source_id) override {
-        bridge_->unit_acknowledge_response(system, source_id);
-    }
-
-    void unit_group_affiliation(const std::shared_ptr<System> &system, long source_id,
-                                long talkgroup_num) override {
-        bridge_->unit_group_affiliation(system, source_id, talkgroup_num);
-    }
-
-    void unit_data_grant(const std::shared_ptr<System> &system, long source_id) override {
-        bridge_->unit_data_grant(system, source_id);
-    }
-
-    void unit_answer_request(const std::shared_ptr<System> &system, long source_id,
-                             long talkgroup) override {
-        bridge_->unit_answer_request(system, source_id, talkgroup);
-    }
-
-    void unit_location(const std::shared_ptr<System> &system, long source_id,
-                       long talkgroup_num) override {
-        bridge_->unit_location(system, source_id, talkgroup_num);
     }
 
     void unit_alias_discovered(const std::shared_ptr<System> &system,
@@ -462,6 +283,17 @@ TrContext::TrContext() : impl(std::make_unique<TrContextImpl>()) {}
 TrContext::~TrContext() = default;
 TrContext::TrContext(TrContext &&) noexcept = default;
 TrContext &TrContext::operator=(TrContext &&) noexcept = default;
+
+TrSystemInfo tr_context_get_system_info(TrContext &ctx, int32_t sys_num) {
+    for (auto &sys : ctx.impl->trunk_ctx.systems) {
+        if (sys->get_sys_num() == sys_num) {
+            return build_system_info(*sys);
+        }
+    }
+    TrSystemInfo info = {};
+    info.sys_num = sys_num;
+    return info;
+}
 
 // ── Lifecycle function implementations ──
 
@@ -496,11 +328,20 @@ void tr_finalize(TrContext &ctx) {
     // Conventional calls remain in trunk_ctx.calls for Rust to drain
     // via tr_context_take_next_conventional_call after finalize.
 
-    ctx.impl->bridge->setup_config(ctx.impl->trunk_ctx.sources,
-                                   ctx.impl->trunk_ctx.systems);
+    // Fire setup_config with TrSystemInfo (bypasses EventSinkBridge)
+    std::vector<TrSystemInfo> infos;
+    infos.reserve(ctx.impl->trunk_ctx.systems.size());
     for (auto &sys : ctx.impl->trunk_ctx.systems) {
-        ctx.impl->bridge->setup_system(sys);
+        infos.push_back(build_system_info(*sys));
     }
+    rust_plugin_setup_config(ctx.impl->bridge->plugin(),
+        rust::Slice<const TrSystemInfo>(infos.data(), infos.size()));
+
+    // Fire setup_system per-system with TrSystemInfo
+    for (auto &info : infos) {
+        rust_plugin_setup_system(ctx.impl->bridge->plugin(), info);
+    }
+
     ctx.impl->bridge->start();
 }
 
@@ -873,30 +714,6 @@ void tr_system_add_control_channel_runtime(TrContext &ctx, int32_t sys_num, doub
     }
 }
 
-void tr_system_update_patches(TrContext &ctx, int32_t sys_num, const TrPatchData &pd) {
-    auto sys = find_system_by_num(ctx, sys_num);
-    if (sys) {
-        PatchData cpd;
-        cpd.sg = pd.sg;
-        cpd.ga1 = pd.ga1;
-        cpd.ga2 = pd.ga2;
-        cpd.ga3 = pd.ga3;
-        sys->update_active_talkgroup_patches(cpd);
-    }
-}
-
-void tr_system_delete_patch(TrContext &ctx, int32_t sys_num, const TrPatchData &pd) {
-    auto sys = find_system_by_num(ctx, sys_num);
-    if (sys) {
-        PatchData cpd;
-        cpd.sg = pd.sg;
-        cpd.ga1 = pd.ga1;
-        cpd.ga2 = pd.ga2;
-        cpd.ga3 = pd.ga3;
-        sys->delete_talkgroup_patch(cpd);
-    }
-}
-
 void tr_system_retune(TrContext &ctx, int32_t sys_num) {
     auto sys = find_system_by_num(ctx, sys_num);
     if (!sys) return;
@@ -925,51 +742,21 @@ bool tr_system_update_status(TrContext &ctx, const TrTrunkMessage &msg) {
     return sys->update_status(tm);
 }
 
-void tr_context_fire_unit_event(TrContext &ctx, int32_t sys_num,
+void tr_context_fire_unit_event(TrContext &ctx, const TrSystemInfo &info,
     TrUnitEventType type, int64_t source_id, int64_t talkgroup) {
-    auto sys = find_system_by_num(ctx, sys_num);
-    if (!sys) return;
-    auto &event_sink = ctx.impl->trunk_ctx.config.event_sink;
-    switch (type) {
-        case TrUnitEventType::Registration:
-            event_sink->unit_registration(sys, source_id);
-            break;
-        case TrUnitEventType::Deregistration:
-            event_sink->unit_deregistration(sys, source_id);
-            break;
-        case TrUnitEventType::Affiliation:
-            event_sink->unit_group_affiliation(sys, source_id, talkgroup);
-            break;
-        case TrUnitEventType::Acknowledge:
-            event_sink->unit_acknowledge_response(sys, source_id);
-            break;
-        case TrUnitEventType::Location:
-            event_sink->unit_location(sys, source_id, talkgroup);
-            break;
-        case TrUnitEventType::DataGrant:
-            event_sink->unit_data_grant(sys, source_id);
-            break;
-        case TrUnitEventType::AnswerRequest:
-            event_sink->unit_answer_request(sys, source_id, talkgroup);
-            break;
-    }
+    rust_plugin_unit_event(ctx.impl->bridge->plugin(), info, type, source_id, talkgroup);
 }
 
-void tr_context_fire_setup_system(TrContext &ctx, int32_t sys_num) {
-    auto sys = find_system_by_num(ctx, sys_num);
-    if (sys) {
-        ctx.impl->trunk_ctx.config.event_sink->setup_system(sys);
-    }
+void tr_context_fire_setup_system(TrContext &ctx, const TrSystemInfo &info) {
+    rust_plugin_setup_system(ctx.impl->bridge->plugin(), info);
+}
+
+void tr_context_fire_trunk_message(TrContext &ctx, rust::Slice<const TrTrunkMessage> messages,
+    const TrSystemInfo &info) {
+    rust_plugin_trunk_message(ctx.impl->bridge->plugin(), messages, info);
 }
 
 // ── Phase B: Decode Rate Checking (called from Rust check_decode_rates) ──
-
-void tr_system_set_decode_rate(TrContext &ctx, int32_t sys_num, int32_t rate) {
-    auto sys = find_system_by_num(ctx, sys_num);
-    if (sys) {
-        sys->set_decode_rate(rate);
-    }
-}
 
 int32_t tr_system_control_channel_count(TrContext &ctx, int32_t sys_num) {
     auto sys = find_system_by_num(ctx, sys_num);
@@ -981,15 +768,12 @@ double tr_system_get_current_control_channel(TrContext &ctx, int32_t sys_num) {
     return sys ? sys->get_current_control_channel() : 0.0;
 }
 
-void tr_context_fire_setup_config(TrContext &ctx) {
-    auto &config = ctx.impl->trunk_ctx.config;
-    config.event_sink->setup_config(ctx.impl->trunk_ctx.sources,
-                                    ctx.impl->trunk_ctx.systems);
+void tr_context_fire_setup_config(TrContext &ctx, rust::Slice<const TrSystemInfo> infos) {
+    rust_plugin_setup_config(ctx.impl->bridge->plugin(), infos);
 }
 
-void tr_context_fire_system_rates(TrContext &ctx, float time_diff) {
-    auto &config = ctx.impl->trunk_ctx.config;
-    config.event_sink->system_rates(ctx.impl->trunk_ctx.systems, time_diff);
+void tr_context_fire_system_rates(TrContext &ctx, rust::Slice<const TrSystemInfo> infos, float time_diff) {
+    rust_plugin_system_rates(ctx.impl->bridge->plugin(), infos, time_diff);
 }
 
 // ── Phase A: Loop Control ──
@@ -1029,8 +813,7 @@ rust::Vec<TrTrunkMessage> tr_context_drain_messages(TrContext &ctx) {
                 trunk_messages = ctx.impl->p25_parser->parse_message(msg, system);
             }
 
-            // Fire trunk_message plugin notification for all messages
-            config.event_sink->trunk_message(trunk_messages, system);
+            // trunk_message event is now fired from Rust after drain returns (Step 3)
 
             // Convert all messages to Rust types for return
             for (const auto &m : trunk_messages) {
@@ -1068,14 +851,6 @@ void tr_context_check_sources(TrContext &ctx) {
         if (!source->got_samples()) {
             BOOST_LOG_TRIVIAL(error) << "Source " << source->get_num() << " has stopped receiving samples - Terminating trunk recorder";
             throw std::runtime_error("Source stopped receiving samples");
-        }
-    }
-}
-
-void tr_context_clear_stale_patches(TrContext &ctx) {
-    for (auto &system : ctx.impl->trunk_ctx.systems) {
-        if (system->get_system_type() == SYS_P25) {
-            system->clear_stale_talkgroup_patches();
         }
     }
 }
@@ -1249,20 +1024,6 @@ TrCallMetadata call_get_metadata(const TrCall &call) {
 
 // State/monitoring/encrypted/is_analog setters removed — Rust owns all call state
 
-rust::Vec<int64_t> tr_context_get_talkgroup_patch(
-    const TrContext &ctx, int32_t sys_num, int64_t talkgroup) {
-    rust::Vec<int64_t> result;
-    for (auto &sys : ctx.impl->trunk_ctx.systems) {
-        if (sys->get_sys_num() == sys_num) {
-            for (auto &tg_id : sys->get_talkgroup_patch(talkgroup)) {
-                result.push_back(tg_id);
-            }
-            break;
-        }
-    }
-    return result;
-}
-
 int32_t tr_context_source_count(const TrContext &ctx) {
     return static_cast<int32_t>(ctx.impl->trunk_ctx.sources.size());
 }
@@ -1373,17 +1134,6 @@ rust::Vec<TrTransmission> call_get_dmr_transmission_list(const TrCall &call, int
 int32_t call_get_recorder_num(const TrCall &call) {
     auto rec = call.ptr->get_recorder();
     return rec ? rec->get_num() : 0;
-}
-
-rust::Vec<uint64_t> call_get_patched_talkgroups(const TrCall &call) {
-    rust::Vec<uint64_t> result;
-    auto sys = call.ptr->get_system();
-    if (sys) {
-        for (auto tg : sys->get_talkgroup_patch(call.ptr->get_talkgroup())) {
-            result.push_back(tg);
-        }
-    }
-    return result;
 }
 
 // ── Phase C: Call Management — update source tracking ──

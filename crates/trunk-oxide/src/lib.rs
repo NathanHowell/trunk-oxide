@@ -392,6 +392,24 @@ impl TrunkRecorder {
             call_mgr.process_recorder_queues();
 
             let messages = ffi::tr_context_drain_messages(self.ctx.pin_mut());
+
+            // Fire trunk_message events grouped by system (replaces C++ EventSinkBridge path)
+            if !messages.is_empty() {
+                let mut by_system: HashMap<i32, Vec<usize>> = HashMap::new();
+                for (i, msg) in messages.iter().enumerate() {
+                    by_system.entry(msg.sys_num).or_default().push(i);
+                }
+                for (&sys_num, indices) in &by_system {
+                    let sys_msgs: Vec<&ffi::TrTrunkMessage> =
+                        indices.iter().map(|&i| &messages[i]).collect();
+                    let info = ffi::tr_context_get_system_info(self.ctx.pin_mut(), sys_num);
+                    // Build a contiguous slice for FFI
+                    let cloned: Vec<ffi::TrTrunkMessage> =
+                        sys_msgs.iter().map(|m| (*m).clone()).collect();
+                    ffi::tr_context_fire_trunk_message(self.ctx.pin_mut(), &cloned, &info);
+                }
+            }
+
             for msg in &messages {
                 call_mgr.handle_message(self.ctx.pin_mut(), msg);
             }
@@ -416,7 +434,7 @@ impl TrunkRecorder {
                 call_mgr.check_decode_rates(self.ctx.pin_mut(), time_diff)?;
                 ffi::tr_context_check_sources(self.ctx.pin_mut())?;
                 last_decode_check = Instant::now();
-                ffi::tr_context_clear_stale_patches(self.ctx.pin_mut());
+                call_mgr.clear_stale_patches();
             }
 
             if now - last_status > Duration::from_secs(200) {

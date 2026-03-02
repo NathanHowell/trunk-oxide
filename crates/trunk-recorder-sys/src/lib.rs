@@ -240,6 +240,25 @@ pub mod ffi {
     }
 
     #[derive(Debug, Clone)]
+    struct TrSystemInfo {
+        pub sys_num: i32,
+        pub sys_id: u64,
+        pub short_name: String,
+        pub system_type: i32,
+        pub wacn: u64,
+        pub nac: u64,
+        pub rfss: i32,
+        pub site_id: i32,
+        pub bandplan: String,
+        pub analog_levels: f64,
+        pub digital_levels: f64,
+        pub squelch_db: f64,
+        pub conversation_mode: bool,
+        pub message_count: i32,
+        pub decode_rate: i32,
+    }
+
+    #[derive(Debug, Clone)]
     struct TrSquelchEvent {
         pub call_num: i64,
         pub muted: bool,   // true = squelch closed (idle), false = squelch open (active)
@@ -270,22 +289,8 @@ pub mod ffi {
         fn call_get_freq_error(call: &TrCall) -> i32;
         fn call_get_current_length(call: &TrCall) -> f64;
 
-        // ── System accessors ──
-        fn system_get_sys_num(sys: &TrSystem) -> i32;
-        fn system_get_sys_id(sys: &TrSystem) -> u64;
-        fn system_get_short_name(sys: &TrSystem) -> String;
-        fn system_get_system_type(sys: &TrSystem) -> i32;
-        fn system_get_wacn(sys: &TrSystem) -> u64;
-        fn system_get_nac(sys: &TrSystem) -> u64;
-        fn system_get_sys_rfss(sys: &TrSystem) -> i32;
-        fn system_get_sys_site_id(sys: &TrSystem) -> i32;
-        fn system_get_bandplan(sys: &TrSystem) -> String;
-        fn system_get_analog_levels(sys: &TrSystem) -> f64;
-        fn system_get_digital_levels(sys: &TrSystem) -> f64;
-        fn system_get_squelch_db(sys: &TrSystem) -> f64;
-        fn system_get_conversation_mode(sys: &TrSystem) -> bool;
-        fn system_get_message_count(sys: &TrSystem) -> i32;
-        fn system_get_decode_rate(sys: &TrSystem) -> i32;
+        // ── System info bulk read (replaces 15 individual system_get_* functions) ──
+        fn tr_context_get_system_info(ctx: Pin<&mut TrContext>, sys_num: i32) -> TrSystemInfo;
 
         // ── Recorder accessors ──
         fn recorder_get_num(rec: &TrRecorder) -> i32;
@@ -389,26 +394,23 @@ pub mod ffi {
         fn tr_context_process_conventional_queues(ctx: Pin<&mut TrContext>);
         fn tr_context_check_conventional_detection(ctx: Pin<&mut TrContext>);
         fn tr_context_check_sources(ctx: Pin<&mut TrContext>) -> Result<()>;
-        fn tr_context_clear_stale_patches(ctx: Pin<&mut TrContext>);
         fn tr_context_print_status(ctx: Pin<&mut TrContext>, calls: &[*const TrCall]);
 
         // ── Phase B: Message Routing (called from Rust handle_message) ──
         fn tr_system_add_control_channel_runtime(ctx: Pin<&mut TrContext>, sys_num: i32, freq: f64);
-        fn tr_system_update_patches(ctx: Pin<&mut TrContext>, sys_num: i32, pd: &TrPatchData);
-        fn tr_system_delete_patch(ctx: Pin<&mut TrContext>, sys_num: i32, pd: &TrPatchData);
         fn tr_system_retune(ctx: Pin<&mut TrContext>, sys_num: i32);
         fn tr_system_update_sysid(ctx: Pin<&mut TrContext>, msg: &TrTrunkMessage) -> bool;
         fn tr_system_update_status(ctx: Pin<&mut TrContext>, msg: &TrTrunkMessage) -> bool;
-        fn tr_context_fire_unit_event(ctx: Pin<&mut TrContext>, sys_num: i32,
+        fn tr_context_fire_unit_event(ctx: Pin<&mut TrContext>, info: &TrSystemInfo,
             event_type: TrUnitEventType, source_id: i64, talkgroup: i64);
-        fn tr_context_fire_setup_system(ctx: Pin<&mut TrContext>, sys_num: i32);
+        fn tr_context_fire_setup_system(ctx: Pin<&mut TrContext>, info: &TrSystemInfo);
 
         // ── Phase B: Decode Rate Checking (called from Rust check_decode_rates) ──
-        fn tr_system_set_decode_rate(ctx: Pin<&mut TrContext>, sys_num: i32, rate: i32);
         fn tr_system_control_channel_count(ctx: Pin<&mut TrContext>, sys_num: i32) -> i32;
         fn tr_system_get_current_control_channel(ctx: Pin<&mut TrContext>, sys_num: i32) -> f64;
-        fn tr_context_fire_setup_config(ctx: Pin<&mut TrContext>);
-        fn tr_context_fire_system_rates(ctx: Pin<&mut TrContext>, time_diff: f32);
+        fn tr_context_fire_trunk_message(ctx: Pin<&mut TrContext>, messages: &[TrTrunkMessage], info: &TrSystemInfo);
+        fn tr_context_fire_setup_config(ctx: Pin<&mut TrContext>, infos: &[TrSystemInfo]);
+        fn tr_context_fire_system_rates(ctx: Pin<&mut TrContext>, infos: &[TrSystemInfo], time_diff: f32);
 
         // ── Conventional call management — recorder status (null-guarded) ──
         fn call_has_recorder(call: &TrCall) -> bool;
@@ -438,7 +440,6 @@ pub mod ffi {
         fn call_get_metadata(call: &TrCall) -> TrCallMetadata;
 
         // ── Phase C: Call Management — recording policy support ──
-        fn tr_context_get_talkgroup_patch(ctx: &TrContext, sys_num: i32, talkgroup: i64) -> Vec<i64>;
         fn tr_context_source_count(ctx: &TrContext) -> i32;
         fn tr_source_covers_freq(ctx: &TrContext, source_idx: i32, freq: f64) -> bool;
         fn tr_source_available_recorders(ctx: &TrContext, source_idx: i32, is_analog: bool) -> i32;
@@ -456,7 +457,6 @@ pub mod ffi {
         fn call_get_transmission_list(call: &TrCall) -> Vec<TrTransmission>;
         fn call_get_dmr_transmission_list(call: &TrCall, slot: i32) -> Vec<TrTransmission>;
         fn call_get_recorder_num(call: &TrCall) -> i32;
-        fn call_get_patched_talkgroups(call: &TrCall) -> Vec<u64>;
 
         // ── Phase C: Call Management — update source tracking ──
         fn call_recorder_set_source(call: Pin<&mut TrCall>, src: i64);
@@ -498,61 +498,26 @@ pub mod ffi {
         fn rust_plugin_call_end(plugin: &mut RustPluginBox, call_data: &TrCallData) -> i32;
         fn rust_plugin_calls_active(plugin: &mut RustPluginBox, infos: &[TrCallInfo]) -> i32;
         fn rust_plugin_setup_recorder(plugin: &mut RustPluginBox, recorder: &TrRecorder) -> i32;
-        fn rust_plugin_setup_system(plugin: &mut RustPluginBox, system: &TrSystem) -> i32;
-        fn rust_plugin_setup_systems(
-            plugin: &mut RustPluginBox,
-            systems: &[*const TrSystem],
-        ) -> i32;
+        fn rust_plugin_setup_system(plugin: &mut RustPluginBox, info: &TrSystemInfo) -> i32;
         fn rust_plugin_setup_sources(plugin: &mut RustPluginBox) -> i32;
         fn rust_plugin_setup_config(
             plugin: &mut RustPluginBox,
-            systems: &[*const TrSystem],
+            infos: &[TrSystemInfo],
         ) -> i32;
         fn rust_plugin_trunk_message(
             plugin: &mut RustPluginBox,
             messages: &[TrTrunkMessage],
-            system: &TrSystem,
+            info: &TrSystemInfo,
         ) -> i32;
         fn rust_plugin_system_rates(
             plugin: &mut RustPluginBox,
-            systems: &[*const TrSystem],
+            infos: &[TrSystemInfo],
             time_diff: f32,
         ) -> i32;
-        fn rust_plugin_unit_registration(
+        fn rust_plugin_unit_event(
             plugin: &mut RustPluginBox,
-            system: &TrSystem,
-            source_id: i64,
-        ) -> i32;
-        fn rust_plugin_unit_deregistration(
-            plugin: &mut RustPluginBox,
-            system: &TrSystem,
-            source_id: i64,
-        ) -> i32;
-        fn rust_plugin_unit_acknowledge_response(
-            plugin: &mut RustPluginBox,
-            system: &TrSystem,
-            source_id: i64,
-        ) -> i32;
-        fn rust_plugin_unit_group_affiliation(
-            plugin: &mut RustPluginBox,
-            system: &TrSystem,
-            source_id: i64,
-            talkgroup: i64,
-        ) -> i32;
-        fn rust_plugin_unit_data_grant(
-            plugin: &mut RustPluginBox,
-            system: &TrSystem,
-            source_id: i64,
-        ) -> i32;
-        fn rust_plugin_unit_answer_request(
-            plugin: &mut RustPluginBox,
-            system: &TrSystem,
-            source_id: i64,
-            talkgroup: i64,
-        ) -> i32;
-        fn rust_plugin_unit_location(
-            plugin: &mut RustPluginBox,
-            system: &TrSystem,
+            info: &TrSystemInfo,
+            event_type: TrUnitEventType,
             source_id: i64,
             talkgroup: i64,
         ) -> i32;
@@ -599,29 +564,18 @@ pub trait RustPluginCallbacks: Send {
     fn call_end(&mut self, call_data: &ffi::TrCallData) -> i32;
     fn calls_active(&mut self, infos: &[ffi::TrCallInfo]) -> i32;
     fn setup_recorder(&mut self, recorder: &ffi::TrRecorder) -> i32;
-    fn setup_system(&mut self, system: &ffi::TrSystem) -> i32;
-    fn setup_systems(&mut self, systems: &[*const ffi::TrSystem]) -> i32;
+    fn setup_system(&mut self, info: &ffi::TrSystemInfo) -> i32;
     fn setup_sources(&mut self) -> i32;
-    fn setup_config(&mut self, systems: &[*const ffi::TrSystem]) -> i32;
-    fn trunk_message(&mut self, messages: &[ffi::TrTrunkMessage], system: &ffi::TrSystem) -> i32;
-    fn system_rates(&mut self, systems: &[*const ffi::TrSystem], time_diff: f32) -> i32;
-    fn unit_registration(&mut self, system: &ffi::TrSystem, source_id: i64) -> i32;
-    fn unit_deregistration(&mut self, system: &ffi::TrSystem, source_id: i64) -> i32;
-    fn unit_acknowledge_response(&mut self, system: &ffi::TrSystem, source_id: i64) -> i32;
-    fn unit_group_affiliation(
+    fn setup_config(&mut self, infos: &[ffi::TrSystemInfo]) -> i32;
+    fn trunk_message(&mut self, messages: &[ffi::TrTrunkMessage], info: &ffi::TrSystemInfo) -> i32;
+    fn system_rates(&mut self, infos: &[ffi::TrSystemInfo], time_diff: f32) -> i32;
+    fn unit_event(
         &mut self,
-        system: &ffi::TrSystem,
+        info: &ffi::TrSystemInfo,
+        event_type: ffi::TrUnitEventType,
         source_id: i64,
         talkgroup: i64,
     ) -> i32;
-    fn unit_data_grant(&mut self, system: &ffi::TrSystem, source_id: i64) -> i32;
-    fn unit_answer_request(
-        &mut self,
-        system: &ffi::TrSystem,
-        source_id: i64,
-        talkgroup: i64,
-    ) -> i32;
-    fn unit_location(&mut self, system: &ffi::TrSystem, source_id: i64, talkgroup: i64) -> i32;
     fn unit_alias_discovered(
         &mut self,
         system: &ffi::TrSystem,
@@ -693,12 +647,8 @@ fn rust_plugin_setup_recorder(plugin: &mut RustPluginBox, recorder: &ffi::TrReco
     plugin.inner.setup_recorder(recorder)
 }
 
-fn rust_plugin_setup_system(plugin: &mut RustPluginBox, system: &ffi::TrSystem) -> i32 {
-    plugin.inner.setup_system(system)
-}
-
-fn rust_plugin_setup_systems(plugin: &mut RustPluginBox, systems: &[*const ffi::TrSystem]) -> i32 {
-    plugin.inner.setup_systems(systems)
+fn rust_plugin_setup_system(plugin: &mut RustPluginBox, info: &ffi::TrSystemInfo) -> i32 {
+    plugin.inner.setup_system(info)
 }
 
 fn rust_plugin_setup_sources(plugin: &mut RustPluginBox) -> i32 {
@@ -707,88 +657,35 @@ fn rust_plugin_setup_sources(plugin: &mut RustPluginBox) -> i32 {
 
 fn rust_plugin_setup_config(
     plugin: &mut RustPluginBox,
-    systems: &[*const ffi::TrSystem],
+    infos: &[ffi::TrSystemInfo],
 ) -> i32 {
-    plugin.inner.setup_config(systems)
+    plugin.inner.setup_config(infos)
 }
 
 fn rust_plugin_trunk_message(
     plugin: &mut RustPluginBox,
     messages: &[ffi::TrTrunkMessage],
-    system: &ffi::TrSystem,
+    info: &ffi::TrSystemInfo,
 ) -> i32 {
-    plugin.inner.trunk_message(messages, system)
+    plugin.inner.trunk_message(messages, info)
 }
 
 fn rust_plugin_system_rates(
     plugin: &mut RustPluginBox,
-    systems: &[*const ffi::TrSystem],
+    infos: &[ffi::TrSystemInfo],
     time_diff: f32,
 ) -> i32 {
-    plugin.inner.system_rates(systems, time_diff)
+    plugin.inner.system_rates(infos, time_diff)
 }
 
-fn rust_plugin_unit_registration(
+fn rust_plugin_unit_event(
     plugin: &mut RustPluginBox,
-    system: &ffi::TrSystem,
-    source_id: i64,
-) -> i32 {
-    plugin.inner.unit_registration(system, source_id)
-}
-
-fn rust_plugin_unit_deregistration(
-    plugin: &mut RustPluginBox,
-    system: &ffi::TrSystem,
-    source_id: i64,
-) -> i32 {
-    plugin.inner.unit_deregistration(system, source_id)
-}
-
-fn rust_plugin_unit_acknowledge_response(
-    plugin: &mut RustPluginBox,
-    system: &ffi::TrSystem,
-    source_id: i64,
-) -> i32 {
-    plugin.inner.unit_acknowledge_response(system, source_id)
-}
-
-fn rust_plugin_unit_group_affiliation(
-    plugin: &mut RustPluginBox,
-    system: &ffi::TrSystem,
+    info: &ffi::TrSystemInfo,
+    event_type: ffi::TrUnitEventType,
     source_id: i64,
     talkgroup: i64,
 ) -> i32 {
-    plugin
-        .inner
-        .unit_group_affiliation(system, source_id, talkgroup)
-}
-
-fn rust_plugin_unit_data_grant(
-    plugin: &mut RustPluginBox,
-    system: &ffi::TrSystem,
-    source_id: i64,
-) -> i32 {
-    plugin.inner.unit_data_grant(system, source_id)
-}
-
-fn rust_plugin_unit_answer_request(
-    plugin: &mut RustPluginBox,
-    system: &ffi::TrSystem,
-    source_id: i64,
-    talkgroup: i64,
-) -> i32 {
-    plugin
-        .inner
-        .unit_answer_request(system, source_id, talkgroup)
-}
-
-fn rust_plugin_unit_location(
-    plugin: &mut RustPluginBox,
-    system: &ffi::TrSystem,
-    source_id: i64,
-    talkgroup: i64,
-) -> i32 {
-    plugin.inner.unit_location(system, source_id, talkgroup)
+    plugin.inner.unit_event(info, event_type, source_id, talkgroup)
 }
 
 fn rust_plugin_unit_alias_discovered(

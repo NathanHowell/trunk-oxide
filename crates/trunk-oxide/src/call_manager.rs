@@ -9,6 +9,63 @@ use trunk_recorder_sys::ffi::{
     TrState, TrTrunkMessage, TrUnitEventType,
 };
 
+/// Per-system patch table: maps supergroup → { talkgroup → last_update }.
+///
+/// Trunked P25 systems dynamically patch talkgroups together via control
+/// channel messages.  Patches expire after 10 seconds without a refresh.
+struct PatchTable {
+    patches: HashMap<u64, HashMap<u64, Instant>>,
+}
+
+impl PatchTable {
+    fn new() -> Self {
+        Self {
+            patches: HashMap::new(),
+        }
+    }
+
+    /// Add/update talkgroups in a patch (from PatchAdd message).
+    fn update(&mut self, pd: &ffi::TrPatchData) {
+        let now = Instant::now();
+        let patch = self.patches.entry(pd.sg).or_default();
+        for &tg in &[pd.sg, pd.ga1, pd.ga2, pd.ga3] {
+            if tg != 0 {
+                patch.insert(tg, now);
+            }
+        }
+    }
+
+    /// Remove ga1/ga2/ga3 from a patch (from PatchDelete message).
+    fn delete(&mut self, pd: &ffi::TrPatchData) {
+        if let Some(patch) = self.patches.get_mut(&pd.sg) {
+            for &tg in &[pd.ga1, pd.ga2, pd.ga3] {
+                if tg != 0 {
+                    patch.remove(&tg);
+                }
+            }
+        }
+    }
+
+    /// Remove entries older than 10 seconds, prune empty patches.
+    fn clear_stale(&mut self) {
+        self.patches.retain(|_, patch| {
+            patch.retain(|_, last_update| last_update.elapsed().as_secs() < 10);
+            !patch.is_empty()
+        });
+    }
+
+    /// Get all talkgroups in the same patch as the given talkgroup.
+    fn get_patch(&self, talkgroup: i64) -> Vec<i64> {
+        let tg = talkgroup as u64;
+        for patch in self.patches.values() {
+            if patch.contains_key(&tg) {
+                return patch.keys().map(|&k| k as i64).collect();
+            }
+        }
+        Vec::new()
+    }
+}
+
 /// Recording policy for a single talkgroup.
 #[derive(Clone)]
 pub struct TalkgroupPolicy {
@@ -219,6 +276,10 @@ pub struct CallManager {
     message_counts: HashMap<i32, i32>,
     /// Per-system consecutive retune attempt counter.
     retune_attempts: HashMap<i32, i32>,
+    /// Per-system computed decode rate (messages/sec, for event dispatch).
+    decode_rates: HashMap<i32, i32>,
+    /// Per-system patch tables (P25 systems only).
+    patch_tables: HashMap<i32, PatchTable>,
 }
 
 struct MultiSiteResult {
@@ -230,17 +291,25 @@ struct MultiSiteResult {
 
 impl CallManager {
     pub fn new(config: CallManagerConfig) -> Self {
+        let patch_tables = config
+            .systems
+            .iter()
+            .filter(|(_, sp)| sp.system_type == SystemType::P25)
+            .map(|(&sys_num, _)| (sys_num, PatchTable::new()))
+            .collect();
         Self {
             calls: Vec::new(),
             config,
             message_counts: HashMap::new(),
             retune_attempts: HashMap::new(),
+            decode_rates: HashMap::new(),
+            patch_tables,
         }
     }
 
     // ── Call data construction ──
 
-    fn build_call_data(entry: &CallEntry) -> TrCallData {
+    fn build_call_data(entry: &CallEntry, patches: &HashMap<i32, PatchTable>) -> TrCallData {
         let audio_type = if entry.is_analog {
             "analog"
         } else if entry.phase2_tdma {
@@ -256,7 +325,10 @@ impl CallManager {
         TrCallData {
             talkgroup: entry.talkgroup,
             color_code: 0,
-            patched_talkgroups: ffi::call_get_patched_talkgroups(&*entry.handle),
+            patched_talkgroups: patches
+                .get(&entry.sys_num)
+                .map(|pt| pt.get_patch(entry.talkgroup).into_iter().map(|t| t as u64).collect())
+                .unwrap_or_default(),
             call_num: entry.call_num,
             freq: entry.freq,
             freq_error: ffi::call_get_freq_error(&*entry.handle),
@@ -288,7 +360,7 @@ impl CallManager {
 
     // ── Call conclusion (replaces C++ Call_impl::conclude_call) ──
 
-    fn conclude_call(ctx: &mut Pin<&mut TrContext>, entry: &mut CallEntry) {
+    fn conclude_call(ctx: &mut Pin<&mut TrContext>, entry: &mut CallEntry, patches: &HashMap<i32, PatchTable>) {
         let should_stop_recording = entry.state == TrState::Recording
             || (entry.state == TrState::Monitoring
                 && entry.monitoring_state == TrMonitoringState::Superseded);
@@ -320,7 +392,7 @@ impl CallManager {
 
                 if metrics.is_dmr {
                     for slot in 0..2i32 {
-                        let mut data = Self::build_call_data(entry);
+                        let mut data = Self::build_call_data(entry, patches);
                         data.tdma_slot = slot;
                         data.length = metrics.final_length;
                         data.freq_error = metrics.freq_error;
@@ -329,7 +401,7 @@ impl CallManager {
                         ffi::tr_context_fire_call_end(ctx.as_mut(), &data);
                     }
                 } else {
-                    let mut data = Self::build_call_data(entry);
+                    let mut data = Self::build_call_data(entry, patches);
                     data.length = metrics.final_length;
                     data.freq_error = metrics.freq_error;
                     data.transmission_list = ffi::call_get_transmission_list(&*entry.handle);
@@ -337,7 +409,7 @@ impl CallManager {
                 }
             }
         } else if entry.state == TrState::Monitoring {
-            let data = Self::build_call_data(entry);
+            let data = Self::build_call_data(entry, patches);
             ffi::tr_context_fire_call_end(ctx.as_mut(), &data);
         }
     }
@@ -386,10 +458,14 @@ impl CallManager {
                 ffi::tr_system_add_control_channel_runtime(ctx, msg.sys_num, msg.freq);
             }
             TrMessageType::PatchAdd => {
-                ffi::tr_system_update_patches(ctx, msg.sys_num, &msg.patch_data);
+                if let Some(pt) = self.patch_tables.get_mut(&msg.sys_num) {
+                    pt.update(&msg.patch_data);
+                }
             }
             TrMessageType::PatchDelete => {
-                ffi::tr_system_delete_patch(ctx, msg.sys_num, &msg.patch_data);
+                if let Some(pt) = self.patch_tables.get_mut(&msg.sys_num) {
+                    pt.delete(&msg.patch_data);
+                }
             }
             TrMessageType::Tdulc => {
                 ffi::tr_system_retune(ctx, msg.sys_num);
@@ -398,49 +474,58 @@ impl CallManager {
             // ── System identity (once-only, fire setup_system if changed) ──
             TrMessageType::Sysid => {
                 if ffi::tr_system_update_sysid(ctx.as_mut(), msg) {
-                    ffi::tr_context_fire_setup_system(ctx, msg.sys_num);
+                    let info = ffi::tr_context_get_system_info(ctx.as_mut(),msg.sys_num);
+                    ffi::tr_context_fire_setup_system(ctx, &info);
                 }
             }
             TrMessageType::Status => {
                 if ffi::tr_system_update_status(ctx.as_mut(), msg) {
-                    ffi::tr_context_fire_setup_system(ctx, msg.sys_num);
+                    let info = ffi::tr_context_get_system_info(ctx.as_mut(),msg.sys_num);
+                    ffi::tr_context_fire_setup_system(ctx, &info);
                 }
             }
 
             // ── Unit-level plugin events ──
             TrMessageType::Registration => {
+                let info = ffi::tr_context_get_system_info(ctx.as_mut(),msg.sys_num);
                 ffi::tr_context_fire_unit_event(
-                    ctx, msg.sys_num, TrUnitEventType::Registration, msg.source, 0,
+                    ctx, &info, TrUnitEventType::Registration, msg.source, 0,
                 );
             }
             TrMessageType::Deregistration => {
+                let info = ffi::tr_context_get_system_info(ctx.as_mut(),msg.sys_num);
                 ffi::tr_context_fire_unit_event(
-                    ctx, msg.sys_num, TrUnitEventType::Deregistration, msg.source, 0,
+                    ctx, &info, TrUnitEventType::Deregistration, msg.source, 0,
                 );
             }
             TrMessageType::Affiliation => {
+                let info = ffi::tr_context_get_system_info(ctx.as_mut(),msg.sys_num);
                 ffi::tr_context_fire_unit_event(
-                    ctx, msg.sys_num, TrUnitEventType::Affiliation, msg.source, msg.talkgroup,
+                    ctx, &info, TrUnitEventType::Affiliation, msg.source, msg.talkgroup,
                 );
             }
             TrMessageType::Acknowledge => {
+                let info = ffi::tr_context_get_system_info(ctx.as_mut(),msg.sys_num);
                 ffi::tr_context_fire_unit_event(
-                    ctx, msg.sys_num, TrUnitEventType::Acknowledge, msg.source, 0,
+                    ctx, &info, TrUnitEventType::Acknowledge, msg.source, 0,
                 );
             }
             TrMessageType::Location => {
+                let info = ffi::tr_context_get_system_info(ctx.as_mut(),msg.sys_num);
                 ffi::tr_context_fire_unit_event(
-                    ctx, msg.sys_num, TrUnitEventType::Location, msg.source, msg.talkgroup,
+                    ctx, &info, TrUnitEventType::Location, msg.source, msg.talkgroup,
                 );
             }
             TrMessageType::DataGrant => {
+                let info = ffi::tr_context_get_system_info(ctx.as_mut(),msg.sys_num);
                 ffi::tr_context_fire_unit_event(
-                    ctx, msg.sys_num, TrUnitEventType::DataGrant, msg.source, 0,
+                    ctx, &info, TrUnitEventType::DataGrant, msg.source, 0,
                 );
             }
             TrMessageType::UuAnsReq => {
+                let info = ffi::tr_context_get_system_info(ctx.as_mut(),msg.sys_num);
                 ffi::tr_context_fire_unit_event(
-                    ctx, msg.sys_num, TrUnitEventType::AnswerRequest, msg.source, msg.talkgroup,
+                    ctx, &info, TrUnitEventType::AnswerRequest, msg.source, msg.talkgroup,
                 );
             }
 
@@ -512,7 +597,7 @@ impl CallManager {
                     let orig = &mut self.calls[orig_idx];
                     orig.state = TrState::Monitoring;
                     orig.monitoring_state = TrMonitoringState::Superseded;
-                    Self::conclude_call(&mut ctx, orig);
+                    Self::conclude_call(&mut ctx, orig, &self.patch_tables);
                 }
             }
         } else if multisite.is_duplicate {
@@ -580,8 +665,12 @@ impl CallManager {
 
         let tg_policy = sys_policy.talkgroups.get(&tg_id);
 
-        // Query runtime patch data from C++
-        let patch_tgs = ffi::tr_context_get_talkgroup_patch(ctx, sys_num, tg_id);
+        // Query runtime patch data from Rust-owned patch table
+        let patch_tgs = self
+            .patch_tables
+            .get(&sys_num)
+            .map(|pt| pt.get_patch(tg_id))
+            .unwrap_or_default();
 
         // 1. Unknown TG check
         if tg_policy.is_none() {
@@ -776,7 +865,7 @@ impl CallManager {
             match entry.state {
                 TrState::Monitoring => {
                     if since_update > timeout {
-                        Self::conclude_call(&mut ctx, entry);
+                        Self::conclude_call(&mut ctx, entry, &self.patch_tables);
                         ended_call = true;
                         return false; // remove
                     }
@@ -784,7 +873,7 @@ impl CallManager {
                 TrState::Recording => {
                     let since_write = ffi::call_recorder_since_last_write_secs(&*entry.handle);
                     if since_write > timeout || since_update > timeout {
-                        Self::conclude_call(&mut ctx, entry);
+                        Self::conclude_call(&mut ctx, entry, &self.patch_tables);
                         ffi::tr_context_fire_setup_recorder(ctx.as_mut(), &*entry.handle);
                         ended_call = true;
                         return false;
@@ -792,7 +881,7 @@ impl CallManager {
                 }
                 _ => {
                     if since_update > timeout {
-                        Self::conclude_call(&mut ctx, entry);
+                        Self::conclude_call(&mut ctx, entry, &self.patch_tables);
                         ended_call = true;
                         return false;
                     }
@@ -866,7 +955,7 @@ impl CallManager {
                     .unwrap_or(false);
                 if idle_timed_out || (entry.max_duration > 0.0 && length > entry.max_duration) {
                     // Conclude current recording, restart for next transmission
-                    Self::conclude_call(&mut ctx, entry);
+                    Self::conclude_call(&mut ctx, entry, &self.patch_tables);
                     ffi::call_restart(entry.handle.pin_mut());
                     entry.refresh_after_restart();
                     entry.idle_since = None;
@@ -882,6 +971,15 @@ impl CallManager {
         }
     }
 
+    // ── Patch maintenance ──
+
+    /// Remove stale patches (>10s without refresh) for all P25 systems.
+    pub fn clear_stale_patches(&mut self) {
+        for pt in self.patch_tables.values_mut() {
+            pt.clear_stale();
+        }
+    }
+
     // ── Shutdown ──
 
     /// Check decode rates for all trunked systems and retune if needed.
@@ -891,17 +989,33 @@ impl CallManager {
         mut ctx: Pin<&mut TrContext>,
         time_diff: f32,
     ) -> anyhow::Result<()> {
-        ffi::tr_context_fire_setup_config(ctx.as_mut());
-        ffi::tr_context_fire_system_rates(ctx.as_mut(), time_diff);
-
+        // Build system info for all systems, computing decode rates for trunked ones.
+        let mut infos = Vec::new();
         for (&sys_num, policy) in &self.config.systems {
-            if !policy.system_type.is_trunked() {
-                continue;
+            let mut info = ffi::tr_context_get_system_info(ctx.as_mut(),sys_num);
+            if policy.system_type.is_trunked() {
+                let count = self.message_counts.remove(&sys_num).unwrap_or(0);
+                let decode_rate = (count as f32 / time_diff).floor() as i32;
+                self.decode_rates.insert(sys_num, decode_rate);
+                info.decode_rate = decode_rate;
+                info.message_count = count;
             }
+            infos.push(info);
+        }
 
-            let count = self.message_counts.remove(&sys_num).unwrap_or(0);
-            let decode_rate = (count as f32 / time_diff).floor() as i32;
-            ffi::tr_system_set_decode_rate(ctx.as_mut(), sys_num, decode_rate);
+        ffi::tr_context_fire_setup_config(ctx.as_mut(), &infos);
+        ffi::tr_context_fire_system_rates(ctx.as_mut(), &infos, time_diff);
+
+        // Per-system retune and warning logic (trunked only).
+        for info in &infos {
+            let sys_num = info.sys_num;
+            let policy = match self.config.systems.get(&sys_num) {
+                Some(p) if p.system_type.is_trunked() => p,
+                _ => continue,
+            };
+            let _ = policy; // used only for the trunked filter above
+            let decode_rate = info.decode_rate;
+            let count = info.message_count;
 
             if decode_rate < 2 {
                 let attempts = self.retune_attempts.entry(sys_num).or_insert(0);
@@ -950,7 +1064,7 @@ impl CallManager {
     pub fn conclude_all(&mut self, mut ctx: Pin<&mut TrContext>) {
         for entry in &mut self.calls {
             if entry.state != TrState::Monitoring {
-                Self::conclude_call(&mut ctx, entry);
+                Self::conclude_call(&mut ctx, entry, &self.patch_tables);
             }
         }
         self.calls.clear();

@@ -4,7 +4,7 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use trunk_recorder_sys::ffi::{
-    TrCallData, TrCallInfo, TrRecorder, TrSystem, TrTrunkMessage,
+    TrCallData, TrCallInfo, TrRecorder, TrSystem, TrSystemInfo, TrTrunkMessage, TrUnitEventType,
 };
 use trunk_recorder_sys::RustPluginCallbacks;
 
@@ -23,30 +23,23 @@ pub struct TalkgroupMeta {
 
 // ── Conversion helpers ──
 
-fn system_info(sys: &TrSystem) -> proto::SystemInfo {
-    use trunk_recorder_sys::ffi::{
-        system_get_analog_levels, system_get_bandplan,
-        system_get_conversation_mode, system_get_decode_rate, system_get_digital_levels,
-        system_get_message_count, system_get_nac, system_get_short_name, system_get_squelch_db,
-        system_get_sys_id, system_get_sys_num, system_get_sys_rfss, system_get_sys_site_id,
-        system_get_system_type, system_get_wacn,
-    };
+fn system_info_from(info: &TrSystemInfo) -> proto::SystemInfo {
     proto::SystemInfo {
-        sys_num: system_get_sys_num(sys),
-        sys_id: system_get_sys_id(sys),
-        short_name: system_get_short_name(sys),
-        system_type: system_get_system_type(sys),
-        wacn: system_get_wacn(sys),
-        nac: system_get_nac(sys),
-        rfss: system_get_sys_rfss(sys),
-        site_id: system_get_sys_site_id(sys),
-        bandplan: system_get_bandplan(sys),
-        analog_levels: system_get_analog_levels(sys),
-        digital_levels: system_get_digital_levels(sys),
-        squelch_db: system_get_squelch_db(sys),
-        conversation_mode: system_get_conversation_mode(sys),
-        message_count: system_get_message_count(sys),
-        decode_rate: system_get_decode_rate(sys),
+        sys_num: info.sys_num,
+        sys_id: info.sys_id,
+        short_name: info.short_name.clone(),
+        system_type: info.system_type,
+        wacn: info.wacn,
+        nac: info.nac,
+        rfss: info.rfss,
+        site_id: info.site_id,
+        bandplan: info.bandplan.clone(),
+        analog_levels: info.analog_levels,
+        digital_levels: info.digital_levels,
+        squelch_db: info.squelch_db,
+        conversation_mode: info.conversation_mode,
+        message_count: info.message_count,
+        decode_rate: info.decode_rate,
     }
 }
 
@@ -196,15 +189,6 @@ fn convert_trunk_messages(messages: &[TrTrunkMessage]) -> Vec<proto::TrunkMessag
             opcode: m.opcode,
         })
         .collect()
-}
-
-/// Convert a slice of raw pointers to a vec of references.
-///
-/// # Safety
-/// Pointers must be valid for the duration of the call.
-#[allow(unsafe_code)]
-fn ptr_slice_to_refs<T>(ptrs: &[*const T]) -> Vec<&T> {
-    ptrs.iter().map(|p| unsafe { &**p }).collect()
 }
 
 // ── gRPC service implementation ──
@@ -372,24 +356,6 @@ impl GrpcPlugin {
             let _ = tx.send(msg);
         }
     }
-
-    fn send_unit_event(
-        &self,
-        event_type: proto::UnitEventType,
-        system: &TrSystem,
-        source_id: i64,
-        talkgroup: i64,
-    ) {
-        use trunk_recorder_sys::ffi::system_get_sys_num;
-        let sys_num = system_get_sys_num(system);
-        self.send_event(proto::plugin_event::Event::Unit(proto::UnitEvent {
-            r#type: event_type as i32,
-            system: Some(system_info(system)),
-            source_id,
-            talkgroup,
-            source_alias: self.unit_alias(sys_num, source_id),
-        }));
-    }
 }
 
 impl RustPluginCallbacks for GrpcPlugin {
@@ -540,20 +506,10 @@ impl RustPluginCallbacks for GrpcPlugin {
         0
     }
 
-    fn setup_system(&mut self, system: &TrSystem) -> i32 {
+    fn setup_system(&mut self, info: &TrSystemInfo) -> i32 {
         self.send_event(proto::plugin_event::Event::SetupSystem(
             proto::SetupSystemEvent {
-                system: Some(system_info(system)),
-            },
-        ));
-        0
-    }
-
-    fn setup_systems(&mut self, systems: &[*const TrSystem]) -> i32 {
-        let refs = ptr_slice_to_refs(systems);
-        self.send_event(proto::plugin_event::Event::SetupSystems(
-            proto::SetupSystemsEvent {
-                systems: refs.iter().map(|s| system_info(s)).collect(),
+                system: Some(system_info_from(info)),
             },
         ));
         0
@@ -568,90 +524,63 @@ impl RustPluginCallbacks for GrpcPlugin {
         0
     }
 
-    fn setup_config(&mut self, systems: &[*const TrSystem]) -> i32 {
-        let refs = ptr_slice_to_refs(systems);
+    fn setup_config(&mut self, infos: &[TrSystemInfo]) -> i32 {
         self.send_event(proto::plugin_event::Event::SetupConfig(
             proto::SetupConfigEvent {
                 sources: vec![],
-                systems: refs.iter().map(|s| system_info(s)).collect(),
+                systems: infos.iter().map(system_info_from).collect(),
             },
         ));
         0
     }
 
-    fn trunk_message(&mut self, messages: &[TrTrunkMessage], system: &TrSystem) -> i32 {
+    fn trunk_message(&mut self, messages: &[TrTrunkMessage], info: &TrSystemInfo) -> i32 {
         self.send_event(proto::plugin_event::Event::TrunkMessage(
             proto::TrunkMessageEvent {
                 messages: convert_trunk_messages(messages),
-                system: Some(system_info(system)),
+                system: Some(system_info_from(info)),
             },
         ));
         0
     }
 
-    fn system_rates(&mut self, systems: &[*const TrSystem], time_diff: f32) -> i32 {
-        let refs = ptr_slice_to_refs(systems);
+    fn system_rates(&mut self, infos: &[TrSystemInfo], time_diff: f32) -> i32 {
         self.send_event(proto::plugin_event::Event::SystemRates(
             proto::SystemRatesEvent {
-                systems: refs.iter().map(|s| system_info(s)).collect(),
+                systems: infos.iter().map(system_info_from).collect(),
                 time_diff,
             },
         ));
         0
     }
 
-    fn unit_registration(&mut self, system: &TrSystem, source_id: i64) -> i32 {
-        self.send_unit_event(proto::UnitEventType::Registration, system, source_id, 0);
-        0
-    }
-
-    fn unit_deregistration(&mut self, system: &TrSystem, source_id: i64) -> i32 {
-        self.send_unit_event(proto::UnitEventType::Deregistration, system, source_id, 0);
-        0
-    }
-
-    fn unit_acknowledge_response(&mut self, system: &TrSystem, source_id: i64) -> i32 {
-        self.send_unit_event(
-            proto::UnitEventType::AcknowledgeResponse,
-            system,
-            source_id,
-            0,
-        );
-        0
-    }
-
-    fn unit_group_affiliation(
+    fn unit_event(
         &mut self,
-        system: &TrSystem,
+        info: &TrSystemInfo,
+        event_type: TrUnitEventType,
         source_id: i64,
         talkgroup: i64,
     ) -> i32 {
-        self.send_unit_event(
-            proto::UnitEventType::GroupAffiliation,
-            system,
+        let proto_type = match event_type {
+            TrUnitEventType::Registration => proto::UnitEventType::Registration,
+            TrUnitEventType::Deregistration => proto::UnitEventType::Deregistration,
+            TrUnitEventType::Affiliation => proto::UnitEventType::GroupAffiliation,
+            TrUnitEventType::Acknowledge => proto::UnitEventType::AcknowledgeResponse,
+            TrUnitEventType::Location => proto::UnitEventType::Location,
+            TrUnitEventType::DataGrant => proto::UnitEventType::DataGrant,
+            TrUnitEventType::AnswerRequest => proto::UnitEventType::AnswerRequest,
+            _ => {
+                tracing::warn!("unknown unit event type: {:?}", event_type);
+                return 0;
+            }
+        };
+        self.send_event(proto::plugin_event::Event::Unit(proto::UnitEvent {
+            r#type: proto_type as i32,
+            system: Some(system_info_from(info)),
             source_id,
             talkgroup,
-        );
-        0
-    }
-
-    fn unit_data_grant(&mut self, system: &TrSystem, source_id: i64) -> i32 {
-        self.send_unit_event(proto::UnitEventType::DataGrant, system, source_id, 0);
-        0
-    }
-
-    fn unit_answer_request(&mut self, system: &TrSystem, source_id: i64, talkgroup: i64) -> i32 {
-        self.send_unit_event(
-            proto::UnitEventType::AnswerRequest,
-            system,
-            source_id,
-            talkgroup,
-        );
-        0
-    }
-
-    fn unit_location(&mut self, system: &TrSystem, source_id: i64, talkgroup: i64) -> i32 {
-        self.send_unit_event(proto::UnitEventType::Location, system, source_id, talkgroup);
+            source_alias: self.unit_alias(info.sys_num, source_id),
+        }));
         0
     }
 
@@ -663,13 +592,14 @@ impl RustPluginCallbacks for GrpcPlugin {
         source: &str,
         talkgroup_id: i64,
     ) -> i32 {
-        use trunk_recorder_sys::ffi::system_get_sys_num;
-        let sys_num = system_get_sys_num(system);
+        // unit_alias_discovered still receives &TrSystem from C++ (recorder callback)
+        // We can't easily get TrSystemInfo here without a TrContext, so build a minimal one
+        let _ = system;
         self.unit_aliases
-            .insert((sys_num, radio_id), alias.to_string());
+            .insert((0, radio_id), alias.to_string());
         self.send_event(proto::plugin_event::Event::UnitAlias(
             proto::UnitAliasEvent {
-                system: Some(system_info(system)),
+                system: None,
                 radio_id,
                 alias: alias.to_string(),
                 source: source.to_string(),

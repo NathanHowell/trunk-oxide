@@ -29,6 +29,10 @@ fn main() -> Result<()> {
             .map_err(|e| anyhow::anyhow!(e))?,
     );
 
+    let otel_resource = opentelemetry_sdk::Resource::builder_empty()
+        .with_service_name("trunk-oxide")
+        .build();
+
     let otel_provider = if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
         let exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_http()
@@ -36,14 +40,29 @@ fn main() -> Result<()> {
 
         let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
             .with_batch_exporter(exporter)
-            .with_resource(
-                opentelemetry_sdk::Resource::builder_empty()
-                    .with_service_name("trunk-oxide")
-                    .build(),
-            )
+            .with_resource(otel_resource.clone())
             .build();
 
         opentelemetry::global::set_tracer_provider(provider.clone());
+        Some(provider)
+    } else {
+        None
+    };
+
+    let meter_provider = if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
+        let exporter = opentelemetry_otlp::MetricExporter::builder()
+            .with_http()
+            .build()?;
+
+        let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(exporter)
+            .build();
+
+        let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+            .with_reader(reader)
+            .with_resource(otel_resource)
+            .build();
+
+        opentelemetry::global::set_meter_provider(provider.clone());
         Some(provider)
     } else {
         None
@@ -103,6 +122,19 @@ fn main() -> Result<()> {
         .context("failed to initialize trunk-recorder")?
         .start();
 
+    // Register observable gauge for event channel depth
+    if meter_provider.is_some() {
+        let depth = recorder.event_channel_depth();
+        let meter = opentelemetry::global::meter("trunk-oxide");
+        let _gauge = meter
+            .u64_observable_gauge("trunk.event_channel.depth")
+            .with_description("Number of GR events queued but not yet consumed")
+            .with_callback(move |observer| {
+                observer.observe(depth.load(Ordering::Relaxed) as u64, &[]);
+            })
+            .build();
+    }
+
     tracing::info!("trunk-recorder engine running, press Ctrl+C to stop");
 
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -125,6 +157,9 @@ fn main() -> Result<()> {
     shutdown.store(true, Ordering::Relaxed);
     monitor_handle.join().unwrap()?;
 
+    if let Some(provider) = meter_provider {
+        let _ = provider.shutdown();
+    }
     if let Some(provider) = otel_provider {
         let _ = provider.shutdown();
     }

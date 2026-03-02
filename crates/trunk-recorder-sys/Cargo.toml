@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 cxx.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 
 [build-dependencies]
 cxx-build.workspace = true

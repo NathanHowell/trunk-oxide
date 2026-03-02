@@ -8,10 +8,11 @@
 
 mod call_manager;
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+
+use trunk_recorder_sys::{EventNotifier, GrEvent};
 
 pub use call_manager::{CallManagerConfig, SystemPolicy, TalkgroupPolicy};
 use call_manager::CallManager;
@@ -45,6 +46,8 @@ pub struct TrunkRecorder {
     ctx: cxx::UniquePtr<ffi::TrContext>,
     call_mgr_config: CallManagerConfig,
     handler: Handler,
+    event_rx: tokio::sync::mpsc::Receiver<GrEvent>,
+    pending: Arc<AtomicUsize>,
 }
 
 // Safety: TrContext is used exclusively from a single thread (the monitor thread).
@@ -346,21 +349,43 @@ impl TrunkRecorderBuilder {
     /// After calling this, use [`TrunkRecorder::run_monitor`] on a dedicated
     /// thread to drive the main loop from Rust.
     pub fn start(mut self) -> TrunkRecorder {
+        // Create the event channel and wire notifiers before starting GR
+        let pending = Arc::new(AtomicUsize::new(0));
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(256);
+        let notifier = EventNotifier::new(event_tx, Arc::clone(&pending));
+        ffi::tr_context_set_event_notifier(self.ctx.pin_mut(), Box::new(notifier));
+        ffi::tr_context_wire_event_notifiers(self.ctx.pin_mut());
+
         ffi::tr_start_gnuradio(self.ctx.pin_mut());
         TrunkRecorder {
             ctx: self.ctx,
             call_mgr_config: self.call_mgr_config,
             handler: self.handler,
+            event_rx,
+            pending,
         }
     }
 }
 
 impl TrunkRecorder {
+    /// Shared counter of events queued but not yet consumed by the monitor loop.
+    pub fn event_channel_depth(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.pending)
+    }
+
     /// Run the monitor loop on the current thread until `shutdown` is set.
     ///
-    /// This replaces the C++ `monitor_messages` function. Fatal errors from
-    /// decode-rate or source checks propagate as `Err`.
+    /// Uses a single-threaded tokio runtime so `TrContext` (C++ objects) stays
+    /// pinned to this thread. GR blocks push events through the mpsc channel;
+    /// periodic work runs on `tokio::time::interval` timers.
     pub fn run_monitor(&mut self, shutdown: &AtomicBool) -> anyhow::Result<()> {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()?;
+        rt.block_on(self.monitor_loop(shutdown))
+    }
+
+    async fn monitor_loop(&mut self, shutdown: &AtomicBool) -> anyhow::Result<()> {
         let mut call_mgr = CallManager::new(self.call_mgr_config.clone(), self.handler.clone());
 
         // Drain conventional calls created by C++ setup_systems during tr_finalize
@@ -372,70 +397,76 @@ impl TrunkRecorder {
             call_mgr.add_call(call);
         }
 
-        let mut last_tick = Instant::now();
-        let mut last_decode_check = Instant::now();
-        let mut last_conv_check = Instant::now();
-        let mut last_status = Instant::now();
+        let mut tick = tokio::time::interval(Duration::from_secs(1));
+        let mut decode = tokio::time::interval(Duration::from_secs(3));
+        let mut status = tokio::time::interval(Duration::from_secs(200));
+
+        // First ticks fire immediately — consume them so the first real tick
+        // happens after the interval elapses.
+        tick.tick().await;
+        decode.tick().await;
+        status.tick().await;
 
         loop {
             if shutdown.load(Ordering::Relaxed) {
                 tracing::info!("shutting down");
                 call_mgr.conclude_all(self.ctx.pin_mut());
                 lock_handler(&self.handler).stop();
-                thread::sleep(Duration::from_secs(5));
+                tokio::time::sleep(Duration::from_secs(5)).await;
                 return Ok(());
             }
 
+            tokio::select! {
+                Some(event) = self.event_rx.recv() => {
+                    self.pending.fetch_sub(1, Ordering::Relaxed);
+                    match event {
+                        GrEvent::TrunkMessages(messages) => {
+                            if !messages.is_empty() {
+                                let mut by_system: HashMap<i32, Vec<usize>> = HashMap::new();
+                                for (i, msg) in messages.iter().enumerate() {
+                                    by_system.entry(msg.sys_num).or_default().push(i);
+                                }
+                                for (&sys_num, indices) in &by_system {
+                                    let sys_msgs: Vec<ffi::TrTrunkMessage> =
+                                        indices.iter().map(|&i| messages[i].clone()).collect();
+                                    let info =
+                                        call_mgr.get_system_info(self.ctx.pin_mut(), sys_num);
+                                    lock_handler(&self.handler).trunk_message(&sys_msgs, &info);
+                                }
+                            }
+                            for msg in &messages {
+                                call_mgr.handle_message(self.ctx.pin_mut(), msg);
+                            }
+                        }
+                        GrEvent::Squelch {
+                            recorder_num,
+                            muted,
+                            pwr_db,
+                        } => {
+                            call_mgr.handle_squelch_event(recorder_num, muted, pwr_db);
+                        }
+                        GrEvent::SignalDetected => {
+                            ffi::tr_context_check_conventional_detection(self.ctx.pin_mut());
+                        }
+                    }
+                },
+                _ = tick.tick() => {
+                    call_mgr.tick(self.ctx.pin_mut());
+                },
+                _ = decode.tick() => {
+                    let time_diff = decode.period().as_secs_f32();
+                    call_mgr.check_decode_rates(self.ctx.pin_mut(), time_diff)?;
+                    ffi::tr_context_check_sources(self.ctx.pin_mut())?;
+                    call_mgr.clear_stale_patches();
+                },
+                _ = status.tick() => {
+                    let ptrs = call_mgr.call_ptrs();
+                    ffi::tr_context_print_status(self.ctx.pin_mut(), &ptrs);
+                },
+            }
+
+            // Cheap sync work after every wake
             call_mgr.process_recorder_queues();
-
-            let messages = ffi::tr_context_drain_messages(self.ctx.pin_mut());
-
-            // Fire trunk_message events grouped by system
-            if !messages.is_empty() {
-                let mut by_system: HashMap<i32, Vec<usize>> = HashMap::new();
-                for (i, msg) in messages.iter().enumerate() {
-                    by_system.entry(msg.sys_num).or_default().push(i);
-                }
-                for (&sys_num, indices) in &by_system {
-                    let sys_msgs: Vec<ffi::TrTrunkMessage> =
-                        indices.iter().map(|&i| messages[i].clone()).collect();
-                    let info = call_mgr.get_system_info(self.ctx.pin_mut(), sys_num);
-                    lock_handler(&self.handler).trunk_message(&sys_msgs, &info);
-                }
-            }
-
-            for msg in &messages {
-                call_mgr.handle_message(self.ctx.pin_mut(), msg);
-            }
-
-            let now = Instant::now();
-
-            if now - last_conv_check >= Duration::from_millis(100) {
-                ffi::tr_context_check_conventional_detection(self.ctx.pin_mut());
-                last_conv_check = now;
-            }
-
-            if now - last_tick >= Duration::from_secs(1) {
-                call_mgr.tick(self.ctx.pin_mut());
-                last_tick = now;
-            }
-
-            thread::sleep(Duration::from_millis(10));
-
-            let decode_elapsed = now - last_decode_check;
-            if decode_elapsed >= Duration::from_secs(3) {
-                let time_diff = decode_elapsed.as_secs_f32();
-                call_mgr.check_decode_rates(self.ctx.pin_mut(), time_diff)?;
-                ffi::tr_context_check_sources(self.ctx.pin_mut())?;
-                last_decode_check = Instant::now();
-                call_mgr.clear_stale_patches();
-            }
-
-            if now - last_status > Duration::from_secs(200) {
-                last_status = now;
-                let ptrs = call_mgr.call_ptrs();
-                ffi::tr_context_print_status(self.ctx.pin_mut(), &ptrs);
-            }
         }
     }
 }

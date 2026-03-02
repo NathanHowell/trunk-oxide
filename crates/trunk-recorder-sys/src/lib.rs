@@ -1,5 +1,6 @@
 #![allow(unsafe_code)]
 
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 #[cxx::bridge(namespace = "trunk_oxide")]
@@ -245,12 +246,7 @@ pub mod ffi {
         pub squelch_db: f64,
     }
 
-    #[derive(Debug, Clone)]
-    struct TrSquelchEvent {
-        pub call_num: i64,
-        pub muted: bool,   // true = squelch closed (idle), false = squelch open (active)
-        pub pwr_db: f64,   // power at transition time
-    }
+
 
     #[derive(Debug, Clone)]
     struct TrStopRecordingResult {
@@ -358,7 +354,6 @@ pub mod ffi {
         fn tr_stop_gnuradio(ctx: Pin<&mut TrContext>);
 
         // ── Phase B: Message Draining ──
-        fn tr_context_drain_messages(ctx: Pin<&mut TrContext>) -> Vec<TrTrunkMessage>;
         fn tr_context_check_conventional_detection(ctx: Pin<&mut TrContext>);
         fn tr_context_check_sources(ctx: Pin<&mut TrContext>) -> Result<()>;
         fn tr_context_print_status(ctx: Pin<&mut TrContext>, calls: &[*const TrCall]);
@@ -379,9 +374,6 @@ pub mod ffi {
         // ── Conventional call management — lifecycle ──
         fn call_restart(call: Pin<&mut TrCall>);
         fn call_start_initial_recording(call: Pin<&mut TrCall>);
-
-        // ── Conventional call management — squelch event drain ──
-        fn call_drain_squelch_events(call: &TrCall) -> Vec<TrSquelchEvent>;
 
         // ── Conventional call management — context-level ──
         fn tr_context_take_next_conventional_call(ctx: Pin<&mut TrContext>) -> UniquePtr<TrCall>;
@@ -417,6 +409,10 @@ pub mod ffi {
         fn call_notify_setup_recorder(ctx: Pin<&mut TrContext>, call: &TrCall);
 
         fn tr_recorder_process_queue(rec: &TrRecorder);
+
+        // ── Event channel wiring ──
+        fn tr_context_set_event_notifier(ctx: Pin<&mut TrContext>, notifier: Box<EventNotifier>);
+        fn tr_context_wire_event_notifiers(ctx: Pin<&mut TrContext>);
     }
 
     // ── Rust functions callable from C++ (event handler callbacks) ──
@@ -442,6 +438,93 @@ pub mod ffi {
             source: &str,
             talkgroup_id: i64,
         );
+    }
+
+    // ── Rust event notifier callable from C++ (GR thread → channel) ──
+
+    extern "Rust" {
+        type EventNotifier;
+
+        fn event_notifier_clone(notifier: &EventNotifier) -> Box<EventNotifier>;
+        fn event_notifier_notify_trunk_messages(
+            notifier: &EventNotifier,
+            messages: Vec<TrTrunkMessage>,
+        );
+        fn event_notifier_notify_squelch(
+            notifier: &EventNotifier,
+            rec: i32,
+            muted: bool,
+            pwr: f64,
+        );
+        fn event_notifier_notify_signal_detected(notifier: &EventNotifier);
+    }
+}
+
+// ── GR event channel types ──
+
+/// Events sent from GNU Radio scheduler threads to the monitor loop via channel.
+pub enum GrEvent {
+    /// Parsed trunk messages from a system's msg_queue (already drained+parsed on GR thread).
+    TrunkMessages(Vec<ffi::TrTrunkMessage>),
+    /// Squelch state change from a recorder's squelch block.
+    Squelch {
+        recorder_num: i32,
+        muted: bool,
+        pwr_db: f64,
+    },
+    /// Signal detected on a conventional source.
+    SignalDetected,
+}
+
+/// Opaque notifier that wraps a cloned `tokio::sync::mpsc::Sender<GrEvent>`.
+/// Each GR block owns one (cloned from a prototype via `event_notifier_clone`).
+pub struct EventNotifier(
+    tokio::sync::mpsc::Sender<GrEvent>,
+    Arc<AtomicUsize>,
+);
+
+impl EventNotifier {
+    pub fn new(sender: tokio::sync::mpsc::Sender<GrEvent>, pending: Arc<AtomicUsize>) -> Self {
+        Self(sender, pending)
+    }
+}
+
+fn event_notifier_clone(notifier: &EventNotifier) -> Box<EventNotifier> {
+    Box::new(EventNotifier(notifier.0.clone(), Arc::clone(&notifier.1)))
+}
+
+fn event_notifier_notify_trunk_messages(
+    notifier: &EventNotifier,
+    messages: Vec<ffi::TrTrunkMessage>,
+) {
+    if !messages.is_empty() {
+        if notifier.0.try_send(GrEvent::TrunkMessages(messages)).is_ok() {
+            notifier.1.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+}
+
+fn event_notifier_notify_squelch(notifier: &EventNotifier, rec: i32, muted: bool, pwr: f64) {
+    if notifier
+        .0
+        .try_send(GrEvent::Squelch {
+            recorder_num: rec,
+            muted,
+            pwr_db: pwr,
+        })
+        .is_ok()
+    {
+        notifier.1.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn event_notifier_notify_signal_detected(notifier: &EventNotifier) {
+    if notifier
+        .0
+        .try_send(GrEvent::SignalDetected)
+        .is_ok()
+    {
+        notifier.1.fetch_add(1, Ordering::Relaxed);
     }
 }
 

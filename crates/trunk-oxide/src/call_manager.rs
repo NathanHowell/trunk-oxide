@@ -1030,6 +1030,35 @@ impl CallManager {
         self.calls.iter().map(|e| &*e.handle as *const TrCall).collect()
     }
 
+    /// Handle a squelch event pushed from a GR block via the event channel.
+    /// Finds the conventional call entry whose recorder matches `recorder_num`
+    /// and updates its idle tracking state.
+    pub fn handle_squelch_event(&mut self, recorder_num: i32, muted: bool, pwr_db: f64) {
+        for entry in &mut self.calls {
+            if !entry.is_conventional {
+                continue;
+            }
+            if !ffi::call_has_recorder(&*entry.handle) {
+                continue;
+            }
+            if ffi::call_get_recorder_num(&*entry.handle) != recorder_num {
+                continue;
+            }
+            if muted {
+                // Squelch closed — signal went away
+                entry.noise = pwr_db;
+                if entry.idle_since.is_none() {
+                    entry.idle_since = Some(Instant::now());
+                }
+            } else {
+                // Squelch opened — signal detected
+                entry.signal = pwr_db;
+                entry.idle_since = None;
+            }
+            return;
+        }
+    }
+
     /// Manage conventional call idle detection via squelch events, conclude+restart, and initial recording.
     fn tick_conventional(&mut self, mut ctx: Pin<&mut TrContext>) {
         for entry in &mut self.calls {
@@ -1038,22 +1067,6 @@ impl CallManager {
             }
             if !ffi::call_has_recorder(&*entry.handle) {
                 continue;
-            }
-
-            // Drain squelch events that accumulated since last tick
-            let events = ffi::call_drain_squelch_events(&*entry.handle);
-            for ev in &events {
-                if ev.muted {
-                    // Squelch closed — signal went away
-                    entry.noise = ev.pwr_db;
-                    if entry.idle_since.is_none() {
-                        entry.idle_since = Some(Instant::now());
-                    }
-                } else {
-                    // Squelch opened — signal detected
-                    entry.signal = ev.pwr_db;
-                    entry.idle_since = None;
-                }
             }
 
             let length = ffi::call_get_current_length(&*entry.handle);

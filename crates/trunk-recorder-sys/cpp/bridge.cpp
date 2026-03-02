@@ -78,9 +78,17 @@ static TrMonitoringState convert_monitoring_state(MonitoringState ms) {
     }
 }
 
+// ── EventBridge implementation ──
+
+EventBridge::EventBridge(rust::Box<EventNotifier> n) : prototype_(std::move(n)) {}
+
+rust::Box<EventNotifier> EventBridge::make_notifier() const {
+    return event_notifier_clone(*prototype_);
+}
+
 // ── Struct conversion helpers ──
 
-static TrTrunkMessage convert_trunk_message(const TrunkMessage &msg) {
+TrTrunkMessage convert_trunk_message(const TrunkMessage &msg) {
     TrTrunkMessage out;
     out.message_type = convert_message_type(msg.message_type);
     out.meta = rust::String(msg.meta);
@@ -206,10 +214,8 @@ struct TrContextImpl {
     rust::Box<EventHandlerBox> handler;  // destroyed LAST (declared first)
     TrunkContext trunk_ctx;              // destroyed FIRST
 
-    // Parsers — created eagerly during tr_finalize
-    std::map<int, std::unique_ptr<SmartnetParser>> smartnet_parsers;
-    std::unique_ptr<P25Parser> p25_parser;
-    std::map<int, P25ParserConfig> p25_parser_configs;
+    // Event bridge for GR thread → Rust channel notifications
+    std::shared_ptr<EventBridge> event_bridge;
 
     explicit TrContextImpl(rust::Box<EventHandlerBox> h)
         : handler(std::move(h)) {}
@@ -250,33 +256,6 @@ void tr_finalize(TrContext &ctx) {
     setup_systems(ctx.impl->trunk_ctx.config, ctx.impl->trunk_ctx.tb,
                   ctx.impl->trunk_ctx.sources, ctx.impl->trunk_ctx.systems,
                   ctx.impl->trunk_ctx.calls);
-
-    // Eagerly create parsers based on configured system types
-    for (auto &system : ctx.impl->trunk_ctx.systems) {
-        if (system->get_system_type() == SYS_SMARTNET) {
-            SmartnetParserConfig config;
-            config.sys_num = system->get_sys_num();
-            config.bandplan = system->get_bandplan();
-            config.bandfreq = system->get_bandfreq();
-            config.bandplan_base = system->get_bandplan_base();
-            config.bandplan_high = system->get_bandplan_high();
-            config.bandplan_spacing = system->get_bandplan_spacing();
-            config.bandplan_offset = system->get_bandplan_offset();
-            ctx.impl->smartnet_parsers[system->get_sys_num()] =
-                std::make_unique<SmartnetParser>(std::move(config));
-        }
-        if (system->get_system_type() == SYS_P25) {
-            if (!ctx.impl->p25_parser) {
-                ctx.impl->p25_parser = std::make_unique<P25Parser>();
-            }
-            P25ParserConfig p25_config;
-            p25_config.sys_num = system->get_sys_num();
-            p25_config.short_name = system->get_short_name();
-            p25_config.custom_freq_table_file = system->has_custom_freq_table_file()
-                ? system->get_custom_freq_table_file() : "";
-            ctx.impl->p25_parser_configs[system->get_sys_num()] = std::move(p25_config);
-        }
-    }
 
     // Conventional calls remain in trunk_ctx.calls for Rust to drain
     // via tr_context_take_next_conventional_call after finalize.
@@ -623,48 +602,93 @@ void tr_stop_gnuradio(TrContext &ctx) {
     ctx.impl->trunk_ctx.tb->wait();
 }
 
-// ── Phase B: Message Draining ──
+// ── Event channel wiring ──
 
-rust::Vec<TrTrunkMessage> tr_context_drain_messages(TrContext &ctx) {
-    rust::Vec<TrTrunkMessage> result;
-    auto &systems = ctx.impl->trunk_ctx.systems;
-    auto &config = ctx.impl->trunk_ctx.config;
+void tr_context_set_event_notifier(TrContext &ctx, rust::Box<EventNotifier> notifier) {
+    ctx.impl->event_bridge = std::make_shared<EventBridge>(std::move(notifier));
+}
 
-    for (auto &system : systems) {
-        if (system->get_system_type() != SYS_P25 && system->get_system_type() != SYS_SMARTNET) {
-            continue;
+// Per-system state for trunk message parsing on GR threads
+struct TrunkDrainState {
+    rust::Box<EventNotifier> notifier;
+    std::unique_ptr<SmartnetParser> smartnet_parser;  // non-null for Smartnet
+    std::unique_ptr<P25Parser> p25_parser;            // non-null for P25
+    P25ParserConfig p25_config;
+
+    explicit TrunkDrainState(rust::Box<EventNotifier> n)
+        : notifier(std::move(n)) {}
+};
+
+void tr_context_wire_event_notifiers(TrContext &ctx) {
+    auto &bridge = ctx.impl->event_bridge;
+    if (!bridge) return;
+
+    // Phase 2: wire trunk message callbacks on trunked systems
+    for (auto &system : ctx.impl->trunk_ctx.systems) {
+        auto sys_type = system->get_system_type();
+        if (sys_type != SYS_SMARTNET && sys_type != SYS_P25) continue;
+
+        auto state = std::shared_ptr<TrunkDrainState>(
+            new TrunkDrainState(bridge->make_notifier()));
+
+        if (sys_type == SYS_SMARTNET) {
+            SmartnetParserConfig config;
+            config.sys_num = system->get_sys_num();
+            config.bandplan = system->get_bandplan();
+            config.bandfreq = system->get_bandfreq();
+            config.bandplan_base = system->get_bandplan_base();
+            config.bandplan_high = system->get_bandplan_high();
+            config.bandplan_spacing = system->get_bandplan_spacing();
+            config.bandplan_offset = system->get_bandplan_offset();
+            state->smartnet_parser = std::make_unique<SmartnetParser>(std::move(config));
+        } else if (sys_type == SYS_P25) {
+            state->p25_parser = std::make_unique<P25Parser>();
+            P25ParserConfig p25_config;
+            p25_config.sys_num = system->get_sys_num();
+            p25_config.short_name = system->get_short_name();
+            p25_config.custom_freq_table_file = system->has_custom_freq_table_file()
+                ? system->get_custom_freq_table_file() : "";
+            state->p25_config = std::move(p25_config);
         }
 
-        gr::message::sptr msg;
-        msg = system->get_msg_queue()->delete_head_nowait();
-        while (msg != nullptr) {
-            std::vector<TrunkMessage> trunk_messages;
-
-            if (system->get_system_type() == SYS_SMARTNET) {
-                auto &smartnet_parser = ctx.impl->smartnet_parsers[system->get_sys_num()];
-                trunk_messages = smartnet_parser->parse_message(msg);
-            } else if (system->get_system_type() == SYS_P25) {
-                auto &p25_config = ctx.impl->p25_parser_configs[system->get_sys_num()];
-                trunk_messages = ctx.impl->p25_parser->parse_message(msg, p25_config);
+        system->set_msg_callback([state](gr::message::sptr msg) {
+            std::vector<TrunkMessage> parsed;
+            if (state->smartnet_parser) {
+                parsed = state->smartnet_parser->parse_message(msg);
+            } else if (state->p25_parser) {
+                parsed = state->p25_parser->parse_message(msg, state->p25_config);
             }
+            if (parsed.empty()) return;
 
-            // trunk_message event is now fired from Rust after drain returns (Step 3)
-
-            // Convert all messages to Rust types for return
-            for (const auto &m : trunk_messages) {
+            rust::Vec<TrTrunkMessage> result;
+            for (const auto &m : parsed) {
                 result.push_back(convert_trunk_message(m));
             }
+            event_notifier_notify_trunk_messages(*state->notifier, std::move(result));
+        });
+    }
 
-            if (msg->type() == -1) {
-                BOOST_LOG_TRIVIAL(error) << "[" << system->get_short_name() << "]\t process_data_unit timeout";
-            }
-
-            msg.reset();
-            msg = system->get_msg_queue()->delete_head_nowait();
+    // Phase 3: wire squelch callbacks on recorder blocks
+    for (auto &source : ctx.impl->trunk_ctx.sources) {
+        for (auto &rec : source->get_recorders()) {
+            auto notifier = bridge->make_notifier();
+            int rec_num = rec->get_num();
+            rec->set_squelch_callback(rec_num,
+                [notifier = std::make_shared<rust::Box<EventNotifier>>(std::move(notifier)),
+                 rec_num](int /*recorder_num*/, bool muted, double pwr_db) {
+                    event_notifier_notify_squelch(**notifier, rec_num, muted, pwr_db);
+                });
         }
     }
 
-    return result;
+    // Phase 4: wire signal detection callbacks on sources
+    for (auto &source : ctx.impl->trunk_ctx.sources) {
+        auto notifier = bridge->make_notifier();
+        source->set_detection_callback(
+            [notifier = std::make_shared<rust::Box<EventNotifier>>(std::move(notifier))]() {
+                event_notifier_notify_signal_detected(**notifier);
+            });
+    }
 }
 
 void tr_context_check_conventional_detection(TrContext &ctx) {
@@ -752,23 +776,6 @@ void call_start_initial_recording(TrCall &call) {
     if (rec) {
         rec->start(call.ptr);
     }
-}
-
-// ── Conventional call management — squelch event drain ──
-
-rust::Vec<TrSquelchEvent> call_drain_squelch_events(const TrCall &call) {
-    rust::Vec<TrSquelchEvent> result;
-    auto rec = call.ptr->get_recorder();
-    if (!rec) return result;
-    auto events = rec->drain_squelch_events();
-    for (const auto &ev : events) {
-        TrSquelchEvent out;
-        out.call_num = call.ptr->get_call_num();
-        out.muted = ev.muted;
-        out.pwr_db = ev.pwr_db;
-        result.push_back(out);
-    }
-    return result;
 }
 
 // ── Conventional call management — context-level ──

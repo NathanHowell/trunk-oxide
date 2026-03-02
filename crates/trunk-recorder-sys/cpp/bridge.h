@@ -6,6 +6,7 @@
 // trunk-recorder headers — these provide the real type definitions.
 // Include paths are set by build.rs (gnuradio, boost, op25_repeater, etc.)
 #include "trunk-recorder/recorders/recorder.h"
+#include "trunk-recorder/systems/parser.h"
 
 #include <memory>
 
@@ -26,8 +27,16 @@ struct TrCallData;
 struct TrCallInfo;
 struct TrCallMetadata;
 struct TrSystemInfo;
-struct TrSquelchEvent;
 struct EventHandlerBox;
+struct EventNotifier;
+
+// ── Event bridge types for GR thread → Rust channel ──
+class EventBridge {
+    rust::Box<EventNotifier> prototype_;
+public:
+    explicit EventBridge(rust::Box<EventNotifier> n);
+    rust::Box<EventNotifier> make_notifier() const;
+};
 
 // ── Opaque wrapper types that cxx sees ──
 // These wrap raw pointers to trunk-recorder objects.
@@ -135,12 +144,17 @@ void tr_system_add_unit_tag(TrContext &ctx, int32_t sys_idx,
                             rust::Str pattern, rust::Str tag);
 void tr_system_set_unit_tags_mode(TrContext &ctx, int32_t sys_idx, rust::Str mode);
 
+// ── Event channel wiring ──
+void tr_context_set_event_notifier(TrContext &ctx, rust::Box<EventNotifier> notifier);
+void tr_context_wire_event_notifiers(TrContext &ctx);
+
+// ── Trunk message conversion (used by GR callbacks) ──
+TrTrunkMessage convert_trunk_message(const TrunkMessage &msg);
+
 // ── Phase A: Loop Control ──
 void tr_start_gnuradio(TrContext &ctx);
 void tr_stop_gnuradio(TrContext &ctx);
 
-// ── Phase B: Message Draining ──
-rust::Vec<TrTrunkMessage> tr_context_drain_messages(TrContext &ctx);
 void tr_context_check_conventional_detection(TrContext &ctx);
 void tr_context_check_sources(TrContext &ctx);
 void tr_context_print_status(TrContext &ctx, rust::Slice<const TrCall *const> calls);
@@ -162,9 +176,6 @@ bool call_get_recorder_is_active(const TrCall &call);
 // ── Conventional call management — lifecycle ──
 void call_restart(TrCall &call);
 void call_start_initial_recording(TrCall &call);
-
-// ── Conventional call management — squelch event drain ──
-rust::Vec<TrSquelchEvent> call_drain_squelch_events(const TrCall &call);
 
 // ── Conventional call management — context-level ──
 std::unique_ptr<TrCall> tr_context_take_next_conventional_call(TrContext &ctx);

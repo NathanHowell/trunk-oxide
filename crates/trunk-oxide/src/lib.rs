@@ -191,28 +191,6 @@ impl TrunkRecorderBuilder {
             ffi::tr_system_set_tau(ctx.pin_mut(), sys_idx, sys.deemphasis_tau);
             ffi::tr_system_set_max_dev(ctx.pin_mut(), sys_idx, sys.max_dev);
             ffi::tr_system_set_filter_width(ctx.pin_mut(), sys_idx, sys.filter_width);
-            ffi::tr_system_set_conversation_mode(ctx.pin_mut(), sys_idx, sys.conversation_mode);
-            ffi::tr_system_set_record_unknown(ctx.pin_mut(), sys_idx, sys.record_unknown);
-
-            // Duration limits
-            if sys.min_duration > 0.0 {
-                ffi::tr_system_set_min_duration(ctx.pin_mut(), sys_idx, sys.min_duration);
-            }
-            if sys.max_duration > 0.0 {
-                ffi::tr_system_set_max_duration(ctx.pin_mut(), sys_idx, sys.max_duration);
-            }
-            if sys.min_transmission_duration > 0.0 {
-                ffi::tr_system_set_min_tx_duration(
-                    ctx.pin_mut(),
-                    sys_idx,
-                    sys.min_transmission_duration,
-                );
-            }
-
-            // Filtering
-            ffi::tr_system_set_hide_encrypted(ctx.pin_mut(), sys_idx, sys.hide_encrypted);
-            ffi::tr_system_set_monitor_encrypted(ctx.pin_mut(), sys_idx, sys.monitor_encrypted);
-            ffi::tr_system_set_hide_unknown(ctx.pin_mut(), sys_idx, sys.hide_unknown_talkgroups);
 
             // Decoder options
             ffi::tr_system_set_mdc_enabled(ctx.pin_mut(), sys_idx, sys.decode_mdc);
@@ -245,21 +223,6 @@ impl TrunkRecorderBuilder {
                     sys.sys_id,
                     sys.wacn,
                     sys.nac,
-                );
-            }
-
-            // Multi-site
-            if sys.multi_site {
-                ffi::tr_system_set_multi_site(ctx.pin_mut(), sys_idx, true);
-                ffi::tr_system_set_multi_site_name(
-                    ctx.pin_mut(),
-                    sys_idx,
-                    &sys.multi_site_system_name,
-                );
-                ffi::tr_system_set_multi_site_number(
-                    ctx.pin_mut(),
-                    sys_idx,
-                    sys.multi_site_system_number as u64,
                 );
             }
 
@@ -306,6 +269,7 @@ impl TrunkRecorderBuilder {
                         TalkgroupPolicy {
                             mode: tg.mode,
                             priority: tg.priority,
+                            preferred_nac: tg.preferred_nac,
                         },
                     )
                 })
@@ -319,6 +283,11 @@ impl TrunkRecorderBuilder {
                     hide_unknown: sys.hide_unknown_talkgroups,
                     hide_encrypted: sys.hide_encrypted,
                     monitor_encrypted: sys.monitor_encrypted,
+                    multi_site: sys.multi_site,
+                    multi_site_name: sys.multi_site_system_name.clone(),
+                    conversation_mode: sys.conversation_mode,
+                    max_duration: sys.max_duration,
+                    control_channels: sys.control_channels.clone(),
                     talkgroups,
                 },
             );
@@ -331,8 +300,12 @@ impl TrunkRecorderBuilder {
         {
             let mut guard = lock_handler(&handler);
             let infos: Vec<ffi::TrSystemInfo> = system_policies
-                .keys()
-                .map(|&sys_idx| ffi::tr_context_get_system_info(ctx.pin_mut(), sys_idx))
+                .iter()
+                .map(|(&sys_idx, policy)| {
+                    let mut info = ffi::tr_context_get_system_info(ctx.pin_mut(), sys_idx);
+                    info.conversation_mode = policy.conversation_mode;
+                    info
+                })
                 .collect();
             guard.setup_config(&infos);
             for info in &infos {
@@ -404,7 +377,6 @@ impl TrunkRecorder {
                 return Ok(());
             }
 
-            ffi::tr_context_process_conventional_queues(self.ctx.pin_mut());
             call_mgr.process_recorder_queues();
 
             let messages = ffi::tr_context_drain_messages(self.ctx.pin_mut());
@@ -418,7 +390,10 @@ impl TrunkRecorder {
                 for (&sys_num, indices) in &by_system {
                     let sys_msgs: Vec<ffi::TrTrunkMessage> =
                         indices.iter().map(|&i| messages[i].clone()).collect();
-                    let info = ffi::tr_context_get_system_info(self.ctx.pin_mut(), sys_num);
+                    let mut info = ffi::tr_context_get_system_info(self.ctx.pin_mut(), sys_num);
+                    if let Some(policy) = call_mgr.config().systems.get(&sys_num) {
+                        info.conversation_mode = policy.conversation_mode;
+                    }
                     lock_handler(&self.handler).trunk_message(&sys_msgs, &info);
                 }
             }

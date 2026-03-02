@@ -232,13 +232,6 @@ pub mod ffi {
         pub signal: f64,
         pub noise: f64,
         pub priority: i32,
-        pub multi_site: bool,
-        pub wacn: u64,
-        pub rfss: i32,
-        pub site_id: i32,
-        pub multi_site_name: String,
-        pub conversation_mode: bool,
-        pub max_duration: f64,
     }
 
     #[derive(Debug, Clone)]
@@ -343,14 +336,6 @@ pub mod ffi {
         fn tr_system_set_tau(ctx: Pin<&mut TrContext>, sys_idx: i32, tau: f32);
         fn tr_system_set_max_dev(ctx: Pin<&mut TrContext>, sys_idx: i32, max_dev: i32);
         fn tr_system_set_filter_width(ctx: Pin<&mut TrContext>, sys_idx: i32, width: f64);
-        fn tr_system_set_conversation_mode(ctx: Pin<&mut TrContext>, sys_idx: i32, mode: bool);
-        fn tr_system_set_record_unknown(ctx: Pin<&mut TrContext>, sys_idx: i32, record: bool);
-        fn tr_system_set_min_duration(ctx: Pin<&mut TrContext>, sys_idx: i32, duration: f64);
-        fn tr_system_set_max_duration(ctx: Pin<&mut TrContext>, sys_idx: i32, duration: f64);
-        fn tr_system_set_min_tx_duration(ctx: Pin<&mut TrContext>, sys_idx: i32, duration: f64);
-        fn tr_system_set_hide_encrypted(ctx: Pin<&mut TrContext>, sys_idx: i32, hide: bool);
-        fn tr_system_set_monitor_encrypted(ctx: Pin<&mut TrContext>, sys_idx: i32, monitor: bool);
-        fn tr_system_set_hide_unknown(ctx: Pin<&mut TrContext>, sys_idx: i32, hide: bool);
         fn tr_system_set_mdc_enabled(ctx: Pin<&mut TrContext>, sys_idx: i32, enabled: bool);
         fn tr_system_set_fsync_enabled(ctx: Pin<&mut TrContext>, sys_idx: i32, enabled: bool);
         fn tr_system_set_star_enabled(ctx: Pin<&mut TrContext>, sys_idx: i32, enabled: bool);
@@ -363,9 +348,6 @@ pub mod ffi {
         fn tr_system_set_bandplan_offset(ctx: Pin<&mut TrContext>, sys_idx: i32, offset: i32);
         fn tr_system_set_xor_mask(ctx: Pin<&mut TrContext>, sys_idx: i32,
                                   sys_id: u64, wacn: u64, nac: u64);
-        fn tr_system_set_multi_site(ctx: Pin<&mut TrContext>, sys_idx: i32, multi_site: bool);
-        fn tr_system_set_multi_site_name(ctx: Pin<&mut TrContext>, sys_idx: i32, name: &str);
-        fn tr_system_set_multi_site_number(ctx: Pin<&mut TrContext>, sys_idx: i32, number: u64);
 
         // ── Talkgroup/Channel builder functions ──
         fn tr_system_add_talkgroup(ctx: Pin<&mut TrContext>, sys_idx: i32,
@@ -385,7 +367,6 @@ pub mod ffi {
 
         // ── Phase B: Message Draining ──
         fn tr_context_drain_messages(ctx: Pin<&mut TrContext>) -> Vec<TrTrunkMessage>;
-        fn tr_context_process_conventional_queues(ctx: Pin<&mut TrContext>);
         fn tr_context_check_conventional_detection(ctx: Pin<&mut TrContext>);
         fn tr_context_check_sources(ctx: Pin<&mut TrContext>) -> Result<()>;
         fn tr_context_print_status(ctx: Pin<&mut TrContext>, calls: &[*const TrCall]);
@@ -397,7 +378,6 @@ pub mod ffi {
         fn tr_system_update_status(ctx: Pin<&mut TrContext>, msg: &TrTrunkMessage) -> bool;
 
         // ── Phase B: Decode Rate Checking (called from Rust check_decode_rates) ──
-        fn tr_system_control_channel_count(ctx: Pin<&mut TrContext>, sys_num: i32) -> i32;
         fn tr_system_get_current_control_channel(ctx: Pin<&mut TrContext>, sys_num: i32) -> f64;
 
         // ── Conventional call management — recorder status (null-guarded) ──
@@ -413,9 +393,6 @@ pub mod ffi {
 
         // ── Conventional call management — context-level ──
         fn tr_context_take_next_conventional_call(ctx: Pin<&mut TrContext>) -> UniquePtr<TrCall>;
-
-        // ── Phase C: Call Management — additional accessors (most removed — Rust owns via CallEntry) ──
-        fn call_system_get_preferred_nac(call: &TrCall, talkgroup: i64) -> u64;
 
         // ── Phase C: Call Management — additional recorder accessors ──
         fn recorder_since_last_write_secs(rec: &TrRecorder) -> f64;
@@ -434,9 +411,6 @@ pub mod ffi {
         // ── Phase C: Call Management — call-level recorder accessors ──
         fn call_recorder_since_last_write_secs(call: &TrCall) -> f64;
         fn call_process_recorder_queue(call: &TrCall);
-
-        // ── Phase C: Call Management — system lookup by sys_num ──
-        fn tr_context_get_system_multi_site_name(ctx: &TrContext, sys_num: i32) -> String;
 
         // ── Phase C: Call Management — conclude recording (recorder mechanics) ──
         fn call_stop_recording(call: Pin<&mut TrCall>) -> TrStopRecordingResult;

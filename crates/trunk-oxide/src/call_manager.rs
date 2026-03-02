@@ -73,6 +73,7 @@ impl PatchTable {
 pub struct TalkgroupPolicy {
     pub mode: TalkgroupMode,
     pub priority: i32,
+    pub preferred_nac: u64,
 }
 
 /// Recording policy for a single system.
@@ -83,8 +84,27 @@ pub struct SystemPolicy {
     pub hide_unknown: bool,
     pub hide_encrypted: bool,
     pub monitor_encrypted: bool,
+    pub multi_site: bool,
+    pub multi_site_name: String,
+    pub conversation_mode: bool,
+    pub max_duration: f64,
+    pub control_channels: Vec<f64>,
     pub talkgroups: HashMap<i64, TalkgroupPolicy>,
 }
+
+static DEFAULT_POLICY: std::sync::LazyLock<SystemPolicy> = std::sync::LazyLock::new(|| SystemPolicy {
+    system_type: SystemType::P25,
+    record_unknown: false,
+    hide_unknown: false,
+    hide_encrypted: false,
+    monitor_encrypted: false,
+    multi_site: false,
+    multi_site_name: String::new(),
+    conversation_mode: false,
+    max_duration: 0.0,
+    control_channels: Vec::new(),
+    talkgroups: HashMap::new(),
+});
 
 /// Configuration extracted from trunk-config for call management decisions.
 #[derive(Clone)]
@@ -148,8 +168,8 @@ struct CallEntry {
 
 impl CallEntry {
     /// Create from a trunked grant message. Immutable fields come from the
-    /// message; remaining fields from C++ metadata.
-    fn from_message(call: UniquePtr<TrCall>, msg: &TrTrunkMessage) -> Self {
+    /// message; system-derived fields from Rust's SystemPolicy.
+    fn from_message(call: UniquePtr<TrCall>, msg: &TrTrunkMessage, policy: &SystemPolicy) -> Self {
         let m = ffi::call_get_metadata(&*call);
         Self {
             handle: call,
@@ -175,18 +195,18 @@ impl CallEntry {
             priority: msg.priority,
             last_update: Instant::now(),
             idle_since: None,
-            multi_site: m.multi_site,
-            wacn: m.wacn,
-            rfss: m.rfss,
-            site_id: m.site_id,
-            multi_site_name: m.multi_site_name,
-            conversation_mode: m.conversation_mode,
-            max_duration: m.max_duration,
+            multi_site: policy.multi_site,
+            wacn: msg.wacn,
+            rfss: msg.sys_rfss,
+            site_id: msg.sys_site_id,
+            multi_site_name: policy.multi_site_name.clone(),
+            conversation_mode: policy.conversation_mode,
+            max_duration: policy.max_duration,
         }
     }
 
     /// Create from an existing C++ call (conventional calls at startup).
-    fn from_existing(call: UniquePtr<TrCall>) -> Self {
+    fn from_existing(call: UniquePtr<TrCall>, policy: &SystemPolicy) -> Self {
         let m = ffi::call_get_metadata(&*call);
         Self {
             handle: call,
@@ -212,13 +232,13 @@ impl CallEntry {
             priority: m.priority,
             last_update: Instant::now(),
             idle_since: None,
-            multi_site: m.multi_site,
-            wacn: m.wacn,
-            rfss: m.rfss,
-            site_id: m.site_id,
-            multi_site_name: m.multi_site_name,
-            conversation_mode: m.conversation_mode,
-            max_duration: m.max_duration,
+            multi_site: policy.multi_site,
+            wacn: 0,
+            rfss: 0,
+            site_id: 0,
+            multi_site_name: policy.multi_site_name.clone(),
+            conversation_mode: policy.conversation_mode,
+            max_duration: policy.max_duration,
         }
     }
 
@@ -309,6 +329,19 @@ impl CallManager {
             decode_rates: HashMap::new(),
             patch_tables,
         }
+    }
+
+    pub fn config(&self) -> &CallManagerConfig {
+        &self.config
+    }
+
+    /// Get system info from C++ and fill in Rust-owned fields.
+    fn get_system_info(&self, ctx: Pin<&mut TrContext>, sys_num: i32) -> ffi::TrSystemInfo {
+        let mut info = ffi::tr_context_get_system_info(ctx, sys_num);
+        if let Some(policy) = self.config.systems.get(&sys_num) {
+            info.conversation_mode = policy.conversation_mode;
+        }
+        info
     }
 
     // ── Call data construction ──
@@ -478,56 +511,56 @@ impl CallManager {
             // ── System identity (once-only, fire setup_system if changed) ──
             TrMessageType::Sysid => {
                 if ffi::tr_system_update_sysid(ctx.as_mut(), msg) {
-                    let info = ffi::tr_context_get_system_info(ctx.as_mut(), msg.sys_num);
+                    let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
                     lock_handler(&self.handler).setup_system(&info);
                 }
             }
             TrMessageType::Status => {
                 if ffi::tr_system_update_status(ctx.as_mut(), msg) {
-                    let info = ffi::tr_context_get_system_info(ctx.as_mut(), msg.sys_num);
+                    let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
                     lock_handler(&self.handler).setup_system(&info);
                 }
             }
 
             // ── Unit-level events ──
             TrMessageType::Registration => {
-                let info = ffi::tr_context_get_system_info(ctx.as_mut(), msg.sys_num);
+                let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
                 lock_handler(&self.handler).unit_event(
                     &info, TrUnitEventType::Registration, msg.source, 0,
                 );
             }
             TrMessageType::Deregistration => {
-                let info = ffi::tr_context_get_system_info(ctx.as_mut(), msg.sys_num);
+                let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
                 lock_handler(&self.handler).unit_event(
                     &info, TrUnitEventType::Deregistration, msg.source, 0,
                 );
             }
             TrMessageType::Affiliation => {
-                let info = ffi::tr_context_get_system_info(ctx.as_mut(), msg.sys_num);
+                let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
                 lock_handler(&self.handler).unit_event(
                     &info, TrUnitEventType::Affiliation, msg.source, msg.talkgroup,
                 );
             }
             TrMessageType::Acknowledge => {
-                let info = ffi::tr_context_get_system_info(ctx.as_mut(), msg.sys_num);
+                let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
                 lock_handler(&self.handler).unit_event(
                     &info, TrUnitEventType::Acknowledge, msg.source, 0,
                 );
             }
             TrMessageType::Location => {
-                let info = ffi::tr_context_get_system_info(ctx.as_mut(), msg.sys_num);
+                let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
                 lock_handler(&self.handler).unit_event(
                     &info, TrUnitEventType::Location, msg.source, msg.talkgroup,
                 );
             }
             TrMessageType::DataGrant => {
-                let info = ffi::tr_context_get_system_info(ctx.as_mut(), msg.sys_num);
+                let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
                 lock_handler(&self.handler).unit_event(
                     &info, TrUnitEventType::DataGrant, msg.source, 0,
                 );
             }
             TrMessageType::UuAnsReq => {
-                let info = ffi::tr_context_get_system_info(ctx.as_mut(), msg.sys_num);
+                let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
                 lock_handler(&self.handler).unit_event(
                     &info, TrUnitEventType::AnswerRequest, msg.source, msg.talkgroup,
                 );
@@ -588,9 +621,10 @@ impl CallManager {
         }
 
         // New call
-        let multisite = self.check_multisite(&*ctx, msg.talkgroup, msg.sys_num, msg);
+        let multisite = self.check_multisite(msg.talkgroup, msg.sys_num, msg);
         let new_call = ffi::tr_context_create_call(ctx.as_mut(), msg);
-        let mut new_entry = CallEntry::from_message(new_call, msg);
+        let policy = self.config.systems.get(&msg.sys_num).unwrap_or(&DEFAULT_POLICY);
+        let mut new_entry = CallEntry::from_message(new_call, msg, policy);
 
         if multisite.is_superseding {
             let recording_started =
@@ -798,7 +832,7 @@ impl CallManager {
 
     // ── Multisite duplicate detection ──
 
-    fn check_multisite(&self, ctx: &TrContext, talkgroup: i64, sys_num: i32, msg: &TrTrunkMessage) -> MultiSiteResult {
+    fn check_multisite(&self, talkgroup: i64, sys_num: i32, msg: &TrTrunkMessage) -> MultiSiteResult {
         let mut result = MultiSiteResult {
             is_duplicate: false,
             is_superseding: false,
@@ -840,14 +874,16 @@ impl CallManager {
                 result.original_idx = Some(idx);
 
                 // Supersede check
-                let call_preferred_nac = ffi::call_system_get_preferred_nac(&*entry.handle, talkgroup);
+                let call_preferred_nac = self.get_preferred_nac(entry.sys_num, talkgroup);
                 if call_preferred_nac != call_rfss_site && msg.nac == msg_rfss_site {
                     result.is_superseding = true;
                 }
             }
             // Secondary mode: match multiSiteSystemName.
             else {
-                let msg_multi_site_name = ffi::tr_context_get_system_multi_site_name(ctx, sys_num);
+                let msg_multi_site_name = self.config.systems.get(&sys_num)
+                    .map(|p| p.multi_site_name.as_str())
+                    .unwrap_or("");
                 if !msg_multi_site_name.is_empty() && entry.multi_site_name == msg_multi_site_name {
                     result.is_duplicate = true;
                     result.original_idx = Some(idx);
@@ -856,6 +892,15 @@ impl CallManager {
         }
 
         result
+    }
+
+    /// Look up preferred NAC for a talkgroup from Rust-owned config.
+    fn get_preferred_nac(&self, sys_num: i32, talkgroup: i64) -> u64 {
+        self.config
+            .systems
+            .get(&sys_num)
+            .and_then(|p| p.talkgroups.get(&talkgroup))
+            .map_or(0, |tg| tg.preferred_nac)
     }
 
     // ── Periodic tick (call timeout management) ──
@@ -918,7 +963,10 @@ impl CallManager {
 
     /// Add a conventional call drained from C++ during startup.
     pub fn add_call(&mut self, call: UniquePtr<TrCall>) {
-        self.calls.push(CallEntry::from_existing(call));
+        // Read metadata once; from_existing uses it for both call fields and policy lookup.
+        let sys_num = ffi::call_get_metadata(&*call).sys_num;
+        let policy = self.config.systems.get(&sys_num).unwrap_or(&DEFAULT_POLICY);
+        self.calls.push(CallEntry::from_existing(call, policy));
     }
 
     /// Collect raw pointers to all tracked calls (for passing to C++ print_status / calls_active).
@@ -998,7 +1046,8 @@ impl CallManager {
         // Build system info for all systems, computing decode rates for trunked ones.
         let mut infos = Vec::new();
         for (&sys_num, policy) in &self.config.systems {
-            let mut info = ffi::tr_context_get_system_info(ctx.as_mut(),sys_num);
+            let mut info = ffi::tr_context_get_system_info(ctx.as_mut(), sys_num);
+            info.conversation_mode = policy.conversation_mode;
             if policy.system_type.is_trunked() {
                 let count = self.message_counts.remove(&sys_num).unwrap_or(0);
                 let decode_rate = (count as f32 / time_diff).floor() as i32;
@@ -1022,7 +1071,6 @@ impl CallManager {
                 Some(p) if p.system_type.is_trunked() => p,
                 _ => continue,
             };
-            let _ = policy; // used only for the trunked filter above
             let decode_rate = info.decode_rate;
             let count = info.message_count;
 
@@ -1038,7 +1086,7 @@ impl CallManager {
                         sys_num
                     );
                 }
-                if ffi::tr_system_control_channel_count(ctx.as_mut(), sys_num) > 1 {
+                if policy.control_channels.len() > 1 {
                     ffi::tr_system_retune(ctx.as_mut(), sys_num);
                 } else {
                     tracing::error!(sys_num, "only one control channel defined");

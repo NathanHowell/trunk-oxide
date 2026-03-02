@@ -110,14 +110,6 @@ void tr_system_set_digital_levels(TrContext &ctx, int32_t sys_idx, double level)
 void tr_system_set_tau(TrContext &ctx, int32_t sys_idx, float tau);
 void tr_system_set_max_dev(TrContext &ctx, int32_t sys_idx, int32_t max_dev);
 void tr_system_set_filter_width(TrContext &ctx, int32_t sys_idx, double width);
-void tr_system_set_conversation_mode(TrContext &ctx, int32_t sys_idx, bool mode);
-void tr_system_set_record_unknown(TrContext &ctx, int32_t sys_idx, bool record);
-void tr_system_set_min_duration(TrContext &ctx, int32_t sys_idx, double duration);
-void tr_system_set_max_duration(TrContext &ctx, int32_t sys_idx, double duration);
-void tr_system_set_min_tx_duration(TrContext &ctx, int32_t sys_idx, double duration);
-void tr_system_set_hide_encrypted(TrContext &ctx, int32_t sys_idx, bool hide);
-void tr_system_set_monitor_encrypted(TrContext &ctx, int32_t sys_idx, bool monitor);
-void tr_system_set_hide_unknown(TrContext &ctx, int32_t sys_idx, bool hide);
 void tr_system_set_mdc_enabled(TrContext &ctx, int32_t sys_idx, bool enabled);
 void tr_system_set_fsync_enabled(TrContext &ctx, int32_t sys_idx, bool enabled);
 void tr_system_set_star_enabled(TrContext &ctx, int32_t sys_idx, bool enabled);
@@ -130,9 +122,6 @@ void tr_system_set_bandplan_spacing(TrContext &ctx, int32_t sys_idx, double spac
 void tr_system_set_bandplan_offset(TrContext &ctx, int32_t sys_idx, int32_t offset);
 void tr_system_set_xor_mask(TrContext &ctx, int32_t sys_idx, uint64_t sys_id,
                             uint64_t wacn, uint64_t nac);
-void tr_system_set_multi_site(TrContext &ctx, int32_t sys_idx, bool multi_site);
-void tr_system_set_multi_site_name(TrContext &ctx, int32_t sys_idx, rust::Str name);
-void tr_system_set_multi_site_number(TrContext &ctx, int32_t sys_idx, uint64_t number);
 
 // ── Talkgroup/Channel builder functions ──
 void tr_system_add_talkgroup(TrContext &ctx, int32_t sys_idx,
@@ -152,7 +141,6 @@ void tr_stop_gnuradio(TrContext &ctx);
 
 // ── Phase B: Message Draining ──
 rust::Vec<TrTrunkMessage> tr_context_drain_messages(TrContext &ctx);
-void tr_context_process_conventional_queues(TrContext &ctx);
 void tr_context_check_conventional_detection(TrContext &ctx);
 void tr_context_check_sources(TrContext &ctx);
 void tr_context_print_status(TrContext &ctx, rust::Slice<const TrCall *const> calls);
@@ -165,7 +153,6 @@ bool tr_system_update_sysid(TrContext &ctx, const TrTrunkMessage &msg);
 bool tr_system_update_status(TrContext &ctx, const TrTrunkMessage &msg);
 
 // ── Phase B: Decode Rate Checking (called from Rust check_decode_rates) ──
-int32_t tr_system_control_channel_count(TrContext &ctx, int32_t sys_num);
 double tr_system_get_current_control_channel(TrContext &ctx, int32_t sys_num);
 
 // ── Conventional call management — recorder status (null-guarded) ──
@@ -181,9 +168,6 @@ rust::Vec<TrSquelchEvent> call_drain_squelch_events(const TrCall &call);
 
 // ── Conventional call management — context-level ──
 std::unique_ptr<TrCall> tr_context_take_next_conventional_call(TrContext &ctx);
-
-// ── Phase C: Call Management — additional accessors (most removed — Rust owns via CallEntry) ──
-uint64_t call_system_get_preferred_nac(const TrCall &call, int64_t talkgroup);
 
 // ── Phase C: Call Management — additional recorder accessors ──
 double recorder_since_last_write_secs(const TrRecorder &rec);
@@ -212,9 +196,6 @@ void call_recorder_set_source(TrCall &call, int64_t src);
 // ── Phase C: Call Management — call-level recorder accessors ──
 double call_recorder_since_last_write_secs(const TrCall &call);
 void call_process_recorder_queue(const TrCall &call);
-
-// ── Phase C: Call Management — system lookup by sys_num ──
-rust::String tr_context_get_system_multi_site_name(const TrContext &ctx, int32_t sys_num);
 
 // ── Recorder setup notification (extracts recorder from call, fires through event_sink) ──
 void call_notify_setup_recorder(TrContext &ctx, const TrCall &call);

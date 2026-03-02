@@ -141,7 +141,7 @@ static TrSystemInfo build_system_info(System &sys) {
     info.analog_levels = sys.get_analog_levels();
     info.digital_levels = sys.get_digital_levels();
     info.squelch_db = sys.get_squelch_db();
-    info.conversation_mode = sys.get_conversation_mode();
+    info.conversation_mode = false;  // Rust fills from SystemPolicy
     info.message_count = 0;  // Rust owns message count
     info.decode_rate = 0;    // Rust owns decode rate
     return info;
@@ -215,6 +215,7 @@ struct TrContextImpl {
     // Parsers — created eagerly during tr_finalize
     std::map<int, std::unique_ptr<SmartnetParser>> smartnet_parsers;
     std::unique_ptr<P25Parser> p25_parser;
+    std::map<int, P25ParserConfig> p25_parser_configs;
 
     explicit TrContextImpl(rust::Box<EventHandlerBox> h)
         : handler(std::move(h)) {}
@@ -259,11 +260,27 @@ void tr_finalize(TrContext &ctx) {
     // Eagerly create parsers based on configured system types
     for (auto &system : ctx.impl->trunk_ctx.systems) {
         if (system->get_system_type() == SYS_SMARTNET) {
+            SmartnetParserConfig config;
+            config.sys_num = system->get_sys_num();
+            config.bandplan = system->get_bandplan();
+            config.bandfreq = system->get_bandfreq();
+            config.bandplan_base = system->get_bandplan_base();
+            config.bandplan_high = system->get_bandplan_high();
+            config.bandplan_spacing = system->get_bandplan_spacing();
+            config.bandplan_offset = system->get_bandplan_offset();
             ctx.impl->smartnet_parsers[system->get_sys_num()] =
-                std::make_unique<SmartnetParser>(system);
+                std::make_unique<SmartnetParser>(std::move(config));
         }
-        if (system->get_system_type() == SYS_P25 && !ctx.impl->p25_parser) {
-            ctx.impl->p25_parser = std::make_unique<P25Parser>();
+        if (system->get_system_type() == SYS_P25) {
+            if (!ctx.impl->p25_parser) {
+                ctx.impl->p25_parser = std::make_unique<P25Parser>();
+            }
+            P25ParserConfig p25_config;
+            p25_config.sys_num = system->get_sys_num();
+            p25_config.short_name = system->get_short_name();
+            p25_config.custom_freq_table_file = system->has_custom_freq_table_file()
+                ? system->get_custom_freq_table_file() : "";
+            ctx.impl->p25_parser_configs[system->get_sys_num()] = std::move(p25_config);
         }
     }
 
@@ -391,38 +408,6 @@ void tr_system_set_filter_width(TrContext &ctx, int32_t sys_idx, double width) {
     ctx.impl->trunk_ctx.systems.at(sys_idx)->set_filter_width(width);
 }
 
-void tr_system_set_conversation_mode(TrContext &ctx, int32_t sys_idx, bool mode) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_conversation_mode(mode);
-}
-
-void tr_system_set_record_unknown(TrContext &ctx, int32_t sys_idx, bool record) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_record_unknown(record);
-}
-
-void tr_system_set_min_duration(TrContext &ctx, int32_t sys_idx, double duration) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_min_duration(duration);
-}
-
-void tr_system_set_max_duration(TrContext &ctx, int32_t sys_idx, double duration) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_max_duration(duration);
-}
-
-void tr_system_set_min_tx_duration(TrContext &ctx, int32_t sys_idx, double duration) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_min_tx_duration(duration);
-}
-
-void tr_system_set_hide_encrypted(TrContext &ctx, int32_t sys_idx, bool hide) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_hideEncrypted(hide);
-}
-
-void tr_system_set_monitor_encrypted(TrContext &ctx, int32_t sys_idx, bool monitor) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_monitorEncrypted(monitor);
-}
-
-void tr_system_set_hide_unknown(TrContext &ctx, int32_t sys_idx, bool hide) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_hideUnknown(hide);
-}
-
 void tr_system_set_mdc_enabled(TrContext &ctx, int32_t sys_idx, bool enabled) {
     ctx.impl->trunk_ctx.systems.at(sys_idx)->set_mdc_enabled(enabled);
 }
@@ -467,19 +452,6 @@ void tr_system_set_bandplan_offset(TrContext &ctx, int32_t sys_idx, int32_t offs
 void tr_system_set_xor_mask(TrContext &ctx, int32_t sys_idx, uint64_t sys_id,
                             uint64_t wacn, uint64_t nac) {
     ctx.impl->trunk_ctx.systems.at(sys_idx)->set_xor_mask(sys_id, wacn, nac);
-}
-
-void tr_system_set_multi_site(TrContext &ctx, int32_t sys_idx, bool multi_site) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_multiSite(multi_site);
-}
-
-void tr_system_set_multi_site_name(TrContext &ctx, int32_t sys_idx, rust::Str name) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_multiSiteSystemName(
-        std::string(name.data(), name.size()));
-}
-
-void tr_system_set_multi_site_number(TrContext &ctx, int32_t sys_idx, uint64_t number) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_multiSiteSystemNumber(number);
 }
 
 // ── Talkgroup/Channel builder implementations ──
@@ -639,11 +611,6 @@ bool tr_system_update_status(TrContext &ctx, const TrTrunkMessage &msg) {
 
 // ── Phase B: Decode Rate Checking (called from Rust check_decode_rates) ──
 
-int32_t tr_system_control_channel_count(TrContext &ctx, int32_t sys_num) {
-    auto sys = find_system_by_num(ctx, sys_num);
-    return sys ? sys->control_channel_count() : 0;
-}
-
 double tr_system_get_current_control_channel(TrContext &ctx, int32_t sys_num) {
     auto sys = find_system_by_num(ctx, sys_num);
     return sys ? sys->get_current_control_channel() : 0.0;
@@ -681,9 +648,10 @@ rust::Vec<TrTrunkMessage> tr_context_drain_messages(TrContext &ctx) {
 
             if (system->get_system_type() == SYS_SMARTNET) {
                 auto &smartnet_parser = ctx.impl->smartnet_parsers[system->get_sys_num()];
-                trunk_messages = smartnet_parser->parse_message(msg, system);
+                trunk_messages = smartnet_parser->parse_message(msg);
             } else if (system->get_system_type() == SYS_P25) {
-                trunk_messages = ctx.impl->p25_parser->parse_message(msg, system);
+                auto &p25_config = ctx.impl->p25_parser_configs[system->get_sys_num()];
+                trunk_messages = ctx.impl->p25_parser->parse_message(msg, p25_config);
             }
 
             // trunk_message event is now fired from Rust after drain returns (Step 3)
@@ -703,14 +671,6 @@ rust::Vec<TrTrunkMessage> tr_context_drain_messages(TrContext &ctx) {
     }
 
     return result;
-}
-
-void tr_context_process_conventional_queues(TrContext &ctx) {
-    for (auto &sys : ctx.impl->trunk_ctx.systems) {
-        for (auto &ar : sys->get_conventional_recorders()) {
-            ar->process_message_queues();
-        }
-    }
 }
 
 void tr_context_check_conventional_detection(TrContext &ctx) {
@@ -831,14 +791,6 @@ std::unique_ptr<TrCall> tr_context_take_next_conventional_call(TrContext &ctx) {
 
 // ── Phase C: Call Management — additional call accessors (most removed — Rust owns via CallEntry) ──
 
-uint64_t call_system_get_preferred_nac(const TrCall &call, int64_t talkgroup) {
-    auto tg = call.ptr->get_system()->find_talkgroup(talkgroup);
-    if (tg) {
-        return tg->get_preferredNAC();
-    }
-    return 0;
-}
-
 // ── Phase C: Call Management — additional recorder accessors ──
 
 double recorder_since_last_write_secs(const TrRecorder &rec) {
@@ -863,7 +815,6 @@ std::unique_ptr<TrCall> tr_context_create_call(TrContext &ctx, const TrTrunkMess
 
 TrCallMetadata call_get_metadata(const TrCall &call) {
     auto *c = call.ptr.get();
-    auto sys = c->get_system();
     TrCallMetadata m;
     m.call_num = c->get_call_num();
     m.talkgroup = c->get_talkgroup();
@@ -885,13 +836,6 @@ TrCallMetadata call_get_metadata(const TrCall &call) {
     m.signal = c->get_signal();
     m.noise = c->get_noise();
     m.priority = c->get_priority();
-    m.multi_site = sys ? sys->get_multiSite() : false;
-    m.wacn = sys ? sys->get_wacn() : 0;
-    m.rfss = sys ? sys->get_sys_rfss() : 0;
-    m.site_id = sys ? sys->get_sys_site_id() : 0;
-    m.multi_site_name = rust::String(sys ? sys->get_multiSiteSystemName() : "");
-    m.conversation_mode = sys ? sys->get_conversation_mode() : false;
-    m.max_duration = sys ? sys->get_max_duration() : 0.0;
     return m;
 }
 
@@ -1031,23 +975,7 @@ double call_recorder_since_last_write_secs(const TrCall &call) {
 void call_process_recorder_queue(const TrCall &call) {
     auto recorder = call.ptr->get_recorder();
     if (!recorder) return;
-    if (recorder->get_type() == P25 || recorder->get_type() == P25C) {
-        auto p25_rec = std::dynamic_pointer_cast<p25_recorder>(recorder);
-        if (p25_rec && p25_rec->is_active()) {
-            p25_rec->process_message_queues();
-        }
-    }
-}
-
-// ── Phase C: Call Management — system lookup by sys_num ──
-
-rust::String tr_context_get_system_multi_site_name(const TrContext &ctx, int32_t sys_num) {
-    for (auto &sys : ctx.impl->trunk_ctx.systems) {
-        if (sys->get_sys_num() == sys_num) {
-            return rust::String(sys->get_multiSiteSystemName());
-        }
-    }
-    return rust::String("");
+    recorder->process_message_queues();
 }
 
 // ── Recorder setup notification (Rust calls this to fire setup_recorder through event_sink) ──

@@ -6,7 +6,7 @@ use tonic::{Request, Response, Status};
 use trunk_recorder_sys::ffi::{
     TrCallData, TrCallInfo, TrRecorder, TrSystem, TrSystemInfo, TrTrunkMessage, TrUnitEventType,
 };
-use trunk_recorder_sys::RustPluginCallbacks;
+use trunk_recorder_sys::EventHandler;
 
 pub use trunk_oxide_proto as proto;
 
@@ -358,8 +358,8 @@ impl GrpcPlugin {
     }
 }
 
-impl RustPluginCallbacks for GrpcPlugin {
-    fn start(&mut self) -> i32 {
+impl EventHandler for GrpcPlugin {
+    fn start(&mut self) {
         let rt = match tokio::runtime::Builder::new_multi_thread()
             .worker_threads(2)
             .enable_all()
@@ -367,8 +367,8 @@ impl RustPluginCallbacks for GrpcPlugin {
         {
             Ok(rt) => rt,
             Err(e) => {
-                eprintln!("trunk-oxide gRPC plugin start error: {e}");
-                return -1;
+                tracing::error!("trunk-oxide gRPC server start error: {e}");
+                return;
             }
         };
 
@@ -413,25 +413,18 @@ impl RustPluginCallbacks for GrpcPlugin {
         self.audio_tx = Some(audio_tx);
         self.event_tx = Some(event_tx);
         self.runtime = Some(rt);
-
-        0
     }
 
-    fn stop(&mut self) -> i32 {
+    fn stop(&mut self) {
         self.audio_tx.take();
         self.event_tx.take();
 
         if let Some(rt) = self.runtime.take() {
             rt.shutdown_timeout(std::time::Duration::from_secs(5));
         }
-        0
     }
 
-    fn poll_one(&mut self) -> i32 {
-        0
-    }
-
-    fn signal(&mut self, unit_id: i64, info: &TrCallInfo) -> i32 {
+    fn signal(&mut self, unit_id: i64, info: &TrCallInfo) {
         self.send_event(proto::plugin_event::Event::Signal(proto::SignalEvent {
             unit_id,
             signaling_type: String::new(),
@@ -441,13 +434,12 @@ impl RustPluginCallbacks for GrpcPlugin {
             recorder: None,
             unit_alias: self.unit_alias(info.sys_num, unit_id),
         }));
-        0
     }
 
-    fn audio_stream(&mut self, call: Option<&trunk_recorder_sys::ffi::TrCall>, recorder: &TrRecorder, samples: &[i16]) -> i32 {
+    fn audio_stream(&mut self, call: Option<&trunk_recorder_sys::ffi::TrCall>, recorder: &TrRecorder, samples: &[i16]) {
         use trunk_recorder_sys::ffi::{call_get_metadata, recorder_get_wav_hz};
         let Some(call) = call else {
-            return 0;
+            return;
         };
         if let Some(tx) = &self.audio_tx {
             let meta = call_get_metadata(call);
@@ -458,7 +450,7 @@ impl RustPluginCallbacks for GrpcPlugin {
                     sample_rate = sample_rate_i64,
                     "sample rate outside i32 range; dropping audio chunk"
                 );
-                return 0;
+                return;
             };
             let msg = proto::AudioSample {
                 talkgroup: meta.talkgroup,
@@ -469,89 +461,71 @@ impl RustPluginCallbacks for GrpcPlugin {
             };
             let _ = tx.send(msg);
         }
-        0
     }
 
-    fn call_start(&mut self, info: &TrCallInfo) -> i32 {
+    fn call_start(&mut self, info: &TrCallInfo) {
         self.send_event(proto::plugin_event::Event::CallStart(
             proto::CallStartEvent {
                 call: Some(self.call_info_from(info)),
             },
         ));
-        0
     }
 
-    fn call_end(&mut self, call_data: &TrCallData) -> i32 {
+    fn call_end(&mut self, call_data: &TrCallData) {
         self.send_event(proto::plugin_event::Event::CallEnd(proto::CallEndEvent {
             call_data: Some(convert_call_data(call_data)),
         }));
-        0
     }
 
-    fn calls_active(&mut self, infos: &[TrCallInfo]) -> i32 {
+    fn calls_active(&mut self, infos: &[TrCallInfo]) {
         self.send_event(proto::plugin_event::Event::CallsActive(
             proto::CallsActiveEvent {
                 calls: infos.iter().map(|i| self.call_info_from(i)).collect(),
             },
         ));
-        0
     }
 
-    fn setup_recorder(&mut self, recorder: &TrRecorder) -> i32 {
+    fn setup_recorder(&mut self, recorder: &TrRecorder) {
         self.send_event(proto::plugin_event::Event::SetupRecorder(
             proto::SetupRecorderEvent {
                 recorder: Some(recorder_info(recorder)),
             },
         ));
-        0
     }
 
-    fn setup_system(&mut self, info: &TrSystemInfo) -> i32 {
+    fn setup_system(&mut self, info: &TrSystemInfo) {
         self.send_event(proto::plugin_event::Event::SetupSystem(
             proto::SetupSystemEvent {
                 system: Some(system_info_from(info)),
             },
         ));
-        0
     }
 
-    fn setup_sources(&mut self) -> i32 {
-        self.send_event(proto::plugin_event::Event::SetupSources(
-            proto::SetupSourcesEvent {
-                sources: vec![],
-            },
-        ));
-        0
-    }
-
-    fn setup_config(&mut self, infos: &[TrSystemInfo]) -> i32 {
+    fn setup_config(&mut self, infos: &[TrSystemInfo]) {
         self.send_event(proto::plugin_event::Event::SetupConfig(
             proto::SetupConfigEvent {
                 sources: vec![],
                 systems: infos.iter().map(system_info_from).collect(),
             },
         ));
-        0
     }
 
-    fn trunk_message(&mut self, messages: &[TrTrunkMessage], info: &TrSystemInfo) -> i32 {
+    fn trunk_message(&mut self, messages: &[TrTrunkMessage], info: &TrSystemInfo) {
         self.send_event(proto::plugin_event::Event::TrunkMessage(
             proto::TrunkMessageEvent {
                 messages: convert_trunk_messages(messages),
                 system: Some(system_info_from(info)),
             },
         ));
-        0
     }
 
-    fn system_rates(&mut self, infos: &[TrSystemInfo], time_diff: f32) -> i32 {
+    fn system_rates(&mut self, infos: &[TrSystemInfo], time_diff: f32) {
         self.send_event(proto::plugin_event::Event::SystemRates(
             proto::SystemRatesEvent {
                 systems: infos.iter().map(system_info_from).collect(),
                 time_diff,
             },
         ));
-        0
     }
 
     fn unit_event(
@@ -560,7 +534,7 @@ impl RustPluginCallbacks for GrpcPlugin {
         event_type: TrUnitEventType,
         source_id: i64,
         talkgroup: i64,
-    ) -> i32 {
+    ) {
         let proto_type = match event_type {
             TrUnitEventType::Registration => proto::UnitEventType::Registration,
             TrUnitEventType::Deregistration => proto::UnitEventType::Deregistration,
@@ -571,7 +545,7 @@ impl RustPluginCallbacks for GrpcPlugin {
             TrUnitEventType::AnswerRequest => proto::UnitEventType::AnswerRequest,
             _ => {
                 tracing::warn!("unknown unit event type: {:?}", event_type);
-                return 0;
+                return;
             }
         };
         self.send_event(proto::plugin_event::Event::Unit(proto::UnitEvent {
@@ -581,7 +555,6 @@ impl RustPluginCallbacks for GrpcPlugin {
             talkgroup,
             source_alias: self.unit_alias(info.sys_num, source_id),
         }));
-        0
     }
 
     fn unit_alias_discovered(
@@ -591,7 +564,7 @@ impl RustPluginCallbacks for GrpcPlugin {
         alias: &str,
         source: &str,
         talkgroup_id: i64,
-    ) -> i32 {
+    ) {
         // unit_alias_discovered still receives &TrSystem from C++ (recorder callback)
         // We can't easily get TrSystemInfo here without a TrContext, so build a minimal one
         let _ = system;
@@ -606,6 +579,5 @@ impl RustPluginCallbacks for GrpcPlugin {
                 talkgroup_id,
             },
         ));
-        0
     }
 }

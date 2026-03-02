@@ -1,5 +1,7 @@
 #![allow(unsafe_code)]
 
+use std::sync::{Arc, Mutex, MutexGuard};
+
 #[cxx::bridge(namespace = "trunk_oxide")]
 pub mod ffi {
     // ── Shared enums (mirrored in both C++ and Rust) ──
@@ -179,7 +181,7 @@ pub mod ffi {
     }
 
     /// Lightweight live-call info for events (call_start, calls_active, signal).
-    /// Built by Rust from CallEntry fields, passed through C++ fire functions.
+    /// Built by Rust from CallEntry fields.
     #[derive(Debug, Clone)]
     struct TrCallInfo {
         pub talkgroup: i64,
@@ -308,7 +310,7 @@ pub mod ffi {
         type TrContext;
 
         // ── Lifecycle functions ──
-        fn tr_create_from_builder(plugin: Box<RustPluginBox>) -> Result<UniquePtr<TrContext>>;
+        fn tr_create_from_builder(handler: Box<EventHandlerBox>) -> Result<UniquePtr<TrContext>>;
         fn tr_finalize(ctx: Pin<&mut TrContext>) -> Result<()>;
 
         // ── Config builder functions ──
@@ -401,22 +403,14 @@ pub mod ffi {
         fn tr_system_retune(ctx: Pin<&mut TrContext>, sys_num: i32);
         fn tr_system_update_sysid(ctx: Pin<&mut TrContext>, msg: &TrTrunkMessage) -> bool;
         fn tr_system_update_status(ctx: Pin<&mut TrContext>, msg: &TrTrunkMessage) -> bool;
-        fn tr_context_fire_unit_event(ctx: Pin<&mut TrContext>, info: &TrSystemInfo,
-            event_type: TrUnitEventType, source_id: i64, talkgroup: i64);
-        fn tr_context_fire_setup_system(ctx: Pin<&mut TrContext>, info: &TrSystemInfo);
 
         // ── Phase B: Decode Rate Checking (called from Rust check_decode_rates) ──
         fn tr_system_control_channel_count(ctx: Pin<&mut TrContext>, sys_num: i32) -> i32;
         fn tr_system_get_current_control_channel(ctx: Pin<&mut TrContext>, sys_num: i32) -> f64;
-        fn tr_context_fire_trunk_message(ctx: Pin<&mut TrContext>, messages: &[TrTrunkMessage], info: &TrSystemInfo);
-        fn tr_context_fire_setup_config(ctx: Pin<&mut TrContext>, infos: &[TrSystemInfo]);
-        fn tr_context_fire_system_rates(ctx: Pin<&mut TrContext>, infos: &[TrSystemInfo], time_diff: f32);
 
         // ── Conventional call management — recorder status (null-guarded) ──
         fn call_has_recorder(call: &TrCall) -> bool;
         fn call_get_recorder_is_active(call: &TrCall) -> bool;
-
-        // ── Conventional call management — signal/noise/system info removed (Rust owns) ──
 
         // ── Conventional call management — lifecycle ──
         fn call_restart(call: Pin<&mut TrCall>);
@@ -461,121 +455,89 @@ pub mod ffi {
         // ── Phase C: Call Management — update source tracking ──
         fn call_recorder_set_source(call: Pin<&mut TrCall>, src: i64);
 
-        // ── Phase C: Call Management — event firing ──
-        fn tr_context_fire_call_start(ctx: Pin<&mut TrContext>, info: &TrCallInfo);
-        fn tr_context_fire_calls_active(ctx: Pin<&mut TrContext>, infos: &[TrCallInfo]);
-        fn tr_context_fire_setup_recorder(ctx: Pin<&mut TrContext>, call: &TrCall);
-        fn tr_context_fire_signal(ctx: Pin<&mut TrContext>, src: i64, info: &TrCallInfo);
-        fn tr_context_fire_call_end(ctx: Pin<&mut TrContext>, data: &TrCallData);
+        // ── Recorder setup notification (extracts recorder from call, fires through event_sink) ──
+        fn call_notify_setup_recorder(ctx: Pin<&mut TrContext>, call: &TrCall);
+
         fn tr_recorder_process_queue(rec: &TrRecorder);
     }
 
-    // ── Rust functions callable from C++ (plugin callbacks) ──
+    // ── Rust functions callable from C++ (event handler callbacks) ──
 
     extern "Rust" {
-        type RustPluginBox;
+        type EventHandlerBox;
 
-        // Takes ownership of a Box<RustPluginBox> to drop it. This also
-        // forces cxx to generate the Box<RustPluginBox> C++ template
-        // instantiation needed by bridge.cpp.
-        fn drop_rust_plugin_box(plugin: Box<RustPluginBox>);
+        // Forces cxx to generate the Box<EventHandlerBox> C++ template instantiation.
+        fn drop_event_handler_box(handler: Box<EventHandlerBox>);
 
-        fn rust_plugin_start(plugin: &mut RustPluginBox) -> i32;
-        fn rust_plugin_stop(plugin: &mut RustPluginBox) -> i32;
-        fn rust_plugin_poll_one(plugin: &mut RustPluginBox) -> i32;
-        fn rust_plugin_signal(
-            plugin: &mut RustPluginBox,
-            unit_id: i64,
-            info: &TrCallInfo,
-        ) -> i32;
-        unsafe fn rust_plugin_audio_stream(
-            plugin: &mut RustPluginBox,
+        unsafe fn event_handler_audio_stream(
+            handler: &mut EventHandlerBox,
             call: *const TrCall,
             recorder: &TrRecorder,
             samples: &[i16],
-        ) -> i32;
-        fn rust_plugin_call_start(plugin: &mut RustPluginBox, info: &TrCallInfo) -> i32;
-        fn rust_plugin_call_end(plugin: &mut RustPluginBox, call_data: &TrCallData) -> i32;
-        fn rust_plugin_calls_active(plugin: &mut RustPluginBox, infos: &[TrCallInfo]) -> i32;
-        fn rust_plugin_setup_recorder(plugin: &mut RustPluginBox, recorder: &TrRecorder) -> i32;
-        fn rust_plugin_setup_system(plugin: &mut RustPluginBox, info: &TrSystemInfo) -> i32;
-        fn rust_plugin_setup_sources(plugin: &mut RustPluginBox) -> i32;
-        fn rust_plugin_setup_config(
-            plugin: &mut RustPluginBox,
-            infos: &[TrSystemInfo],
-        ) -> i32;
-        fn rust_plugin_trunk_message(
-            plugin: &mut RustPluginBox,
-            messages: &[TrTrunkMessage],
-            info: &TrSystemInfo,
-        ) -> i32;
-        fn rust_plugin_system_rates(
-            plugin: &mut RustPluginBox,
-            infos: &[TrSystemInfo],
-            time_diff: f32,
-        ) -> i32;
-        fn rust_plugin_unit_event(
-            plugin: &mut RustPluginBox,
-            info: &TrSystemInfo,
-            event_type: TrUnitEventType,
-            source_id: i64,
-            talkgroup: i64,
-        ) -> i32;
-        fn rust_plugin_unit_alias_discovered(
-            plugin: &mut RustPluginBox,
+        );
+        fn event_handler_setup_recorder(handler: &mut EventHandlerBox, recorder: &TrRecorder);
+        fn event_handler_unit_alias_discovered(
+            handler: &mut EventHandlerBox,
             system: &TrSystem,
             radio_id: i64,
             alias: &str,
             source: &str,
             talkgroup_id: i64,
-        ) -> i32;
+        );
     }
 }
 
-/// Opaque type that holds the Rust plugin implementation.
-/// The C++ bridge holds a `Box<RustPluginBox>` via cxx.
-pub struct RustPluginBox {
-    inner: Box<dyn RustPluginCallbacks>,
+/// Opaque type that holds the event handler behind a shared mutex.
+/// C++ holds a `Box<EventHandlerBox>` via cxx for the 3 C++-initiated callbacks.
+/// Rust holds a clone of the inner `Arc` to call methods directly without FFI.
+pub struct EventHandlerBox {
+    inner: Arc<Mutex<Box<dyn EventHandler>>>,
 }
 
-impl RustPluginBox {
-    pub fn new(plugin: Box<dyn RustPluginCallbacks>) -> Self {
-        Self { inner: plugin }
+impl EventHandlerBox {
+    pub fn new(inner: Arc<Mutex<Box<dyn EventHandler>>>) -> Self {
+        Self { inner }
+    }
+
+    fn lock(&self) -> MutexGuard<'_, Box<dyn EventHandler>> {
+        match self.inner.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
     }
 }
 
-fn drop_rust_plugin_box(_plugin: Box<RustPluginBox>) {
+fn drop_event_handler_box(_handler: Box<EventHandlerBox>) {
     // Box is dropped automatically
 }
 
-/// Trait that downstream crates implement to receive plugin callbacks.
-pub trait RustPluginCallbacks: Send {
-    fn start(&mut self) -> i32;
-    fn stop(&mut self) -> i32;
-    fn poll_one(&mut self) -> i32;
-    fn signal(&mut self, unit_id: i64, info: &ffi::TrCallInfo) -> i32;
+/// Trait for receiving events from the radio system.
+/// Implemented by GrpcPlugin in trunk-oxide-grpc.
+pub trait EventHandler: Send {
+    fn start(&mut self);
+    fn stop(&mut self);
+    fn signal(&mut self, unit_id: i64, info: &ffi::TrCallInfo);
     fn audio_stream(
         &mut self,
         call: Option<&ffi::TrCall>,
         recorder: &ffi::TrRecorder,
         samples: &[i16],
-    ) -> i32;
-    fn call_start(&mut self, info: &ffi::TrCallInfo) -> i32;
-    fn call_end(&mut self, call_data: &ffi::TrCallData) -> i32;
-    fn calls_active(&mut self, infos: &[ffi::TrCallInfo]) -> i32;
-    fn setup_recorder(&mut self, recorder: &ffi::TrRecorder) -> i32;
-    fn setup_system(&mut self, info: &ffi::TrSystemInfo) -> i32;
-    fn setup_sources(&mut self) -> i32;
-    fn setup_config(&mut self, infos: &[ffi::TrSystemInfo]) -> i32;
-    fn trunk_message(&mut self, messages: &[ffi::TrTrunkMessage], info: &ffi::TrSystemInfo) -> i32;
-    fn system_rates(&mut self, infos: &[ffi::TrSystemInfo], time_diff: f32) -> i32;
+    );
+    fn call_start(&mut self, info: &ffi::TrCallInfo);
+    fn call_end(&mut self, call_data: &ffi::TrCallData);
+    fn calls_active(&mut self, infos: &[ffi::TrCallInfo]);
+    fn setup_recorder(&mut self, recorder: &ffi::TrRecorder);
+    fn setup_system(&mut self, info: &ffi::TrSystemInfo);
+    fn setup_config(&mut self, infos: &[ffi::TrSystemInfo]);
+    fn trunk_message(&mut self, messages: &[ffi::TrTrunkMessage], info: &ffi::TrSystemInfo);
+    fn system_rates(&mut self, infos: &[ffi::TrSystemInfo], time_diff: f32);
     fn unit_event(
         &mut self,
         info: &ffi::TrSystemInfo,
         event_type: ffi::TrUnitEventType,
         source_id: i64,
         talkgroup: i64,
-    ) -> i32;
+    );
     fn unit_alias_discovered(
         &mut self,
         system: &ffi::TrSystem,
@@ -583,22 +545,12 @@ pub trait RustPluginCallbacks: Send {
         alias: &str,
         source: &str,
         talkgroup_id: i64,
-    ) -> i32;
+    );
 }
 
-// ── Trampoline functions from C++ → Rust via cxx ──
-
-fn rust_plugin_start(plugin: &mut RustPluginBox) -> i32 {
-    plugin.inner.start()
-}
-
-fn rust_plugin_stop(plugin: &mut RustPluginBox) -> i32 {
-    plugin.inner.stop()
-}
-
-fn rust_plugin_poll_one(plugin: &mut RustPluginBox) -> i32 {
-    plugin.inner.poll_one()
-}
+// ── Trampoline functions for C++-initiated callbacks ──
+// Only 3 remain: audio_stream, setup_recorder, unit_alias_discovered.
+// All other events are fired directly from Rust without FFI.
 
 /// Convert a nullable opaque pointer to `Option<&T>`.
 ///
@@ -613,90 +565,29 @@ unsafe fn nullable<T>(ptr: *const T) -> Option<&'static T> {
     }
 }
 
-fn rust_plugin_signal(
-    plugin: &mut RustPluginBox,
-    unit_id: i64,
-    info: &ffi::TrCallInfo,
-) -> i32 {
-    plugin.inner.signal(unit_id, info)
-}
-
-unsafe fn rust_plugin_audio_stream(
-    plugin: &mut RustPluginBox,
+unsafe fn event_handler_audio_stream(
+    handler: &mut EventHandlerBox,
     call: *const ffi::TrCall,
     recorder: &ffi::TrRecorder,
     samples: &[i16],
-) -> i32 {
+) {
     let call = unsafe { nullable(call) };
-    plugin.inner.audio_stream(call, recorder, samples)
+    handler.lock().audio_stream(call, recorder, samples);
 }
 
-fn rust_plugin_call_start(plugin: &mut RustPluginBox, info: &ffi::TrCallInfo) -> i32 {
-    plugin.inner.call_start(info)
+fn event_handler_setup_recorder(handler: &mut EventHandlerBox, recorder: &ffi::TrRecorder) {
+    handler.lock().setup_recorder(recorder);
 }
 
-fn rust_plugin_call_end(plugin: &mut RustPluginBox, call_data: &ffi::TrCallData) -> i32 {
-    plugin.inner.call_end(call_data)
-}
-
-fn rust_plugin_calls_active(plugin: &mut RustPluginBox, infos: &[ffi::TrCallInfo]) -> i32 {
-    plugin.inner.calls_active(infos)
-}
-
-fn rust_plugin_setup_recorder(plugin: &mut RustPluginBox, recorder: &ffi::TrRecorder) -> i32 {
-    plugin.inner.setup_recorder(recorder)
-}
-
-fn rust_plugin_setup_system(plugin: &mut RustPluginBox, info: &ffi::TrSystemInfo) -> i32 {
-    plugin.inner.setup_system(info)
-}
-
-fn rust_plugin_setup_sources(plugin: &mut RustPluginBox) -> i32 {
-    plugin.inner.setup_sources()
-}
-
-fn rust_plugin_setup_config(
-    plugin: &mut RustPluginBox,
-    infos: &[ffi::TrSystemInfo],
-) -> i32 {
-    plugin.inner.setup_config(infos)
-}
-
-fn rust_plugin_trunk_message(
-    plugin: &mut RustPluginBox,
-    messages: &[ffi::TrTrunkMessage],
-    info: &ffi::TrSystemInfo,
-) -> i32 {
-    plugin.inner.trunk_message(messages, info)
-}
-
-fn rust_plugin_system_rates(
-    plugin: &mut RustPluginBox,
-    infos: &[ffi::TrSystemInfo],
-    time_diff: f32,
-) -> i32 {
-    plugin.inner.system_rates(infos, time_diff)
-}
-
-fn rust_plugin_unit_event(
-    plugin: &mut RustPluginBox,
-    info: &ffi::TrSystemInfo,
-    event_type: ffi::TrUnitEventType,
-    source_id: i64,
-    talkgroup: i64,
-) -> i32 {
-    plugin.inner.unit_event(info, event_type, source_id, talkgroup)
-}
-
-fn rust_plugin_unit_alias_discovered(
-    plugin: &mut RustPluginBox,
+fn event_handler_unit_alias_discovered(
+    handler: &mut EventHandlerBox,
     system: &ffi::TrSystem,
     radio_id: i64,
     alias: &str,
     source: &str,
     talkgroup_id: i64,
-) -> i32 {
-    plugin
-        .inner
-        .unit_alias_discovered(system, radio_id, alias, source, talkgroup_id)
+) {
+    handler
+        .lock()
+        .unit_alias_discovered(system, radio_id, alias, source, talkgroup_id);
 }

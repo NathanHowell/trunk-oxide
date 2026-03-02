@@ -9,6 +9,7 @@
 mod call_manager;
 
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -18,7 +19,16 @@ use std::collections::HashMap;
 
 use trunk_config::{Config, DefaultMode, FrequencyFormat, Modulation, SourceDriver, SystemType};
 use trunk_recorder_sys::ffi;
-use trunk_recorder_sys::RustPluginCallbacks;
+use trunk_recorder_sys::EventHandler;
+
+pub(crate) type Handler = Arc<Mutex<Box<dyn EventHandler>>>;
+
+pub(crate) fn lock_handler(handler: &Handler) -> MutexGuard<'_, Box<dyn EventHandler>> {
+    match handler.lock() {
+        Ok(guard) => guard,
+        Err(poisoned) => poisoned.into_inner(),
+    }
+}
 
 /// Configures and initializes a trunk-recorder instance without starting it.
 ///
@@ -27,12 +37,14 @@ use trunk_recorder_sys::RustPluginCallbacks;
 pub struct TrunkRecorderBuilder {
     ctx: cxx::UniquePtr<ffi::TrContext>,
     call_mgr_config: CallManagerConfig,
+    handler: Handler,
 }
 
 /// A running trunk-recorder instance. Stops automatically on drop.
 pub struct TrunkRecorder {
     ctx: cxx::UniquePtr<ffi::TrContext>,
     call_mgr_config: CallManagerConfig,
+    handler: Handler,
 }
 
 // Safety: TrContext is used exclusively from a single thread (the monitor thread).
@@ -49,12 +61,13 @@ impl TrunkRecorderBuilder {
     /// # Errors
     ///
     /// Returns an error if an SDR source fails to open or system setup fails.
-    pub fn from_config<P: RustPluginCallbacks + 'static>(
+    pub fn from_config<P: EventHandler + 'static>(
         config: &Config,
-        plugin: P,
+        handler: P,
     ) -> anyhow::Result<Self> {
-        let plugin_box = trunk_recorder_sys::RustPluginBox::new(Box::new(plugin));
-        let mut ctx = ffi::tr_create_from_builder(Box::new(plugin_box))?;
+        let handler: Handler = Arc::new(Mutex::new(Box::new(handler)));
+        let handler_box = trunk_recorder_sys::EventHandlerBox::new(handler.clone());
+        let mut ctx = ffi::tr_create_from_builder(Box::new(handler_box))?;
 
         // ── Config ──
         if let Some(rec) = &config.recorder {
@@ -325,8 +338,22 @@ impl TrunkRecorderBuilder {
             );
         }
 
-        // ── Finalize: setup_systems + plugin callbacks ──
+        // ── Finalize: setup_systems (C++) then fire events (Rust) ──
         ffi::tr_finalize(ctx.pin_mut())?;
+
+        // Fire setup events now that systems are initialized
+        {
+            let mut guard = lock_handler(&handler);
+            let infos: Vec<ffi::TrSystemInfo> = system_policies
+                .keys()
+                .map(|&sys_idx| ffi::tr_context_get_system_info(ctx.pin_mut(), sys_idx))
+                .collect();
+            guard.setup_config(&infos);
+            for info in &infos {
+                guard.setup_system(info);
+            }
+            guard.start();
+        }
 
         let rec = config.recorder.as_ref();
         let call_mgr_config = CallManagerConfig {
@@ -342,6 +369,7 @@ impl TrunkRecorderBuilder {
         Ok(Self {
             ctx,
             call_mgr_config,
+            handler,
         })
     }
 
@@ -354,6 +382,7 @@ impl TrunkRecorderBuilder {
         TrunkRecorder {
             ctx: self.ctx,
             call_mgr_config: self.call_mgr_config,
+            handler: self.handler,
         }
     }
 }
@@ -364,7 +393,7 @@ impl TrunkRecorder {
     /// This replaces the C++ `monitor_messages` function. Fatal errors from
     /// decode-rate or source checks propagate as `Err`.
     pub fn run_monitor(&mut self, shutdown: &AtomicBool) -> anyhow::Result<()> {
-        let mut call_mgr = CallManager::new(self.call_mgr_config.clone());
+        let mut call_mgr = CallManager::new(self.call_mgr_config.clone(), self.handler.clone());
 
         // Drain conventional calls created by C++ setup_systems during tr_finalize
         loop {
@@ -384,6 +413,7 @@ impl TrunkRecorder {
             if shutdown.load(Ordering::Relaxed) {
                 tracing::info!("shutting down");
                 call_mgr.conclude_all(self.ctx.pin_mut());
+                lock_handler(&self.handler).stop();
                 thread::sleep(Duration::from_secs(5));
                 return Ok(());
             }
@@ -393,20 +423,17 @@ impl TrunkRecorder {
 
             let messages = ffi::tr_context_drain_messages(self.ctx.pin_mut());
 
-            // Fire trunk_message events grouped by system (replaces C++ EventSinkBridge path)
+            // Fire trunk_message events grouped by system
             if !messages.is_empty() {
                 let mut by_system: HashMap<i32, Vec<usize>> = HashMap::new();
                 for (i, msg) in messages.iter().enumerate() {
                     by_system.entry(msg.sys_num).or_default().push(i);
                 }
                 for (&sys_num, indices) in &by_system {
-                    let sys_msgs: Vec<&ffi::TrTrunkMessage> =
-                        indices.iter().map(|&i| &messages[i]).collect();
+                    let sys_msgs: Vec<ffi::TrTrunkMessage> =
+                        indices.iter().map(|&i| messages[i].clone()).collect();
                     let info = ffi::tr_context_get_system_info(self.ctx.pin_mut(), sys_num);
-                    // Build a contiguous slice for FFI
-                    let cloned: Vec<ffi::TrTrunkMessage> =
-                        sys_msgs.iter().map(|m| (*m).clone()).collect();
-                    ffi::tr_context_fire_trunk_message(self.ctx.pin_mut(), &cloned, &info);
+                    lock_handler(&self.handler).trunk_message(&sys_msgs, &info);
                 }
             }
 

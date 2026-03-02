@@ -147,71 +147,6 @@ static TrSystemInfo build_system_info(System &sys) {
     return info;
 }
 
-// ── RustPluginBridge: delegates all plugin callbacks to Rust via FFI ──
-
-class RustPluginBridge {
-public:
-    explicit RustPluginBridge(rust::Box<RustPluginBox> plugin)
-        : plugin_(std::move(plugin)) {}
-
-    int start() {
-        return rust_plugin_start(*plugin_);
-    }
-
-    int stop() {
-        return rust_plugin_stop(*plugin_);
-    }
-
-    int poll_one() {
-        return rust_plugin_poll_one(*plugin_);
-    }
-
-    int audio_stream(const std::shared_ptr<Call> &call, const std::shared_ptr<Recorder> &recorder,
-                     int16_t *samples, int sampleCount) {
-        TrCall tr_call(call);
-        TrRecorder tr_rec(recorder);
-        rust::Slice<const int16_t> slice(samples, static_cast<size_t>(sampleCount));
-        return rust_plugin_audio_stream(
-            *plugin_,
-            call ? &tr_call : nullptr,
-            tr_rec, slice);
-    }
-
-    int setup_recorder(const std::shared_ptr<Recorder> &recorder) {
-        TrRecorder tr_rec(recorder);
-        return rust_plugin_setup_recorder(*plugin_, tr_rec);
-    }
-
-    int setup_system(const std::shared_ptr<System> &system) {
-        auto info = build_system_info(*system);
-        return rust_plugin_setup_system(*plugin_, info);
-    }
-
-    int setup_config(std::vector<std::shared_ptr<Source>> /*sources*/,
-                     std::vector<std::shared_ptr<System>> systems) {
-        std::vector<TrSystemInfo> infos;
-        infos.reserve(systems.size());
-        for (auto &s : systems) {
-            infos.push_back(build_system_info(*s));
-        }
-        rust::Slice<const TrSystemInfo> slice(infos.data(), infos.size());
-        return rust_plugin_setup_config(*plugin_, slice);
-    }
-
-    int unit_alias_discovered(const std::shared_ptr<System> &sys, const OTAAlias &alias) {
-        TrSystem tr_sys(sys);
-        return rust_plugin_unit_alias_discovered(
-            *plugin_, tr_sys, alias.radio_id,
-            rust::Str(alias.alias.data(), alias.alias.size()),
-            rust::Str(alias.source.data(), alias.source.size()),
-            alias.talkgroup_id);
-    }
-
-    RustPluginBox &plugin() { return *plugin_; }
-
-private:
-    rust::Box<RustPluginBox> plugin_;
-};
 
 // ── Call accessor implementations (most removed — Rust owns call state via CallEntry) ──
 
@@ -237,49 +172,55 @@ double recorder_get_current_length(const TrRecorder &rec) { return rec.ptr->get_
 
 // ── Source accessor implementations ──
 
-// ── CxxEventSink: EventSink subclass that delegates to RustPluginBridge ──
-// Used in library mode to route trunk-recorder events to Rust callbacks.
+// ── CxxEventSink: EventSink subclass for the 3 C++-initiated callbacks ──
+// Calls Rust trampolines directly on the EventHandlerBox.
 
 class CxxEventSink : public EventSink {
 public:
-    explicit CxxEventSink(std::shared_ptr<RustPluginBridge> bridge)
-        : bridge_(std::move(bridge)) {}
+    explicit CxxEventSink(EventHandlerBox *handler) : handler_(handler) {}
 
     void audio_callback(const std::shared_ptr<Call> &call, const std::shared_ptr<Recorder> &recorder,
                         int16_t *samples, int sampleCount) override {
-        bridge_->audio_stream(call, recorder, samples, sampleCount);
-    }
-
-    void poll_one() override {
-        bridge_->poll_one();
+        TrCall tr_call(call);
+        TrRecorder tr_rec(recorder);
+        rust::Slice<const int16_t> slice(samples, static_cast<size_t>(sampleCount));
+        event_handler_audio_stream(*handler_, call ? &tr_call : nullptr, tr_rec, slice);
     }
 
     void setup_recorder(const std::shared_ptr<Recorder> &recorder) override {
-        bridge_->setup_recorder(recorder);
+        TrRecorder tr_rec(recorder);
+        event_handler_setup_recorder(*handler_, tr_rec);
     }
 
     void unit_alias_discovered(const std::shared_ptr<System> &system,
                                const OTAAlias &alias) override {
-        bridge_->unit_alias_discovered(system, alias);
+        TrSystem tr_sys(system);
+        event_handler_unit_alias_discovered(
+            *handler_, tr_sys, alias.radio_id,
+            rust::Str(alias.alias.data(), alias.alias.size()),
+            rust::Str(alias.source.data(), alias.source.size()),
+            alias.talkgroup_id);
     }
 
 private:
-    std::shared_ptr<RustPluginBridge> bridge_;
+    EventHandlerBox *handler_;
 };
 
 // ── TrContext pimpl implementation ──
 
 struct TrContextImpl {
-    TrunkContext trunk_ctx;
-    std::shared_ptr<RustPluginBridge> bridge;
+    rust::Box<EventHandlerBox> handler;  // destroyed LAST (declared first)
+    TrunkContext trunk_ctx;              // destroyed FIRST
 
     // Parsers — created eagerly during tr_finalize
     std::map<int, std::unique_ptr<SmartnetParser>> smartnet_parsers;
     std::unique_ptr<P25Parser> p25_parser;
 
+    explicit TrContextImpl(rust::Box<EventHandlerBox> h)
+        : handler(std::move(h)) {}
 };
 
-TrContext::TrContext() : impl(std::make_unique<TrContextImpl>()) {}
+TrContext::TrContext() = default;
 TrContext::~TrContext() = default;
 TrContext::TrContext(TrContext &&) noexcept = default;
 TrContext &TrContext::operator=(TrContext &&) noexcept = default;
@@ -299,15 +240,16 @@ TrSystemInfo tr_context_get_system_info(TrContext &ctx, int32_t sys_num) {
 
 // ── Builder: create empty context ──
 
-std::unique_ptr<TrContext> tr_create_from_builder(rust::Box<RustPluginBox> plugin) {
+std::unique_ptr<TrContext> tr_create_from_builder(rust::Box<EventHandlerBox> handler) {
     auto ctx = std::make_unique<TrContext>();
-    ctx->impl->bridge = std::make_shared<RustPluginBridge>(std::move(plugin));
-    ctx->impl->trunk_ctx.config.event_sink = std::make_shared<CxxEventSink>(ctx->impl->bridge);
+    ctx->impl = std::make_unique<TrContextImpl>(std::move(handler));
+    ctx->impl->trunk_ctx.config.event_sink =
+        std::make_shared<CxxEventSink>(&*ctx->impl->handler);
     ctx->impl->trunk_ctx.tb = gr::make_top_block("Trunking");
     return ctx;
 }
 
-// ── Builder: finalize (setup_systems + plugin callbacks) ──
+// ── Builder: finalize (setup_systems only — event callbacks moved to Rust) ──
 
 void tr_finalize(TrContext &ctx) {
     setup_systems(ctx.impl->trunk_ctx.config, ctx.impl->trunk_ctx.tb,
@@ -327,22 +269,7 @@ void tr_finalize(TrContext &ctx) {
 
     // Conventional calls remain in trunk_ctx.calls for Rust to drain
     // via tr_context_take_next_conventional_call after finalize.
-
-    // Fire setup_config with TrSystemInfo (bypasses EventSinkBridge)
-    std::vector<TrSystemInfo> infos;
-    infos.reserve(ctx.impl->trunk_ctx.systems.size());
-    for (auto &sys : ctx.impl->trunk_ctx.systems) {
-        infos.push_back(build_system_info(*sys));
-    }
-    rust_plugin_setup_config(ctx.impl->bridge->plugin(),
-        rust::Slice<const TrSystemInfo>(infos.data(), infos.size()));
-
-    // Fire setup_system per-system with TrSystemInfo
-    for (auto &info : infos) {
-        rust_plugin_setup_system(ctx.impl->bridge->plugin(), info);
-    }
-
-    ctx.impl->bridge->start();
+    // setup_config, setup_system, and start are now fired from Rust.
 }
 
 // ── Config builder implementations ──
@@ -742,20 +669,6 @@ bool tr_system_update_status(TrContext &ctx, const TrTrunkMessage &msg) {
     return sys->update_status(tm);
 }
 
-void tr_context_fire_unit_event(TrContext &ctx, const TrSystemInfo &info,
-    TrUnitEventType type, int64_t source_id, int64_t talkgroup) {
-    rust_plugin_unit_event(ctx.impl->bridge->plugin(), info, type, source_id, talkgroup);
-}
-
-void tr_context_fire_setup_system(TrContext &ctx, const TrSystemInfo &info) {
-    rust_plugin_setup_system(ctx.impl->bridge->plugin(), info);
-}
-
-void tr_context_fire_trunk_message(TrContext &ctx, rust::Slice<const TrTrunkMessage> messages,
-    const TrSystemInfo &info) {
-    rust_plugin_trunk_message(ctx.impl->bridge->plugin(), messages, info);
-}
-
 // ── Phase B: Decode Rate Checking (called from Rust check_decode_rates) ──
 
 int32_t tr_system_control_channel_count(TrContext &ctx, int32_t sys_num) {
@@ -766,14 +679,6 @@ int32_t tr_system_control_channel_count(TrContext &ctx, int32_t sys_num) {
 double tr_system_get_current_control_channel(TrContext &ctx, int32_t sys_num) {
     auto sys = find_system_by_num(ctx, sys_num);
     return sys ? sys->get_current_control_channel() : 0.0;
-}
-
-void tr_context_fire_setup_config(TrContext &ctx, rust::Slice<const TrSystemInfo> infos) {
-    rust_plugin_setup_config(ctx.impl->bridge->plugin(), infos);
-}
-
-void tr_context_fire_system_rates(TrContext &ctx, rust::Slice<const TrSystemInfo> infos, float time_diff) {
-    rust_plugin_system_rates(ctx.impl->bridge->plugin(), infos, time_diff);
 }
 
 // ── Phase A: Loop Control ──
@@ -1177,30 +1082,14 @@ rust::String tr_context_get_system_multi_site_name(const TrContext &ctx, int32_t
     return rust::String("");
 }
 
-// ── Phase C: Call Management — event firing ──
-// call_start, calls_active, signal bypass EventSinkBridge — Rust plugin called directly
+// ── Recorder setup notification (Rust calls this to fire setup_recorder through event_sink) ──
+// Needed because Rust doesn't have direct access to the C++ recorder shared_ptr.
 
-void tr_context_fire_call_start(TrContext &ctx, const TrCallInfo &info) {
-    rust_plugin_call_start(ctx.impl->bridge->plugin(), info);
-}
-
-void tr_context_fire_calls_active(TrContext &ctx, rust::Slice<const TrCallInfo> infos) {
-    rust_plugin_calls_active(ctx.impl->bridge->plugin(), infos);
-}
-
-void tr_context_fire_setup_recorder(TrContext &ctx, const TrCall &call) {
+void call_notify_setup_recorder(TrContext &ctx, const TrCall &call) {
     auto recorder = call.ptr->get_recorder();
     if (recorder) {
         ctx.impl->trunk_ctx.config.event_sink->setup_recorder(recorder);
     }
-}
-
-void tr_context_fire_signal(TrContext &ctx, int64_t src, const TrCallInfo &info) {
-    rust_plugin_signal(ctx.impl->bridge->plugin(), src, info);
-}
-
-void tr_context_fire_call_end(TrContext &ctx, const TrCallData &data) {
-    rust_plugin_call_end(ctx.impl->bridge->plugin(), data);
 }
 
 void tr_recorder_process_queue(const TrRecorder &rec) {

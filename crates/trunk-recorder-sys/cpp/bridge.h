@@ -27,7 +27,7 @@ struct TrCallInfo;
 struct TrCallMetadata;
 struct TrSystemInfo;
 struct TrSquelchEvent;
-struct RustPluginBox;
+struct EventHandlerBox;
 
 // ── Opaque wrapper types that cxx sees ──
 // These wrap raw pointers to trunk-recorder objects.
@@ -77,7 +77,7 @@ struct TrContext {
 TrSystemInfo tr_context_get_system_info(TrContext &ctx, int32_t sys_num);
 
 // ── Lifecycle functions ──
-std::unique_ptr<TrContext> tr_create_from_builder(rust::Box<RustPluginBox> plugin);
+std::unique_ptr<TrContext> tr_create_from_builder(rust::Box<EventHandlerBox> handler);
 void tr_finalize(TrContext &ctx);
 
 // ── Config builder functions ──
@@ -171,23 +171,14 @@ void tr_system_add_control_channel_runtime(TrContext &ctx, int32_t sys_num, doub
 void tr_system_retune(TrContext &ctx, int32_t sys_num);
 bool tr_system_update_sysid(TrContext &ctx, const TrTrunkMessage &msg);
 bool tr_system_update_status(TrContext &ctx, const TrTrunkMessage &msg);
-void tr_context_fire_unit_event(TrContext &ctx, const TrSystemInfo &info,
-    TrUnitEventType type, int64_t source_id, int64_t talkgroup);
-void tr_context_fire_setup_system(TrContext &ctx, const TrSystemInfo &info);
 
 // ── Phase B: Decode Rate Checking (called from Rust check_decode_rates) ──
 int32_t tr_system_control_channel_count(TrContext &ctx, int32_t sys_num);
 double tr_system_get_current_control_channel(TrContext &ctx, int32_t sys_num);
-void tr_context_fire_trunk_message(TrContext &ctx, rust::Slice<const TrTrunkMessage> messages,
-    const TrSystemInfo &info);
-void tr_context_fire_setup_config(TrContext &ctx, rust::Slice<const TrSystemInfo> infos);
-void tr_context_fire_system_rates(TrContext &ctx, rust::Slice<const TrSystemInfo> infos, float time_diff);
 
 // ── Conventional call management — recorder status (null-guarded) ──
 bool call_has_recorder(const TrCall &call);
 bool call_get_recorder_is_active(const TrCall &call);
-
-// ── Conventional call management — signal/noise/system info removed (Rust owns) ──
 
 // ── Conventional call management — lifecycle ──
 void call_restart(TrCall &call);
@@ -233,12 +224,9 @@ void call_process_recorder_queue(const TrCall &call);
 // ── Phase C: Call Management — system lookup by sys_num ──
 rust::String tr_context_get_system_multi_site_name(const TrContext &ctx, int32_t sys_num);
 
-// ── Phase C: Call Management — event firing ──
-void tr_context_fire_call_start(TrContext &ctx, const TrCallInfo &info);
-void tr_context_fire_calls_active(TrContext &ctx, rust::Slice<const TrCallInfo> infos);
-void tr_context_fire_setup_recorder(TrContext &ctx, const TrCall &call);
-void tr_context_fire_signal(TrContext &ctx, int64_t src, const TrCallInfo &info);
-void tr_context_fire_call_end(TrContext &ctx, const TrCallData &data);
+// ── Recorder setup notification (extracts recorder from call, fires through event_sink) ──
+void call_notify_setup_recorder(TrContext &ctx, const TrCall &call);
+
 void tr_recorder_process_queue(const TrRecorder &rec);
 
 } // namespace trunk_oxide

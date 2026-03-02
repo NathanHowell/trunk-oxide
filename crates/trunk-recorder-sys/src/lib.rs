@@ -315,15 +315,7 @@ pub mod ffi {
 
         // ── Config builder functions ──
         fn tr_config_set_temp_dir(ctx: Pin<&mut TrContext>, dir: &str);
-        fn tr_config_set_call_timeout(ctx: Pin<&mut TrContext>, seconds: f64);
-        fn tr_config_set_control_warn_rate(ctx: Pin<&mut TrContext>, rate: i32);
-        fn tr_config_set_control_retune_limit(ctx: Pin<&mut TrContext>, limit: i32);
-        fn tr_config_set_broadcast_signals(ctx: Pin<&mut TrContext>, enabled: bool);
         fn tr_config_set_soft_vocoder(ctx: Pin<&mut TrContext>, enabled: bool);
-        fn tr_config_set_record_uu_v_calls(ctx: Pin<&mut TrContext>, enabled: bool);
-        fn tr_config_set_new_call_from_update(ctx: Pin<&mut TrContext>, enabled: bool);
-        fn tr_config_set_frequency_format(ctx: Pin<&mut TrContext>, format: i32);
-        fn tr_config_set_default_mode(ctx: Pin<&mut TrContext>, mode: &str);
         fn tr_config_set_debug_recorder(ctx: Pin<&mut TrContext>, enabled: bool, address: &str, port: i32);
 
         // ── Source builder functions ──

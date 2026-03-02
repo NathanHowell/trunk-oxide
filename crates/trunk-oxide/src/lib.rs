@@ -17,7 +17,7 @@ pub use call_manager::{CallManagerConfig, SystemPolicy, TalkgroupPolicy};
 use call_manager::CallManager;
 use std::collections::HashMap;
 
-use trunk_config::{Config, DefaultMode, FrequencyFormat, Modulation, SourceDriver, SystemType};
+use trunk_config::{Config, DefaultMode, Modulation, SourceDriver, SystemType};
 use trunk_recorder_sys::ffi;
 use trunk_recorder_sys::EventHandler;
 
@@ -72,21 +72,7 @@ impl TrunkRecorderBuilder {
         // ── Config ──
         if let Some(rec) = &config.recorder {
             ffi::tr_config_set_temp_dir(ctx.pin_mut(), &rec.temp_dir);
-            ffi::tr_config_set_call_timeout(ctx.pin_mut(), rec.call_timeout);
-            ffi::tr_config_set_control_warn_rate(ctx.pin_mut(), rec.control_warn_rate);
-            ffi::tr_config_set_control_retune_limit(ctx.pin_mut(), rec.control_retune_limit);
-            ffi::tr_config_set_broadcast_signals(ctx.pin_mut(), rec.broadcast_signals);
             ffi::tr_config_set_soft_vocoder(ctx.pin_mut(), rec.soft_vocoder);
-            ffi::tr_config_set_record_uu_v_calls(ctx.pin_mut(), rec.record_uu_v_calls);
-            ffi::tr_config_set_new_call_from_update(ctx.pin_mut(), rec.new_call_from_update);
-            ffi::tr_config_set_frequency_format(
-                ctx.pin_mut(),
-                match rec.frequency_format {
-                    FrequencyFormat::Mhz => 0,
-                    FrequencyFormat::Hz => 1,
-                },
-            );
-            ffi::tr_config_set_default_mode(ctx.pin_mut(), rec.default_mode.as_str());
             ffi::tr_config_set_debug_recorder(
                 ctx.pin_mut(),
                 rec.debug.enabled,

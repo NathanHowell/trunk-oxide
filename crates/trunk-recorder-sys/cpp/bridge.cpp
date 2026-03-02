@@ -278,40 +278,8 @@ void tr_config_set_temp_dir(TrContext &ctx, rust::Str dir) {
     ctx.impl->trunk_ctx.config.temp_dir = std::string(dir.data(), dir.size());
 }
 
-void tr_config_set_call_timeout(TrContext &ctx, double seconds) {
-    ctx.impl->trunk_ctx.config.call_timeout = std::chrono::duration<double>(seconds);
-}
-
-void tr_config_set_control_warn_rate(TrContext &ctx, int32_t rate) {
-    ctx.impl->trunk_ctx.config.control_message_warn_rate = rate;
-}
-
-void tr_config_set_control_retune_limit(TrContext &ctx, int32_t limit) {
-    ctx.impl->trunk_ctx.config.control_retune_limit = limit;
-}
-
-void tr_config_set_broadcast_signals(TrContext &ctx, bool enabled) {
-    ctx.impl->trunk_ctx.config.broadcast_signals = enabled;
-}
-
 void tr_config_set_soft_vocoder(TrContext &ctx, bool enabled) {
     ctx.impl->trunk_ctx.config.soft_vocoder = enabled;
-}
-
-void tr_config_set_record_uu_v_calls(TrContext &ctx, bool enabled) {
-    ctx.impl->trunk_ctx.config.record_uu_v_calls = enabled;
-}
-
-void tr_config_set_new_call_from_update(TrContext &ctx, bool enabled) {
-    ctx.impl->trunk_ctx.config.new_call_from_update = enabled;
-}
-
-void tr_config_set_frequency_format(TrContext &ctx, int32_t format) {
-    ctx.impl->trunk_ctx.config.frequency_format = format;
-}
-
-void tr_config_set_default_mode(TrContext &ctx, rust::Str mode) {
-    ctx.impl->trunk_ctx.config.default_mode = std::string(mode.data(), mode.size());
 }
 
 void tr_config_set_debug_recorder(TrContext &ctx, bool enabled, rust::Str address, int32_t port) {

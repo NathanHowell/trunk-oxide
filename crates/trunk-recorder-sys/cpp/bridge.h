@@ -82,15 +82,7 @@ void tr_finalize(TrContext &ctx);
 
 // ── Config builder functions ──
 void tr_config_set_temp_dir(TrContext &ctx, rust::Str dir);
-void tr_config_set_call_timeout(TrContext &ctx, double seconds);
-void tr_config_set_control_warn_rate(TrContext &ctx, int32_t rate);
-void tr_config_set_control_retune_limit(TrContext &ctx, int32_t limit);
-void tr_config_set_broadcast_signals(TrContext &ctx, bool enabled);
 void tr_config_set_soft_vocoder(TrContext &ctx, bool enabled);
-void tr_config_set_record_uu_v_calls(TrContext &ctx, bool enabled);
-void tr_config_set_new_call_from_update(TrContext &ctx, bool enabled);
-void tr_config_set_frequency_format(TrContext &ctx, int32_t format);
-void tr_config_set_default_mode(TrContext &ctx, rust::Str mode);
 void tr_config_set_debug_recorder(TrContext &ctx, bool enabled, rust::Str address, int32_t port);
 
 // ── Source builder functions ──

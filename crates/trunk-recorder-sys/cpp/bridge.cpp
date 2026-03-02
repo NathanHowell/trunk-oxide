@@ -32,23 +32,6 @@ namespace trunk_oxide {
 
 // ── Enum conversion helpers ──
 
-static TrSignalType convert_signal_type(gr::blocks::SignalType st) {
-    switch (st) {
-        case gr::blocks::Normal: return TrSignalType::Normal;
-        case gr::blocks::Emergency: return TrSignalType::Emergency;
-        case gr::blocks::EmergencyAck: return TrSignalType::EmergencyAck;
-        case gr::blocks::RadioCheck: return TrSignalType::RadioCheck;
-        case gr::blocks::RadioCheckAck: return TrSignalType::RadioCheckAck;
-        case gr::blocks::RadioStun: return TrSignalType::RadioStun;
-        case gr::blocks::RadioStunAck: return TrSignalType::RadioStunAck;
-        case gr::blocks::RadioRevive: return TrSignalType::RadioRevive;
-        case gr::blocks::RadioReviveAck: return TrSignalType::RadioReviveAck;
-        case gr::blocks::NormalPre: return TrSignalType::NormalPre;
-        case gr::blocks::EmergencyPre: return TrSignalType::EmergencyPre;
-        default: return TrSignalType::Normal;
-    }
-}
-
 static TrMessageType convert_message_type(MessageType mt) {
     switch (mt) {
         case GRANT: return TrMessageType::Grant;
@@ -160,21 +143,11 @@ public:
         return rust_plugin_poll_one(*plugin_);
     }
 
-    int signal(long unitId, const char *signaling_type,
-               gr::blocks::SignalType sig_type,
-               const std::shared_ptr<Call> &call, const std::shared_ptr<System> &system, const std::shared_ptr<Recorder> &recorder) {
-        auto sig_str = signaling_type
-            ? rust::Str(signaling_type, std::strlen(signaling_type))
-            : rust::Str("", 0);
-        TrCall tr_call(call);
-        TrSystem tr_sys(system);
-        TrRecorder tr_rec(recorder);
-        return rust_plugin_signal(
-            *plugin_, unitId, sig_str,
-            convert_signal_type(sig_type),
-            call ? &tr_call : nullptr,
-            system ? &tr_sys : nullptr,
-            recorder ? &tr_rec : nullptr);
+    // signal() bypassed — Rust calls rust_plugin_signal directly via tr_context_fire_signal
+    int signal(long /*unitId*/, const char * /*signaling_type*/,
+               gr::blocks::SignalType /*sig_type*/,
+               const std::shared_ptr<Call> & /*call*/, const std::shared_ptr<System> & /*system*/, const std::shared_ptr<Recorder> & /*recorder*/) {
+        return 0;
     }
 
     int audio_stream(const std::shared_ptr<Call> &call, const std::shared_ptr<Recorder> &recorder,
@@ -188,25 +161,14 @@ public:
             tr_rec, slice);
     }
 
-    int call_start(const std::shared_ptr<Call> &call) {
-        TrCall tr_call(call);
-        return rust_plugin_call_start(*plugin_, tr_call);
+    // call_start() bypassed — Rust calls rust_plugin_call_start directly via tr_context_fire_call_start
+    int call_start(const std::shared_ptr<Call> & /*call*/) {
+        return 0;
     }
 
-    int calls_active(std::vector<std::shared_ptr<Call>> calls) {
-        // Convert vector<shared_ptr<Call>> to vector of TrCall, then pass pointers
-        std::vector<TrCall> wrappers;
-        wrappers.reserve(calls.size());
-        for (auto &c : calls) {
-            wrappers.emplace_back(c);
-        }
-        std::vector<const TrCall *> ptrs;
-        ptrs.reserve(wrappers.size());
-        for (auto &w : wrappers) {
-            ptrs.push_back(&w);
-        }
-        rust::Slice<const TrCall *const> slice(ptrs.data(), ptrs.size());
-        return rust_plugin_calls_active(*plugin_, slice);
+    // calls_active() bypassed — Rust calls rust_plugin_calls_active directly via tr_context_fire_calls_active
+    int calls_active(std::vector<std::shared_ptr<Call>> /*calls*/) {
+        return 0;
     }
 
     int setup_recorder(const std::shared_ptr<Recorder> &recorder) {
@@ -341,32 +303,14 @@ private:
     rust::Box<RustPluginBox> plugin_;
 };
 
-// ── Call accessor implementations ──
+// ── Call accessor implementations (most removed — Rust owns call state via CallEntry) ──
 
-int64_t call_get_talkgroup(const TrCall &call) { return call.ptr->get_talkgroup(); }
-int64_t call_get_call_num(const TrCall &call) { return call.ptr->get_call_num(); }
-int32_t call_get_sys_num(const TrCall &call) { return call.ptr->get_sys_num(); }
-double call_get_freq(const TrCall &call) { return call.ptr->get_freq(); }
-double call_get_signal(const TrCall &call) { return call.ptr->get_signal(); }
-double call_get_noise(const TrCall &call) { return call.ptr->get_noise(); }
 int32_t call_get_freq_error(const TrCall &call) { return call.ptr->get_freq_error(); }
-bool call_get_encrypted(const TrCall &call) { return call.ptr->get_encrypted(); }
-bool call_get_emergency(const TrCall &call) { return call.ptr->get_emergency(); }
-bool call_get_is_analog(const TrCall &call) { return call.ptr->get_is_analog(); }
-bool call_is_conventional(const TrCall &call) { return call.ptr->is_conventional(); }
-bool call_get_phase2_tdma(const TrCall &call) { return call.ptr->get_phase2_tdma(); }
-int32_t call_get_tdma_slot(const TrCall &call) { return call.ptr->get_tdma_slot(); }
-int32_t call_get_priority(const TrCall &call) { return call.ptr->get_priority(); }
-bool call_get_mode(const TrCall &call) { return call.ptr->get_mode(); }
-bool call_get_duplex(const TrCall &call) { return call.ptr->get_duplex(); }
-bool call_get_conversation_mode(const TrCall &call) { return call.ptr->get_conversation_mode(); }
-int64_t call_get_current_source_id(const TrCall &call) { return call.ptr->get_current_source_id(); }
-double call_get_current_length(const TrCall &call) { return call.ptr->get_current_length(); }
-int64_t call_get_start_time(const TrCall &call) { return static_cast<int64_t>(call.ptr->get_start_time()); }
-int64_t call_elapsed(const TrCall &call) { return static_cast<int64_t>(call.ptr->elapsed().count()); }
-rust::String call_get_short_name(const TrCall &call) { return rust::String(call.ptr->get_short_name()); }
-TrState call_get_state(const TrCall &call) { return convert_state(call.ptr->get_state()); }
-TrMonitoringState call_get_monitoring_state(const TrCall &call) { return convert_monitoring_state(call.ptr->get_monitoring_state()); }
+double call_get_current_length(const TrCall &call) {
+    // Bypass Call_impl::get_current_length() state check — Rust owns state
+    auto rec = call.ptr->get_recorder();
+    return rec ? rec->get_current_length() : 0.0;
+}
 
 // ── System accessor implementations ──
 
@@ -1192,21 +1136,8 @@ bool call_get_recorder_is_active(const TrCall &call) {
     return rec ? rec->is_active() : false;
 }
 
-// ── Conventional call management — signal/noise ──
-
-void call_set_signal(TrCall &call, double s) {
-    call.ptr->set_signal(s);
-}
-
-void call_set_noise(TrCall &call, double n) {
-    call.ptr->set_noise(n);
-}
-
-// ── Conventional call management — system info ──
-
-double call_get_system_max_duration(const TrCall &call) {
-    return call.ptr->get_system()->get_max_duration();
-}
+// ── Conventional call management — signal/noise (removed — Rust owns) ──
+// ── Conventional call management — system info (removed — Rust owns via CallEntry::max_duration) ──
 
 // ── Conventional call management — lifecycle ──
 
@@ -1250,39 +1181,7 @@ std::unique_ptr<TrCall> tr_context_take_next_conventional_call(TrContext &ctx) {
     return std::make_unique<TrCall>(call_ptr);
 }
 
-// ── Phase C: Call Management — additional call accessors ──
-
-double call_since_last_update_secs(const TrCall &call) {
-    return call.ptr->since_last_update().count();
-}
-
-bool call_get_system_multi_site(const TrCall &call) {
-    return call.ptr->get_system()->get_multiSite();
-}
-
-uint64_t call_get_system_wacn(const TrCall &call) {
-    return call.ptr->get_system()->get_wacn();
-}
-
-uint64_t call_get_system_nac(const TrCall &call) {
-    return call.ptr->get_system()->get_nac();
-}
-
-int32_t call_get_system_rfss(const TrCall &call) {
-    return call.ptr->get_system()->get_sys_rfss();
-}
-
-int32_t call_get_system_site_id(const TrCall &call) {
-    return call.ptr->get_system()->get_sys_site_id();
-}
-
-rust::String call_get_system_multi_site_name(const TrCall &call) {
-    return rust::String(call.ptr->get_system()->get_multiSiteSystemName());
-}
-
-uint64_t call_get_system_multi_site_number(const TrCall &call) {
-    return call.ptr->get_system()->get_multiSiteSystemNumber();
-}
+// ── Phase C: Call Management — additional call accessors (most removed — Rust owns via CallEntry) ──
 
 uint64_t call_system_get_preferred_nac(const TrCall &call, int64_t talkgroup) {
     auto tg = call.ptr->get_system()->find_talkgroup(talkgroup);
@@ -1314,21 +1213,41 @@ std::unique_ptr<TrCall> tr_context_create_call(TrContext &ctx, const TrTrunkMess
     return std::make_unique<TrCall>(call);
 }
 
-void tr_call_set_state(TrCall &call, TrState state) {
-    call.ptr->set_state(convert_state_back(state));
+TrCallMetadata call_get_metadata(const TrCall &call) {
+    auto *c = call.ptr.get();
+    auto sys = c->get_system();
+    TrCallMetadata m;
+    m.call_num = c->get_call_num();
+    m.talkgroup = c->get_talkgroup();
+    m.freq = c->get_freq();
+    m.sys_num = c->get_sys_num();
+    m.short_name = rust::String(c->get_short_name());
+    m.tdma_slot = c->get_tdma_slot();
+    m.phase2_tdma = c->get_phase2_tdma();
+    m.mode = c->get_mode();
+    m.duplex = c->get_duplex();
+    m.emergency = c->get_emergency();
+    m.is_conventional = c->is_conventional();
+    m.start_time = static_cast<int64_t>(c->get_start_time());
+    m.state = convert_state(c->get_state());
+    m.monitoring_state = convert_monitoring_state(c->get_monitoring_state());
+    m.encrypted = c->get_encrypted();
+    m.is_analog = c->get_is_analog();
+    m.current_source_id = c->get_current_source_id();
+    m.signal = c->get_signal();
+    m.noise = c->get_noise();
+    m.priority = c->get_priority();
+    m.multi_site = sys ? sys->get_multiSite() : false;
+    m.wacn = sys ? sys->get_wacn() : 0;
+    m.rfss = sys ? sys->get_sys_rfss() : 0;
+    m.site_id = sys ? sys->get_sys_site_id() : 0;
+    m.multi_site_name = rust::String(sys ? sys->get_multiSiteSystemName() : "");
+    m.conversation_mode = sys ? sys->get_conversation_mode() : false;
+    m.max_duration = sys ? sys->get_max_duration() : 0.0;
+    return m;
 }
 
-void tr_call_set_monitoring_state(TrCall &call, TrMonitoringState state) {
-    call.ptr->set_monitoring_state(convert_monitoring_state_back(state));
-}
-
-void tr_call_set_encrypted(TrCall &call, bool encrypted) {
-    call.ptr->set_encrypted(encrypted);
-}
-
-void call_set_is_analog(TrCall &call, bool is_analog) {
-    call.ptr->set_is_analog(is_analog);
-}
+// State/monitoring/encrypted/is_analog setters removed — Rust owns all call state
 
 rust::Vec<int64_t> tr_context_get_talkgroup_patch(
     const TrContext &ctx, int32_t sys_num, int64_t talkgroup) {
@@ -1379,7 +1298,7 @@ bool tr_source_start_recording(TrContext &ctx, int32_t source_idx, TrCall &call,
     }
 
     call.ptr->set_recorder(recorder);
-    call.ptr->set_state(RECORDING);
+    // State is now owned by Rust — caller sets entry.state = Recording
     config.event_sink->setup_recorder(recorder);
 
     // Debug recorder
@@ -1468,20 +1387,12 @@ rust::Vec<uint64_t> call_get_patched_talkgroups(const TrCall &call) {
 }
 
 // ── Phase C: Call Management — update source tracking ──
-
-void call_touch(TrCall &call) {
-    call.ptr->set_last_update();
-}
-
-void call_set_current_source_id(TrCall &call, int64_t src) {
-    call.ptr->set_current_source_id(src);
-}
+// call_touch and call_set_current_source_id removed — Rust owns timing and source_id
 
 void call_recorder_set_source(TrCall &call, int64_t src) {
-    if (call.ptr->get_state() == RECORDING) {
-        auto rec = call.ptr->get_recorder();
-        if (rec) rec->set_source(src);
-    }
+    // Rust only calls this when entry.state == Recording
+    auto rec = call.ptr->get_recorder();
+    if (rec) rec->set_source(src);
 }
 
 // ── Phase C: Call Management — call-level recorder accessors ──
@@ -1517,18 +1428,14 @@ rust::String tr_context_get_system_multi_site_name(const TrContext &ctx, int32_t
 }
 
 // ── Phase C: Call Management — event firing ──
+// call_start, calls_active, signal bypass EventSinkBridge — Rust plugin called directly
 
-void tr_context_fire_call_start(TrContext &ctx, const TrCall &call) {
-    ctx.impl->trunk_ctx.config.event_sink->call_start(call.ptr);
+void tr_context_fire_call_start(TrContext &ctx, const TrCallInfo &info) {
+    rust_plugin_call_start(ctx.impl->bridge->plugin(), info);
 }
 
-void tr_context_fire_calls_active(TrContext &ctx, rust::Slice<const TrCall *const> calls) {
-    std::vector<std::shared_ptr<Call>> call_ptrs;
-    call_ptrs.reserve(calls.size());
-    for (auto *c : calls) {
-        call_ptrs.push_back(c->ptr);
-    }
-    ctx.impl->trunk_ctx.config.event_sink->calls_active(std::move(call_ptrs));
+void tr_context_fire_calls_active(TrContext &ctx, rust::Slice<const TrCallInfo> infos) {
+    rust_plugin_calls_active(ctx.impl->bridge->plugin(), infos);
 }
 
 void tr_context_fire_setup_recorder(TrContext &ctx, const TrCall &call) {
@@ -1538,10 +1445,8 @@ void tr_context_fire_setup_recorder(TrContext &ctx, const TrCall &call) {
     }
 }
 
-void tr_context_fire_signal(TrContext &ctx, int64_t src, const TrCall &call) {
-    ctx.impl->trunk_ctx.config.event_sink->signal(
-        src, nullptr, gr::blocks::SignalType::Normal,
-        call.ptr, call.ptr->get_system(), nullptr);
+void tr_context_fire_signal(TrContext &ctx, int64_t src, const TrCallInfo &info) {
+    rust_plugin_signal(ctx.impl->bridge->plugin(), src, info);
 }
 
 void tr_context_fire_call_end(TrContext &ctx, const TrCallData &data) {

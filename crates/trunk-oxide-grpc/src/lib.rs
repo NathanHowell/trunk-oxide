@@ -4,7 +4,7 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use trunk_recorder_sys::ffi::{
-    TrCall, TrCallData, TrRecorder, TrSignalType, TrSystem, TrTrunkMessage,
+    TrCallData, TrCallInfo, TrRecorder, TrSystem, TrTrunkMessage,
 };
 use trunk_recorder_sys::RustPluginCallbacks;
 
@@ -137,26 +137,6 @@ fn convert_call_data(cd: &TrCallData) -> proto::CallData {
             })
             .collect(),
         status: i32::from(cd.status.repr),
-    }
-}
-
-fn convert_signal_type(st: TrSignalType) -> i32 {
-    match st {
-        TrSignalType::Normal => proto::SignalType::Normal as i32,
-        TrSignalType::Emergency => proto::SignalType::Emergency as i32,
-        TrSignalType::EmergencyAck => proto::SignalType::EmergencyAck as i32,
-        TrSignalType::RadioCheck => proto::SignalType::RadioCheck as i32,
-        TrSignalType::RadioCheckAck => proto::SignalType::RadioCheckAck as i32,
-        TrSignalType::RadioStun => proto::SignalType::RadioStun as i32,
-        TrSignalType::RadioStunAck => proto::SignalType::RadioStunAck as i32,
-        TrSignalType::RadioRevive => proto::SignalType::RadioRevive as i32,
-        TrSignalType::RadioReviveAck => proto::SignalType::RadioReviveAck as i32,
-        TrSignalType::NormalPre => proto::SignalType::NormalPre as i32,
-        TrSignalType::EmergencyPre => proto::SignalType::EmergencyPre as i32,
-        other => {
-            tracing::warn!("unknown signal type: {:?}", other);
-            proto::SignalType::Normal as i32
-        }
     }
 }
 
@@ -346,46 +326,36 @@ impl GrpcPlugin {
         self.talkgroups = talkgroups;
     }
 
-    fn call_info(&self, call: &TrCall) -> proto::CallInfo {
-        use trunk_recorder_sys::ffi::{
-            call_elapsed, call_get_call_num, call_get_conversation_mode, call_get_current_length,
-            call_get_current_source_id, call_get_duplex, call_get_emergency, call_get_encrypted,
-            call_get_freq, call_get_freq_error, call_get_is_analog, call_get_mode,
-            call_get_monitoring_state, call_get_noise, call_get_phase2_tdma, call_get_priority,
-            call_get_short_name, call_get_signal, call_get_start_time, call_get_state,
-            call_get_sys_num, call_get_talkgroup, call_get_tdma_slot, call_is_conventional,
-        };
-        let short_name = call_get_short_name(call);
-        let talkgroup = call_get_talkgroup(call);
-        let meta = self.talkgroups.get(&(short_name.clone(), talkgroup));
+    fn call_info_from(&self, info: &TrCallInfo) -> proto::CallInfo {
+        let meta = self.talkgroups.get(&(info.short_name.clone(), info.talkgroup));
         proto::CallInfo {
-            talkgroup,
-            call_num: call_get_call_num(call),
-            sys_num: call_get_sys_num(call),
-            freq: call_get_freq(call),
-            signal: { let s = call_get_signal(call); if s >= 998.0 { None } else { Some(s) } },
-            noise: { let n = call_get_noise(call); if n >= 998.0 { None } else { Some(n) } },
-            freq_error: call_get_freq_error(call),
-            encrypted: call_get_encrypted(call),
-            emergency: call_get_emergency(call),
-            is_analog: call_get_is_analog(call),
-            is_conventional: call_is_conventional(call),
-            phase2_tdma: call_get_phase2_tdma(call),
-            tdma_slot: call_get_tdma_slot(call),
-            priority: call_get_priority(call),
-            mode: call_get_mode(call),
-            duplex: call_get_duplex(call),
-            conversation_mode: call_get_conversation_mode(call),
-            current_source_id: call_get_current_source_id(call),
-            current_length: call_get_current_length(call),
-            start_time: call_get_start_time(call),
-            elapsed: call_elapsed(call),
-            short_name,
+            talkgroup: info.talkgroup,
+            call_num: info.call_num,
+            sys_num: info.sys_num,
+            freq: info.freq,
+            signal: if info.signal >= 998.0 { None } else { Some(info.signal) },
+            noise: if info.noise >= 998.0 { None } else { Some(info.noise) },
+            freq_error: info.freq_error,
+            encrypted: info.encrypted,
+            emergency: info.emergency,
+            is_analog: info.is_analog,
+            is_conventional: info.is_conventional,
+            phase2_tdma: info.phase2_tdma,
+            tdma_slot: info.tdma_slot,
+            priority: info.priority,
+            mode: info.mode,
+            duplex: info.duplex,
+            conversation_mode: info.conversation_mode,
+            current_source_id: info.current_source_id,
+            current_length: info.current_length,
+            start_time: info.start_time,
+            elapsed: info.elapsed as i64,
+            short_name: info.short_name.clone(),
             talkgroup_alpha_tag: meta.map_or_else(String::new, |m| m.alpha_tag.clone()),
             talkgroup_tag: meta.map_or_else(String::new, |m| m.tag.clone()),
             talkgroup_group: meta.map_or_else(String::new, |m| m.group.clone()),
-            state: i32::from(call_get_state(call).repr),
-            monitoring_state: i32::from(call_get_monitoring_state(call).repr),
+            state: i32::from(info.state.repr),
+            monitoring_state: i32::from(info.monitoring_state.repr),
         }
     }
 
@@ -495,37 +465,26 @@ impl RustPluginCallbacks for GrpcPlugin {
         0
     }
 
-    fn signal(
-        &mut self,
-        unit_id: i64,
-        signaling_type: &str,
-        sig_type: TrSignalType,
-        call: Option<&TrCall>,
-        system: Option<&TrSystem>,
-        recorder: Option<&TrRecorder>,
-    ) -> i32 {
-        use trunk_recorder_sys::ffi::system_get_sys_num;
-        let sys_num = system.map_or(0, system_get_sys_num);
+    fn signal(&mut self, unit_id: i64, info: &TrCallInfo) -> i32 {
         self.send_event(proto::plugin_event::Event::Signal(proto::SignalEvent {
             unit_id,
-            signaling_type: signaling_type.to_string(),
-            signal_type: convert_signal_type(sig_type),
-            call: call.map(|c| self.call_info(c)),
-            system: system.map(system_info),
-            recorder: recorder.map(recorder_info),
-            unit_alias: self.unit_alias(sys_num, unit_id),
+            signaling_type: String::new(),
+            signal_type: proto::SignalType::Normal as i32,
+            call: Some(self.call_info_from(info)),
+            system: None,
+            recorder: None,
+            unit_alias: self.unit_alias(info.sys_num, unit_id),
         }));
         0
     }
 
-    fn audio_stream(&mut self, call: Option<&TrCall>, recorder: &TrRecorder, samples: &[i16]) -> i32 {
-        use trunk_recorder_sys::ffi::{
-            call_get_freq, call_get_sys_num, call_get_talkgroup, recorder_get_wav_hz,
-        };
+    fn audio_stream(&mut self, call: Option<&trunk_recorder_sys::ffi::TrCall>, recorder: &TrRecorder, samples: &[i16]) -> i32 {
+        use trunk_recorder_sys::ffi::{call_get_metadata, recorder_get_wav_hz};
         let Some(call) = call else {
             return 0;
         };
         if let Some(tx) = &self.audio_tx {
+            let meta = call_get_metadata(call);
             let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
             let sample_rate_i64 = recorder_get_wav_hz(recorder);
             let Ok(sample_rate) = i32::try_from(sample_rate_i64) else {
@@ -536,9 +495,9 @@ impl RustPluginCallbacks for GrpcPlugin {
                 return 0;
             };
             let msg = proto::AudioSample {
-                talkgroup: call_get_talkgroup(call),
-                sys_num: call_get_sys_num(call),
-                freq: call_get_freq(call),
+                talkgroup: meta.talkgroup,
+                sys_num: meta.sys_num,
+                freq: meta.freq,
                 samples: bytes,
                 sample_rate,
             };
@@ -547,10 +506,10 @@ impl RustPluginCallbacks for GrpcPlugin {
         0
     }
 
-    fn call_start(&mut self, call: &TrCall) -> i32 {
+    fn call_start(&mut self, info: &TrCallInfo) -> i32 {
         self.send_event(proto::plugin_event::Event::CallStart(
             proto::CallStartEvent {
-                call: Some(self.call_info(call)),
+                call: Some(self.call_info_from(info)),
             },
         ));
         0
@@ -563,11 +522,10 @@ impl RustPluginCallbacks for GrpcPlugin {
         0
     }
 
-    fn calls_active(&mut self, calls: &[*const TrCall]) -> i32 {
-        let refs = ptr_slice_to_refs(calls);
+    fn calls_active(&mut self, infos: &[TrCallInfo]) -> i32 {
         self.send_event(proto::plugin_event::Event::CallsActive(
             proto::CallsActiveEvent {
-                calls: refs.iter().map(|c| self.call_info(c)).collect(),
+                calls: infos.iter().map(|i| self.call_info_from(i)).collect(),
             },
         ));
         0

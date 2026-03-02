@@ -178,6 +178,67 @@ pub mod ffi {
         pub status: TrCallDataStatus,
     }
 
+    /// Lightweight live-call info for events (call_start, calls_active, signal).
+    /// Built by Rust from CallEntry fields, passed through C++ fire functions.
+    #[derive(Debug, Clone)]
+    struct TrCallInfo {
+        pub talkgroup: i64,
+        pub call_num: i64,
+        pub sys_num: i32,
+        pub freq: f64,
+        pub signal: f64,
+        pub noise: f64,
+        pub freq_error: i32,
+        pub encrypted: bool,
+        pub emergency: bool,
+        pub is_analog: bool,
+        pub is_conventional: bool,
+        pub phase2_tdma: bool,
+        pub tdma_slot: i32,
+        pub priority: i32,
+        pub mode: bool,
+        pub duplex: bool,
+        pub conversation_mode: bool,
+        pub current_source_id: i64,
+        pub current_length: f64,
+        pub start_time: i64,
+        pub elapsed: f64,
+        pub short_name: String,
+        pub state: TrState,
+        pub monitoring_state: TrMonitoringState,
+    }
+
+    #[derive(Debug, Clone)]
+    struct TrCallMetadata {
+        pub call_num: i64,
+        pub talkgroup: i64,
+        pub freq: f64,
+        pub sys_num: i32,
+        pub short_name: String,
+        pub tdma_slot: i32,
+        pub phase2_tdma: bool,
+        pub mode: bool,
+        pub duplex: bool,
+        pub emergency: bool,
+        pub is_conventional: bool,
+        pub start_time: i64,
+        pub state: TrState,
+        pub monitoring_state: TrMonitoringState,
+        pub encrypted: bool,
+        pub is_analog: bool,
+        pub current_source_id: i64,
+        pub signal: f64,
+        pub noise: f64,
+        pub priority: i32,
+        pub multi_site: bool,
+        pub wacn: u64,
+        pub rfss: i32,
+        pub site_id: i32,
+        pub multi_site_name: String,
+        pub conversation_mode: bool,
+        pub max_duration: f64,
+    }
+
     #[derive(Debug, Clone)]
     struct TrSquelchEvent {
         pub call_num: i64,
@@ -205,31 +266,9 @@ pub mod ffi {
         type TrCall;
         type TrSystem;
         type TrRecorder;
-        // ── Call accessors ──
-        fn call_get_talkgroup(call: &TrCall) -> i64;
-        fn call_get_call_num(call: &TrCall) -> i64;
-        fn call_get_sys_num(call: &TrCall) -> i32;
-        fn call_get_freq(call: &TrCall) -> f64;
-        fn call_get_signal(call: &TrCall) -> f64;
-        fn call_get_noise(call: &TrCall) -> f64;
+        // ── Call accessors (most removed — Rust owns call state via CallEntry) ──
         fn call_get_freq_error(call: &TrCall) -> i32;
-        fn call_get_encrypted(call: &TrCall) -> bool;
-        fn call_get_emergency(call: &TrCall) -> bool;
-        fn call_get_is_analog(call: &TrCall) -> bool;
-        fn call_is_conventional(call: &TrCall) -> bool;
-        fn call_get_phase2_tdma(call: &TrCall) -> bool;
-        fn call_get_tdma_slot(call: &TrCall) -> i32;
-        fn call_get_priority(call: &TrCall) -> i32;
-        fn call_get_mode(call: &TrCall) -> bool;
-        fn call_get_duplex(call: &TrCall) -> bool;
-        fn call_get_conversation_mode(call: &TrCall) -> bool;
-        fn call_get_current_source_id(call: &TrCall) -> i64;
         fn call_get_current_length(call: &TrCall) -> f64;
-        fn call_get_start_time(call: &TrCall) -> i64;
-        fn call_elapsed(call: &TrCall) -> i64;
-        fn call_get_short_name(call: &TrCall) -> String;
-        fn call_get_state(call: &TrCall) -> TrState;
-        fn call_get_monitoring_state(call: &TrCall) -> TrMonitoringState;
 
         // ── System accessors ──
         fn system_get_sys_num(sys: &TrSystem) -> i32;
@@ -375,12 +414,7 @@ pub mod ffi {
         fn call_has_recorder(call: &TrCall) -> bool;
         fn call_get_recorder_is_active(call: &TrCall) -> bool;
 
-        // ── Conventional call management — signal/noise ──
-        fn call_set_signal(call: Pin<&mut TrCall>, s: f64);
-        fn call_set_noise(call: Pin<&mut TrCall>, n: f64);
-
-        // ── Conventional call management — system info ──
-        fn call_get_system_max_duration(call: &TrCall) -> f64;
+        // ── Conventional call management — signal/noise/system info removed (Rust owns) ──
 
         // ── Conventional call management — lifecycle ──
         fn call_restart(call: Pin<&mut TrCall>);
@@ -392,15 +426,7 @@ pub mod ffi {
         // ── Conventional call management — context-level ──
         fn tr_context_take_next_conventional_call(ctx: Pin<&mut TrContext>) -> UniquePtr<TrCall>;
 
-        // ── Phase C: Call Management — additional accessors ──
-        fn call_since_last_update_secs(call: &TrCall) -> f64;
-        fn call_get_system_multi_site(call: &TrCall) -> bool;
-        fn call_get_system_wacn(call: &TrCall) -> u64;
-        fn call_get_system_nac(call: &TrCall) -> u64;
-        fn call_get_system_rfss(call: &TrCall) -> i32;
-        fn call_get_system_site_id(call: &TrCall) -> i32;
-        fn call_get_system_multi_site_name(call: &TrCall) -> String;
-        fn call_get_system_multi_site_number(call: &TrCall) -> u64;
+        // ── Phase C: Call Management — additional accessors (most removed — Rust owns via CallEntry) ──
         fn call_system_get_preferred_nac(call: &TrCall, talkgroup: i64) -> u64;
 
         // ── Phase C: Call Management — additional recorder accessors ──
@@ -409,10 +435,7 @@ pub mod ffi {
 
         // ── Phase C: Call Management — lifecycle operations ──
         fn tr_context_create_call(ctx: Pin<&mut TrContext>, msg: &TrTrunkMessage) -> UniquePtr<TrCall>;
-        fn tr_call_set_state(call: Pin<&mut TrCall>, state: TrState);
-        fn tr_call_set_monitoring_state(call: Pin<&mut TrCall>, state: TrMonitoringState);
-        fn tr_call_set_encrypted(call: Pin<&mut TrCall>, encrypted: bool);
-        fn call_set_is_analog(call: Pin<&mut TrCall>, is_analog: bool);
+        fn call_get_metadata(call: &TrCall) -> TrCallMetadata;
 
         // ── Phase C: Call Management — recording policy support ──
         fn tr_context_get_talkgroup_patch(ctx: &TrContext, sys_num: i32, talkgroup: i64) -> Vec<i64>;
@@ -436,15 +459,13 @@ pub mod ffi {
         fn call_get_patched_talkgroups(call: &TrCall) -> Vec<u64>;
 
         // ── Phase C: Call Management — update source tracking ──
-        fn call_touch(call: Pin<&mut TrCall>);
-        fn call_set_current_source_id(call: Pin<&mut TrCall>, src: i64);
         fn call_recorder_set_source(call: Pin<&mut TrCall>, src: i64);
 
         // ── Phase C: Call Management — event firing ──
-        fn tr_context_fire_call_start(ctx: Pin<&mut TrContext>, call: &TrCall);
-        fn tr_context_fire_calls_active(ctx: Pin<&mut TrContext>, calls: &[*const TrCall]);
+        fn tr_context_fire_call_start(ctx: Pin<&mut TrContext>, info: &TrCallInfo);
+        fn tr_context_fire_calls_active(ctx: Pin<&mut TrContext>, infos: &[TrCallInfo]);
         fn tr_context_fire_setup_recorder(ctx: Pin<&mut TrContext>, call: &TrCall);
-        fn tr_context_fire_signal(ctx: Pin<&mut TrContext>, src: i64, call: &TrCall);
+        fn tr_context_fire_signal(ctx: Pin<&mut TrContext>, src: i64, info: &TrCallInfo);
         fn tr_context_fire_call_end(ctx: Pin<&mut TrContext>, data: &TrCallData);
         fn tr_recorder_process_queue(rec: &TrRecorder);
     }
@@ -462,14 +483,10 @@ pub mod ffi {
         fn rust_plugin_start(plugin: &mut RustPluginBox) -> i32;
         fn rust_plugin_stop(plugin: &mut RustPluginBox) -> i32;
         fn rust_plugin_poll_one(plugin: &mut RustPluginBox) -> i32;
-        unsafe fn rust_plugin_signal(
+        fn rust_plugin_signal(
             plugin: &mut RustPluginBox,
             unit_id: i64,
-            signaling_type: &str,
-            sig_type: TrSignalType,
-            call: *const TrCall,
-            system: *const TrSystem,
-            recorder: *const TrRecorder,
+            info: &TrCallInfo,
         ) -> i32;
         unsafe fn rust_plugin_audio_stream(
             plugin: &mut RustPluginBox,
@@ -477,9 +494,9 @@ pub mod ffi {
             recorder: &TrRecorder,
             samples: &[i16],
         ) -> i32;
-        fn rust_plugin_call_start(plugin: &mut RustPluginBox, call: &TrCall) -> i32;
+        fn rust_plugin_call_start(plugin: &mut RustPluginBox, info: &TrCallInfo) -> i32;
         fn rust_plugin_call_end(plugin: &mut RustPluginBox, call_data: &TrCallData) -> i32;
-        fn rust_plugin_calls_active(plugin: &mut RustPluginBox, calls: &[*const TrCall]) -> i32;
+        fn rust_plugin_calls_active(plugin: &mut RustPluginBox, infos: &[TrCallInfo]) -> i32;
         fn rust_plugin_setup_recorder(plugin: &mut RustPluginBox, recorder: &TrRecorder) -> i32;
         fn rust_plugin_setup_system(plugin: &mut RustPluginBox, system: &TrSystem) -> i32;
         fn rust_plugin_setup_systems(
@@ -571,24 +588,16 @@ pub trait RustPluginCallbacks: Send {
     fn start(&mut self) -> i32;
     fn stop(&mut self) -> i32;
     fn poll_one(&mut self) -> i32;
-    fn signal(
-        &mut self,
-        unit_id: i64,
-        signaling_type: &str,
-        sig_type: ffi::TrSignalType,
-        call: Option<&ffi::TrCall>,
-        system: Option<&ffi::TrSystem>,
-        recorder: Option<&ffi::TrRecorder>,
-    ) -> i32;
+    fn signal(&mut self, unit_id: i64, info: &ffi::TrCallInfo) -> i32;
     fn audio_stream(
         &mut self,
         call: Option<&ffi::TrCall>,
         recorder: &ffi::TrRecorder,
         samples: &[i16],
     ) -> i32;
-    fn call_start(&mut self, call: &ffi::TrCall) -> i32;
+    fn call_start(&mut self, info: &ffi::TrCallInfo) -> i32;
     fn call_end(&mut self, call_data: &ffi::TrCallData) -> i32;
-    fn calls_active(&mut self, calls: &[*const ffi::TrCall]) -> i32;
+    fn calls_active(&mut self, infos: &[ffi::TrCallInfo]) -> i32;
     fn setup_recorder(&mut self, recorder: &ffi::TrRecorder) -> i32;
     fn setup_system(&mut self, system: &ffi::TrSystem) -> i32;
     fn setup_systems(&mut self, systems: &[*const ffi::TrSystem]) -> i32;
@@ -650,21 +659,12 @@ unsafe fn nullable<T>(ptr: *const T) -> Option<&'static T> {
     }
 }
 
-unsafe fn rust_plugin_signal(
+fn rust_plugin_signal(
     plugin: &mut RustPluginBox,
     unit_id: i64,
-    signaling_type: &str,
-    sig_type: ffi::TrSignalType,
-    call: *const ffi::TrCall,
-    system: *const ffi::TrSystem,
-    recorder: *const ffi::TrRecorder,
+    info: &ffi::TrCallInfo,
 ) -> i32 {
-    let call = unsafe { nullable(call) };
-    let system = unsafe { nullable(system) };
-    let recorder = unsafe { nullable(recorder) };
-    plugin
-        .inner
-        .signal(unit_id, signaling_type, sig_type, call, system, recorder)
+    plugin.inner.signal(unit_id, info)
 }
 
 unsafe fn rust_plugin_audio_stream(
@@ -677,16 +677,16 @@ unsafe fn rust_plugin_audio_stream(
     plugin.inner.audio_stream(call, recorder, samples)
 }
 
-fn rust_plugin_call_start(plugin: &mut RustPluginBox, call: &ffi::TrCall) -> i32 {
-    plugin.inner.call_start(call)
+fn rust_plugin_call_start(plugin: &mut RustPluginBox, info: &ffi::TrCallInfo) -> i32 {
+    plugin.inner.call_start(info)
 }
 
 fn rust_plugin_call_end(plugin: &mut RustPluginBox, call_data: &ffi::TrCallData) -> i32 {
     plugin.inner.call_end(call_data)
 }
 
-fn rust_plugin_calls_active(plugin: &mut RustPluginBox, calls: &[*const ffi::TrCall]) -> i32 {
-    plugin.inner.calls_active(calls)
+fn rust_plugin_calls_active(plugin: &mut RustPluginBox, infos: &[ffi::TrCallInfo]) -> i32 {
+    plugin.inner.calls_active(infos)
 }
 
 fn rust_plugin_setup_recorder(plugin: &mut RustPluginBox, recorder: &ffi::TrRecorder) -> i32 {

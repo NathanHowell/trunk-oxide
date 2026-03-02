@@ -23,6 +23,8 @@ struct TrTransmission;
 struct TrCallSource;
 struct TrCallError;
 struct TrCallData;
+struct TrCallInfo;
+struct TrCallMetadata;
 struct TrSquelchEvent;
 struct RustPluginBox;
 
@@ -44,31 +46,9 @@ struct TrRecorder final {
     explicit TrRecorder(const std::shared_ptr<Recorder> &p) : ptr(p) {}
 };
 
-// ── Call accessor wrappers ──
-int64_t call_get_talkgroup(const TrCall &call);
-int64_t call_get_call_num(const TrCall &call);
-int32_t call_get_sys_num(const TrCall &call);
-double call_get_freq(const TrCall &call);
-double call_get_signal(const TrCall &call);
-double call_get_noise(const TrCall &call);
+// ── Call accessor wrappers (most removed — Rust owns call state via CallEntry) ──
 int32_t call_get_freq_error(const TrCall &call);
-bool call_get_encrypted(const TrCall &call);
-bool call_get_emergency(const TrCall &call);
-bool call_get_is_analog(const TrCall &call);
-bool call_is_conventional(const TrCall &call);
-bool call_get_phase2_tdma(const TrCall &call);
-int32_t call_get_tdma_slot(const TrCall &call);
-int32_t call_get_priority(const TrCall &call);
-bool call_get_mode(const TrCall &call);
-bool call_get_duplex(const TrCall &call);
-bool call_get_conversation_mode(const TrCall &call);
-int64_t call_get_current_source_id(const TrCall &call);
 double call_get_current_length(const TrCall &call);
-int64_t call_get_start_time(const TrCall &call);
-int64_t call_elapsed(const TrCall &call);
-rust::String call_get_short_name(const TrCall &call);
-TrState call_get_state(const TrCall &call);
-TrMonitoringState call_get_monitoring_state(const TrCall &call);
 
 // ── System accessor wrappers ──
 int32_t system_get_sys_num(const TrSystem &sys);
@@ -222,12 +202,7 @@ void tr_context_fire_system_rates(TrContext &ctx, float time_diff);
 bool call_has_recorder(const TrCall &call);
 bool call_get_recorder_is_active(const TrCall &call);
 
-// ── Conventional call management — signal/noise ──
-void call_set_signal(TrCall &call, double s);
-void call_set_noise(TrCall &call, double n);
-
-// ── Conventional call management — system info ──
-double call_get_system_max_duration(const TrCall &call);
+// ── Conventional call management — signal/noise/system info removed (Rust owns) ──
 
 // ── Conventional call management — lifecycle ──
 void call_restart(TrCall &call);
@@ -239,15 +214,7 @@ rust::Vec<TrSquelchEvent> call_drain_squelch_events(const TrCall &call);
 // ── Conventional call management — context-level ──
 std::unique_ptr<TrCall> tr_context_take_next_conventional_call(TrContext &ctx);
 
-// ── Phase C: Call Management — additional accessors ──
-double call_since_last_update_secs(const TrCall &call);
-bool call_get_system_multi_site(const TrCall &call);
-uint64_t call_get_system_wacn(const TrCall &call);
-uint64_t call_get_system_nac(const TrCall &call);
-int32_t call_get_system_rfss(const TrCall &call);
-int32_t call_get_system_site_id(const TrCall &call);
-rust::String call_get_system_multi_site_name(const TrCall &call);
-uint64_t call_get_system_multi_site_number(const TrCall &call);
+// ── Phase C: Call Management — additional accessors (most removed — Rust owns via CallEntry) ──
 uint64_t call_system_get_preferred_nac(const TrCall &call, int64_t talkgroup);
 
 // ── Phase C: Call Management — additional recorder accessors ──
@@ -256,7 +223,7 @@ int32_t recorder_get_type(const TrRecorder &rec);
 
 // ── Phase C: Call Management — lifecycle operations ──
 std::unique_ptr<TrCall> tr_context_create_call(TrContext &ctx, const TrTrunkMessage &msg);
-void call_set_is_analog(TrCall &call, bool is_analog);
+TrCallMetadata call_get_metadata(const TrCall &call);
 
 // ── Phase C: Call Management — recording policy support ──
 rust::Vec<int64_t> tr_context_get_talkgroup_patch(
@@ -265,9 +232,6 @@ int32_t tr_context_source_count(const TrContext &ctx);
 bool tr_source_covers_freq(const TrContext &ctx, int32_t source_idx, double freq);
 int32_t tr_source_available_recorders(const TrContext &ctx, int32_t source_idx, bool is_analog);
 bool tr_source_start_recording(TrContext &ctx, int32_t source_idx, TrCall &call, bool is_analog);
-void tr_call_set_state(TrCall &call, TrState state);
-void tr_call_set_monitoring_state(TrCall &call, TrMonitoringState state);
-void tr_call_set_encrypted(TrCall &call, bool encrypted);
 
 // ── Phase C: Call Management — conclude recording (recorder mechanics) ──
 struct TrStopRecordingResult;
@@ -278,8 +242,6 @@ int32_t call_get_recorder_num(const TrCall &call);
 rust::Vec<uint64_t> call_get_patched_talkgroups(const TrCall &call);
 
 // ── Phase C: Call Management — update source tracking ──
-void call_touch(TrCall &call);
-void call_set_current_source_id(TrCall &call, int64_t src);
 void call_recorder_set_source(TrCall &call, int64_t src);
 
 // ── Phase C: Call Management — call-level recorder accessors ──
@@ -290,10 +252,10 @@ void call_process_recorder_queue(const TrCall &call);
 rust::String tr_context_get_system_multi_site_name(const TrContext &ctx, int32_t sys_num);
 
 // ── Phase C: Call Management — event firing ──
-void tr_context_fire_call_start(TrContext &ctx, const TrCall &call);
-void tr_context_fire_calls_active(TrContext &ctx, rust::Slice<const TrCall *const> calls);
+void tr_context_fire_call_start(TrContext &ctx, const TrCallInfo &info);
+void tr_context_fire_calls_active(TrContext &ctx, rust::Slice<const TrCallInfo> infos);
 void tr_context_fire_setup_recorder(TrContext &ctx, const TrCall &call);
-void tr_context_fire_signal(TrContext &ctx, int64_t src, const TrCall &call);
+void tr_context_fire_signal(TrContext &ctx, int64_t src, const TrCallInfo &info);
 void tr_context_fire_call_end(TrContext &ctx, const TrCallData &data);
 void tr_recorder_process_queue(const TrRecorder &rec);
 

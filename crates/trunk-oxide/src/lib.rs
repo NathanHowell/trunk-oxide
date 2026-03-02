@@ -279,6 +279,7 @@ impl TrunkRecorderBuilder {
                 sys_idx,
                 SystemPolicy {
                     system_type: sys.system_type,
+                    short_name: short_name.clone(),
                     record_unknown: sys.record_unknown,
                     hide_unknown: sys.hide_unknown_talkgroups,
                     hide_encrypted: sys.hide_encrypted,
@@ -289,6 +290,9 @@ impl TrunkRecorderBuilder {
                     max_duration: sys.max_duration,
                     control_channels: sys.control_channels.clone(),
                     talkgroups,
+                    sys_id: sys.sys_id,
+                    wacn: sys.wacn,
+                    nac: sys.nac,
                 },
             );
         }
@@ -299,11 +303,16 @@ impl TrunkRecorderBuilder {
         // Fire setup events now that systems are initialized
         {
             let mut guard = lock_handler(&handler);
-            let infos: Vec<ffi::TrSystemInfo> = system_policies
+            let infos: Vec<trunk_recorder_sys::SystemInfo> = system_policies
                 .iter()
                 .map(|(&sys_idx, policy)| {
-                    let mut info = ffi::tr_context_get_system_info(ctx.pin_mut(), sys_idx);
+                    let ffi_info = ffi::tr_context_get_system_info(ctx.pin_mut(), sys_idx);
+                    let mut info = trunk_recorder_sys::SystemInfo::from_ffi(&ffi_info);
+                    info.short_name = policy.short_name.clone();
                     info.conversation_mode = policy.conversation_mode;
+                    info.sys_id = policy.sys_id;
+                    info.wacn = policy.wacn;
+                    info.nac = policy.nac;
                     info
                 })
                 .collect();
@@ -390,10 +399,7 @@ impl TrunkRecorder {
                 for (&sys_num, indices) in &by_system {
                     let sys_msgs: Vec<ffi::TrTrunkMessage> =
                         indices.iter().map(|&i| messages[i].clone()).collect();
-                    let mut info = ffi::tr_context_get_system_info(self.ctx.pin_mut(), sys_num);
-                    if let Some(policy) = call_mgr.config().systems.get(&sys_num) {
-                        info.conversation_mode = policy.conversation_mode;
-                    }
+                    let info = call_mgr.get_system_info(self.ctx.pin_mut(), sys_num);
                     lock_handler(&self.handler).trunk_message(&sys_msgs, &info);
                 }
             }

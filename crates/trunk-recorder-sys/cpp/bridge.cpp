@@ -127,23 +127,17 @@ static TrTransmission convert_transmission(const Transmission &tx) {
 // ── System info bulk read (replaces 15 individual system_get_* functions) ──
 
 static TrSystemInfo build_system_info(System &sys) {
-    TrSystemInfo info;
+    TrSystemInfo info{};
     info.sys_num = sys.get_sys_num();
-    info.sys_id = sys.get_sys_id();
-    info.short_name = rust::String(sys.get_short_name());
     // Map C++ SystemType enum (0-based) to proto SystemType enum (1-based, 0 = UNSPECIFIED)
     info.system_type = static_cast<int32_t>(sys.get_system_type()) + 1;
-    info.wacn = sys.get_wacn();
-    info.nac = sys.get_nac();
-    info.rfss = sys.get_sys_rfss();
-    info.site_id = sys.get_sys_site_id();
+    // DSP parameters (read by recorders at start time)
     info.bandplan = rust::String(sys.get_bandplan());
     info.analog_levels = sys.get_analog_levels();
     info.digital_levels = sys.get_digital_levels();
     info.squelch_db = sys.get_squelch_db();
-    info.conversation_mode = false;  // Rust fills from SystemPolicy
-    info.message_count = 0;  // Rust owns message count
-    info.decode_rate = 0;    // Rust owns decode rate
+    // Remaining fields (short_name, identity, conversation_mode, rates)
+    // are zero-initialized — Rust fills them from its own caches.
     return info;
 }
 

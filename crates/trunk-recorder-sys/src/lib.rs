@@ -234,23 +234,15 @@ pub mod ffi {
         pub priority: i32,
     }
 
+    /// C++-provided fields only. Rust-owned fields live in [`SystemInfo`].
     #[derive(Debug, Clone)]
     struct TrSystemInfo {
         pub sys_num: i32,
-        pub sys_id: u64,
-        pub short_name: String,
         pub system_type: i32,
-        pub wacn: u64,
-        pub nac: u64,
-        pub rfss: i32,
-        pub site_id: i32,
         pub bandplan: String,
         pub analog_levels: f64,
         pub digital_levels: f64,
         pub squelch_db: f64,
-        pub conversation_mode: bool,
-        pub message_count: i32,
-        pub decode_rate: i32,
     }
 
     #[derive(Debug, Clone)]
@@ -453,6 +445,49 @@ pub mod ffi {
     }
 }
 
+/// Full system info combining C++-provided DSP fields with Rust-owned metadata.
+#[derive(Debug, Clone)]
+pub struct SystemInfo {
+    pub sys_num: i32,
+    pub system_type: i32,
+    pub short_name: String,
+    pub sys_id: u64,
+    pub wacn: u64,
+    pub nac: u64,
+    pub rfss: i32,
+    pub site_id: i32,
+    pub bandplan: String,
+    pub analog_levels: f64,
+    pub digital_levels: f64,
+    pub squelch_db: f64,
+    pub conversation_mode: bool,
+    pub message_count: i32,
+    pub decode_rate: i32,
+}
+
+impl SystemInfo {
+    /// Build from the C++ FFI struct, filling Rust-owned fields with defaults.
+    pub fn from_ffi(info: &ffi::TrSystemInfo) -> Self {
+        Self {
+            sys_num: info.sys_num,
+            system_type: info.system_type,
+            short_name: String::new(),
+            sys_id: 0,
+            wacn: 0,
+            nac: 0,
+            rfss: 0,
+            site_id: 0,
+            bandplan: info.bandplan.clone(),
+            analog_levels: info.analog_levels,
+            digital_levels: info.digital_levels,
+            squelch_db: info.squelch_db,
+            conversation_mode: false,
+            message_count: 0,
+            decode_rate: 0,
+        }
+    }
+}
+
 /// Opaque type that holds the event handler behind a shared mutex.
 /// C++ holds a `Box<EventHandlerBox>` via cxx for the 3 C++-initiated callbacks.
 /// Rust holds a clone of the inner `Arc` to call methods directly without FFI.
@@ -493,13 +528,13 @@ pub trait EventHandler: Send {
     fn call_end(&mut self, call_data: &ffi::TrCallData);
     fn calls_active(&mut self, infos: &[ffi::TrCallInfo]);
     fn setup_recorder(&mut self, recorder: &ffi::TrRecorder);
-    fn setup_system(&mut self, info: &ffi::TrSystemInfo);
-    fn setup_config(&mut self, infos: &[ffi::TrSystemInfo]);
-    fn trunk_message(&mut self, messages: &[ffi::TrTrunkMessage], info: &ffi::TrSystemInfo);
-    fn system_rates(&mut self, infos: &[ffi::TrSystemInfo], time_diff: f32);
+    fn setup_system(&mut self, info: &SystemInfo);
+    fn setup_config(&mut self, infos: &[SystemInfo]);
+    fn trunk_message(&mut self, messages: &[ffi::TrTrunkMessage], info: &SystemInfo);
+    fn system_rates(&mut self, infos: &[SystemInfo], time_diff: f32);
     fn unit_event(
         &mut self,
-        info: &ffi::TrSystemInfo,
+        info: &SystemInfo,
         event_type: ffi::TrUnitEventType,
         source_id: i64,
         talkgroup: i64,

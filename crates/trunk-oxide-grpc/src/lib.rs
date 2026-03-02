@@ -4,9 +4,9 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use trunk_recorder_sys::ffi::{
-    TrCallData, TrCallInfo, TrRecorder, TrSystem, TrSystemInfo, TrTrunkMessage, TrUnitEventType,
+    TrCallData, TrCallInfo, TrRecorder, TrSystem, TrTrunkMessage, TrUnitEventType,
 };
-use trunk_recorder_sys::EventHandler;
+use trunk_recorder_sys::{EventHandler, SystemInfo};
 
 pub use trunk_oxide_proto as proto;
 
@@ -23,7 +23,7 @@ pub struct TalkgroupMeta {
 
 // ── Conversion helpers ──
 
-fn system_info_from(info: &TrSystemInfo) -> proto::SystemInfo {
+fn system_info_from(info: &SystemInfo) -> proto::SystemInfo {
     proto::SystemInfo {
         sys_num: info.sys_num,
         sys_id: info.sys_id,
@@ -493,7 +493,7 @@ impl EventHandler for GrpcPlugin {
         ));
     }
 
-    fn setup_system(&mut self, info: &TrSystemInfo) {
+    fn setup_system(&mut self, info: &SystemInfo) {
         self.send_event(proto::plugin_event::Event::SetupSystem(
             proto::SetupSystemEvent {
                 system: Some(system_info_from(info)),
@@ -501,7 +501,7 @@ impl EventHandler for GrpcPlugin {
         ));
     }
 
-    fn setup_config(&mut self, infos: &[TrSystemInfo]) {
+    fn setup_config(&mut self, infos: &[SystemInfo]) {
         self.send_event(proto::plugin_event::Event::SetupConfig(
             proto::SetupConfigEvent {
                 sources: vec![],
@@ -510,7 +510,7 @@ impl EventHandler for GrpcPlugin {
         ));
     }
 
-    fn trunk_message(&mut self, messages: &[TrTrunkMessage], info: &TrSystemInfo) {
+    fn trunk_message(&mut self, messages: &[TrTrunkMessage], info: &SystemInfo) {
         self.send_event(proto::plugin_event::Event::TrunkMessage(
             proto::TrunkMessageEvent {
                 messages: convert_trunk_messages(messages),
@@ -519,7 +519,7 @@ impl EventHandler for GrpcPlugin {
         ));
     }
 
-    fn system_rates(&mut self, infos: &[TrSystemInfo], time_diff: f32) {
+    fn system_rates(&mut self, infos: &[SystemInfo], time_diff: f32) {
         self.send_event(proto::plugin_event::Event::SystemRates(
             proto::SystemRatesEvent {
                 systems: infos.iter().map(system_info_from).collect(),
@@ -530,7 +530,7 @@ impl EventHandler for GrpcPlugin {
 
     fn unit_event(
         &mut self,
-        info: &TrSystemInfo,
+        info: &SystemInfo,
         event_type: TrUnitEventType,
         source_id: i64,
         talkgroup: i64,

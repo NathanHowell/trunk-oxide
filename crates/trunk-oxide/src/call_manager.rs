@@ -8,6 +8,7 @@ use trunk_recorder_sys::ffi::{
     self, TrCall, TrCallData, TrCallDataStatus, TrContext, TrMessageType, TrMonitoringState,
     TrState, TrTrunkMessage, TrUnitEventType,
 };
+use trunk_recorder_sys::SystemInfo;
 
 use crate::{lock_handler, Handler};
 
@@ -80,6 +81,7 @@ pub struct TalkgroupPolicy {
 #[derive(Clone)]
 pub struct SystemPolicy {
     pub system_type: SystemType,
+    pub short_name: String,
     pub record_unknown: bool,
     pub hide_unknown: bool,
     pub hide_encrypted: bool,
@@ -90,10 +92,15 @@ pub struct SystemPolicy {
     pub max_duration: f64,
     pub control_channels: Vec<f64>,
     pub talkgroups: HashMap<i64, TalkgroupPolicy>,
+    /// Initial P25 identity from config (for LFSR / XOR mask).
+    pub sys_id: u64,
+    pub wacn: u64,
+    pub nac: u64,
 }
 
 static DEFAULT_POLICY: std::sync::LazyLock<SystemPolicy> = std::sync::LazyLock::new(|| SystemPolicy {
     system_type: SystemType::P25,
+    short_name: String::new(),
     record_unknown: false,
     hide_unknown: false,
     hide_encrypted: false,
@@ -104,7 +111,19 @@ static DEFAULT_POLICY: std::sync::LazyLock<SystemPolicy> = std::sync::LazyLock::
     max_duration: 0.0,
     control_channels: Vec::new(),
     talkgroups: HashMap::new(),
+    sys_id: 0,
+    wacn: 0,
+    nac: 0,
 });
+
+/// Mutable P25 identity fields, updated once at runtime from trunk messages.
+struct SystemIdentity {
+    sys_id: u64,
+    wacn: u64,
+    nac: u64,
+    rfss: i32,
+    site_id: i32,
+}
 
 /// Configuration extracted from trunk-config for call management decisions.
 #[derive(Clone)]
@@ -303,6 +322,8 @@ pub struct CallManager {
     decode_rates: HashMap<i32, i32>,
     /// Per-system patch tables (P25 systems only).
     patch_tables: HashMap<i32, PatchTable>,
+    /// Per-system P25 identity (seeded from config, updated once from trunk messages).
+    system_identities: HashMap<i32, SystemIdentity>,
 }
 
 struct MultiSiteResult {
@@ -320,6 +341,22 @@ impl CallManager {
             .filter(|(_, sp)| sp.system_type == SystemType::P25)
             .map(|(&sys_num, _)| (sys_num, PatchTable::new()))
             .collect();
+        let system_identities = config
+            .systems
+            .iter()
+            .map(|(&sys_num, sp)| {
+                (
+                    sys_num,
+                    SystemIdentity {
+                        sys_id: sp.sys_id,
+                        wacn: sp.wacn,
+                        nac: sp.nac,
+                        rfss: 0,
+                        site_id: 0,
+                    },
+                )
+            })
+            .collect();
         Self {
             calls: Vec::new(),
             config,
@@ -328,6 +365,7 @@ impl CallManager {
             retune_attempts: HashMap::new(),
             decode_rates: HashMap::new(),
             patch_tables,
+            system_identities,
         }
     }
 
@@ -335,11 +373,20 @@ impl CallManager {
         &self.config
     }
 
-    /// Get system info from C++ and fill in Rust-owned fields.
-    fn get_system_info(&self, ctx: Pin<&mut TrContext>, sys_num: i32) -> ffi::TrSystemInfo {
-        let mut info = ffi::tr_context_get_system_info(ctx, sys_num);
+    /// Build full SystemInfo from C++ DSP fields + Rust-owned metadata.
+    pub(crate) fn get_system_info(&self, ctx: Pin<&mut TrContext>, sys_num: i32) -> SystemInfo {
+        let ffi_info = ffi::tr_context_get_system_info(ctx, sys_num);
+        let mut info = SystemInfo::from_ffi(&ffi_info);
         if let Some(policy) = self.config.systems.get(&sys_num) {
+            info.short_name = policy.short_name.clone();
             info.conversation_mode = policy.conversation_mode;
+        }
+        if let Some(id) = self.system_identities.get(&sys_num) {
+            info.sys_id = id.sys_id;
+            info.wacn = id.wacn;
+            info.nac = id.nac;
+            info.rfss = id.rfss;
+            info.site_id = id.site_id;
         }
         info
     }
@@ -511,12 +558,21 @@ impl CallManager {
             // ── System identity (once-only, fire setup_system if changed) ──
             TrMessageType::Sysid => {
                 if ffi::tr_system_update_sysid(ctx.as_mut(), msg) {
+                    if let Some(id) = self.system_identities.get_mut(&msg.sys_num) {
+                        id.rfss = msg.sys_rfss;
+                        id.site_id = msg.sys_site_id;
+                    }
                     let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
                     lock_handler(&self.handler).setup_system(&info);
                 }
             }
             TrMessageType::Status => {
                 if ffi::tr_system_update_status(ctx.as_mut(), msg) {
+                    if let Some(id) = self.system_identities.get_mut(&msg.sys_num) {
+                        id.sys_id = msg.sys_id;
+                        id.wacn = msg.wacn;
+                        id.nac = msg.nac;
+                    }
                     let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
                     lock_handler(&self.handler).setup_system(&info);
                 }
@@ -1046,8 +1102,7 @@ impl CallManager {
         // Build system info for all systems, computing decode rates for trunked ones.
         let mut infos = Vec::new();
         for (&sys_num, policy) in &self.config.systems {
-            let mut info = ffi::tr_context_get_system_info(ctx.as_mut(), sys_num);
-            info.conversation_mode = policy.conversation_mode;
+            let mut info = self.get_system_info(ctx.as_mut(), sys_num);
             if policy.system_type.is_trunked() {
                 let count = self.message_counts.remove(&sys_num).unwrap_or(0);
                 let decode_rate = (count as f32 / time_diff).floor() as i32;

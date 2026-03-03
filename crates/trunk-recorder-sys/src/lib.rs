@@ -266,6 +266,82 @@ pub mod ffi {
         pub rec_state: i32,
     }
 
+    // ── Bulk config structs for source/system setup ──
+
+    struct TrGainStage {
+        pub name: String,
+        pub value: f64,
+    }
+
+    struct TrSourceConfig {
+        pub driver: String,
+        pub device: String,
+        pub center: f64,
+        pub rate: f64,
+        pub error: f64,
+        pub gain: f64,
+        pub agc: bool,
+        pub ppm: f64,
+        pub antenna: String,
+        pub silence_frames: i32,
+        pub signal_detector_threshold: f64,
+        pub has_signal_detector_threshold: bool,
+        pub gain_stages: Vec<TrGainStage>,
+        pub digital_recorders: i32,
+        pub analog_recorders: i32,
+        pub sigmf_recorders: i32,
+    }
+
+    struct TrTalkgroupConfig {
+        pub id: i64,
+        pub mode: String,
+        pub priority: i32,
+        pub preferred_nac: u64,
+    }
+
+    struct TrChannelConfig {
+        pub id: i64,
+        pub freq: f64,
+        pub tone: f64,
+        pub squelch_db: f64,
+        pub signal_detection: bool,
+    }
+
+    struct TrUnitTagConfig {
+        pub pattern: String,
+        pub tag: String,
+    }
+
+    struct TrSystemConfig {
+        pub short_name: String,
+        pub system_type: String,
+        pub qpsk_mod: bool,
+        pub squelch_db: f64,
+        pub analog_levels: f64,
+        pub digital_levels: f64,
+        pub tau: f64,
+        pub max_dev: i32,
+        pub filter_width: f64,
+        pub decode_mdc: bool,
+        pub decode_fsync: bool,
+        pub decode_star: bool,
+        pub decode_tps: bool,
+        pub bandplan: String,
+        pub bandplan_base: f64,
+        pub bandplan_high: f64,
+        pub bandplan_spacing: f64,
+        pub bandplan_offset: i32,
+        pub bandfreq: f64,
+        pub sys_id: u64,
+        pub wacn: u64,
+        pub nac: u64,
+        pub control_channels: Vec<f64>,
+        pub channels: Vec<TrChannelConfig>,
+        pub talkgroups: Vec<TrTalkgroupConfig>,
+        pub unit_tags: Vec<TrUnitTagConfig>,
+        pub unit_tags_mode: String,
+    }
+
     // ── Opaque C++ types ──
 
     unsafe extern "C++" {
@@ -312,85 +388,11 @@ pub mod ffi {
             port: i32,
         );
 
-        // ── Source builder functions ──
-        fn tr_add_source(
-            ctx: Pin<&mut TrContext>,
-            driver: &str,
-            device: &str,
-            center: f64,
-            rate: f64,
-            error: f64,
-        ) -> Result<i32>;
-        fn tr_source_set_gain(ctx: Pin<&mut TrContext>, idx: i32, gain: f64);
-        fn tr_source_set_gain_by_name(ctx: Pin<&mut TrContext>, idx: i32, name: &str, gain: f64);
-        fn tr_source_set_antenna(ctx: Pin<&mut TrContext>, idx: i32, antenna: &str);
-        fn tr_source_set_freq_corr(ctx: Pin<&mut TrContext>, idx: i32, ppm: f64);
-        fn tr_source_set_gain_mode(ctx: Pin<&mut TrContext>, idx: i32, agc: bool);
-        fn tr_source_set_silence_frames(ctx: Pin<&mut TrContext>, idx: i32, frames: i32);
-        fn tr_source_set_signal_detector_threshold(
-            ctx: Pin<&mut TrContext>,
-            idx: i32,
-            threshold: f32,
-        );
-        fn tr_source_create_digital_recorders(ctx: Pin<&mut TrContext>, idx: i32, count: i32);
-        fn tr_source_create_analog_recorders(ctx: Pin<&mut TrContext>, idx: i32, count: i32);
-        fn tr_source_create_sigmf_recorders(ctx: Pin<&mut TrContext>, idx: i32, count: i32);
-
-        // ── System builder functions ──
-        fn tr_add_system(
-            ctx: Pin<&mut TrContext>,
-            short_name: &str,
-            system_type: &str,
-        ) -> Result<i32>;
-        fn tr_system_add_control_channel(ctx: Pin<&mut TrContext>, sys_idx: i32, freq: f64);
-        fn tr_system_add_channel(ctx: Pin<&mut TrContext>, sys_idx: i32, freq: f64);
-        fn tr_system_set_qpsk_mod(ctx: Pin<&mut TrContext>, sys_idx: i32, qpsk: bool);
-        fn tr_system_set_squelch_db(ctx: Pin<&mut TrContext>, sys_idx: i32, db: f64);
-        fn tr_system_set_analog_levels(ctx: Pin<&mut TrContext>, sys_idx: i32, level: f64);
-        fn tr_system_set_digital_levels(ctx: Pin<&mut TrContext>, sys_idx: i32, level: f64);
-        fn tr_system_set_tau(ctx: Pin<&mut TrContext>, sys_idx: i32, tau: f32);
-        fn tr_system_set_max_dev(ctx: Pin<&mut TrContext>, sys_idx: i32, max_dev: i32);
-        fn tr_system_set_filter_width(ctx: Pin<&mut TrContext>, sys_idx: i32, width: f64);
-        fn tr_system_set_mdc_enabled(ctx: Pin<&mut TrContext>, sys_idx: i32, enabled: bool);
-        fn tr_system_set_fsync_enabled(ctx: Pin<&mut TrContext>, sys_idx: i32, enabled: bool);
-        fn tr_system_set_star_enabled(ctx: Pin<&mut TrContext>, sys_idx: i32, enabled: bool);
-        fn tr_system_set_tps_enabled(ctx: Pin<&mut TrContext>, sys_idx: i32, enabled: bool);
-        fn tr_system_set_bandplan(ctx: Pin<&mut TrContext>, sys_idx: i32, bandplan: &str);
-        fn tr_system_set_bandfreq(ctx: Pin<&mut TrContext>, sys_idx: i32, freq: i32);
-        fn tr_system_set_bandplan_base(ctx: Pin<&mut TrContext>, sys_idx: i32, base: f64);
-        fn tr_system_set_bandplan_high(ctx: Pin<&mut TrContext>, sys_idx: i32, high: f64);
-        fn tr_system_set_bandplan_spacing(ctx: Pin<&mut TrContext>, sys_idx: i32, spacing: f64);
-        fn tr_system_set_bandplan_offset(ctx: Pin<&mut TrContext>, sys_idx: i32, offset: i32);
-        fn tr_system_set_xor_mask(
-            ctx: Pin<&mut TrContext>,
-            sys_idx: i32,
-            sys_id: u64,
-            wacn: u64,
-            nac: u64,
-        );
-
-        // ── Talkgroup/Channel builder functions ──
-        fn tr_system_add_talkgroup(
-            ctx: Pin<&mut TrContext>,
-            sys_idx: i32,
-            id: i64,
-            mode: &str,
-            priority: i32,
-            preferred_nac: u64,
-        );
-        fn tr_system_add_conventional_channel(
-            ctx: Pin<&mut TrContext>,
-            sys_idx: i32,
-            tg_number: i64,
-            freq: f64,
-            tone: f64,
-            squelch_db: f64,
-            signal_detection: bool,
-        );
-
-        // ── Unit tag builder functions ──
-        fn tr_system_add_unit_tag(ctx: Pin<&mut TrContext>, sys_idx: i32, pattern: &str, tag: &str);
-        fn tr_system_set_unit_tags_mode(ctx: Pin<&mut TrContext>, sys_idx: i32, mode: &str);
+        // ── Bulk source/system builder functions ──
+        fn tr_add_source_from_config(ctx: Pin<&mut TrContext>, cfg: &TrSourceConfig)
+        -> Result<i32>;
+        fn tr_add_system_from_config(ctx: Pin<&mut TrContext>, cfg: &TrSystemConfig)
+        -> Result<i32>;
 
         // ── Phase A: Loop Control ──
         fn tr_start_gnuradio(ctx: Pin<&mut TrContext>);

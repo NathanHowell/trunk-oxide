@@ -102,40 +102,15 @@ impl TrunkRecorderBuilder {
                 SourceDriver::Iqfile => "iqfile",
             };
 
-            let idx = ffi::tr_add_source(
-                ctx.pin_mut(),
-                driver_str,
-                &src.device,
-                src.center,
-                src.rate,
-                src.error,
-            )?;
-
-            if src.agc {
-                ffi::tr_source_set_gain_mode(ctx.pin_mut(), idx, true);
-            }
-            if src.gain != 0.0 {
-                ffi::tr_source_set_gain(ctx.pin_mut(), idx, src.gain);
-            }
-            if src.ppm != 0.0 {
-                ffi::tr_source_set_freq_corr(ctx.pin_mut(), idx, src.ppm);
-            }
-            if !src.antenna.is_empty() {
-                ffi::tr_source_set_antenna(ctx.pin_mut(), idx, &src.antenna);
-            }
-            if src.silence_frames != 0 {
-                ffi::tr_source_set_silence_frames(ctx.pin_mut(), idx, src.silence_frames);
-            }
-            if let Some(threshold) = src.signal_detector_threshold {
-                ffi::tr_source_set_signal_detector_threshold(ctx.pin_mut(), idx, threshold);
-            }
-
-            // Named gain stages
-            for (name, &value) in &src.gain_settings {
-                ffi::tr_source_set_gain_by_name(ctx.pin_mut(), idx, name, value);
-            }
-
-            // Individual gain fields (shorthand for common stages)
+            // Collect all gain stages into a flat list
+            let mut gain_stages: Vec<ffi::TrGainStage> = src
+                .gain_settings
+                .iter()
+                .map(|(name, &value)| ffi::TrGainStage {
+                    name: name.clone(),
+                    value,
+                })
+                .collect();
             let named_gains = [
                 ("IF", src.if_gain),
                 ("BB", src.bb_gain),
@@ -150,20 +125,34 @@ impl TrunkRecorderBuilder {
             ];
             for (name, value) in named_gains {
                 if value != 0.0 {
-                    ffi::tr_source_set_gain_by_name(ctx.pin_mut(), idx, name, value);
+                    gain_stages.push(ffi::TrGainStage {
+                        name: name.into(),
+                        value,
+                    });
                 }
             }
 
-            // Recorder slots
-            if src.digital_recorders > 0 {
-                ffi::tr_source_create_digital_recorders(ctx.pin_mut(), idx, src.digital_recorders);
-            }
-            if src.analog_recorders > 0 {
-                ffi::tr_source_create_analog_recorders(ctx.pin_mut(), idx, src.analog_recorders);
-            }
-            if src.sigmf_recorders > 0 {
-                ffi::tr_source_create_sigmf_recorders(ctx.pin_mut(), idx, src.sigmf_recorders);
-            }
+            ffi::tr_add_source_from_config(
+                ctx.pin_mut(),
+                &ffi::TrSourceConfig {
+                    driver: driver_str.into(),
+                    device: src.device.clone(),
+                    center: src.center,
+                    rate: src.rate,
+                    error: src.error,
+                    gain: src.gain,
+                    agc: src.agc,
+                    ppm: src.ppm,
+                    antenna: src.antenna.clone(),
+                    silence_frames: src.silence_frames,
+                    signal_detector_threshold: src.signal_detector_threshold.unwrap_or(0.0).into(),
+                    has_signal_detector_threshold: src.signal_detector_threshold.is_some(),
+                    gain_stages,
+                    digital_recorders: src.digital_recorders,
+                    analog_recorders: src.analog_recorders,
+                    sigmf_recorders: src.sigmf_recorders,
+                },
+            )?;
         }
 
         // ── Systems ──
@@ -178,84 +167,68 @@ impl TrunkRecorderBuilder {
                 SystemType::P25 => "p25",
             };
 
-            let sys_idx = ffi::tr_add_system(ctx.pin_mut(), short_name, type_str)?;
-
-            // Control channels (trunked systems)
-            for &freq in &sys.control_channels {
-                ffi::tr_system_add_control_channel(ctx.pin_mut(), sys_idx, freq);
-            }
-
-            // Modulation
-            ffi::tr_system_set_qpsk_mod(ctx.pin_mut(), sys_idx, sys.modulation == Modulation::Qpsk);
-
-            // Audio/filter settings
-            ffi::tr_system_set_squelch_db(ctx.pin_mut(), sys_idx, sys.squelch);
-            ffi::tr_system_set_analog_levels(ctx.pin_mut(), sys_idx, sys.analog_levels);
-            ffi::tr_system_set_digital_levels(ctx.pin_mut(), sys_idx, sys.digital_levels);
-            ffi::tr_system_set_tau(ctx.pin_mut(), sys_idx, sys.deemphasis_tau);
-            ffi::tr_system_set_max_dev(ctx.pin_mut(), sys_idx, sys.max_dev);
-            ffi::tr_system_set_filter_width(ctx.pin_mut(), sys_idx, sys.filter_width);
-
-            // Decoder options
-            ffi::tr_system_set_mdc_enabled(ctx.pin_mut(), sys_idx, sys.decode_mdc);
-            ffi::tr_system_set_fsync_enabled(ctx.pin_mut(), sys_idx, sys.decode_fsync);
-            ffi::tr_system_set_star_enabled(ctx.pin_mut(), sys_idx, sys.decode_star);
-            ffi::tr_system_set_tps_enabled(ctx.pin_mut(), sys_idx, sys.decode_tps);
-
-            // Bandplan
-            if let Some(bp) = &sys.bandplan {
-                ffi::tr_system_set_bandplan(ctx.pin_mut(), sys_idx, bp);
-            }
-            if sys.bandplan_base > 0.0 {
-                ffi::tr_system_set_bandplan_base(ctx.pin_mut(), sys_idx, sys.bandplan_base);
-            }
-            if sys.bandplan_high > 0.0 {
-                ffi::tr_system_set_bandplan_high(ctx.pin_mut(), sys_idx, sys.bandplan_high);
-            }
-            if sys.bandplan_spacing > 0.0 {
-                ffi::tr_system_set_bandplan_spacing(ctx.pin_mut(), sys_idx, sys.bandplan_spacing);
-            }
-            if sys.bandplan_offset != 0 {
-                ffi::tr_system_set_bandplan_offset(ctx.pin_mut(), sys_idx, sys.bandplan_offset);
-            }
-
-            // XOR mask (P25 identity)
-            if sys.sys_id != 0 || sys.wacn != 0 || sys.nac != 0 {
-                ffi::tr_system_set_xor_mask(ctx.pin_mut(), sys_idx, sys.sys_id, sys.wacn, sys.nac);
-            }
-
-            // Talkgroups (trunked systems)
-            for tg in &sys.talkgroup {
-                ffi::tr_system_add_talkgroup(
-                    ctx.pin_mut(),
-                    sys_idx,
-                    tg.id,
-                    tg.mode.as_str(),
-                    tg.priority,
-                    tg.preferred_nac,
-                );
-            }
-
-            // Channels (conventional systems)
-            for ch in &sys.channel {
-                ffi::tr_system_add_conventional_channel(
-                    ctx.pin_mut(),
-                    sys_idx,
-                    ch.id,
-                    ch.freq,
-                    ch.tone,
-                    ch.squelch_db,
-                    ch.signal_detection,
-                );
-            }
-
-            // Unit tags
-            for ut in &sys.unit_tag {
-                ffi::tr_system_add_unit_tag(ctx.pin_mut(), sys_idx, &ut.pattern, &ut.tag);
-            }
-            if let Some(settings) = &sys.unit_tags {
-                ffi::tr_system_set_unit_tags_mode(ctx.pin_mut(), sys_idx, &settings.mode);
-            }
+            let sys_idx = ffi::tr_add_system_from_config(
+                ctx.pin_mut(),
+                &ffi::TrSystemConfig {
+                    short_name: short_name.clone(),
+                    system_type: type_str.into(),
+                    qpsk_mod: sys.modulation == Modulation::Qpsk,
+                    squelch_db: sys.squelch,
+                    analog_levels: sys.analog_levels,
+                    digital_levels: sys.digital_levels,
+                    tau: sys.deemphasis_tau.into(),
+                    max_dev: sys.max_dev,
+                    filter_width: sys.filter_width,
+                    decode_mdc: sys.decode_mdc,
+                    decode_fsync: sys.decode_fsync,
+                    decode_star: sys.decode_star,
+                    decode_tps: sys.decode_tps,
+                    bandplan: sys.bandplan.clone().unwrap_or_default(),
+                    bandplan_base: sys.bandplan_base,
+                    bandplan_high: sys.bandplan_high,
+                    bandplan_spacing: sys.bandplan_spacing,
+                    bandplan_offset: sys.bandplan_offset,
+                    bandfreq: 0.0,
+                    sys_id: sys.sys_id,
+                    wacn: sys.wacn,
+                    nac: sys.nac,
+                    control_channels: sys.control_channels.clone(),
+                    channels: sys
+                        .channel
+                        .iter()
+                        .map(|ch| ffi::TrChannelConfig {
+                            id: ch.id,
+                            freq: ch.freq,
+                            tone: ch.tone,
+                            squelch_db: ch.squelch_db,
+                            signal_detection: ch.signal_detection,
+                        })
+                        .collect(),
+                    talkgroups: sys
+                        .talkgroup
+                        .iter()
+                        .map(|tg| ffi::TrTalkgroupConfig {
+                            id: tg.id,
+                            mode: tg.mode.as_str().into(),
+                            priority: tg.priority,
+                            preferred_nac: tg.preferred_nac,
+                        })
+                        .collect(),
+                    unit_tags: sys
+                        .unit_tag
+                        .iter()
+                        .map(|ut| ffi::TrUnitTagConfig {
+                            pattern: ut.pattern.clone(),
+                            tag: ut.tag.clone(),
+                        })
+                        .collect(),
+                    unit_tags_mode: sys
+                        .unit_tags
+                        .as_ref()
+                        .map(|s| s.mode.clone())
+                        .unwrap_or_default(),
+                },
+            )?;
 
             // Build recording policy for this system
             let talkgroups = sys

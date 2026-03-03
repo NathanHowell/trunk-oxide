@@ -280,184 +280,102 @@ void tr_config_set_debug_recorder(TrContext &ctx, bool enabled, rust::Str addres
 
 // ── Source builder implementations ──
 
-int32_t tr_add_source(TrContext &ctx, rust::Str driver, rust::Str device,
-                      double center, double rate, double error) {
-    std::string drv(driver.data(), driver.size());
-    std::string dev(device.data(), device.size());
-    auto source = std::make_shared<Source>(center, rate, error, drv, dev, ctx.impl->trunk_ctx.config);
+int32_t tr_add_source_from_config(TrContext &ctx, const TrSourceConfig &cfg) {
+    std::string drv(cfg.driver.data(), cfg.driver.size());
+    std::string dev(cfg.device.data(), cfg.device.size());
+    auto source = std::make_shared<Source>(cfg.center, cfg.rate, cfg.error, drv, dev,
+                                           ctx.impl->trunk_ctx.config);
     source->init_shared();
+
+    if (cfg.agc) source->set_gain_mode(true);
+    if (cfg.gain != 0.0) source->set_gain(cfg.gain);
+    if (cfg.ppm != 0.0) source->set_freq_corr(cfg.ppm);
+    if (!cfg.antenna.empty()) source->set_antenna(std::string(cfg.antenna.data(), cfg.antenna.size()));
+    if (cfg.silence_frames != 0) source->set_silence_frames(cfg.silence_frames);
+    if (cfg.has_signal_detector_threshold) source->set_signal_detector_threshold(static_cast<float>(cfg.signal_detector_threshold));
+
+    for (const auto &gs : cfg.gain_stages) {
+        source->set_gain_by_name(std::string(gs.name.data(), gs.name.size()), gs.value);
+    }
+
+    auto &tb = ctx.impl->trunk_ctx.tb;
+    if (cfg.digital_recorders > 0) source->create_digital_recorders(tb, cfg.digital_recorders);
+    if (cfg.analog_recorders > 0) source->create_analog_recorders(tb, cfg.analog_recorders);
+    if (cfg.sigmf_recorders > 0) source->create_sigmf_recorders(tb, cfg.sigmf_recorders);
+
     int32_t idx = static_cast<int32_t>(ctx.impl->trunk_ctx.sources.size());
     ctx.impl->trunk_ctx.sources.push_back(source);
     return idx;
 }
 
-void tr_source_set_gain(TrContext &ctx, int32_t idx, double gain) {
-    ctx.impl->trunk_ctx.sources.at(idx)->set_gain(gain);
-}
-
-void tr_source_set_gain_by_name(TrContext &ctx, int32_t idx, rust::Str name, double gain) {
-    ctx.impl->trunk_ctx.sources.at(idx)->set_gain_by_name(
-        std::string(name.data(), name.size()), gain);
-}
-
-void tr_source_set_antenna(TrContext &ctx, int32_t idx, rust::Str antenna) {
-    ctx.impl->trunk_ctx.sources.at(idx)->set_antenna(
-        std::string(antenna.data(), antenna.size()));
-}
-
-void tr_source_set_freq_corr(TrContext &ctx, int32_t idx, double ppm) {
-    ctx.impl->trunk_ctx.sources.at(idx)->set_freq_corr(ppm);
-}
-
-void tr_source_set_gain_mode(TrContext &ctx, int32_t idx, bool agc) {
-    ctx.impl->trunk_ctx.sources.at(idx)->set_gain_mode(agc);
-}
-
-void tr_source_set_silence_frames(TrContext &ctx, int32_t idx, int32_t frames) {
-    ctx.impl->trunk_ctx.sources.at(idx)->set_silence_frames(frames);
-}
-
-void tr_source_set_signal_detector_threshold(TrContext &ctx, int32_t idx, float threshold) {
-    ctx.impl->trunk_ctx.sources.at(idx)->set_signal_detector_threshold(threshold);
-}
-
-void tr_source_create_digital_recorders(TrContext &ctx, int32_t idx, int32_t count) {
-    ctx.impl->trunk_ctx.sources.at(idx)->create_digital_recorders(ctx.impl->trunk_ctx.tb, count);
-}
-
-void tr_source_create_analog_recorders(TrContext &ctx, int32_t idx, int32_t count) {
-    ctx.impl->trunk_ctx.sources.at(idx)->create_analog_recorders(ctx.impl->trunk_ctx.tb, count);
-}
-
-void tr_source_create_sigmf_recorders(TrContext &ctx, int32_t idx, int32_t count) {
-    ctx.impl->trunk_ctx.sources.at(idx)->create_sigmf_recorders(ctx.impl->trunk_ctx.tb, count);
-}
-
-// ── System builder implementations ──
-
-int32_t tr_add_system(TrContext &ctx, rust::Str short_name, rust::Str system_type) {
+int32_t tr_add_system_from_config(TrContext &ctx, const TrSystemConfig &cfg) {
     int32_t sys_idx = static_cast<int32_t>(ctx.impl->trunk_ctx.systems.size());
-    auto system = System::make(sys_idx);
-    system->set_short_name(std::string(short_name.data(), short_name.size()));
-    std::string type_str(system_type.data(), system_type.size());
-    system->set_system_type(system_type_from_string(type_str));
-    ctx.impl->trunk_ctx.systems.push_back(system);
+    auto sys = System::make(sys_idx);
+    sys->set_short_name(std::string(cfg.short_name.data(), cfg.short_name.size()));
+    sys->set_system_type(system_type_from_string(std::string(cfg.system_type.data(), cfg.system_type.size())));
+
+    // Control channels
+    for (double freq : cfg.control_channels) {
+        sys->add_control_channel(freq);
+    }
+
+    // DSP settings
+    sys->set_qpsk_mod(cfg.qpsk_mod);
+    sys->set_squelch_db(cfg.squelch_db);
+    sys->set_analog_levels(cfg.analog_levels);
+    sys->set_digital_levels(cfg.digital_levels);
+    sys->set_tau(static_cast<float>(cfg.tau));
+    sys->set_max_dev(static_cast<int32_t>(cfg.max_dev));
+    sys->set_filter_width(cfg.filter_width);
+
+    // Decoder options
+    sys->set_mdc_enabled(cfg.decode_mdc);
+    sys->set_fsync_enabled(cfg.decode_fsync);
+    sys->set_star_enabled(cfg.decode_star);
+    sys->set_tps_enabled(cfg.decode_tps);
+
+    // Bandplan
+    if (!cfg.bandplan.empty()) sys->set_bandplan(std::string(cfg.bandplan.data(), cfg.bandplan.size()));
+    if (cfg.bandplan_base > 0.0) sys->set_bandplan_base(cfg.bandplan_base);
+    if (cfg.bandplan_high > 0.0) sys->set_bandplan_high(cfg.bandplan_high);
+    if (cfg.bandplan_spacing > 0.0) sys->set_bandplan_spacing(cfg.bandplan_spacing);
+    if (cfg.bandplan_offset != 0) sys->set_bandplan_offset(cfg.bandplan_offset);
+    if (cfg.bandfreq != 0.0) sys->set_bandfreq(static_cast<int32_t>(cfg.bandfreq));
+
+    // XOR mask
+    if (cfg.sys_id != 0 || cfg.wacn != 0 || cfg.nac != 0) {
+        sys->set_xor_mask(cfg.sys_id, cfg.wacn, cfg.nac);
+    }
+
+    // Talkgroups
+    for (const auto &tg : cfg.talkgroups) {
+        auto tg_obj = std::make_shared<Talkgroup>(
+            sys->get_sys_num(), tg.id,
+            std::string(tg.mode.data(), tg.mode.size()),
+            tg.priority, tg.preferred_nac);
+        sys->add_talkgroup(tg_obj);
+    }
+
+    // Conventional channels
+    for (const auto &ch : cfg.channels) {
+        auto tg_obj = std::make_shared<Talkgroup>(
+            sys->get_sys_num(), ch.id, ch.freq, ch.tone, ch.squelch_db, ch.signal_detection);
+        sys->add_talkgroup(tg_obj);
+        sys->add_channel(ch.freq);
+    }
+
+    // Unit tags
+    for (const auto &ut : cfg.unit_tags) {
+        sys->add_unit_tag(
+            std::string(ut.pattern.data(), ut.pattern.size()),
+            std::string(ut.tag.data(), ut.tag.size()));
+    }
+    if (!cfg.unit_tags_mode.empty()) {
+        sys->set_unit_tags_mode(std::string(cfg.unit_tags_mode.data(), cfg.unit_tags_mode.size()));
+    }
+
+    ctx.impl->trunk_ctx.systems.push_back(sys);
     return sys_idx;
-}
-
-void tr_system_add_control_channel(TrContext &ctx, int32_t sys_idx, double freq) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->add_control_channel(freq);
-}
-
-void tr_system_add_channel(TrContext &ctx, int32_t sys_idx, double freq) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->add_channel(freq);
-}
-
-void tr_system_set_qpsk_mod(TrContext &ctx, int32_t sys_idx, bool qpsk) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_qpsk_mod(qpsk);
-}
-
-void tr_system_set_squelch_db(TrContext &ctx, int32_t sys_idx, double db) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_squelch_db(db);
-}
-
-void tr_system_set_analog_levels(TrContext &ctx, int32_t sys_idx, double level) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_analog_levels(level);
-}
-
-void tr_system_set_digital_levels(TrContext &ctx, int32_t sys_idx, double level) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_digital_levels(level);
-}
-
-void tr_system_set_tau(TrContext &ctx, int32_t sys_idx, float tau) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_tau(tau);
-}
-
-void tr_system_set_max_dev(TrContext &ctx, int32_t sys_idx, int32_t max_dev) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_max_dev(max_dev);
-}
-
-void tr_system_set_filter_width(TrContext &ctx, int32_t sys_idx, double width) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_filter_width(width);
-}
-
-void tr_system_set_mdc_enabled(TrContext &ctx, int32_t sys_idx, bool enabled) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_mdc_enabled(enabled);
-}
-
-void tr_system_set_fsync_enabled(TrContext &ctx, int32_t sys_idx, bool enabled) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_fsync_enabled(enabled);
-}
-
-void tr_system_set_star_enabled(TrContext &ctx, int32_t sys_idx, bool enabled) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_star_enabled(enabled);
-}
-
-void tr_system_set_tps_enabled(TrContext &ctx, int32_t sys_idx, bool enabled) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_tps_enabled(enabled);
-}
-
-void tr_system_set_bandplan(TrContext &ctx, int32_t sys_idx, rust::Str bandplan) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_bandplan(
-        std::string(bandplan.data(), bandplan.size()));
-}
-
-void tr_system_set_bandfreq(TrContext &ctx, int32_t sys_idx, int32_t freq) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_bandfreq(freq);
-}
-
-void tr_system_set_bandplan_base(TrContext &ctx, int32_t sys_idx, double base) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_bandplan_base(base);
-}
-
-void tr_system_set_bandplan_high(TrContext &ctx, int32_t sys_idx, double high) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_bandplan_high(high);
-}
-
-void tr_system_set_bandplan_spacing(TrContext &ctx, int32_t sys_idx, double spacing) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_bandplan_spacing(spacing);
-}
-
-void tr_system_set_bandplan_offset(TrContext &ctx, int32_t sys_idx, int32_t offset) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_bandplan_offset(offset);
-}
-
-void tr_system_set_xor_mask(TrContext &ctx, int32_t sys_idx, uint64_t sys_id,
-                            uint64_t wacn, uint64_t nac) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_xor_mask(sys_id, wacn, nac);
-}
-
-// ── Talkgroup/Channel builder implementations ──
-
-void tr_system_add_talkgroup(TrContext &ctx, int32_t sys_idx,
-                             int64_t id, rust::Str mode, int32_t priority, uint64_t preferred_nac) {
-    auto &sys = ctx.impl->trunk_ctx.systems.at(sys_idx);
-    std::string mode_str(mode.data(), mode.size());
-    auto tg = std::make_shared<Talkgroup>(sys->get_sys_num(), id, mode_str, priority, preferred_nac);
-    sys->add_talkgroup(tg);
-}
-
-void tr_system_add_conventional_channel(TrContext &ctx, int32_t sys_idx,
-                                        int64_t tg_number, double freq, double tone,
-                                        double squelch_db, bool signal_detection) {
-    auto &sys = ctx.impl->trunk_ctx.systems.at(sys_idx);
-    auto tg = std::make_shared<Talkgroup>(sys->get_sys_num(), tg_number, freq, tone, squelch_db, signal_detection);
-    sys->add_talkgroup(tg);
-    sys->add_channel(freq);
-}
-
-// ── Unit tag builder implementations ──
-
-void tr_system_add_unit_tag(TrContext &ctx, int32_t sys_idx,
-                            rust::Str pattern, rust::Str tag) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->add_unit_tag(
-        std::string(pattern.data(), pattern.size()),
-        std::string(tag.data(), tag.size()));
-}
-
-void tr_system_set_unit_tags_mode(TrContext &ctx, int32_t sys_idx, rust::Str mode) {
-    ctx.impl->trunk_ctx.systems.at(sys_idx)->set_unit_tags_mode(
-        std::string(mode.data(), mode.size()));
 }
 
 // ── Reverse conversion: TrTrunkMessage → C++ TrunkMessage ──

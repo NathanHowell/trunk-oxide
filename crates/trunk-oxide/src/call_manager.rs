@@ -1160,7 +1160,11 @@ impl CallManager {
             if !entry.is_conventional {
                 continue;
             }
-            if entry.recorder.as_ref().map_or(true, |r| r.rec_num != recorder_num) {
+            if entry
+                .recorder
+                .as_ref()
+                .map_or(true, |r| r.rec_num != recorder_num)
+            {
                 continue;
             }
             if muted {

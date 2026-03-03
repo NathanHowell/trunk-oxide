@@ -503,8 +503,19 @@ impl CallManager {
                 && entry.monitoring_state == TrMonitoringState::Superseded);
 
         if should_stop_recording {
+            let rec_num = ffi::call_get_recorder_num(&*entry.handle);
             let metrics = ffi::call_stop_recording(entry.handle.pin_mut());
             if metrics.has_recorder {
+                tracing::info!(
+                    short_name = %entry.short_name,
+                    rec_num,
+                    talkgroup = entry.talkgroup,
+                    freq = %format_freq(entry.freq),
+                    tdma = entry.phase2_tdma,
+                    slot = entry.tdma_slot,
+                    freq_error = format_args!("{:+.0} Hz", metrics.freq_error),
+                    "stopping recorder"
+                );
                 // For conventional calls, update signal/noise from recorder power
                 if entry.is_conventional {
                     if metrics.recorder_idle {
@@ -939,6 +950,17 @@ impl CallManager {
                 is_analog,
             ) {
                 entry.state = TrState::Recording;
+                let rec_num = ffi::call_get_recorder_num(&*entry.handle);
+                tracing::info!(
+                    short_name = %entry.short_name,
+                    rec_num,
+                    talkgroup = tg_id,
+                    freq = %format_freq(entry.freq),
+                    tdma = entry.phase2_tdma,
+                    slot = entry.tdma_slot,
+                    analog = is_analog,
+                    "starting recorder"
+                );
                 return true;
             }
 

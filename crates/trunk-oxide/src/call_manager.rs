@@ -189,6 +189,19 @@ pub struct CallManagerConfig {
 ///
 /// Rust owns all call state. The C++ `TrCall` handle is retained only for
 /// recorder operations (`start`, `stop`, `restart`, etc.).
+/// A recorder currently assigned to a call. Consuming `stop()` ensures the
+/// recorder number cannot be used after the C++ recorder is released.
+struct Recorder {
+    rec_num: i32,
+}
+
+impl Recorder {
+    /// Stop recording on the associated call, consuming this handle.
+    fn stop(self, call: Pin<&mut TrCall>) -> ffi::TrStopRecordingResult {
+        ffi::call_stop_recording(call)
+    }
+}
+
 struct CallEntry {
     /// C++ Call — recorder handle only.
     handle: UniquePtr<TrCall>,
@@ -216,6 +229,8 @@ struct CallEntry {
     signal: f64,
     noise: f64,
     priority: i32,
+    /// The recorder assigned to this call, if any.
+    recorder: Option<Recorder>,
 
     // Rust-only timing
     last_update: Instant,
@@ -260,6 +275,7 @@ impl CallEntry {
             signal: m.signal,
             noise: m.noise,
             priority: msg.priority,
+            recorder: None,
             last_update: Instant::now(),
             idle_since: None,
             multi_site: policy.multi_site,
@@ -275,6 +291,13 @@ impl CallEntry {
     /// Create from an existing C++ call (conventional calls at startup).
     fn from_existing(call: UniquePtr<TrCall>, policy: &SystemPolicy) -> Self {
         let m = ffi::call_get_metadata(&*call);
+        let recorder = if ffi::call_has_recorder(&*call) {
+            Some(Recorder {
+                rec_num: ffi::call_get_recorder_num(&*call),
+            })
+        } else {
+            None
+        };
         Self {
             handle: call,
             call_num: m.call_num,
@@ -297,6 +320,7 @@ impl CallEntry {
             signal: m.signal,
             noise: m.noise,
             priority: m.priority,
+            recorder,
             last_update: Instant::now(),
             idle_since: None,
             multi_site: policy.multi_site,
@@ -470,7 +494,7 @@ impl CallManager {
             freq: entry.freq,
             freq_error: ffi::call_get_freq_error(&*entry.handle),
             source_num: 0,
-            recorder_num: ffi::call_get_recorder_num(&*entry.handle),
+            recorder_num: entry.recorder.as_ref().map_or(-1, |r| r.rec_num),
             signal: entry.signal,
             noise: entry.noise,
             start_time: entry.start_time,
@@ -503,9 +527,9 @@ impl CallManager {
                 && entry.monitoring_state == TrMonitoringState::Superseded);
 
         if should_stop_recording {
-            let rec_num = ffi::call_get_recorder_num(&*entry.handle);
-            let metrics = ffi::call_stop_recording(entry.handle.pin_mut());
-            if metrics.has_recorder {
+            if let Some(recorder) = entry.recorder.take() {
+                let rec_num = recorder.rec_num;
+                let metrics = recorder.stop(entry.handle.pin_mut());
                 tracing::info!(
                     short_name = %entry.short_name,
                     rec_num,
@@ -951,6 +975,7 @@ impl CallManager {
             ) {
                 entry.state = TrState::Recording;
                 let rec_num = ffi::call_get_recorder_num(&*entry.handle);
+                entry.recorder = Some(Recorder { rec_num });
                 tracing::info!(
                     short_name = %entry.short_name,
                     rec_num,
@@ -1135,10 +1160,7 @@ impl CallManager {
             if !entry.is_conventional {
                 continue;
             }
-            if !ffi::call_has_recorder(&*entry.handle) {
-                continue;
-            }
-            if ffi::call_get_recorder_num(&*entry.handle) != recorder_num {
+            if entry.recorder.as_ref().map_or(true, |r| r.rec_num != recorder_num) {
                 continue;
             }
             if muted {
@@ -1162,7 +1184,7 @@ impl CallManager {
             if !entry.is_conventional {
                 continue;
             }
-            if !ffi::call_has_recorder(&*entry.handle) {
+            if entry.recorder.is_none() {
                 continue;
             }
 
@@ -1259,10 +1281,9 @@ impl CallManager {
                 );
             }
 
-            if ffi::call_has_recorder(&*entry.handle) {
-                let rec_num = ffi::call_get_recorder_num(&*entry.handle);
+            if let Some(recorder) = &entry.recorder {
                 let rec_state = format_recorder_state(ffi::call_get_recorder_state(&*entry.handle));
-                tracing::info!(rec_num, rec_state, "  recorder");
+                tracing::info!(rec_num = recorder.rec_num, rec_state, "  recorder");
             }
         }
 

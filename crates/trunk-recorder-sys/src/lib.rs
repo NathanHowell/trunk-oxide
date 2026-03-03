@@ -357,6 +357,7 @@ pub mod ffi {
         fn tr_context_check_conventional_detection(ctx: Pin<&mut TrContext>);
         fn tr_context_check_sources(ctx: Pin<&mut TrContext>) -> Result<()>;
         fn tr_context_print_status(ctx: Pin<&mut TrContext>);
+        fn tr_context_autotune_control_channels(ctx: Pin<&mut TrContext>);
 
         // ── Phase B: Message Routing (called from Rust handle_message) ──
         fn tr_system_add_control_channel_runtime(ctx: Pin<&mut TrContext>, sys_num: i32, freq: f64);

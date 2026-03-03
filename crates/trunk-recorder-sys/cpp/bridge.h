@@ -158,6 +158,7 @@ void tr_stop_gnuradio(TrContext &ctx);
 void tr_context_check_conventional_detection(TrContext &ctx);
 void tr_context_check_sources(TrContext &ctx);
 void tr_context_print_status(TrContext &ctx);
+void tr_context_autotune_control_channels(TrContext &ctx);
 
 // ── Phase B: Message Routing (called from Rust handle_message) ──
 enum class TrUnitEventType : uint8_t;

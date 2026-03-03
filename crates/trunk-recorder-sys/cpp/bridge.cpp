@@ -706,20 +706,19 @@ void tr_context_check_sources(TrContext &ctx) {
     }
 }
 
-void tr_context_print_status(TrContext &ctx) {
-    auto &sources = ctx.impl->trunk_ctx.sources;
-    auto &systems = ctx.impl->trunk_ctx.systems;
-
-    for (auto &sys : systems) {
+void tr_context_autotune_control_channels(TrContext &ctx) {
+    for (auto &sys : ctx.impl->trunk_ctx.systems) {
         if (!is_conventional(sys->get_system_type())) {
             if ((sys->get_source()->get_autotune_source()) && (sys->get_system_type() == SYS_P25)) {
                 autotune_control_channel(sys);
             }
         }
     }
+}
 
+void tr_context_print_status(TrContext &ctx) {
     BOOST_LOG_TRIVIAL(info) << "Recorders: ";
-    for (auto &source : sources) {
+    for (auto &source : ctx.impl->trunk_ctx.sources) {
         source->print_recorders();
     }
 }

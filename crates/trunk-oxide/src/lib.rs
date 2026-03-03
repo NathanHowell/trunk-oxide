@@ -400,12 +400,14 @@ impl TrunkRecorder {
         let mut tick = tokio::time::interval(Duration::from_secs(1));
         let mut decode = tokio::time::interval(Duration::from_secs(3));
         let mut status = tokio::time::interval(Duration::from_secs(200));
+        let mut autotune = tokio::time::interval(Duration::from_secs(200));
 
         // First ticks fire immediately — consume them so the first real tick
         // happens after the interval elapses.
         tick.tick().await;
         decode.tick().await;
         status.tick().await;
+        autotune.tick().await;
 
         loop {
             if shutdown.load(Ordering::Relaxed) {
@@ -463,6 +465,9 @@ impl TrunkRecorder {
                     call_mgr.print_status(self.ctx.pin_mut());
                     call_mgr.print_active_patches();
                     ffi::tr_context_print_status(self.ctx.pin_mut());
+                },
+                _ = autotune.tick() => {
+                    ffi::tr_context_autotune_control_channels(self.ctx.pin_mut());
                 },
             }
 

@@ -57,7 +57,9 @@ pub async fn run(
     let mut event_stream = event_response.into_inner();
     let mut audio_stream = audio_response.into_inner();
 
-    reporter.set_service_status("", tonic_health::ServingStatus::Serving).await;
+    reporter
+        .set_service_status("", tonic_health::ServingStatus::Serving)
+        .await;
 
     let dispatcher_events = Arc::clone(&dispatcher);
     let event_handle = tokio::spawn(async move {
@@ -100,7 +102,9 @@ pub async fn run(
         tracing::error!("audio stream task join error: {e}");
     }
 
-    reporter.set_service_status("", tonic_health::ServingStatus::NotServing).await;
+    reporter
+        .set_service_status("", tonic_health::ServingStatus::NotServing)
+        .await;
 
     Ok(())
 }

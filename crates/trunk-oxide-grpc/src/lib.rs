@@ -74,8 +74,16 @@ fn convert_call_data(cd: &TrCallData) -> proto::CallData {
         freq_error: cd.freq_error,
         source_num: cd.source_num,
         recorder_num: cd.recorder_num,
-        signal: if cd.signal >= 998.0 { None } else { Some(cd.signal) },
-        noise: if cd.noise >= 998.0 { None } else { Some(cd.noise) },
+        signal: if cd.signal >= 998.0 {
+            None
+        } else {
+            Some(cd.signal)
+        },
+        noise: if cd.noise >= 998.0 {
+            None
+        } else {
+            Some(cd.noise)
+        },
         start_time: cd.start_time,
         stop_time: cd.stop_time,
         error_count: cd.error_count,
@@ -282,6 +290,7 @@ impl Default for GrpcConfig {
     }
 }
 
+#[derive(Default)]
 pub struct GrpcPlugin {
     config: GrpcConfig,
     runtime: Option<tokio::runtime::Runtime>,
@@ -295,14 +304,7 @@ pub struct GrpcPlugin {
 
 impl GrpcPlugin {
     pub fn new() -> Self {
-        Self {
-            config: GrpcConfig::default(),
-            runtime: None,
-            audio_tx: None,
-            event_tx: None,
-            talkgroups: HashMap::new(),
-            unit_aliases: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Populate talkgroup metadata lookup from config data.
@@ -311,14 +313,24 @@ impl GrpcPlugin {
     }
 
     fn call_info_from(&self, info: &TrCallInfo) -> proto::CallInfo {
-        let meta = self.talkgroups.get(&(info.short_name.clone(), info.talkgroup));
+        let meta = self
+            .talkgroups
+            .get(&(info.short_name.clone(), info.talkgroup));
         proto::CallInfo {
             talkgroup: info.talkgroup,
             call_num: info.call_num,
             sys_num: info.sys_num,
             freq: info.freq,
-            signal: if info.signal >= 998.0 { None } else { Some(info.signal) },
-            noise: if info.noise >= 998.0 { None } else { Some(info.noise) },
+            signal: if info.signal >= 998.0 {
+                None
+            } else {
+                Some(info.signal)
+            },
+            noise: if info.noise >= 998.0 {
+                None
+            } else {
+                Some(info.noise)
+            },
             freq_error: info.freq_error,
             encrypted: info.encrypted,
             emergency: info.emergency,
@@ -436,7 +448,12 @@ impl EventHandler for GrpcPlugin {
         }));
     }
 
-    fn audio_stream(&mut self, call: Option<&trunk_recorder_sys::ffi::TrCall>, recorder: &TrRecorder, samples: &[i16]) {
+    fn audio_stream(
+        &mut self,
+        call: Option<&trunk_recorder_sys::ffi::TrCall>,
+        recorder: &TrRecorder,
+        samples: &[i16],
+    ) {
         use trunk_recorder_sys::ffi::{call_get_metadata, recorder_get_wav_hz};
         let Some(call) = call else {
             return;
@@ -568,8 +585,7 @@ impl EventHandler for GrpcPlugin {
         // unit_alias_discovered still receives &TrSystem from C++ (recorder callback)
         // We can't easily get TrSystemInfo here without a TrContext, so build a minimal one
         let _ = system;
-        self.unit_aliases
-            .insert((0, radio_id), alias.to_string());
+        self.unit_aliases.insert((0, radio_id), alias.to_string());
         self.send_event(proto::plugin_event::Event::UnitAlias(
             proto::UnitAliasEvent {
                 system: None,

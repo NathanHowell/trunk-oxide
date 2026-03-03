@@ -16,9 +16,8 @@ use clap::Parser;
 use opentelemetry::trace::TracerProvider;
 use serenity::model::id::{ChannelId, GuildId};
 use tokio::sync::Mutex;
-use trunk_config::Config;
 use tracing_subscriber::prelude::*;
-
+use trunk_config::Config;
 
 #[derive(Parser)]
 struct Args {
@@ -78,8 +77,13 @@ async fn init_channel_manager(
     let lookup = channel_manager::new_lookup();
     if let Some(guild_id) = config.guild_id.map(GuildId::from) {
         if !config.groups.is_empty() {
-            match channel_manager::resolve_existing(discord_client, guild_id, &config.groups, &lookup)
-                .await
+            match channel_manager::resolve_existing(
+                discord_client,
+                guild_id,
+                &config.groups,
+                &lookup,
+            )
+            .await
             {
                 Ok(existing_channels) => {
                     let reconcile_discord = Arc::clone(discord_client);
@@ -99,7 +103,9 @@ async fn init_channel_manager(
             }
         }
     } else if !config.groups.is_empty() {
-        tracing::warn!("discord.groups configured but guild_id is missing, channel management disabled");
+        tracing::warn!(
+            "discord.groups configured but guild_id is missing, channel management disabled"
+        );
     }
     lookup
 }
@@ -116,7 +122,10 @@ async fn main() -> Result<()> {
     let otel_provider = init_tracing();
 
     let mut config = Config::load(&args.config)?;
-    let discord = config.discord.as_mut().expect("missing [discord] section in config");
+    let discord = config
+        .discord
+        .as_mut()
+        .expect("missing [discord] section in config");
     if let Some(token) = args.discord_token.as_deref() {
         token.trim().clone_into(&mut discord.bot_token);
     } else if let Ok(token) = std::env::var("DISCORD_TOKEN") {
@@ -145,9 +154,18 @@ async fn main() -> Result<()> {
         }
     });
 
-    let discord_config = config.discord.as_ref().expect("missing [discord] section in config");
-    let whisperer_config = config.whisperer.as_ref().expect("missing [whisperer] section in config");
-    let oxide_config = config.oxide.as_ref().expect("missing [oxide] section in config");
+    let discord_config = config
+        .discord
+        .as_ref()
+        .expect("missing [discord] section in config");
+    let whisperer_config = config
+        .whisperer
+        .as_ref()
+        .expect("missing [whisperer] section in config");
+    let oxide_config = config
+        .oxide
+        .as_ref()
+        .expect("missing [oxide] section in config");
     let fallback_channel_id = ChannelId::from(discord_config.channel_id.get());
 
     let whisperer =

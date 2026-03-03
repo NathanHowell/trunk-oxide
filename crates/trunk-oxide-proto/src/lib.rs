@@ -264,10 +264,7 @@ mod tests {
                     ..Default::default()
                 },
             ),
-            (
-                "all defaults (zero values)",
-                TrunkMessage::default(),
-            ),
+            ("all defaults (zero values)", TrunkMessage::default()),
             (
                 "all bools true",
                 TrunkMessage {
@@ -304,7 +301,12 @@ mod tests {
                     nac: 0x5AB,
                     wacn: 0xBEEF0,
                     opcode: 42,
-                    patch_data: Some(PatchData { sg: 100, ga1: 200, ga2: 300, ga3: 400 }),
+                    patch_data: Some(PatchData {
+                        sg: 100,
+                        ga1: 200,
+                        ga2: 300,
+                        ga3: 400,
+                    }),
                     ..Default::default()
                 },
             ),

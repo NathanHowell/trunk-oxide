@@ -6,8 +6,8 @@ use serenity::model::id::{ChannelId, GuildId};
 use tokio::sync::RwLock;
 use tokio::time::{Duration, sleep};
 
-use trunk_config::ChannelGroup;
 use crate::discord::DiscordClient;
+use trunk_config::ChannelGroup;
 
 /// Key for the talkgroup-to-channel lookup: (`system_short_name`, `talkgroup_id`).
 pub type TalkgroupKey = (String, i64);
@@ -30,10 +30,8 @@ pub async fn resolve_existing(
     let guild_channels = discord.get_guild_channels(guild_id).await?;
 
     // Index channels by ID for pinned lookups
-    let channels_by_id: HashMap<ChannelId, &GuildChannel> = guild_channels
-        .iter()
-        .map(|ch| (ch.id, ch))
-        .collect();
+    let channels_by_id: HashMap<ChannelId, &GuildChannel> =
+        guild_channels.iter().map(|ch| (ch.id, ch)).collect();
 
     // Index categories by lowercase name
     let categories: HashMap<String, ChannelId> = guild_channels
@@ -69,7 +67,8 @@ pub async fn resolve_existing(
 
         for channel_mapping in &group.channels {
             // Resolve channel: prefer pinned ID, fall back to name match
-            let channel_id = if let Some(id) = channel_mapping.id.map(|n| ChannelId::from(n.get())) {
+            let channel_id = if let Some(id) = channel_mapping.id.map(|n| ChannelId::from(n.get()))
+            {
                 if channels_by_id.contains_key(&id) {
                     id
                 } else {
@@ -113,10 +112,8 @@ pub async fn reconcile(
     existing_channels: Vec<GuildChannel>,
 ) {
     // Build indexes from existing state
-    let existing_by_id: HashMap<ChannelId, &GuildChannel> = existing_channels
-        .iter()
-        .map(|ch| (ch.id, ch))
-        .collect();
+    let existing_by_id: HashMap<ChannelId, &GuildChannel> =
+        existing_channels.iter().map(|ch| (ch.id, ch)).collect();
 
     let mut categories: HashMap<String, ChannelId> = existing_channels
         .iter()
@@ -145,23 +142,22 @@ pub async fn reconcile(
         } else {
             match categories.get(&group.name.to_lowercase()) {
                 Some(&id) => id,
-                None => {
-                    match create_with_retry(&discord, guild_id, &group.name, None).await {
-                        Some(ch) => {
-                            let id = ch.id;
-                            categories.insert(group.name.to_lowercase(), id);
-                            tracing::info!(category = %group.name, "created Discord category");
-                            id
-                        }
-                        None => continue,
+                None => match create_with_retry(&discord, guild_id, &group.name, None).await {
+                    Some(ch) => {
+                        let id = ch.id;
+                        categories.insert(group.name.to_lowercase(), id);
+                        tracing::info!(category = %group.name, "created Discord category");
+                        id
                     }
-                }
+                    None => continue,
+                },
             }
         };
 
         // Ensure each channel exists: pinned ID > name match > create
         for channel_mapping in &group.channels {
-            let channel_id = if let Some(id) = channel_mapping.id.map(|n| ChannelId::from(n.get())) {
+            let channel_id = if let Some(id) = channel_mapping.id.map(|n| ChannelId::from(n.get()))
+            {
                 if existing_by_id.contains_key(&id) {
                     id
                 } else {

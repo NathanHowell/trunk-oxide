@@ -750,7 +750,7 @@ mod tests {
         let mut phase = 0.0_f32;
         (0..n)
             .map(|i| {
-                let freq = if (i / switch_samples) % 2 == 0 {
+                let freq = if (i / switch_samples).is_multiple_of(2) {
                     freq_a
                 } else {
                     freq_b

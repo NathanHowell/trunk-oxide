@@ -24,8 +24,8 @@ use call_manager::CallManager;
 use std::collections::HashMap;
 
 use trunk_config::{Config, DefaultMode, Modulation, SourceDriver, SystemType};
-use trunk_recorder_sys::ffi;
 use trunk_recorder_sys::EventHandler;
+use trunk_recorder_sys::ffi;
 
 pub(crate) type Handler = Arc<Mutex<Box<dyn EventHandler>>>;
 
@@ -186,11 +186,7 @@ impl TrunkRecorderBuilder {
             }
 
             // Modulation
-            ffi::tr_system_set_qpsk_mod(
-                ctx.pin_mut(),
-                sys_idx,
-                sys.modulation == Modulation::Qpsk,
-            );
+            ffi::tr_system_set_qpsk_mod(ctx.pin_mut(), sys_idx, sys.modulation == Modulation::Qpsk);
 
             // Audio/filter settings
             ffi::tr_system_set_squelch_db(ctx.pin_mut(), sys_idx, sys.squelch);
@@ -225,13 +221,7 @@ impl TrunkRecorderBuilder {
 
             // XOR mask (P25 identity)
             if sys.sys_id != 0 || sys.wacn != 0 || sys.nac != 0 {
-                ffi::tr_system_set_xor_mask(
-                    ctx.pin_mut(),
-                    sys_idx,
-                    sys.sys_id,
-                    sys.wacn,
-                    sys.nac,
-                );
+                ffi::tr_system_set_xor_mask(ctx.pin_mut(), sys_idx, sys.sys_id, sys.wacn, sys.nac);
             }
 
             // Talkgroups (trunked systems)

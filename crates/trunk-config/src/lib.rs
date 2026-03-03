@@ -58,15 +58,11 @@ impl Config {
             .any(|sys| sys.talkgroup_file.is_some() || sys.channel_file.is_some());
 
         if needs_resolve {
-            let config_dir = Path::new(path)
-                .parent()
-                .unwrap_or(Path::new("."));
+            let config_dir = Path::new(path).parent().unwrap_or(Path::new("."));
 
             // Re-parse raw TOML to detect which fields were explicitly set
             let raw: toml::Value = toml::from_str(&content)?;
-            let raw_systems = raw
-                .get("system")
-                .and_then(|v| v.as_table());
+            let raw_systems = raw.get("system").and_then(|v| v.as_table());
 
             for (name, sys) in &mut config.system {
                 if sys.talkgroup_file.is_some() {
@@ -320,7 +316,10 @@ channel_id = 123456789
     #[test]
     fn parse_csv_talkgroups() {
         use std::path::Path;
-        let csv_path = Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/../../smco-talkgroups.csv"));
+        let csv_path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../smco-talkgroups.csv"
+        ));
         let tgs = crate::system::load_talkgroups_csv(csv_path).unwrap();
         assert!(tgs.len() > 50, "expected 50+ talkgroups, got {}", tgs.len());
 
@@ -548,9 +547,11 @@ alpha_tag = "Custom Ch"
 
     #[test]
     fn parse_real_discord_config() {
-        let toml =
-            std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../config-discord.toml"))
-                .unwrap();
+        let toml = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../config-discord.toml"
+        ))
+        .unwrap();
         let config: Config = toml::from_str(&toml).unwrap();
         let discord = config.discord.expect("missing discord section");
         assert!(!discord.groups.is_empty());
@@ -562,6 +563,9 @@ alpha_tag = "Custom Ch"
             .flat_map(|c| &c.talkgroups)
             .map(|s| s.ids.len())
             .sum();
-        assert!(total_tgs > 100, "expected 100+ mapped talkgroups, got {total_tgs}");
+        assert!(
+            total_tgs > 100,
+            "expected 100+ mapped talkgroups, got {total_tgs}"
+        );
     }
 }

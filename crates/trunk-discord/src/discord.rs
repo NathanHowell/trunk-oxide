@@ -36,11 +36,7 @@ impl DiscordClient {
         Ok(msg.id)
     }
 
-    pub async fn send_embed(
-        &self,
-        channel_id: ChannelId,
-        embed: CreateEmbed,
-    ) -> Result<MessageId> {
+    pub async fn send_embed(&self, channel_id: ChannelId, embed: CreateEmbed) -> Result<MessageId> {
         let msg = channel_id
             .send_message(&self.http, CreateMessage::new().embed(embed))
             .await?;
@@ -59,14 +55,8 @@ impl DiscordClient {
         Ok(())
     }
 
-    pub async fn delete_message(
-        &self,
-        channel_id: ChannelId,
-        message_id: MessageId,
-    ) -> Result<()> {
-        channel_id
-            .delete_message(&self.http, message_id)
-            .await?;
+    pub async fn delete_message(&self, channel_id: ChannelId, message_id: MessageId) -> Result<()> {
+        channel_id.delete_message(&self.http, message_id).await?;
         Ok(())
     }
 

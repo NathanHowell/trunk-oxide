@@ -120,11 +120,13 @@ impl Database {
         date: &str,
         channel_id: u64,
     ) -> Result<()> {
-        self.conn.execute(
-            "INSERT OR REPLACE INTO thread_cache (sys_num, talkgroup, date, channel_id)
+        self.conn
+            .execute(
+                "INSERT OR REPLACE INTO thread_cache (sys_num, talkgroup, date, channel_id)
              VALUES (?1, ?2, ?3, ?4)",
-            rusqlite::params![sys_num.0, talkgroup.0, date, channel_id],
-        ).context("setting thread cache")?;
+                rusqlite::params![sys_num.0, talkgroup.0, date, channel_id],
+            )
+            .context("setting thread cache")?;
 
         Ok(())
     }
@@ -287,10 +289,7 @@ mod tests {
         assert!(db.get_thread(sys, tg, "2026-02-26").unwrap().is_none());
 
         db.set_thread(sys, tg, "2026-02-26", 999_888).unwrap();
-        assert_eq!(
-            db.get_thread(sys, tg, "2026-02-26").unwrap(),
-            Some(999_888)
-        );
+        assert_eq!(db.get_thread(sys, tg, "2026-02-26").unwrap(), Some(999_888));
 
         // Different date returns None
         assert!(db.get_thread(sys, tg, "2026-02-27").unwrap().is_none());
@@ -322,10 +321,11 @@ mod tests {
             Some(222)
         );
         // Old date not copied
-        assert!(new
-            .get_thread(SysNum(1), Talkgroup(300), "2026-02-25")
-            .unwrap()
-            .is_none());
+        assert!(
+            new.get_thread(SysNum(1), Talkgroup(300), "2026-02-25")
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]

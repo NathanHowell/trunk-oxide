@@ -31,7 +31,11 @@ pub struct Aggregator {
 }
 
 impl Aggregator {
-    pub fn new(discord: Arc<DiscordClient>, channel_id: ChannelId, db: Arc<Mutex<Database>>) -> Self {
+    pub fn new(
+        discord: Arc<DiscordClient>,
+        channel_id: ChannelId,
+        db: Arc<Mutex<Database>>,
+    ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
 
         let inner = AggregatorInner {
@@ -91,9 +95,9 @@ struct AggregatorInner {
     activity_embed_id: Option<MessageId>,
 
     // Aggregated counters (flushed periodically)
-    signal_counts: HashMap<String, u64>,               // signal_type -> count
+    signal_counts: HashMap<String, u64>, // signal_type -> count
     trunk_message_counts: HashMap<String, (u64, u64)>, // sys_name -> (messages, batches)
-    unit_counts: HashMap<String, u64>,                  // event_type -> count
+    unit_counts: HashMap<String, u64>,   // event_type -> count
     latest_rates: Option<proto::SystemRatesEvent>,
     latest_calls_active: Option<usize>,
 }
@@ -394,7 +398,9 @@ fn format_setup_config(e: &proto::SetupConfigEvent) -> String {
         let _ = writeln!(
             text,
             "System: {} ({}) - type: {}",
-            sys.short_name, sys.sys_num, format_system_type(sys.system_type)
+            sys.short_name,
+            sys.sys_num,
+            format_system_type(sys.system_type)
         );
     }
     for src in &e.sources {
@@ -415,7 +421,9 @@ fn format_setup_systems(e: &proto::SetupSystemsEvent) -> String {
         let _ = writeln!(
             text,
             "{} (sys_num={}, type={})",
-            sys.short_name, sys.sys_num, format_system_type(sys.system_type)
+            sys.short_name,
+            sys.sys_num,
+            format_system_type(sys.system_type)
         );
     }
     text
@@ -443,7 +451,9 @@ fn format_setup_system(e: &proto::SetupSystemEvent) -> String {
         |sys| {
             format!(
                 "{} (sys_num={}, type={})",
-                sys.short_name, sys.sys_num, format_system_type(sys.system_type)
+                sys.short_name,
+                sys.sys_num,
+                format_system_type(sys.system_type)
             )
         },
     )
@@ -454,7 +464,11 @@ fn build_recorder_table(recorders: &HashMap<i32, proto::RecorderInfo>) -> String
     ids.sort_unstable();
 
     let mut table = String::from("```\n");
-    let _ = writeln!(table, "{:<4} {:<8} {:>12} {:>10} State", "ID", "Type", "Freq (MHz)", "TG");
+    let _ = writeln!(
+        table,
+        "{:<4} {:<8} {:>12} {:>10} State",
+        "ID", "Type", "Freq (MHz)", "TG"
+    );
     for id in ids {
         let rec = &recorders[&id];
         let state = if rec.is_active {
@@ -506,4 +520,3 @@ fn format_unit_type(r#type: i32) -> String {
         },
     )
 }
-

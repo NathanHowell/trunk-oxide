@@ -87,8 +87,7 @@ fn build_device_list(cli: &Cli, config: &TrunkConfig) -> Result<Vec<Device>> {
         cli.devices
             .iter()
             .map(|name| {
-                Device::from_name(name)
-                    .ok_or_else(|| anyhow::anyhow!("Unknown device: {name}"))
+                Device::from_name(name).ok_or_else(|| anyhow::anyhow!("Unknown device: {name}"))
             })
             .collect()
     }

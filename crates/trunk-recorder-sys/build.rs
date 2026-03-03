@@ -149,23 +149,22 @@ fn compute_gnuradio_version(version: &str) -> u32 {
 /// Find boost include directory
 fn find_boost_include() -> Option<PathBuf> {
     // Try pkg-config first
-    if let Ok(boost) = pkg_config::Config::new().probe("boost") {
-        if let Some(path) = boost.include_paths.first() {
-            return Some(path.clone());
-        }
+    if let Ok(boost) = pkg_config::Config::new().probe("boost")
+        && let Some(path) = boost.include_paths.first()
+    {
+        return Some(path.clone());
     }
 
     // Try brew
     if let Ok(output) = std::process::Command::new("brew")
         .args(["--prefix", "boost"])
         .output()
+        && output.status.success()
     {
-        if output.status.success() {
-            let prefix = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            let inc = PathBuf::from(format!("{prefix}/include"));
-            if inc.exists() {
-                return Some(inc);
-            }
+        let prefix = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let inc = PathBuf::from(format!("{prefix}/include"));
+        if inc.exists() {
+            return Some(inc);
         }
     }
 

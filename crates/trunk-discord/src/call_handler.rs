@@ -3,11 +3,11 @@ use std::time::Duration;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
+use proto::types::{CallRowId, Freq, SignalDb};
 use serenity::all::{CreateEmbed, CreateEmbedFooter};
 use serenity::model::id::{ChannelId, MessageId};
 use tokio::sync::{Mutex, mpsc};
 use trunk_oxide_proto as proto;
-use proto::types::{CallRowId, Freq, SignalDb};
 
 use trunk_database::Database;
 
@@ -83,8 +83,8 @@ impl CallHandler {
             None
         };
 
-        let start_time = DateTime::<Utc>::from_timestamp(call_info.start_time, 0)
-            .unwrap_or_else(Utc::now);
+        let start_time =
+            DateTime::<Utc>::from_timestamp(call_info.start_time, 0).unwrap_or_else(Utc::now);
         let start_time_str = start_time.format("%H:%M:%S UTC").to_string();
 
         let tag = if call_info.talkgroup_alpha_tag.is_empty() {
@@ -304,11 +304,7 @@ impl CallHandler {
         let result = detector.finish();
 
         if !result.tones.is_empty() {
-            self.detected_tones = result
-                .tones
-                .iter()
-                .map(|t| format!("{t}"))
-                .collect();
+            self.detected_tones = result.tones.iter().map(|t| format!("{t}")).collect();
             self.update_embed().await?;
 
             // Strip dispatch tone samples from the front of the audio buffer
@@ -393,14 +389,10 @@ impl CallHandler {
             || !self.detected_tones.is_empty()
             || !self.events.is_empty();
         if !has_content {
-            if let Some(msg_id) = self.embed_message_id {
-                if let Err(e) = self
-                    .discord
-                    .delete_message(self.post_channel, msg_id)
-                    .await
-                {
-                    tracing::warn!(error = %e, "failed to delete empty call embed");
-                }
+            if let Some(msg_id) = self.embed_message_id
+                && let Err(e) = self.discord.delete_message(self.post_channel, msg_id).await
+            {
+                tracing::warn!(error = %e, "failed to delete empty call embed");
             }
             tracing::info!("call ended (empty, deleted embed)");
             return Ok(());
@@ -462,9 +454,5 @@ fn is_blank_audio(text: &str) -> bool {
         .trim()
         .to_lowercase()
         .replace('_', " ");
-    t == "blank audio"
-        || t == "no speech"
-        || t == "silence"
-        || t == "..."
-        || t == "."
+    t == "blank audio" || t == "no speech" || t == "silence" || t == "..." || t == "."
 }

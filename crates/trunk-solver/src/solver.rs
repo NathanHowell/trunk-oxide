@@ -209,7 +209,9 @@ pub fn solve(channels: &[Channel], devices: &[Device]) -> Result<Vec<Source>> {
         bail!("Optimization failed: {sat:?}");
     }
 
-    let model = opt.get_model().ok_or_else(|| anyhow::anyhow!("Failed to get model"))?;
+    let model = opt
+        .get_model()
+        .ok_or_else(|| anyhow::anyhow!("Failed to get model"))?;
 
     extract_sources(&model, &problem, channels, devices)
 }
@@ -287,8 +289,8 @@ fn extract_sources(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{Channel, Signal, Tag};
     use crate::device::Device;
+    use crate::{Channel, Signal, Tag};
 
     /// Helper: assert every channel is within the usable range of some source,
     /// applying trunk-recorder's actual decimation guard.
@@ -332,8 +334,18 @@ mod tests {
         // The exact bug case: two analog channels 750 kHz apart.
         // Old solver picked rate=912k which couldn't cover both after decimation.
         let channels = vec![
-            Channel { frequency: 488_337_500, signal: Signal::Analog, tag: None, system: None },
-            Channel { frequency: 489_087_500, signal: Signal::Analog, tag: None, system: None },
+            Channel {
+                frequency: 488_337_500,
+                signal: Signal::Analog,
+                tag: None,
+                system: None,
+            },
+            Channel {
+                frequency: 489_087_500,
+                signal: Signal::Analog,
+                tag: None,
+                system: None,
+            },
         ];
         let devices = vec![Device::rtlsdr()];
 
@@ -347,8 +359,12 @@ mod tests {
         // P25 control + voice channels spanning ~770–774 MHz.
         let control = [772_031_250, 772_406_250, 772_706_250, 773_481_250];
         let voice = [
-            770_031_250, 770_306_250, 771_281_250, 771_431_250,
-            771_581_250, 771_881_250,
+            770_031_250,
+            770_306_250,
+            771_281_250,
+            771_431_250,
+            771_581_250,
+            771_881_250,
         ];
 
         let mut channels: Vec<Channel> = control
@@ -376,9 +392,12 @@ mod tests {
 
     #[test]
     fn test_single_channel() {
-        let channels = vec![
-            Channel { frequency: 460_000_000, signal: Signal::Analog, tag: None, system: None },
-        ];
+        let channels = vec![Channel {
+            frequency: 460_000_000,
+            signal: Signal::Analog,
+            tag: None,
+            system: None,
+        }];
         let devices = vec![Device::rtlsdr()];
 
         let sources = solve(&channels, &devices).expect("should find a solution");
@@ -392,8 +411,18 @@ mod tests {
     fn test_impossible_assignment() {
         // Two channels 10 MHz apart — impossible with a single RTL-SDR (max ~2.56 MHz)
         let channels = vec![
-            Channel { frequency: 460_000_000, signal: Signal::Analog, tag: None, system: None },
-            Channel { frequency: 470_000_000, signal: Signal::Analog, tag: None, system: None },
+            Channel {
+                frequency: 460_000_000,
+                signal: Signal::Analog,
+                tag: None,
+                system: None,
+            },
+            Channel {
+                frequency: 470_000_000,
+                signal: Signal::Analog,
+                tag: None,
+                system: None,
+            },
         ];
         let devices = vec![Device::rtlsdr()];
 

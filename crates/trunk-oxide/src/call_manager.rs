@@ -4,13 +4,13 @@ use std::time::Instant;
 
 use cxx::UniquePtr;
 use trunk_config::{DefaultMode, SystemType, TalkgroupMode};
+use trunk_recorder_sys::SystemInfo;
 use trunk_recorder_sys::ffi::{
     self, TrCall, TrCallData, TrCallDataStatus, TrContext, TrMessageType, TrMonitoringState,
     TrState, TrTrunkMessage, TrUnitEventType,
 };
-use trunk_recorder_sys::SystemInfo;
 
-use crate::{lock_handler, Handler};
+use crate::{Handler, lock_handler};
 
 /// Per-system patch table: maps supergroup → { talkgroup → last_update }.
 ///
@@ -145,23 +145,24 @@ pub struct SystemPolicy {
     pub nac: u64,
 }
 
-static DEFAULT_POLICY: std::sync::LazyLock<SystemPolicy> = std::sync::LazyLock::new(|| SystemPolicy {
-    system_type: SystemType::P25,
-    short_name: String::new(),
-    record_unknown: false,
-    hide_unknown: false,
-    hide_encrypted: false,
-    monitor_encrypted: false,
-    multi_site: false,
-    multi_site_name: String::new(),
-    conversation_mode: false,
-    max_duration: 0.0,
-    control_channels: Vec::new(),
-    talkgroups: HashMap::new(),
-    sys_id: 0,
-    wacn: 0,
-    nac: 0,
-});
+static DEFAULT_POLICY: std::sync::LazyLock<SystemPolicy> =
+    std::sync::LazyLock::new(|| SystemPolicy {
+        system_type: SystemType::P25,
+        short_name: String::new(),
+        record_unknown: false,
+        hide_unknown: false,
+        hide_encrypted: false,
+        monitor_encrypted: false,
+        multi_site: false,
+        multi_site_name: String::new(),
+        conversation_mode: false,
+        max_duration: 0.0,
+        control_channels: Vec::new(),
+        talkgroups: HashMap::new(),
+        sys_id: 0,
+        wacn: 0,
+        nac: 0,
+    });
 
 /// Mutable P25 identity fields, updated once at runtime from trunk messages.
 struct SystemIdentity {
@@ -458,7 +459,12 @@ impl CallManager {
             color_code: 0,
             patched_talkgroups: patches
                 .get(&entry.sys_num)
-                .map(|pt| pt.get_patch(entry.talkgroup).into_iter().map(|t| t as u64).collect())
+                .map(|pt| {
+                    pt.get_patch(entry.talkgroup)
+                        .into_iter()
+                        .map(|t| t as u64)
+                        .collect()
+                })
                 .unwrap_or_default(),
             call_num: entry.call_num,
             freq: entry.freq,
@@ -547,11 +553,7 @@ impl CallManager {
 
     // ── Source tracking update (replaces C++ Call_impl::update + add_source) ──
 
-    fn update_call_source(
-        entry: &mut CallEntry,
-        msg: &TrTrunkMessage,
-        handler: &Handler,
-    ) -> bool {
+    fn update_call_source(entry: &mut CallEntry, msg: &TrTrunkMessage, handler: &Handler) -> bool {
         entry.last_update = Instant::now();
 
         let src = msg.source;
@@ -629,43 +631,64 @@ impl CallManager {
             TrMessageType::Registration => {
                 let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
                 lock_handler(&self.handler).unit_event(
-                    &info, TrUnitEventType::Registration, msg.source, 0,
+                    &info,
+                    TrUnitEventType::Registration,
+                    msg.source,
+                    0,
                 );
             }
             TrMessageType::Deregistration => {
                 let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
                 lock_handler(&self.handler).unit_event(
-                    &info, TrUnitEventType::Deregistration, msg.source, 0,
+                    &info,
+                    TrUnitEventType::Deregistration,
+                    msg.source,
+                    0,
                 );
             }
             TrMessageType::Affiliation => {
                 let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
                 lock_handler(&self.handler).unit_event(
-                    &info, TrUnitEventType::Affiliation, msg.source, msg.talkgroup,
+                    &info,
+                    TrUnitEventType::Affiliation,
+                    msg.source,
+                    msg.talkgroup,
                 );
             }
             TrMessageType::Acknowledge => {
                 let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
                 lock_handler(&self.handler).unit_event(
-                    &info, TrUnitEventType::Acknowledge, msg.source, 0,
+                    &info,
+                    TrUnitEventType::Acknowledge,
+                    msg.source,
+                    0,
                 );
             }
             TrMessageType::Location => {
                 let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
                 lock_handler(&self.handler).unit_event(
-                    &info, TrUnitEventType::Location, msg.source, msg.talkgroup,
+                    &info,
+                    TrUnitEventType::Location,
+                    msg.source,
+                    msg.talkgroup,
                 );
             }
             TrMessageType::DataGrant => {
                 let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
                 lock_handler(&self.handler).unit_event(
-                    &info, TrUnitEventType::DataGrant, msg.source, 0,
+                    &info,
+                    TrUnitEventType::DataGrant,
+                    msg.source,
+                    0,
                 );
             }
             TrMessageType::UuAnsReq => {
                 let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
                 lock_handler(&self.handler).unit_event(
-                    &info, TrUnitEventType::AnswerRequest, msg.source, msg.talkgroup,
+                    &info,
+                    TrUnitEventType::AnswerRequest,
+                    msg.source,
+                    msg.talkgroup,
                 );
             }
 
@@ -711,8 +734,7 @@ impl CallManager {
                 && entry.phase2_tdma == msg.phase2_tdma
             {
                 call_found = true;
-                let source_updated =
-                    Self::update_call_source(entry, msg, &self.handler);
+                let source_updated = Self::update_call_source(entry, msg, &self.handler);
                 if source_updated {
                     lock_handler(&self.handler).call_start(&entry.to_call_info());
                 }
@@ -726,12 +748,15 @@ impl CallManager {
         // New call
         let multisite = self.check_multisite(msg.talkgroup, msg.sys_num, msg);
         let new_call = ffi::tr_context_create_call(ctx.as_mut(), msg);
-        let policy = self.config.systems.get(&msg.sys_num).unwrap_or(&DEFAULT_POLICY);
+        let policy = self
+            .config
+            .systems
+            .get(&msg.sys_num)
+            .unwrap_or(&DEFAULT_POLICY);
         let mut new_entry = CallEntry::from_message(new_call, msg, policy);
 
         if multisite.is_superseding {
-            let recording_started =
-                self.try_start_recording(&mut ctx, &mut new_entry, msg);
+            let recording_started = self.try_start_recording(&mut ctx, &mut new_entry, msg);
 
             if recording_started {
                 if let Some(orig_idx) = multisite.original_idx {
@@ -745,8 +770,7 @@ impl CallManager {
             new_entry.state = TrState::Monitoring;
             new_entry.monitoring_state = TrMonitoringState::Duplicate;
         } else {
-            let recording_started =
-                self.try_start_recording(&mut ctx, &mut new_entry, msg);
+            let recording_started = self.try_start_recording(&mut ctx, &mut new_entry, msg);
             if recording_started && !is_grant_message {
                 tracing::info!(
                     talkgroup = msg.talkgroup,
@@ -780,8 +804,7 @@ impl CallManager {
                     entry.encrypted = true;
                 }
 
-                let source_updated =
-                    Self::update_call_source(entry, msg, &self.handler);
+                let source_updated = Self::update_call_source(entry, msg, &self.handler);
                 if source_updated {
                     lock_handler(&self.handler).call_start(&entry.to_call_info());
                 }
@@ -835,19 +858,14 @@ impl CallManager {
         }
 
         // 2. Encryption check
-        let is_encrypted =
-            msg.encrypted || tg_policy.map_or(false, |tg| tg.mode.is_encrypted());
+        let is_encrypted = msg.encrypted || tg_policy.map_or(false, |tg| tg.mode.is_encrypted());
         if is_encrypted {
             entry.encrypted = true;
             if !sys_policy.monitor_encrypted {
                 entry.state = TrState::Monitoring;
                 entry.monitoring_state = TrMonitoringState::Encrypted;
                 if !sys_policy.hide_encrypted {
-                    tracing::info!(
-                        talkgroup = tg_id,
-                        sys_num,
-                        "not recording: encrypted"
-                    );
+                    tracing::info!(talkgroup = tg_id, sys_num, "not recording: encrypted");
                 }
                 return false;
             }
@@ -881,7 +899,11 @@ impl CallManager {
         if priority == -1 {
             entry.state = TrState::Monitoring;
             entry.monitoring_state = TrMonitoringState::IgnoredTg;
-            tracing::info!(talkgroup = tg_id, sys_num, "not recording: priority disabled (-1)");
+            tracing::info!(
+                talkgroup = tg_id,
+                sys_num,
+                "not recording: priority disabled (-1)"
+            );
             return false;
         }
 
@@ -928,14 +950,23 @@ impl CallManager {
         if !found_source {
             entry.state = TrState::Monitoring;
             entry.monitoring_state = TrMonitoringState::NoSource;
-            tracing::error!(talkgroup = tg_id, sys_num, "not recording: no source covering freq");
+            tracing::error!(
+                talkgroup = tg_id,
+                sys_num,
+                "not recording: no source covering freq"
+            );
         }
         false
     }
 
     // ── Multisite duplicate detection ──
 
-    fn check_multisite(&self, talkgroup: i64, sys_num: i32, msg: &TrTrunkMessage) -> MultiSiteResult {
+    fn check_multisite(
+        &self,
+        talkgroup: i64,
+        sys_num: i32,
+        msg: &TrTrunkMessage,
+    ) -> MultiSiteResult {
         let mut result = MultiSiteResult {
             is_duplicate: false,
             is_superseding: false,
@@ -984,7 +1015,10 @@ impl CallManager {
             }
             // Secondary mode: match multiSiteSystemName.
             else {
-                let msg_multi_site_name = self.config.systems.get(&sys_num)
+                let msg_multi_site_name = self
+                    .config
+                    .systems
+                    .get(&sys_num)
                     .map(|p| p.multi_site_name.as_str())
                     .unwrap_or("");
                 if !msg_multi_site_name.is_empty() && entry.multi_site_name == msg_multi_site_name {
@@ -1046,8 +1080,7 @@ impl CallManager {
         });
 
         if ended_call {
-            let infos: Vec<ffi::TrCallInfo> =
-                self.calls.iter().map(|e| e.to_call_info()).collect();
+            let infos: Vec<ffi::TrCallInfo> = self.calls.iter().map(|e| e.to_call_info()).collect();
             lock_handler(&self.handler).calls_active(&infos);
         }
 

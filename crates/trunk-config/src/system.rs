@@ -335,8 +335,7 @@ pub(crate) fn load_talkgroups_csv(path: &Path) -> Result<HashMap<i64, TalkgroupC
         }
     }
 
-    let col_decimal =
-        col_decimal.context("talkgroup CSV missing required 'Decimal' column")?;
+    let col_decimal = col_decimal.context("talkgroup CSV missing required 'Decimal' column")?;
 
     let mut talkgroups = HashMap::new();
 
@@ -497,10 +496,8 @@ pub(crate) fn load_channels_csv(path: &Path) -> Result<HashMap<i64, ChannelConfi
         }
     }
 
-    let col_tg_number =
-        col_tg_number.context("channel CSV missing required 'TG Number' column")?;
-    let col_frequency =
-        col_frequency.context("channel CSV missing required 'Frequency' column")?;
+    let col_tg_number = col_tg_number.context("channel CSV missing required 'TG Number' column")?;
+    let col_frequency = col_frequency.context("channel CSV missing required 'Frequency' column")?;
 
     let mut channels = HashMap::new();
 

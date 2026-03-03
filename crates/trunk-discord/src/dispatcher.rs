@@ -4,11 +4,11 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::{DateTime, Utc};
+use proto::types::{SysNum, Talkgroup};
 use serenity::model::id::ChannelId;
 use tokio::sync::{Mutex, RwLock, mpsc};
 use tracing::Instrument;
 use trunk_oxide_proto as proto;
-use proto::types::{SysNum, Talkgroup};
 
 use trunk_database::Database;
 
@@ -292,10 +292,13 @@ impl Dispatcher {
 
         tokio::spawn(handler.run().instrument(span));
 
-        self.calls.write().await.insert(key, ActiveCall {
-            tx,
-            started_at: Instant::now(),
-        });
+        self.calls.write().await.insert(
+            key,
+            ActiveCall {
+                tx,
+                started_at: Instant::now(),
+            },
+        );
     }
 
     async fn resolve_or_create_thread(
@@ -366,7 +369,8 @@ impl Dispatcher {
 
         let active = self.calls.write().await.remove(&key);
         if let Some(active) = active {
-            let _ = active.tx
+            let _ = active
+                .tx
                 .send(CallMessage::End(event.call_data.map(Box::new)))
                 .await;
         }
@@ -462,7 +466,10 @@ fn format_signal_event(event: &proto::SignalEvent) -> String {
         format!("{} ({})", event.unit_alias, event.unit_id)
     };
 
-    format!("**Signal**: {unit} - {signal_type} ({})", event.signaling_type)
+    format!(
+        "**Signal**: {unit} - {signal_type} ({})",
+        event.signaling_type
+    )
 }
 
 fn format_unit_event(event: &proto::UnitEvent) -> String {

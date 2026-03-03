@@ -4,15 +4,15 @@
 //! libtrunk-recorder.so, reads the TOML config file, and routes all events
 //! through the gRPC plugin to downstream consumers.
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use trunk_oxide::TrunkRecorderBuilder;
-use trunk_oxide_grpc::GrpcPlugin;
 use opentelemetry::trace::TracerProvider;
 use tracing_subscriber::prelude::*;
+use trunk_oxide::TrunkRecorderBuilder;
+use trunk_oxide_grpc::GrpcPlugin;
 
 #[derive(Parser)]
 struct Args {
@@ -54,8 +54,7 @@ fn main() -> Result<()> {
             .with_http()
             .build()?;
 
-        let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(exporter)
-            .build();
+        let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(exporter).build();
 
         let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
             .with_reader(reader)
@@ -82,8 +81,7 @@ fn main() -> Result<()> {
     let config_path = &args.config;
     tracing::info!(config = %config_path, "starting trunk-oxide driver");
 
-    let config = trunk_config::Config::load(config_path)
-        .context("failed to load TOML config")?;
+    let config = trunk_config::Config::load(config_path).context("failed to load TOML config")?;
 
     let mut plugin = GrpcPlugin::new();
 
@@ -140,9 +138,7 @@ fn main() -> Result<()> {
     let shutdown = Arc::new(AtomicBool::new(false));
     let monitor_shutdown = Arc::clone(&shutdown);
 
-    let monitor_handle = std::thread::spawn(move || {
-        recorder.run_monitor(&monitor_shutdown)
-    });
+    let monitor_handle = std::thread::spawn(move || recorder.run_monitor(&monitor_shutdown));
 
     // Block until SIGINT
     let rt = tokio::runtime::Builder::new_current_thread()

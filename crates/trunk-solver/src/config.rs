@@ -117,8 +117,7 @@ impl TrunkConfig {
     /// Replace the `sources` array in the config with solver output,
     /// preserving everything else.
     pub fn patch_sources(&mut self, sources: &[impl serde::Serialize]) {
-        self.raw["sources"] =
-            serde_json::to_value(sources).expect("Source is always serializable");
+        self.raw["sources"] = serde_json::to_value(sources).expect("Source is always serializable");
     }
 
     /// Serialize the full config back to pretty-printed JSON.

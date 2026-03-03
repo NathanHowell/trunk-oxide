@@ -35,10 +35,7 @@ impl Device {
     #[must_use]
     pub fn airspy() -> Self {
         Self {
-            sample_rates: vec![
-                SampleRate::Exact(2_500_000),
-                SampleRate::Exact(10_000_000),
-            ],
+            sample_rates: vec![SampleRate::Exact(2_500_000), SampleRate::Exact(10_000_000)],
             ppm: 1,
             driver: "osmosdr".into(),
             device_template: "airspy={}".into(),

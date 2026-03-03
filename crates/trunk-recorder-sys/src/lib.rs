@@ -246,8 +246,6 @@ pub mod ffi {
         pub squelch_db: f64,
     }
 
-
-
     #[derive(Debug, Clone)]
     struct TrStopRecordingResult {
         pub final_length: f64,
@@ -297,24 +295,43 @@ pub mod ffi {
         // ── Config builder functions ──
         fn tr_config_set_temp_dir(ctx: Pin<&mut TrContext>, dir: &str);
         fn tr_config_set_soft_vocoder(ctx: Pin<&mut TrContext>, enabled: bool);
-        fn tr_config_set_debug_recorder(ctx: Pin<&mut TrContext>, enabled: bool, address: &str, port: i32);
+        fn tr_config_set_debug_recorder(
+            ctx: Pin<&mut TrContext>,
+            enabled: bool,
+            address: &str,
+            port: i32,
+        );
 
         // ── Source builder functions ──
-        fn tr_add_source(ctx: Pin<&mut TrContext>, driver: &str, device: &str,
-                         center: f64, rate: f64, error: f64) -> Result<i32>;
+        fn tr_add_source(
+            ctx: Pin<&mut TrContext>,
+            driver: &str,
+            device: &str,
+            center: f64,
+            rate: f64,
+            error: f64,
+        ) -> Result<i32>;
         fn tr_source_set_gain(ctx: Pin<&mut TrContext>, idx: i32, gain: f64);
         fn tr_source_set_gain_by_name(ctx: Pin<&mut TrContext>, idx: i32, name: &str, gain: f64);
         fn tr_source_set_antenna(ctx: Pin<&mut TrContext>, idx: i32, antenna: &str);
         fn tr_source_set_freq_corr(ctx: Pin<&mut TrContext>, idx: i32, ppm: f64);
         fn tr_source_set_gain_mode(ctx: Pin<&mut TrContext>, idx: i32, agc: bool);
         fn tr_source_set_silence_frames(ctx: Pin<&mut TrContext>, idx: i32, frames: i32);
-        fn tr_source_set_signal_detector_threshold(ctx: Pin<&mut TrContext>, idx: i32, threshold: f32);
+        fn tr_source_set_signal_detector_threshold(
+            ctx: Pin<&mut TrContext>,
+            idx: i32,
+            threshold: f32,
+        );
         fn tr_source_create_digital_recorders(ctx: Pin<&mut TrContext>, idx: i32, count: i32);
         fn tr_source_create_analog_recorders(ctx: Pin<&mut TrContext>, idx: i32, count: i32);
         fn tr_source_create_sigmf_recorders(ctx: Pin<&mut TrContext>, idx: i32, count: i32);
 
         // ── System builder functions ──
-        fn tr_add_system(ctx: Pin<&mut TrContext>, short_name: &str, system_type: &str) -> Result<i32>;
+        fn tr_add_system(
+            ctx: Pin<&mut TrContext>,
+            short_name: &str,
+            system_type: &str,
+        ) -> Result<i32>;
         fn tr_system_add_control_channel(ctx: Pin<&mut TrContext>, sys_idx: i32, freq: f64);
         fn tr_system_add_channel(ctx: Pin<&mut TrContext>, sys_idx: i32, freq: f64);
         fn tr_system_set_qpsk_mod(ctx: Pin<&mut TrContext>, sys_idx: i32, qpsk: bool);
@@ -334,19 +351,35 @@ pub mod ffi {
         fn tr_system_set_bandplan_high(ctx: Pin<&mut TrContext>, sys_idx: i32, high: f64);
         fn tr_system_set_bandplan_spacing(ctx: Pin<&mut TrContext>, sys_idx: i32, spacing: f64);
         fn tr_system_set_bandplan_offset(ctx: Pin<&mut TrContext>, sys_idx: i32, offset: i32);
-        fn tr_system_set_xor_mask(ctx: Pin<&mut TrContext>, sys_idx: i32,
-                                  sys_id: u64, wacn: u64, nac: u64);
+        fn tr_system_set_xor_mask(
+            ctx: Pin<&mut TrContext>,
+            sys_idx: i32,
+            sys_id: u64,
+            wacn: u64,
+            nac: u64,
+        );
 
         // ── Talkgroup/Channel builder functions ──
-        fn tr_system_add_talkgroup(ctx: Pin<&mut TrContext>, sys_idx: i32,
-                                   id: i64, mode: &str, priority: i32, preferred_nac: u64);
-        fn tr_system_add_conventional_channel(ctx: Pin<&mut TrContext>, sys_idx: i32,
-                                              tg_number: i64, freq: f64, tone: f64,
-                                              squelch_db: f64, signal_detection: bool);
+        fn tr_system_add_talkgroup(
+            ctx: Pin<&mut TrContext>,
+            sys_idx: i32,
+            id: i64,
+            mode: &str,
+            priority: i32,
+            preferred_nac: u64,
+        );
+        fn tr_system_add_conventional_channel(
+            ctx: Pin<&mut TrContext>,
+            sys_idx: i32,
+            tg_number: i64,
+            freq: f64,
+            tone: f64,
+            squelch_db: f64,
+            signal_detection: bool,
+        );
 
         // ── Unit tag builder functions ──
-        fn tr_system_add_unit_tag(ctx: Pin<&mut TrContext>, sys_idx: i32,
-                                  pattern: &str, tag: &str);
+        fn tr_system_add_unit_tag(ctx: Pin<&mut TrContext>, sys_idx: i32, pattern: &str, tag: &str);
         fn tr_system_set_unit_tags_mode(ctx: Pin<&mut TrContext>, sys_idx: i32, mode: &str);
 
         // ── Phase A: Loop Control ──
@@ -386,14 +419,22 @@ pub mod ffi {
         fn recorder_get_type(rec: &TrRecorder) -> i32;
 
         // ── Phase C: Call Management — lifecycle operations ──
-        fn tr_context_create_call(ctx: Pin<&mut TrContext>, msg: &TrTrunkMessage) -> UniquePtr<TrCall>;
+        fn tr_context_create_call(
+            ctx: Pin<&mut TrContext>,
+            msg: &TrTrunkMessage,
+        ) -> UniquePtr<TrCall>;
         fn call_get_metadata(call: &TrCall) -> TrCallMetadata;
 
         // ── Phase C: Call Management — recording policy support ──
         fn tr_context_source_count(ctx: &TrContext) -> i32;
         fn tr_source_covers_freq(ctx: &TrContext, source_idx: i32, freq: f64) -> bool;
         fn tr_source_available_recorders(ctx: &TrContext, source_idx: i32, is_analog: bool) -> i32;
-        fn tr_source_start_recording(ctx: Pin<&mut TrContext>, source_idx: i32, call: Pin<&mut TrCall>, is_analog: bool) -> bool;
+        fn tr_source_start_recording(
+            ctx: Pin<&mut TrContext>,
+            source_idx: i32,
+            call: Pin<&mut TrCall>,
+            is_analog: bool,
+        ) -> bool;
 
         // ── Phase C: Call Management — call-level recorder accessors ──
         fn call_recorder_since_last_write_secs(call: &TrCall) -> f64;
@@ -453,12 +494,7 @@ pub mod ffi {
             notifier: &EventNotifier,
             messages: Vec<TrTrunkMessage>,
         );
-        fn event_notifier_notify_squelch(
-            notifier: &EventNotifier,
-            rec: i32,
-            muted: bool,
-            pwr: f64,
-        );
+        fn event_notifier_notify_squelch(notifier: &EventNotifier, rec: i32, muted: bool, pwr: f64);
         fn event_notifier_notify_signal_detected(notifier: &EventNotifier);
     }
 }
@@ -481,10 +517,7 @@ pub enum GrEvent {
 
 /// Opaque notifier that wraps a cloned `tokio::sync::mpsc::Sender<GrEvent>`.
 /// Each GR block owns one (cloned from a prototype via `event_notifier_clone`).
-pub struct EventNotifier(
-    tokio::sync::mpsc::Sender<GrEvent>,
-    Arc<AtomicUsize>,
-);
+pub struct EventNotifier(tokio::sync::mpsc::Sender<GrEvent>, Arc<AtomicUsize>);
 
 impl EventNotifier {
     pub fn new(sender: tokio::sync::mpsc::Sender<GrEvent>, pending: Arc<AtomicUsize>) -> Self {
@@ -500,10 +533,13 @@ fn event_notifier_notify_trunk_messages(
     notifier: &EventNotifier,
     messages: Vec<ffi::TrTrunkMessage>,
 ) {
-    if !messages.is_empty() {
-        if notifier.0.try_send(GrEvent::TrunkMessages(messages)).is_ok() {
-            notifier.1.fetch_add(1, Ordering::Relaxed);
-        }
+    if !messages.is_empty()
+        && notifier
+            .0
+            .try_send(GrEvent::TrunkMessages(messages))
+            .is_ok()
+    {
+        notifier.1.fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -522,11 +558,7 @@ fn event_notifier_notify_squelch(notifier: &EventNotifier, rec: i32, muted: bool
 }
 
 fn event_notifier_notify_signal_detected(notifier: &EventNotifier) {
-    if notifier
-        .0
-        .try_send(GrEvent::SignalDetected)
-        .is_ok()
-    {
+    if notifier.0.try_send(GrEvent::SignalDetected).is_ok() {
         notifier.1.fetch_add(1, Ordering::Relaxed);
     }
 }
@@ -594,6 +626,7 @@ impl EventHandlerBox {
     }
 }
 
+#[allow(clippy::boxed_local)]
 fn drop_event_handler_box(_handler: Box<EventHandlerBox>) {
     // Box is dropped automatically
 }

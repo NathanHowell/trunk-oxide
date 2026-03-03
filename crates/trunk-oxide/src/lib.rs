@@ -15,6 +15,11 @@ use std::time::Duration;
 use trunk_recorder_sys::{EventNotifier, GrEvent};
 
 pub use call_manager::{CallManagerConfig, SystemPolicy, TalkgroupPolicy};
+
+/// Create an interval whose first tick fires after `period` (not immediately).
+fn delayed_interval(period: Duration) -> tokio::time::Interval {
+    tokio::time::interval_at(tokio::time::Instant::now() + period, period)
+}
 use call_manager::CallManager;
 use std::collections::HashMap;
 
@@ -397,17 +402,10 @@ impl TrunkRecorder {
             call_mgr.add_call(call);
         }
 
-        let mut tick = tokio::time::interval(Duration::from_secs(1));
-        let mut decode = tokio::time::interval(Duration::from_secs(3));
-        let mut status = tokio::time::interval(Duration::from_secs(200));
-        let mut autotune = tokio::time::interval(Duration::from_secs(200));
-
-        // First ticks fire immediately — consume them so the first real tick
-        // happens after the interval elapses.
-        tick.tick().await;
-        decode.tick().await;
-        status.tick().await;
-        autotune.tick().await;
+        let mut tick = delayed_interval(Duration::from_secs(1));
+        let mut decode = delayed_interval(Duration::from_secs(3));
+        let mut status = delayed_interval(Duration::from_secs(200));
+        let mut autotune = delayed_interval(Duration::from_secs(200));
 
         loop {
             if shutdown.load(Ordering::Relaxed) {

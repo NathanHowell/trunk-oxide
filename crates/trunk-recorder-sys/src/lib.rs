@@ -356,7 +356,7 @@ pub mod ffi {
         // ── Phase B: Message Draining ──
         fn tr_context_check_conventional_detection(ctx: Pin<&mut TrContext>);
         fn tr_context_check_sources(ctx: Pin<&mut TrContext>) -> Result<()>;
-        fn tr_context_print_status(ctx: Pin<&mut TrContext>, calls: &[*const TrCall]);
+        fn tr_context_print_status(ctx: Pin<&mut TrContext>);
 
         // ── Phase B: Message Routing (called from Rust handle_message) ──
         fn tr_system_add_control_channel_runtime(ctx: Pin<&mut TrContext>, sys_num: i32, freq: f64);
@@ -370,6 +370,8 @@ pub mod ffi {
         // ── Conventional call management — recorder status (null-guarded) ──
         fn call_has_recorder(call: &TrCall) -> bool;
         fn call_get_recorder_is_active(call: &TrCall) -> bool;
+        fn call_get_recorder_is_enabled(call: &TrCall) -> bool;
+        fn call_get_recorder_state(call: &TrCall) -> i32;
 
         // ── Conventional call management — lifecycle ──
         fn call_restart(call: Pin<&mut TrCall>);

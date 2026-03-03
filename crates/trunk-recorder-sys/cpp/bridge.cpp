@@ -706,34 +706,12 @@ void tr_context_check_sources(TrContext &ctx) {
     }
 }
 
-void tr_context_print_status(TrContext &ctx, rust::Slice<const TrCall *const> calls) {
+void tr_context_print_status(TrContext &ctx) {
     auto &sources = ctx.impl->trunk_ctx.sources;
     auto &systems = ctx.impl->trunk_ctx.systems;
 
-    BOOST_LOG_TRIVIAL(info) << "Active Calls: " << calls.size();
-    for (auto *tr_call : calls) {
-        auto &call = tr_call->ptr;
-        auto recorder = call->get_recorder();
-        std::string loghdr = log_header(call->get_short_name(), call->get_call_num(), call->get_talkgroup(), call->get_freq());
-        if (call->get_state() == MONITORING) {
-            BOOST_LOG_TRIVIAL(info) << loghdr << "Elapsed: " << std::setw(4) << call->elapsed().count() << " State: " << format_state(call->get_state(), call->get_monitoring_state());
-        } else {
-            if (call->is_conventional()) {
-                bool is_enabled = call->get_recorder()->is_enabled();
-                BOOST_LOG_TRIVIAL(info) << loghdr << "Elapsed: " << std::setw(4) << call->elapsed().count() << " State: " << format_state(call->get_state()) << " Enabled: " << is_enabled;
-            } else {
-                BOOST_LOG_TRIVIAL(info) << loghdr << "Elapsed: " << std::setw(4) << call->elapsed().count() << " State: " << format_state(call->get_state());
-            }
-        }
-        if (recorder) {
-            BOOST_LOG_TRIVIAL(info) << "\t[ " << std::setw(2) << recorder->get_num() << " ] State: " << format_state(recorder->get_state());
-        }
-    }
-
-    BOOST_LOG_TRIVIAL(info) << "Control Channel Decode Rates: ";
     for (auto &sys : systems) {
         if (!is_conventional(sys->get_system_type())) {
-            BOOST_LOG_TRIVIAL(info) << "[" << sys->get_short_name() << "]\t" << format_freq(sys->get_current_control_channel()) << "\t" << sys->get_decode_rate() << " msg/sec";
             if ((sys->get_source()->get_autotune_source()) && (sys->get_system_type() == SYS_P25)) {
                 autotune_control_channel(sys);
             }
@@ -755,6 +733,16 @@ bool call_has_recorder(const TrCall &call) {
 bool call_get_recorder_is_active(const TrCall &call) {
     auto rec = call.ptr->get_recorder();
     return rec ? rec->is_active() : false;
+}
+
+bool call_get_recorder_is_enabled(const TrCall &call) {
+    auto rec = call.ptr->get_recorder();
+    return rec ? rec->is_enabled() : false;
+}
+
+int32_t call_get_recorder_state(const TrCall &call) {
+    auto rec = call.ptr->get_recorder();
+    return rec ? static_cast<int32_t>(rec->get_state()) : static_cast<int32_t>(REC_INACTIVE);
 }
 
 // ── Conventional call management — signal/noise (removed — Rust owns) ──

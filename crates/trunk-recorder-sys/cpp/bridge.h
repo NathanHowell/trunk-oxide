@@ -157,7 +157,7 @@ void tr_stop_gnuradio(TrContext &ctx);
 
 void tr_context_check_conventional_detection(TrContext &ctx);
 void tr_context_check_sources(TrContext &ctx);
-void tr_context_print_status(TrContext &ctx, rust::Slice<const TrCall *const> calls);
+void tr_context_print_status(TrContext &ctx);
 
 // ── Phase B: Message Routing (called from Rust handle_message) ──
 enum class TrUnitEventType : uint8_t;
@@ -172,6 +172,8 @@ double tr_system_get_current_control_channel(TrContext &ctx, int32_t sys_num);
 // ── Conventional call management — recorder status (null-guarded) ──
 bool call_has_recorder(const TrCall &call);
 bool call_get_recorder_is_active(const TrCall &call);
+bool call_get_recorder_is_enabled(const TrCall &call);
+int32_t call_get_recorder_state(const TrCall &call);
 
 // ── Conventional call management — lifecycle ──
 void call_restart(TrCall &call);

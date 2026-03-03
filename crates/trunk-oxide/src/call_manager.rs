@@ -82,6 +82,40 @@ impl PatchTable {
     }
 }
 
+fn format_freq(f: f64) -> String {
+    format!("{:.4} MHz", f / 1_000_000.0)
+}
+
+fn format_call_state(state: TrState, monitoring: TrMonitoringState) -> &'static str {
+    match state {
+        TrState::Monitoring => match monitoring {
+            TrMonitoringState::UnknownTg => "Monitoring: UNKNOWN TG",
+            TrMonitoringState::IgnoredTg => "Monitoring: IGNORED TG",
+            TrMonitoringState::NoSource => "Monitoring: NO SOURCE",
+            TrMonitoringState::NoRecorder => "Monitoring: NO RECORDER",
+            TrMonitoringState::Encrypted => "Monitoring: ENCRYPTED",
+            TrMonitoringState::Duplicate => "Monitoring: DUPLICATE",
+            TrMonitoringState::Superseded => "Monitoring: SUPERSEDED",
+            _ => "Monitoring",
+        },
+        TrState::Recording => "Recording",
+        _ => "Unknown",
+    }
+}
+
+fn format_recorder_state(state: i32) -> &'static str {
+    match state {
+        1 => "Recording",
+        2 => "Inactive",
+        3 => "Active",
+        4 => "Idle",
+        6 => "Stopped",
+        7 => "Available",
+        8 => "Ignored",
+        _ => "Unknown",
+    }
+}
+
 /// Recording policy for a single talkgroup.
 #[derive(Clone)]
 pub struct TalkgroupPolicy {
@@ -1038,11 +1072,6 @@ impl CallManager {
         self.calls.push(CallEntry::from_existing(call, policy));
     }
 
-    /// Collect raw pointers to all tracked calls (for passing to C++ print_status / calls_active).
-    pub fn call_ptrs(&self) -> Vec<*const TrCall> {
-        self.calls.iter().map(|e| &*e.handle as *const TrCall).collect()
-    }
-
     /// Handle a squelch event pushed from a GR block via the event channel.
     /// Finds the conventional call entry whose recorder matches `recorder_num`
     /// and updates its idle tracking state.
@@ -1127,6 +1156,75 @@ impl CallManager {
                 .map(|sp| sp.short_name.as_str())
                 .unwrap_or("unknown");
             pt.log_patches(short_name);
+        }
+    }
+
+    /// Log status for all active calls and control channel decode rates.
+    pub fn print_status(&self, mut ctx: Pin<&mut TrContext>) {
+        let now_secs = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64);
+
+        tracing::info!(count = self.calls.len(), "Active Calls");
+        for entry in &self.calls {
+            let elapsed = now_secs - entry.start_time;
+            let state = format_call_state(entry.state, entry.monitoring_state);
+
+            if entry.state == TrState::Monitoring {
+                tracing::info!(
+                    system = %entry.short_name,
+                    call_num = entry.call_num,
+                    talkgroup = entry.talkgroup,
+                    freq = format_freq(entry.freq),
+                    elapsed,
+                    state,
+                    "call status"
+                );
+            } else if entry.is_conventional {
+                let enabled = ffi::call_get_recorder_is_enabled(&*entry.handle);
+                tracing::info!(
+                    system = %entry.short_name,
+                    call_num = entry.call_num,
+                    talkgroup = entry.talkgroup,
+                    freq = format_freq(entry.freq),
+                    elapsed,
+                    state,
+                    enabled,
+                    "call status"
+                );
+            } else {
+                tracing::info!(
+                    system = %entry.short_name,
+                    call_num = entry.call_num,
+                    talkgroup = entry.talkgroup,
+                    freq = format_freq(entry.freq),
+                    elapsed,
+                    state,
+                    "call status"
+                );
+            }
+
+            if ffi::call_has_recorder(&*entry.handle) {
+                let rec_num = ffi::call_get_recorder_num(&*entry.handle);
+                let rec_state = format_recorder_state(ffi::call_get_recorder_state(&*entry.handle));
+                tracing::info!(rec_num, rec_state, "  recorder");
+            }
+        }
+
+        tracing::info!("Control Channel Decode Rates");
+        for (&sys_num, policy) in &self.config.systems {
+            if policy.system_type != SystemType::Conventional
+                && policy.system_type != SystemType::ConventionalP25
+            {
+                let cc_freq = ffi::tr_system_get_current_control_channel(ctx.as_mut(), sys_num);
+                let decode_rate = self.decode_rates.get(&sys_num).copied().unwrap_or(0);
+                tracing::info!(
+                    system = %policy.short_name,
+                    freq = format_freq(cc_freq),
+                    decode_rate,
+                    "msg/sec"
+                );
+            }
         }
     }
 

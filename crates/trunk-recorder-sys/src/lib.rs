@@ -256,6 +256,16 @@ pub mod ffi {
         pub is_dmr: bool,
     }
 
+    #[derive(Debug, Clone)]
+    struct TrRecorderStatus {
+        pub source_num: i32,
+        pub source_center: f64,
+        pub source_device: String,
+        pub rec_num: i32,
+        pub rec_type: String,
+        pub rec_state: i32,
+    }
+
     // ── Opaque C++ types ──
 
     unsafe extern "C++" {
@@ -389,7 +399,7 @@ pub mod ffi {
         // ── Phase B: Message Draining ──
         fn tr_context_check_conventional_detection(ctx: Pin<&mut TrContext>);
         fn tr_context_check_sources(ctx: Pin<&mut TrContext>) -> Result<()>;
-        fn tr_context_print_status(ctx: Pin<&mut TrContext>);
+        fn tr_context_get_recorder_status(ctx: &TrContext) -> Vec<TrRecorderStatus>;
         fn tr_context_autotune_control_channels(ctx: Pin<&mut TrContext>);
 
         // ── Phase B: Message Routing (called from Rust handle_message) ──

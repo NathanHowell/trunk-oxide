@@ -27,6 +27,7 @@ struct TrCallData;
 struct TrCallInfo;
 struct TrCallMetadata;
 struct TrSystemInfo;
+struct TrRecorderStatus;
 struct EventHandlerBox;
 struct EventNotifier;
 
@@ -157,7 +158,7 @@ void tr_stop_gnuradio(TrContext &ctx);
 
 void tr_context_check_conventional_detection(TrContext &ctx);
 void tr_context_check_sources(TrContext &ctx);
-void tr_context_print_status(TrContext &ctx);
+rust::Vec<TrRecorderStatus> tr_context_get_recorder_status(const TrContext &ctx);
 void tr_context_autotune_control_channels(TrContext &ctx);
 
 // ── Phase B: Message Routing (called from Rust handle_message) ──

@@ -1304,6 +1304,29 @@ impl CallManager {
         }
     }
 
+    /// Log recorder status for all sources.
+    pub fn print_recorder_status(&self, ctx: &TrContext) {
+        let recorders = ffi::tr_context_get_recorder_status(ctx);
+        let mut current_source = -1i32;
+        for r in &recorders {
+            if r.source_num != current_source {
+                current_source = r.source_num;
+                tracing::info!(
+                    source = r.source_num,
+                    freq = %format_freq(r.source_center),
+                    device = %r.source_device,
+                    "source"
+                );
+            }
+            tracing::info!(
+                rec_num = r.rec_num,
+                rec_type = %r.rec_type,
+                rec_state = format_recorder_state(r.rec_state),
+                "  recorder"
+            );
+        }
+    }
+
     // ── Shutdown ──
 
     /// Check decode rates for all trunked systems and retune if needed.

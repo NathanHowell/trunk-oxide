@@ -716,11 +716,22 @@ void tr_context_autotune_control_channels(TrContext &ctx) {
     }
 }
 
-void tr_context_print_status(TrContext &ctx) {
-    BOOST_LOG_TRIVIAL(info) << "Recorders: ";
+rust::Vec<TrRecorderStatus> tr_context_get_recorder_status(const TrContext &ctx) {
+    rust::Vec<TrRecorderStatus> result;
     for (auto &source : ctx.impl->trunk_ctx.sources) {
-        source->print_recorders();
+        auto recorders = source->get_recorders();
+        for (auto &rx : recorders) {
+            TrRecorderStatus s;
+            s.source_num = source->get_num();
+            s.source_center = source->get_center();
+            s.source_device = rust::String(source->get_device());
+            s.rec_num = rx->get_num();
+            s.rec_type = rust::String(rx->get_type_string());
+            s.rec_state = static_cast<int32_t>(rx->get_state());
+            result.push_back(std::move(s));
+        }
     }
+    return result;
 }
 
 // ── Conventional call management — recorder status (null-guarded) ──

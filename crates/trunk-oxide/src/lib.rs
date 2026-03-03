@@ -452,7 +452,7 @@ impl TrunkRecorder {
                 _ = status.tick() => {
                     call_mgr.print_status(self.ctx.pin_mut());
                     call_mgr.print_active_patches();
-                    ffi::tr_context_print_status(self.ctx.pin_mut());
+                    call_mgr.print_recorder_status(&*self.ctx);
                 },
                 _ = autotune.tick() => {
                     ffi::tr_context_autotune_control_channels(self.ctx.pin_mut());

@@ -730,11 +730,6 @@ void tr_context_print_status(TrContext &ctx, rust::Slice<const TrCall *const> ca
         }
     }
 
-    BOOST_LOG_TRIVIAL(info) << "Active Patches: ";
-    for (auto &sys : systems) {
-        sys->print_active_talkgroup_patches();
-    }
-
     BOOST_LOG_TRIVIAL(info) << "Control Channel Decode Rates: ";
     for (auto &sys : systems) {
         if (!is_conventional(sys->get_system_type())) {

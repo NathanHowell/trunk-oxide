@@ -57,6 +57,19 @@ impl PatchTable {
         });
     }
 
+    /// Log all active patches for a given system short name.
+    fn log_patches(&self, short_name: &str) {
+        tracing::info!(
+            system = short_name,
+            count = self.patches.len(),
+            "active talkgroup patches"
+        );
+        for (sg, members) in &self.patches {
+            let tgids: Vec<u64> = members.keys().copied().collect();
+            tracing::info!(supergroup = sg, ?tgids, "active patch");
+        }
+    }
+
     /// Get all talkgroups in the same patch as the given talkgroup.
     fn get_patch(&self, talkgroup: i64) -> Vec<i64> {
         let tg = talkgroup as u64;
@@ -1100,6 +1113,20 @@ impl CallManager {
     pub fn clear_stale_patches(&mut self) {
         for pt in self.patch_tables.values_mut() {
             pt.clear_stale();
+        }
+    }
+
+    /// Log all active patches for all systems.
+    pub fn print_active_patches(&self) {
+        tracing::info!("Active Patches:");
+        for (&sys_num, pt) in &self.patch_tables {
+            let short_name = self
+                .config
+                .systems
+                .get(&sys_num)
+                .map(|sp| sp.short_name.as_str())
+                .unwrap_or("unknown");
+            pt.log_patches(short_name);
         }
     }
 

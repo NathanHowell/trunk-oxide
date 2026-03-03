@@ -462,6 +462,7 @@ impl TrunkRecorder {
                 _ = status.tick() => {
                     let ptrs = call_mgr.call_ptrs();
                     ffi::tr_context_print_status(self.ctx.pin_mut(), &ptrs);
+                    call_mgr.print_active_patches();
                 },
             }
 

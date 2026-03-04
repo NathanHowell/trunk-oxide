@@ -28,6 +28,8 @@ pub struct AudioConfig {
     pub tone_detection: bool,
     #[serde(default = "default_tone_detection_duration_s")]
     pub tone_detection_duration_s: f32,
+    #[serde(default = "default_audio_attachment")]
+    pub audio_attachment: bool,
 }
 
 impl Default for AudioConfig {
@@ -36,6 +38,7 @@ impl Default for AudioConfig {
             buffer_duration_ms: default_buffer_duration_ms(),
             tone_detection: default_tone_detection(),
             tone_detection_duration_s: default_tone_detection_duration_s(),
+            audio_attachment: default_audio_attachment(),
         }
     }
 }
@@ -48,6 +51,9 @@ const fn default_tone_detection() -> bool {
 }
 const fn default_tone_detection_duration_s() -> f32 {
     5.0
+}
+const fn default_audio_attachment() -> bool {
+    true
 }
 
 #[derive(Debug, Deserialize)]

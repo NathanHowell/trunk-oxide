@@ -5,6 +5,7 @@ mod discord;
 mod dispatcher;
 mod grpc_oxide;
 mod grpc_whisperer;
+mod ogg_encoder;
 mod resampler;
 mod tone_detect;
 
@@ -198,6 +199,7 @@ async fn main() -> Result<()> {
         channel_lookup,
         config.audio.tone_detection,
         config.audio.tone_detection_duration_s,
+        config.audio.audio_attachment,
         Arc::clone(&db),
         args.db_path,
     ));

@@ -52,10 +52,12 @@ trunk-oxide-grpc = { path = "crates/trunk-oxide-grpc" }
 trunk-whisperer-proto = { path = "crates/trunk-whisperer-proto" }
 trunk-config = { path = "crates/trunk-config" }
 trunk-database = { path = "crates/trunk-database" }
+audiopus = "0.2"
 anyhow = "1"
 chrono = "0.4"
 cxx = "1"
 cxx-build = "1"
+ogg = "0.9"
 opentelemetry = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "metrics", "http-proto", "reqwest-blocking-client"] }

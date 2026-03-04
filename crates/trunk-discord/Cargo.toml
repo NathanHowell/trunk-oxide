@@ -8,6 +8,8 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
+audiopus.workspace = true
+ogg.workspace = true
 trunk-config.workspace = true
 trunk-oxide-proto.workspace = true
 trunk-whisperer-proto.workspace = true

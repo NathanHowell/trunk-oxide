@@ -1,7 +1,7 @@
 use anyhow::Result;
 use serenity::all::{
-    AutoArchiveDuration, ChannelType, CreateChannel, CreateEmbed, CreateMessage, CreateThread,
-    EditMessage, GuildChannel,
+    AutoArchiveDuration, ChannelType, CreateAttachment, CreateChannel, CreateEmbed, CreateMessage,
+    CreateThread, EditMessage, GuildChannel,
 };
 use serenity::http::Http;
 use serenity::model::id::{ChannelId, GuildId, MessageId};
@@ -51,6 +51,25 @@ impl DiscordClient {
     ) -> Result<()> {
         channel_id
             .edit_message(&self.http, message_id, EditMessage::new().embed(embed))
+            .await?;
+        Ok(())
+    }
+
+    pub async fn edit_embed_with_attachment(
+        &self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        embed: CreateEmbed,
+        file_data: Vec<u8>,
+        filename: &str,
+    ) -> Result<()> {
+        let attachment = CreateAttachment::bytes(file_data, filename.to_owned());
+        channel_id
+            .edit_message(
+                &self.http,
+                message_id,
+                EditMessage::new().embed(embed).new_attachment(attachment),
+            )
             .await?;
         Ok(())
     }

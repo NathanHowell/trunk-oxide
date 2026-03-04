@@ -57,6 +57,7 @@ pub struct Dispatcher {
     channel_lookup: ChannelLookup,
     tone_detection: bool,
     tone_detection_duration_s: f32,
+    audio_attachment: bool,
     db: Arc<Mutex<Database>>,
     db_path: PathBuf,
     current_hour: RwLock<String>,
@@ -73,6 +74,7 @@ impl Dispatcher {
         channel_lookup: ChannelLookup,
         tone_detection: bool,
         tone_detection_duration_s: f32,
+        audio_attachment: bool,
         db: Arc<Mutex<Database>>,
         db_path: PathBuf,
     ) -> Self {
@@ -88,6 +90,7 @@ impl Dispatcher {
             channel_lookup,
             tone_detection,
             tone_detection_duration_s,
+            audio_attachment,
             db,
             db_path,
             current_hour: RwLock::new(current_hour),
@@ -275,7 +278,7 @@ impl Dispatcher {
             encrypted = call.encrypted,
         );
 
-        let handler = CallHandler::new(
+        let handler = match CallHandler::new(
             call,
             rx,
             self.whisperer.clone(),
@@ -284,11 +287,18 @@ impl Dispatcher {
                 buffer_duration_ms: self.buffer_duration_ms,
                 tone_detection: self.tone_detection,
                 tone_detection_duration_s: self.tone_detection_duration_s,
+                audio_attachment: self.audio_attachment,
             },
             post_channel,
             Arc::clone(&self.db),
             call_row_id,
-        );
+        ) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::error!(error = %e, "failed to create call handler");
+                return;
+            }
+        };
 
         tokio::spawn(handler.run().instrument(span));
 

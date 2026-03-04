@@ -13,6 +13,7 @@ use trunk_database::Database;
 
 use crate::discord::DiscordClient;
 use crate::grpc_whisperer::WhispererConnection;
+use crate::ogg_encoder::OggOpusEncoder;
 use crate::resampler::Resampler;
 use crate::tone_detect::{DetectedTone, NotchFilter, ToneDetector};
 
@@ -27,6 +28,7 @@ pub struct CallHandlerConfig {
     pub buffer_duration_ms: u64,
     pub tone_detection: bool,
     pub tone_detection_duration_s: f32,
+    pub audio_attachment: bool,
 }
 
 /// Max chars for embed description before we truncate from the front.
@@ -43,6 +45,7 @@ pub struct CallHandler {
     tone_detector: Option<ToneDetector>,
     notch_filter: Option<NotchFilter>,
     post_channel: ChannelId,
+    ogg_encoder: Option<OggOpusEncoder>,
 
     // Single-embed state
     embed_message_id: Option<MessageId>,
@@ -71,7 +74,7 @@ impl CallHandler {
         post_channel: ChannelId,
         db: Arc<Mutex<Database>>,
         call_row_id: Option<CallRowId>,
-    ) -> Self {
+    ) -> Result<Self> {
         let detect_ctcss = config.tone_detection && call_info.is_conventional;
         let tone_detector = if config.tone_detection {
             Some(if detect_ctcss {
@@ -93,7 +96,13 @@ impl CallHandler {
             call_info.talkgroup_alpha_tag.clone()
         };
 
-        Self {
+        let ogg_encoder = if config.audio_attachment {
+            Some(OggOpusEncoder::new()?)
+        } else {
+            None
+        };
+
+        Ok(Self {
             call_info,
             rx,
             whisperer,
@@ -104,6 +113,7 @@ impl CallHandler {
             tone_detector,
             notch_filter: None,
             post_channel,
+            ogg_encoder,
             embed_message_id: None,
             transcription_text: String::new(),
             detected_tones: Vec::new(),
@@ -115,7 +125,7 @@ impl CallHandler {
             tag,
             db,
             call_row_id,
-        }
+        })
     }
 
     pub async fn run(mut self) {
@@ -275,6 +285,10 @@ impl CallHandler {
             filter.process(&mut samples);
         }
 
+        if let Some(enc) = &mut self.ogg_encoder {
+            enc.process(&samples)?;
+        }
+
         self.audio_buffer.extend_from_slice(&samples);
 
         if self
@@ -362,7 +376,13 @@ impl CallHandler {
     async fn handle_end(&mut self, call_data: Option<Box<proto::CallData>>) -> Result<()> {
         // Flush resampler
         if let Some(resampler) = &mut self.resampler {
-            let flushed = resampler.flush()?;
+            let mut flushed = resampler.flush()?;
+            if let Some(filter) = &mut self.notch_filter {
+                filter.process(&mut flushed);
+            }
+            if let Some(enc) = &mut self.ogg_encoder {
+                enc.process(&flushed)?;
+            }
             self.audio_buffer.extend_from_slice(&flushed);
         }
 
@@ -399,6 +419,39 @@ impl CallHandler {
         }
 
         self.update_embed().await?;
+
+        // Encode and attach OGG Opus audio
+        if let Some(encoder) = self.ogg_encoder.take()
+            && let Some(msg_id) = self.embed_message_id
+        {
+            match encoder.finish() {
+                Ok(ogg_data) => {
+                    let start_time = DateTime::<Utc>::from_timestamp(self.call_info.start_time, 0)
+                        .unwrap_or_else(Utc::now);
+                    let filename = format!(
+                        "call_{}_{}.ogg",
+                        self.call_info.talkgroup,
+                        start_time.format("%Y%m%dT%H%M%S%.3fZ"),
+                    );
+                    if let Err(e) = self
+                        .discord
+                        .edit_embed_with_attachment(
+                            self.post_channel,
+                            msg_id,
+                            self.build_embed(),
+                            ogg_data,
+                            &filename,
+                        )
+                        .await
+                    {
+                        tracing::warn!(error = %e, "failed to attach audio to call embed");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to encode OGG audio");
+                }
+            }
+        }
 
         // Persist final call state to DB
         if let Some(row_id) = self.call_row_id {

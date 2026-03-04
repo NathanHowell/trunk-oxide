@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 audiopus.workspace = true
+audiopus_sys.workspace = true
 ogg.workspace = true
 trunk-config.workspace = true
 trunk-oxide-proto.workspace = true

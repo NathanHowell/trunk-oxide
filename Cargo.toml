@@ -53,6 +53,7 @@ trunk-whisperer-proto = { path = "crates/trunk-whisperer-proto" }
 trunk-config = { path = "crates/trunk-config" }
 trunk-database = { path = "crates/trunk-database" }
 audiopus = "0.2"
+audiopus_sys = { version = "0.1", features = ["static"] }
 anyhow = "1"
 chrono = "0.4"
 cxx = "1"

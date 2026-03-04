@@ -591,9 +591,9 @@ void tr_context_wire_event_notifiers(TrContext &ctx) {
         for (auto &rec : source->get_recorders()) {
             auto notifier = bridge->make_notifier();
             int rec_num = rec->get_num();
-            rec->set_squelch_callback(rec_num,
+            rec->set_squelch_callback(
                 [notifier = std::make_shared<rust::Box<EventNotifier>>(std::move(notifier)),
-                 rec_num](int /*recorder_num*/, bool muted, double pwr_db) {
+                 rec_num](bool muted, double pwr_db) {
                     event_notifier_notify_squelch(**notifier, rec_num, muted, pwr_db);
                 });
         }

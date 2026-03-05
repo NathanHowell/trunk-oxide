@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Instant, SystemTime};
 
 use trunk_config::{DefaultMode, SystemType, TalkgroupMode};
 
@@ -23,9 +23,8 @@ pub(crate) fn next_call_num() -> i64 {
     NEXT_CALL_NUM.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-pub(crate) fn unix_timestamp_now() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
+pub(crate) fn system_time_to_unix(t: SystemTime) -> i64 {
+    t.duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_secs() as i64)
 }
 
@@ -304,7 +303,7 @@ pub(crate) struct CallEntry {
     pub(crate) mode: bool,
     pub(crate) duplex: bool,
     pub(crate) emergency: bool,
-    pub(crate) start_time: i64,
+    pub(crate) start_time: SystemTime,
     pub(crate) freq: Freq,
     pub(crate) state: CallState,
     pub(crate) encrypted: bool,
@@ -335,7 +334,7 @@ impl Default for CallEntry {
             mode: false,
             duplex: false,
             emergency: false,
-            start_time: unix_timestamp_now(),
+            start_time: SystemTime::now(),
             freq: Freq::from_hz(0.0),
             state: CallState::Idle,
             encrypted: false,
@@ -1262,7 +1261,7 @@ impl TrunkStateMachine {
     pub(crate) fn on_conventional_restarted(&mut self, call_id: CallId) {
         if let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) {
             entry.call_num = next_call_num();
-            entry.start_time = unix_timestamp_now();
+            entry.start_time = SystemTime::now();
         }
     }
 

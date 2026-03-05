@@ -366,10 +366,7 @@ impl CallManager {
 
                 let segments = self.build_proto_segments_final(call_id, final_freq, rec_num.0);
 
-                let elapsed = std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map_or(0, |d| d.as_secs() as i64)
-                    - entry.start_time;
+                let elapsed = entry.start_time.elapsed().map_or(0, |d| d.as_secs() as i64);
                 tracing::info!(
                     short_name = %entry.short_name,
                     call_num = entry.call_num,
@@ -591,13 +588,9 @@ impl CallManager {
     }
 
     pub fn print_status(&self, mut ctx: Pin<&mut TrContext>) {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs() as i64);
-
         tracing::info!(count = self.state.calls.len(), "Active Calls");
         for entry in &self.state.calls {
-            let elapsed = now_secs - entry.start_time;
+            let elapsed = entry.start_time.elapsed().map_or(0, |d| d.as_secs() as i64);
             let state = entry.state.to_string();
 
             if entry.is_conventional() {
@@ -741,9 +734,7 @@ impl CallManager {
     // ── Helper: build TrCallInfo from pure CallEntry ──
 
     fn build_call_info(&self, entry: &crate::call_state::CallEntry) -> ffi::TrCallInfo {
-        let now_secs = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs() as i64);
+        let elapsed = entry.start_time.elapsed().unwrap_or_default();
         let handle = self.handles.get(&entry.id);
         ffi::TrCallInfo {
             talkgroup: entry.talkgroup,
@@ -767,8 +758,8 @@ impl CallManager {
                 .map_or(false, |t| t.conversation_mode),
             current_source_id: entry.current_source_id,
             current_length: handle.map_or(0.0, |h| ffi::call_get_current_length(&**h)),
-            start_time: entry.start_time,
-            elapsed: (now_secs - entry.start_time) as f64,
+            start_time: crate::call_state::system_time_to_unix(entry.start_time),
+            elapsed: elapsed.as_secs_f64(),
             short_name: entry.short_name.clone(),
             call_state: entry.state.to_proto(),
         }
@@ -785,9 +776,7 @@ impl CallManager {
             "digital"
         };
 
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |d| d.as_secs() as i64);
+        let now = crate::call_state::system_time_to_unix(std::time::SystemTime::now());
 
         TrCallData {
             talkgroup: entry.talkgroup,
@@ -810,7 +799,7 @@ impl CallManager {
             recorder_num: entry.recorder.map_or(-1, |r| r.0),
             signal: entry.signal,
             noise: entry.noise,
-            start_time: entry.start_time,
+            start_time: crate::call_state::system_time_to_unix(entry.start_time),
             stop_time: now,
             error_count: 0,
             spike_count: 0,

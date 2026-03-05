@@ -6,6 +6,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <iostream>
 #include <map>
 
 #include "trunk-recorder/trunk_context.h"
@@ -22,11 +23,12 @@
 #include "trunk-recorder/autotune.h"
 #include "trunk-recorder/recorders/p25_recorder.h"
 
+#include "trunk-recorder/monitor_systems.h"
+
 // Forward declarations for functions provided by libtrunk-recorder.so
 bool setup_systems(Config &config, gr::top_block_sptr &tb,
                    std::vector<std::shared_ptr<Source>> &sources, std::vector<std::shared_ptr<System>> &systems,
                    std::vector<std::shared_ptr<Call>> &calls);
-void set_logging_level(std::string log_level);
 
 namespace trunk_oxide {
 
@@ -618,7 +620,7 @@ void tr_context_check_conventional_detection(TrContext &ctx) {
 void tr_context_check_sources(TrContext &ctx) {
     for (auto &source : ctx.impl->trunk_ctx.sources) {
         if (!source->got_samples()) {
-            BOOST_LOG_TRIVIAL(error) << "Source " << source->get_num() << " has stopped receiving samples - Terminating trunk recorder";
+            std::cerr << "Source " << source->get_num() << " has stopped receiving samples - Terminating trunk recorder" << std::endl;
             throw std::runtime_error("Source stopped receiving samples");
         }
     }

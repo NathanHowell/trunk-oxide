@@ -195,6 +195,13 @@ impl CallManager {
                     if let Some(handle) = self.handles.get_mut(&call_id) {
                         ffi::call_restart(handle.pin_mut());
                         self.state.on_conventional_restarted(call_id);
+                        // Restore recorder after restart (exec_conclude_call clears it)
+                        if ffi::call_has_recorder(&**handle) {
+                            let rec_num = RecorderNum(ffi::call_get_recorder_num(&**handle));
+                            if let Some(entry) = self.state.get_call_mut(call_id) {
+                                entry.recorder = Some(rec_num);
+                            }
+                        }
                     }
                 }
                 Effect::ConventionalStartInitial { call_id } => {

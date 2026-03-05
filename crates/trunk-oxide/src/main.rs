@@ -30,10 +30,10 @@ fn main() -> Result<()> {
     );
 
     let otel_resource = opentelemetry_sdk::Resource::builder_empty()
-        .with_service_name("trunk-oxide")
+        .with_service_name(env!("CARGO_PKG_NAME"))
         .build();
 
-    let otel_provider = if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
+    let tracer_provider = if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
         let exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_http()
             .build()?;
@@ -49,7 +49,9 @@ fn main() -> Result<()> {
         None
     };
 
-    let meter_provider = if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
+    let meter_provider = if std::env::var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT").is_ok()
+        || std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok()
+    {
         let exporter = opentelemetry_otlp::MetricExporter::builder()
             .with_http()
             .build()?;
@@ -67,8 +69,8 @@ fn main() -> Result<()> {
         None
     };
 
-    let otel_layer = otel_provider.as_ref().map(|provider| {
-        let tracer = provider.tracer("trunk-oxide");
+    let otel_layer = tracer_provider.as_ref().map(|provider| {
+        let tracer = provider.tracer(env!("CARGO_PKG_NAME"));
         tracing_opentelemetry::layer().with_tracer(tracer)
     });
 
@@ -125,7 +127,7 @@ fn main() -> Result<()> {
     // Register observable gauge for event channel depth
     if meter_provider.is_some() {
         let depth = recorder.event_channel_depth();
-        let meter = opentelemetry::global::meter("trunk-oxide");
+        let meter = opentelemetry::global::meter(env!("CARGO_PKG_NAME"));
         let _gauge = meter
             .u64_observable_gauge("trunk.event_channel.depth")
             .with_description("Number of GR events queued but not yet consumed")
@@ -166,7 +168,7 @@ fn main() -> Result<()> {
     if let Some(provider) = meter_provider {
         let _ = provider.shutdown();
     }
-    if let Some(provider) = otel_provider {
+    if let Some(provider) = tracer_provider {
         let _ = provider.shutdown();
     }
 

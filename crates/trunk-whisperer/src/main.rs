@@ -27,18 +27,18 @@ async fn main() -> Result<()> {
             .map_err(|e| anyhow::anyhow!(e))?,
     );
 
-    let otel_provider = if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
+    let otel_resource = opentelemetry_sdk::Resource::builder_empty()
+        .with_service_name(env!("CARGO_PKG_NAME"))
+        .build();
+
+    let tracer_provider = if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
         let exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_http()
             .build()?;
 
         let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
             .with_batch_exporter(exporter)
-            .with_resource(
-                opentelemetry_sdk::Resource::builder_empty()
-                    .with_service_name("trunk-whisperer")
-                    .build(),
-            )
+            .with_resource(otel_resource.clone())
             .build();
 
         opentelemetry::global::set_tracer_provider(provider.clone());
@@ -47,8 +47,28 @@ async fn main() -> Result<()> {
         None
     };
 
-    let otel_layer = otel_provider.as_ref().map(|provider| {
-        let tracer = provider.tracer("trunk-whisperer");
+    let meter_provider = if std::env::var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT").is_ok()
+        || std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok()
+    {
+        let exporter = opentelemetry_otlp::MetricExporter::builder()
+            .with_http()
+            .build()?;
+
+        let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(exporter).build();
+
+        let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+            .with_reader(reader)
+            .with_resource(otel_resource)
+            .build();
+
+        opentelemetry::global::set_meter_provider(provider.clone());
+        Some(provider)
+    } else {
+        None
+    };
+
+    let otel_layer = tracer_provider.as_ref().map(|provider| {
+        let tracer = provider.tracer(env!("CARGO_PKG_NAME"));
         tracing_opentelemetry::layer().with_tracer(tracer)
     });
 
@@ -82,7 +102,10 @@ async fn main() -> Result<()> {
         .serve_with_incoming_shutdown(incoming, shutdown_signal())
         .await?;
 
-    if let Some(provider) = otel_provider {
+    if let Some(provider) = meter_provider {
+        let _ = provider.shutdown();
+    }
+    if let Some(provider) = tracer_provider {
         let _ = provider.shutdown();
     }
 

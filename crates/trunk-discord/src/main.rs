@@ -38,30 +38,60 @@ struct Args {
     db_path: PathBuf,
 }
 
-fn init_tracing() -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
-    let otel_provider = if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
+struct OtelProviders {
+    tracer: Option<opentelemetry_sdk::trace::SdkTracerProvider>,
+    meter: Option<opentelemetry_sdk::metrics::SdkMeterProvider>,
+}
+
+fn init_otel() -> OtelProviders {
+    let otel_resource = opentelemetry_sdk::Resource::builder_empty()
+        .with_service_name(env!("CARGO_PKG_NAME"))
+        .build();
+
+    let tracer_provider = if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
         let exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_http()
             .build()
-            .ok()?;
+            .ok();
 
-        let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
-            .with_batch_exporter(exporter)
-            .with_resource(
-                opentelemetry_sdk::Resource::builder_empty()
-                    .with_service_name("trunk-discord")
-                    .build(),
-            )
-            .build();
+        exporter.map(|exporter| {
+            let provider = opentelemetry_sdk::trace::SdkTracerProvider::builder()
+                .with_batch_exporter(exporter)
+                .with_resource(otel_resource.clone())
+                .build();
 
-        opentelemetry::global::set_tracer_provider(provider.clone());
-        Some(provider)
+            opentelemetry::global::set_tracer_provider(provider.clone());
+            provider
+        })
     } else {
         None
     };
 
-    let otel_layer = otel_provider.as_ref().map(|provider| {
-        let tracer = provider.tracer("trunk-discord");
+    let meter_provider = if std::env::var("OTEL_EXPORTER_OTLP_METRICS_ENDPOINT").is_ok()
+        || std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok()
+    {
+        let exporter = opentelemetry_otlp::MetricExporter::builder()
+            .with_http()
+            .build()
+            .ok();
+
+        exporter.map(|exporter| {
+            let reader = opentelemetry_sdk::metrics::PeriodicReader::builder(exporter).build();
+
+            let provider = opentelemetry_sdk::metrics::SdkMeterProvider::builder()
+                .with_reader(reader)
+                .with_resource(otel_resource)
+                .build();
+
+            opentelemetry::global::set_meter_provider(provider.clone());
+            provider
+        })
+    } else {
+        None
+    };
+
+    let otel_layer = tracer_provider.as_ref().map(|provider| {
+        let tracer = provider.tracer(env!("CARGO_PKG_NAME"));
         tracing_opentelemetry::layer().with_tracer(tracer)
     });
 
@@ -71,7 +101,10 @@ fn init_tracing() -> Option<opentelemetry_sdk::trace::SdkTracerProvider> {
         .with(otel_layer)
         .init();
 
-    otel_provider
+    OtelProviders {
+        tracer: tracer_provider,
+        meter: meter_provider,
+    }
 }
 
 async fn init_channel_manager(
@@ -123,7 +156,7 @@ async fn main() -> Result<()> {
             .map_err(|e| anyhow::anyhow!(e))?,
     );
 
-    let otel_provider = init_tracing();
+    let otel = init_otel();
 
     let mut config = Config::load(&args.config)?;
     let discord = config
@@ -220,7 +253,10 @@ async fn main() -> Result<()> {
 
     grpc_oxide::run(oxide_config.socket_path.clone(), dispatcher, reporter).await?;
 
-    if let Some(provider) = otel_provider {
+    if let Some(provider) = otel.meter {
+        let _ = provider.shutdown();
+    }
+    if let Some(provider) = otel.tracer {
         let _ = provider.shutdown();
     }
 

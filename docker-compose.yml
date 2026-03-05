@@ -20,6 +20,7 @@ services:
       - ./conventional-channels.csv:/app/conventional-channels.csv:ro
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
+      - OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://victoriametrics:8428/opentelemetry/api/v1/push
       - RUST_LOG=info
     healthcheck:
       test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr", "unix:///run/service/grpc.sock"]
@@ -61,6 +62,7 @@ services:
         condition: service_completed_successfully
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
+      - OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://victoriametrics:8428/opentelemetry/api/v1/push
       - RUST_LOG=info
     healthcheck:
       test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr", "unix:///run/service/grpc.sock"]
@@ -89,6 +91,7 @@ services:
     command: ["--discord-token", "@/run/secrets/discord_token"]
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
+      - OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://victoriametrics:8428/opentelemetry/api/v1/push
       - RUST_LOG=info
     healthcheck:
       test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr", "unix:///run/service/grpc.sock"]
@@ -104,6 +107,16 @@ services:
       - "4317:4317"
       - "4318:4318"
 
+  victoriametrics:
+    image: victoriametrics/victoria-metrics:v1.115.0
+    command:
+      - -storageDataPath=/storage
+      - -retentionPeriod=30d
+    ports:
+      - "8428:8428"
+    volumes:
+      - victoriametrics-data:/storage
+
 secrets:
   discord_token:
     file: ./secrets/discord_token
@@ -113,3 +126,4 @@ volumes:
   whisperer-socket:
   discord-socket:
   whisper-models:
+  victoriametrics-data:

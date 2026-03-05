@@ -1,9 +1,7 @@
 use std::sync::Arc;
-use std::time::Duration;
 
 use anyhow::Result;
-use chrono::{DateTime, Utc};
-use proto::types::{CallRowId, Freq, SignalDb};
+use proto::types::CallRowId;
 use serenity::all::{CreateEmbed, CreateEmbedFooter};
 use serenity::model::id::{ChannelId, MessageId};
 use tokio::sync::{Mutex, mpsc};
@@ -11,6 +9,7 @@ use trunk_oxide_proto as proto;
 
 use trunk_database::Database;
 
+use crate::call_state::{CallEffect, CallState, CallStateConfig, EmbedData};
 use crate::discord::DiscordClient;
 use crate::grpc_whisperer::WhispererConnection;
 use crate::ogg_encoder::OggOpusEncoder;
@@ -31,15 +30,8 @@ pub struct CallHandlerConfig {
     pub audio_attachment: bool,
 }
 
-/// Max chars for embed description before we truncate from the front.
-const MAX_DESCRIPTION_LEN: usize = 3800;
-
-/// RMS threshold below which post-filter audio is considered silent.
-/// Samples are normalized to [-1.0, 1.0]; an RMS of 0.005 is ~-46 dBFS.
-const SILENCE_RMS_THRESHOLD: f64 = 0.005;
-
 pub struct CallHandler {
-    call_info: proto::CallInfo,
+    state: CallState,
     rx: mpsc::Receiver<CallMessage>,
     whisperer: WhispererConnection,
     discord: Arc<DiscordClient>,
@@ -51,20 +43,7 @@ pub struct CallHandler {
     post_channel: ChannelId,
     ogg_encoder: Option<OggOpusEncoder>,
 
-    // Single-embed state
     embed_message_id: Option<MessageId>,
-    transcription_text: String,
-    detected_tones: Vec<DetectedTone>,
-    events: Vec<String>,
-    call_ended: bool,
-    call_end_duration: Option<Duration>,
-    call_end_signal: Option<SignalDb>,
-    start_time_str: String,
-    tag: String,
-
-    // Audio energy tracking (post-filter)
-    audio_energy_sum: f64,
-    audio_sample_count: u64,
 
     // Database
     db: Arc<Mutex<Database>>,
@@ -94,31 +73,31 @@ impl CallHandler {
             None
         };
 
-        let start_time = call_info
-            .start_time
-            .as_ref()
-            .and_then(|ts| DateTime::<Utc>::from_timestamp(ts.seconds, ts.nanos.try_into().unwrap_or(0)))
-            .unwrap_or_else(Utc::now);
-        let start_time_str = start_time.format("%H:%M:%S UTC").to_string();
-
-        let tag = if call_info.talkgroup_alpha_tag.is_empty() {
-            call_info.talkgroup.to_string()
-        } else {
-            call_info.talkgroup_alpha_tag.clone()
-        };
-
         let ogg_encoder = if config.audio_attachment {
             Some(OggOpusEncoder::new()?)
         } else {
             None
         };
 
+        let buffer_duration_ms = config.buffer_duration_ms;
+        let buffer_threshold = usize::try_from(buffer_duration_ms)
+            .unwrap_or(usize::MAX)
+            .saturating_mul(16);
+
+        let state = CallState::new(
+            &call_info,
+            CallStateConfig {
+                buffer_threshold,
+                audio_attachment: config.audio_attachment,
+            },
+        );
+
         Ok(Self {
-            call_info,
+            state,
             rx,
             whisperer,
             discord,
-            buffer_duration_ms: config.buffer_duration_ms,
+            buffer_duration_ms,
             audio_buffer: Vec::new(),
             resampler: None,
             tone_detector,
@@ -126,26 +105,18 @@ impl CallHandler {
             post_channel,
             ogg_encoder,
             embed_message_id: None,
-            transcription_text: String::new(),
-            detected_tones: Vec::new(),
-            events: Vec::new(),
-            call_ended: false,
-            call_end_duration: None,
-            call_end_signal: None,
-            start_time_str,
-            tag,
-            audio_energy_sum: 0.0,
-            audio_sample_count: 0,
             db,
             call_row_id,
         })
     }
 
     pub async fn run(mut self) {
-        if let Err(e) = self.send_initial_embed().await {
+        let effects = self.state.on_start();
+        if let Err(e) = self.process_effects(effects).await {
             tracing::error!(error = %e, "failed to post call embed");
             return;
         }
+        tracing::info!(thread = %self.post_channel, "call started");
 
         while let Some(msg) = self.rx.recv().await {
             match msg {
@@ -158,7 +129,8 @@ impl CallHandler {
                     }
                 }
                 CallMessage::Event(text) => {
-                    if let Err(e) = self.post_event(&text).await {
+                    let effects = self.state.on_event(text);
+                    if let Err(e) = self.process_effects(effects).await {
                         tracing::error!(error = %e, "event posting error");
                     }
                 }
@@ -172,106 +144,88 @@ impl CallHandler {
         }
     }
 
-    fn build_embed(&self) -> CreateEmbed {
-        let title = if self.call_ended {
-            self.tag.clone()
-        } else {
-            format!("{} ...", self.tag)
-        };
-
-        let colour = if self.call_ended {
-            if self.call_info.encrypted {
-                0x00e7_4c3c_u32 // red
-            } else {
-                0x002e_cc71_u32 // green
+    async fn process_effects(&mut self, effects: Vec<CallEffect>) -> Result<()> {
+        // Use a queue to avoid async recursion (Transcribe → on_transcription → EditEmbed)
+        let mut queue: std::collections::VecDeque<CallEffect> = effects.into();
+        while let Some(effect) = queue.pop_front() {
+            match effect {
+                CallEffect::SendEmbed { embed } => {
+                    let serenity_embed = embed_data_to_serenity(&embed);
+                    let msg_id = self
+                        .discord
+                        .send_embed(self.post_channel, serenity_embed)
+                        .await?;
+                    self.embed_message_id = Some(msg_id);
+                }
+                CallEffect::EditEmbed { embed } => {
+                    if let Some(msg_id) = self.embed_message_id {
+                        let serenity_embed = embed_data_to_serenity(&embed);
+                        self.discord
+                            .edit_embed(self.post_channel, msg_id, serenity_embed)
+                            .await?;
+                    }
+                }
+                CallEffect::DeleteEmbed => {
+                    if let Some(msg_id) = self.embed_message_id {
+                        if let Err(e) =
+                            self.discord.delete_message(self.post_channel, msg_id).await
+                        {
+                            tracing::warn!(error = %e, "failed to delete empty call embed");
+                        }
+                    }
+                }
+                CallEffect::AttachAudio {
+                    embed,
+                    ogg_data,
+                    filename,
+                } => {
+                    if let Some(msg_id) = self.embed_message_id {
+                        let serenity_embed = embed_data_to_serenity(&embed);
+                        if let Err(e) = self
+                            .discord
+                            .edit_embed_with_attachment(
+                                self.post_channel,
+                                msg_id,
+                                serenity_embed,
+                                ogg_data,
+                                &filename,
+                            )
+                            .await
+                        {
+                            tracing::warn!(error = %e, "failed to attach audio to call embed");
+                        }
+                    }
+                }
+                CallEffect::Transcribe { audio } => {
+                    if !audio.is_empty() {
+                        let text = self.whisperer.transcribe(audio).await?;
+                        let followup = self.state.on_transcription(&text);
+                        // on_transcription never emits Transcribe, so this won't loop.
+                        // Insert at front to preserve ordering relative to remaining effects.
+                        for (i, e) in followup.into_iter().enumerate() {
+                            queue.insert(i, e);
+                        }
+                    }
+                }
+                CallEffect::UpdateDb { update } => {
+                    if let Some(row_id) = self.call_row_id {
+                        let db_update = trunk_database::CallUpdate {
+                            duration: update.duration,
+                            signal: update.signal,
+                            transcription: update.transcription,
+                            tones: update.tones,
+                            events: update.events,
+                        };
+                        let db = self.db.lock().await;
+                        if let Err(e) = db.update_call(row_id, &db_update) {
+                            tracing::warn!(error = %e, "failed to update call in db");
+                        }
+                    }
+                }
+                CallEffect::Log { message } => {
+                    tracing::info!("{message}");
+                }
             }
-        } else {
-            0x0095_a5a6_u32 // grey
-        };
-
-        let mut embed = CreateEmbed::new().title(title).colour(colour);
-
-        // Description: transcription text (truncated from front if too long)
-        if !self.transcription_text.is_empty() {
-            let desc = if self.transcription_text.len() > MAX_DESCRIPTION_LEN {
-                let skip = self.transcription_text.len() - MAX_DESCRIPTION_LEN;
-                // Find next char boundary after skip point
-                let start = self.transcription_text[skip..]
-                    .char_indices()
-                    .next()
-                    .map_or(skip, |(i, _)| skip + i);
-                format!("...{}", &self.transcription_text[start..])
-            } else {
-                self.transcription_text.clone()
-            };
-            embed = embed.description(desc);
-        }
-
-        // Always-present fields
-        let tg_display = if self.call_info.talkgroup_alpha_tag.is_empty() {
-            self.call_info.talkgroup.to_string()
-        } else {
-            format!(
-                "{} — {}",
-                self.call_info.talkgroup, self.call_info.talkgroup_alpha_tag
-            )
-        };
-        embed = embed
-            .field("Talkgroup", tg_display, true)
-            .field("Frequency", Freq(self.call_info.freq).to_string(), true)
-            .field("System", &self.call_info.short_name, true);
-
-        if !self.call_info.talkgroup_tag.is_empty() {
-            embed = embed.field("Category", &self.call_info.talkgroup_tag, true);
-        }
-
-        if self.call_info.encrypted {
-            embed = embed.field("Encrypted", "Yes", true);
-        }
-
-        // Tones (added when detected)
-        if !self.detected_tones.is_empty() {
-            let tones_str: Vec<String> = self.detected_tones.iter().map(|t| format!("{t}")).collect();
-            embed = embed.field("Tones", tones_str.join(", "), false);
-        }
-
-        // Signal/unit events
-        if !self.events.is_empty() {
-            embed = embed.field("Events", self.events.join("\n"), false);
-        }
-
-        // End-of-call fields
-        if let Some(duration) = self.call_end_duration
-            && !duration.is_zero()
-        {
-            embed = embed.field("Duration", format!("{:.1}s", duration.as_secs_f64()), true);
-        }
-        if let Some(signal) = self.call_end_signal {
-            embed = embed.field("Signal", signal.to_string(), true);
-        }
-
-        embed = embed.footer(CreateEmbedFooter::new(&self.start_time_str));
-
-        embed
-    }
-
-    async fn send_initial_embed(&mut self) -> Result<()> {
-        let embed = self.build_embed();
-        let msg_id = self.discord.send_embed(self.post_channel, embed).await?;
-        self.embed_message_id = Some(msg_id);
-
-        tracing::info!(thread = %self.post_channel, "call started");
-
-        Ok(())
-    }
-
-    #[allow(clippy::needless_pass_by_ref_mut)]
-    async fn update_embed(&mut self) -> Result<()> {
-        if let Some(msg_id) = self.embed_message_id {
-            let embed = self.build_embed();
-            self.discord
-                .edit_embed(self.post_channel, msg_id, embed)
-                .await?;
         }
         Ok(())
     }
@@ -308,9 +262,9 @@ impl CallHandler {
             filter.process(&mut samples);
         }
 
-        // Track audio energy after filtering for silence detection
-        self.audio_energy_sum += samples.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>();
-        self.audio_sample_count += samples.len() as u64;
+        // Compute energy for silence detection
+        let energy: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum();
+        let sample_count = samples.len() as u64;
 
         if let Some(enc) = &mut self.ogg_encoder {
             enc.process(&samples)?;
@@ -326,15 +280,24 @@ impl CallHandler {
             self.finish_tone_detection().await?;
         }
 
-        let buffer_duration_ms = usize::try_from(self.buffer_duration_ms)
-            .map_err(|_| anyhow::anyhow!("buffer_duration_ms too large"))?;
-        let buffer_threshold = buffer_duration_ms.saturating_mul(16);
-        if self.audio_buffer.len() >= buffer_threshold {
-            let audio: Vec<f32> = self.audio_buffer.drain(..).collect();
-            self.transcribe_and_post(audio).await?;
-        }
+        let buffer_len = self.audio_buffer.len();
+        let audio_drain: Vec<f32> = if buffer_len >= self.buffer_threshold() {
+            self.audio_buffer.drain(..).collect()
+        } else {
+            Vec::new()
+        };
+
+        let effects = self
+            .state
+            .on_audio_processed(sample_count, energy, buffer_len, audio_drain);
+        self.process_effects(effects).await?;
 
         Ok(())
+    }
+
+    fn buffer_threshold(&self) -> usize {
+        let ms = usize::try_from(self.buffer_duration_ms).unwrap_or(usize::MAX);
+        ms.saturating_mul(16)
     }
 
     async fn finish_tone_detection(&mut self) -> Result<()> {
@@ -351,8 +314,7 @@ impl CallHandler {
                 _ => None,
             });
 
-            self.detected_tones = result.tones;
-            self.update_embed().await?;
+            let tones = result.tones;
 
             // Strip dispatch tone samples from the front of the audio buffer
             let strip = result.tone_end_sample.min(self.audio_buffer.len());
@@ -369,39 +331,11 @@ impl CallHandler {
                 filter.process(&mut self.audio_buffer);
                 self.notch_filter = Some(filter);
             }
+
+            let effects = self.state.on_tones_detected(tones);
+            self.process_effects(effects).await?;
         }
 
-        Ok(())
-    }
-
-    async fn transcribe_and_post(&mut self, audio: Vec<f32>) -> Result<()> {
-        if audio.is_empty() {
-            return Ok(());
-        }
-
-        let text = self.whisperer.transcribe(audio).await?;
-        let text = text.trim();
-        if text.is_empty() || is_blank_audio(text) {
-            if !self.transcription_text.is_empty() {
-                // Indicate silence gap
-                self.transcription_text.push_str(" ...");
-                self.update_embed().await?;
-            }
-            return Ok(());
-        }
-
-        if !self.transcription_text.is_empty() {
-            self.transcription_text.push(' ');
-        }
-        self.transcription_text.push_str(text);
-        self.update_embed().await?;
-
-        Ok(())
-    }
-
-    async fn post_event(&mut self, text: &str) -> Result<()> {
-        self.events.push(text.to_string());
-        self.update_embed().await?;
         Ok(())
     }
 
@@ -426,111 +360,27 @@ impl CallHandler {
         // Transcribe remaining audio
         if !self.audio_buffer.is_empty() {
             let audio: Vec<f32> = std::mem::take(&mut self.audio_buffer);
-            self.transcribe_and_post(audio).await?;
-        }
-
-        // Update embed with end-of-call data
-        self.call_ended = true;
-        if let Some(data) = &call_data {
-            self.call_end_duration = Some(Duration::from_secs_f64(data.length));
-            self.call_end_signal = data.signal.map(SignalDb);
-        }
-
-        // Delete the embed if the call produced nothing useful.
-        // CTCSS tones alone don't count — they're just squelch signaling.
-        let has_interesting_tones = self
-            .detected_tones
-            .iter()
-            .any(|t| !matches!(t, DetectedTone::Ctcss { .. }));
-        let audio_rms = if self.audio_sample_count > 0 {
-            (self.audio_energy_sum / self.audio_sample_count as f64).sqrt()
-        } else {
-            0.0
-        };
-        let audio_is_silent = audio_rms < SILENCE_RMS_THRESHOLD;
-        if audio_is_silent {
-            tracing::info!(rms = format_args!("{audio_rms:.6}"), "audio below silence threshold");
-        }
-        let has_content = (!self.transcription_text.is_empty() && !audio_is_silent)
-            || has_interesting_tones
-            || !self.events.is_empty();
-        if !has_content {
-            if let Some(msg_id) = self.embed_message_id
-                && let Err(e) = self.discord.delete_message(self.post_channel, msg_id).await
-            {
-                tracing::warn!(error = %e, "failed to delete empty call embed");
+            if !audio.is_empty() {
+                let text = self.whisperer.transcribe(audio).await?;
+                let effects = self.state.on_transcription(&text);
+                self.process_effects(effects).await?;
             }
-            tracing::info!("call ended (empty, deleted embed)");
-            return Ok(());
         }
 
-        self.update_embed().await?;
-
-        // Encode and attach OGG Opus audio
-        if let Some(encoder) = self.ogg_encoder.take()
-            && let Some(msg_id) = self.embed_message_id
-        {
+        // Finalize OGG encoder
+        let ogg_data = self.ogg_encoder.take().and_then(|encoder| {
             match encoder.finish() {
-                Ok(ogg_data) => {
-                    let start_time = self
-                        .call_info
-                        .start_time
-                        .as_ref()
-                        .and_then(|ts| DateTime::<Utc>::from_timestamp(ts.seconds, ts.nanos.try_into().unwrap_or(0)))
-                        .unwrap_or_else(Utc::now);
-                    let filename = format!(
-                        "call_{}_{}.ogg",
-                        self.call_info.talkgroup,
-                        start_time.format("%Y%m%dT%H%M%S%.3fZ"),
-                    );
-                    if let Err(e) = self
-                        .discord
-                        .edit_embed_with_attachment(
-                            self.post_channel,
-                            msg_id,
-                            self.build_embed(),
-                            ogg_data,
-                            &filename,
-                        )
-                        .await
-                    {
-                        tracing::warn!(error = %e, "failed to attach audio to call embed");
-                    }
-                }
+                Ok(data) => Some(data),
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to encode OGG audio");
+                    None
                 }
             }
-        }
+        });
 
-        // Persist final call state to DB
-        if let Some(row_id) = self.call_row_id {
-            let update = trunk_database::CallUpdate {
-                duration: self.call_end_duration,
-                signal: self.call_end_signal,
-                transcription: if self.transcription_text.is_empty() {
-                    None
-                } else {
-                    Some(self.transcription_text.clone())
-                },
-                tones: if self.detected_tones.is_empty() {
-                    None
-                } else {
-                    Some(self.detected_tones.iter().map(|t| format!("{t}")).collect())
-                },
-                events: if self.events.is_empty() {
-                    None
-                } else {
-                    Some(self.events.clone())
-                },
-            };
-            let db = self.db.lock().await;
-            if let Err(e) = db.update_call(row_id, &update) {
-                tracing::warn!(error = %e, "failed to update call in db");
-            }
-        }
-
-        tracing::info!("call ended");
+        // Let the state machine decide what to do
+        let effects = self.state.on_end(call_data.as_deref(), ogg_data);
+        self.process_effects(effects).await?;
 
         Ok(())
     }
@@ -546,16 +396,20 @@ fn decode_audio(bytes: &[u8]) -> Vec<f32> {
         .collect()
 }
 
-/// Check if Whisper returned a "blank audio" placeholder.
-/// Only matches when the entire transcription is a placeholder — not when
-/// real words like "silence" appear in normal speech.
-fn is_blank_audio(text: &str) -> bool {
-    let t = text
-        .trim()
-        .trim_start_matches(['[', '('])
-        .trim_end_matches([']', ')'])
-        .trim()
-        .to_lowercase()
-        .replace('_', " ");
-    t == "blank audio" || t == "no speech" || t == "silence" || t == "..." || t == "."
+/// Convert pure [`EmbedData`] to a serenity [`CreateEmbed`].
+fn embed_data_to_serenity(data: &EmbedData) -> CreateEmbed {
+    let mut embed = CreateEmbed::new()
+        .title(&data.title)
+        .colour(data.colour)
+        .footer(CreateEmbedFooter::new(&data.footer));
+
+    if let Some(desc) = &data.description {
+        embed = embed.description(desc);
+    }
+
+    for field in &data.fields {
+        embed = embed.field(&field.name, &field.value, field.inline);
+    }
+
+    embed
 }

@@ -1,54 +1,34 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use chrono::{DateTime, Utc};
-use proto::types::{SysNum, Talkgroup};
 use serenity::model::id::ChannelId;
-use tokio::sync::{Mutex, RwLock, mpsc};
+use tokio::sync::{Mutex, mpsc};
 use tracing::Instrument;
 use trunk_oxide_proto as proto;
 
+use proto::types::{SysNum, Talkgroup};
 use trunk_database::Database;
 
-use proto::plugin_event::Event;
-
-use crate::aggregator::{Aggregator, AggregatorMessage};
+use crate::aggregator::Aggregator;
 use crate::call_handler::{CallHandler, CallHandlerConfig, CallMessage};
 use crate::channel_manager::ChannelLookup;
 use crate::discord::DiscordClient;
+use crate::dispatcher_state::{CallKey, DispatchEffect, DispatcherState, ThreadCacheKey};
 use crate::grpc_whisperer::WhispererConnection;
-
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-struct CallKey {
-    sys_num: SysNum,
-    talkgroup: Talkgroup,
-}
-
-/// Key for reusing Discord threads: one thread per talkgroup per day.
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-struct ThreadCacheKey {
-    sys_num: SysNum,
-    talkgroup: Talkgroup,
-    date: String, // "YYYY-MM-DD"
-}
-
-struct ActiveCall {
-    tx: mpsc::Sender<CallMessage>,
-    started_at: Instant,
-}
-
-/// Maximum time a call can be active before being reaped.
-/// This is a safety net for C++ bugs that fail to emit `CallEndEvent`.
-const MAX_CALL_AGE: Duration = Duration::from_secs(10 * 60);
 
 /// How often to check for stuck calls.
 const REAP_INTERVAL: Duration = Duration::from_secs(60);
 
+struct ActiveCall {
+    tx: mpsc::Sender<CallMessage>,
+}
+
 pub struct Dispatcher {
-    calls: RwLock<HashMap<CallKey, ActiveCall>>,
-    thread_cache: RwLock<HashMap<ThreadCacheKey, ChannelId>>,
+    state: Mutex<DispatcherState>,
+    calls: Mutex<HashMap<CallKey, ActiveCall>>,
     whisperer: WhispererConnection,
     discord: Arc<DiscordClient>,
     aggregator: Arc<Aggregator>,
@@ -60,7 +40,6 @@ pub struct Dispatcher {
     audio_attachment: bool,
     db: Arc<Mutex<Database>>,
     db_path: PathBuf,
-    current_hour: RwLock<String>,
 }
 
 impl Dispatcher {
@@ -78,10 +57,9 @@ impl Dispatcher {
         db: Arc<Mutex<Database>>,
         db_path: PathBuf,
     ) -> Self {
-        let current_hour = Utc::now().format("%Y-%m-%dT%H").to_string();
         Self {
-            calls: RwLock::new(HashMap::new()),
-            thread_cache: RwLock::new(HashMap::new()),
+            state: Mutex::new(DispatcherState::new()),
+            calls: Mutex::new(HashMap::new()),
             whisperer,
             discord,
             aggregator,
@@ -93,167 +71,224 @@ impl Dispatcher {
             audio_attachment,
             db,
             db_path,
-            current_hour: RwLock::new(current_hour),
-        }
-    }
-
-    async fn ensure_current_hour(&self) {
-        let now_hour = Utc::now().format("%Y-%m-%dT%H").to_string();
-        let current = self.current_hour.read().await;
-        if *current == now_hour {
-            return;
-        }
-        drop(current);
-
-        let mut current = self.current_hour.write().await;
-        // Double-check after acquiring write lock
-        if *current == now_hour {
-            return;
-        }
-
-        let today = Utc::now().format("%Y-%m-%d").to_string();
-        match Database::open_hourly(&self.db_path, &now_hour) {
-            Ok(new_db) => {
-                let mut db = self.db.lock().await;
-                if let Err(e) = new_db.copy_threads_from(&db, &today) {
-                    tracing::warn!(error = %e, "failed to copy thread cache to new hourly db");
-                }
-                *db = new_db;
-                drop(db);
-                *current = now_hour;
-                tracing::info!(hour = %*current, "rotated to new hourly database");
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "failed to open new hourly database");
-            }
         }
     }
 
     pub async fn handle_audio(&self, sample: proto::AudioSample) {
-        if sample.sample_rate == 0 {
-            tracing::warn!(
-                talkgroup = sample.talkgroup,
-                "dropping audio with sample_rate=0"
-            );
-            return;
-        }
-
-        let key = CallKey {
-            sys_num: SysNum(sample.sys_num),
-            talkgroup: Talkgroup(sample.talkgroup),
+        let effects = {
+            let state = self.state.lock().await;
+            state.on_audio(&sample)
         };
-
-        let calls = self.calls.read().await;
-        if let Some(active) = calls.get(&key) {
-            if let Err(e) = active.tx.try_send(CallMessage::Audio {
-                samples: sample.samples,
-                sample_rate: sample.sample_rate,
-            }) {
-                tracing::warn!(talkgroup = key.talkgroup.0, "audio packet dropped: {e}");
-            }
-        }
-        // Audio arriving before CallStartEvent is silently dropped
+        self.process_effects(effects).await;
     }
 
     pub async fn handle_event(&self, event: proto::PluginEvent) {
-        let Some(event) = event.event else { return };
+        let effects = {
+            let mut state = self.state.lock().await;
+            state.on_event(event)
+        };
+        self.process_effects(effects).await;
+    }
 
-        match event {
-            Event::CallStart(e) => self.handle_call_start(e).await,
-            Event::CallEnd(e) => self.handle_call_end(e).await,
-            Event::Signal(e) => self.handle_signal(e).await,
-            Event::Unit(e) => self.handle_unit(e).await,
-            Event::CallsActive(e) => {
-                self.aggregator.send(AggregatorMessage::CallsActive(e));
+    pub fn spawn_reaper(self: &Arc<Self>) {
+        let dispatcher = Arc::clone(self);
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(REAP_INTERVAL);
+            interval.tick().await; // first tick is immediate, skip it
+            loop {
+                interval.tick().await;
+                let effects = {
+                    let mut state = dispatcher.state.lock().await;
+                    state.on_reap_tick()
+                };
+                dispatcher.process_effects(effects).await;
             }
-            Event::TrunkMessage(e) => {
-                self.aggregator.send(AggregatorMessage::TrunkMessage(e));
-            }
-            Event::SystemRates(e) => {
-                self.aggregator.send(AggregatorMessage::SystemRates(e));
-            }
-            Event::SetupRecorder(e) => {
-                self.aggregator.send(AggregatorMessage::SetupRecorder(e));
-            }
-            Event::SetupSystem(e) => {
-                self.aggregator.send(AggregatorMessage::SetupSystem(e));
-            }
-            Event::SetupSystems(e) => {
-                self.aggregator.send(AggregatorMessage::SetupSystems(e));
-            }
-            Event::SetupSources(e) => {
-                self.aggregator.send(AggregatorMessage::SetupSources(e));
-            }
-            Event::SetupConfig(e) => {
-                self.aggregator.send(AggregatorMessage::SetupConfig(e));
-            }
-            Event::UnitAlias(e) => {
-                tracing::debug!(
-                    radio_id = e.radio_id,
-                    alias = %e.alias,
-                    source = %e.source,
-                    talkgroup_id = e.talkgroup_id,
-                    "OTA unit alias discovered"
-                );
+        });
+    }
+
+    async fn process_effects(&self, effects: Vec<DispatchEffect>) {
+        for effect in effects {
+            match effect {
+                DispatchEffect::SendAudio {
+                    key,
+                    samples,
+                    sample_rate,
+                } => {
+                    let calls = self.calls.lock().await;
+                    if let Some(active) = calls.get(&key) {
+                        if let Err(e) = active.tx.try_send(CallMessage::Audio {
+                            samples,
+                            sample_rate,
+                        }) {
+                            tracing::warn!(talkgroup = key.talkgroup.0, "audio packet dropped: {e}");
+                        }
+                    }
+                }
+
+                DispatchEffect::SendEvent { key, text } => {
+                    let calls = self.calls.lock().await;
+                    if let Some(active) = calls.get(&key) {
+                        if let Err(e) = active.tx.try_send(CallMessage::Event(text)) {
+                            tracing::warn!(talkgroup = key.talkgroup.0, "event dropped: {e}");
+                        }
+                    }
+                }
+
+                DispatchEffect::EndCall { key, call_data } => {
+                    let active = self.calls.lock().await.remove(&key);
+                    if let Some(active) = active {
+                        let _ = active.tx.send(CallMessage::End(call_data)).await;
+                    }
+                }
+
+                DispatchEffect::ReapCall { key } => {
+                    let active = self.calls.lock().await.remove(&key);
+                    if let Some(active) = active {
+                        let _ = active.tx.try_send(CallMessage::End(None));
+                    }
+                }
+
+                DispatchEffect::ForwardToAggregator { message } => {
+                    self.aggregator.send(message);
+                }
+
+                DispatchEffect::RotateDb => {
+                    self.rotate_db().await;
+                }
+
+                DispatchEffect::ResolveChannel { call } => {
+                    let post_channel = self.resolve_channel(&call).await;
+                    if let Some(post_channel) = post_channel {
+                        let follow_up = {
+                            let mut state = self.state.lock().await;
+                            state.on_channel_resolved(call, post_channel)
+                        };
+                        // on_channel_resolved returns SpawnCallHandler — process inline
+                        for effect in follow_up {
+                            if let DispatchEffect::SpawnCallHandler {
+                                key,
+                                call,
+                                post_channel,
+                            } = effect
+                            {
+                                self.spawn_call_handler(key, call, post_channel).await;
+                            }
+                        }
+                    }
+                }
+
+                DispatchEffect::SpawnCallHandler {
+                    key,
+                    call,
+                    post_channel,
+                } => {
+                    self.spawn_call_handler(key, call, post_channel).await;
+                }
+
+                DispatchEffect::Log { message } => {
+                    tracing::info!("{message}");
+                }
             }
         }
     }
 
-    async fn handle_call_start(&self, event: proto::CallStartEvent) {
-        let Some(call) = event.call else { return };
-
-        self.ensure_current_hour().await;
-
+    async fn resolve_channel(&self, call: &proto::CallInfo) -> Option<ChannelId> {
         let talkgroup = Talkgroup(call.talkgroup);
         let sys_num = SysNum(call.sys_num);
 
-        let key = CallKey { sys_num, talkgroup };
-
-        // Resolve target channel: mapped channels get direct posts, fallback uses threads
+        // Check mapped channels first
         let mapped_channel = {
             let map = self.channel_lookup.read().await;
             map.get(&(call.short_name.clone(), call.talkgroup)).copied()
         };
 
-        let post_channel = if let Some(channel) = mapped_channel {
-            // Mapped channel — post directly, no thread
-            channel
-        } else {
-            // Fallback — create/reuse a per-talkgroup-per-day thread
-            let start_time = call
-                .start_time
-                .as_ref()
-                .and_then(|ts| DateTime::<Utc>::from_timestamp(ts.seconds, ts.nanos.try_into().unwrap_or(0)))
-                .unwrap_or_else(Utc::now);
-            let date_str = start_time.format("%Y-%m-%d").to_string();
+        if let Some(channel) = mapped_channel {
+            return Some(channel);
+        }
 
-            let cache_key = ThreadCacheKey {
-                sys_num,
-                talkgroup,
-                date: date_str.clone(),
-            };
+        // Fallback: create/reuse a per-talkgroup-per-day thread
+        let start_time = call
+            .start_time
+            .as_ref()
+            .and_then(|ts| {
+                DateTime::<Utc>::from_timestamp(ts.seconds, ts.nanos.try_into().unwrap_or(0))
+            })
+            .unwrap_or_else(Utc::now);
+        let date_str = start_time.format("%Y-%m-%d").to_string();
 
-            let thread_id = {
-                let cache = self.thread_cache.read().await;
-                cache.get(&cache_key).copied()
-            };
-
-            let thread_id = if let Some(id) = thread_id {
-                Some(id)
-            } else {
-                self.resolve_or_create_thread(&call, sys_num, talkgroup, cache_key, &date_str)
-                    .await
-            };
-
-            let Some(thread_id) = thread_id else { return };
-            thread_id
+        let cache_key = ThreadCacheKey {
+            sys_num,
+            talkgroup,
+            date: date_str.clone(),
         };
 
-        // Insert call record into DB
+        // Check in-memory thread cache
+        {
+            let state = self.state.lock().await;
+            if let Some(channel) = state.get_cached_thread(&cache_key) {
+                return Some(channel);
+            }
+        }
+
+        // Check DB for thread from earlier this session/hour
+        let db_thread = {
+            let db = self.db.lock().await;
+            db.get_thread(sys_num, talkgroup, &date_str)
+                .unwrap_or(None)
+                .and_then(|id| std::num::NonZeroU64::new(id).map(ChannelId::from))
+        };
+
+        if let Some(id) = db_thread {
+            let mut state = self.state.lock().await;
+            state.cache_thread(cache_key, id);
+            return Some(id);
+        }
+
+        // Create new thread
+        let thread_name = format!("TG {} [{}]", call.talkgroup, date_str);
+        let thread_name = if thread_name.len() > 100 {
+            thread_name[..100].to_string()
+        } else {
+            thread_name
+        };
+
+        match self
+            .discord
+            .create_call_thread(self.channel_id, &thread_name)
+            .await
+        {
+            Ok(id) => {
+                let mut state = self.state.lock().await;
+                state.cache_thread(cache_key, id);
+
+                let db = self.db.lock().await;
+                if let Err(e) = db.set_thread(sys_num, talkgroup, &date_str, id.get()) {
+                    tracing::warn!(error = %e, "failed to persist thread to db");
+                }
+
+                Some(id)
+            }
+            Err(e) => {
+                tracing::error!(
+                    talkgroup = call.talkgroup,
+                    error = %e,
+                    "failed to create discord thread"
+                );
+                None
+            }
+        }
+    }
+
+    async fn spawn_call_handler(
+        &self,
+        key: CallKey,
+        call: proto::CallInfo,
+        post_channel: ChannelId,
+    ) {
         let call_row_id = {
             let record = trunk_database::CallRecord {
-                talkgroup,
-                sys_num,
+                talkgroup: Talkgroup(call.talkgroup),
+                sys_num: SysNum(call.sys_num),
                 freq: proto::types::Freq(call.freq),
                 encrypted: call.encrypted,
                 emergency: call.emergency,
@@ -307,206 +342,25 @@ impl Dispatcher {
 
         tokio::spawn(handler.run().instrument(span));
 
-        self.calls.write().await.insert(
-            key,
-            ActiveCall {
-                tx,
-                started_at: Instant::now(),
-            },
-        );
+        self.calls.lock().await.insert(key, ActiveCall { tx });
     }
 
-    async fn resolve_or_create_thread(
-        &self,
-        call: &proto::CallInfo,
-        sys_num: SysNum,
-        talkgroup: Talkgroup,
-        cache_key: ThreadCacheKey,
-        date_str: &str,
-    ) -> Option<ChannelId> {
-        // Check DB for thread from earlier this session/hour
-        let db_thread = {
-            let db = self.db.lock().await;
-            db.get_thread(sys_num, talkgroup, date_str)
-                .unwrap_or(None)
-                .and_then(|id| std::num::NonZeroU64::new(id).map(ChannelId::from))
-        };
+    async fn rotate_db(&self) {
+        let now_hour = Utc::now().format("%Y-%m-%dT%H").to_string();
+        let today = Utc::now().format("%Y-%m-%d").to_string();
 
-        if let Some(id) = db_thread {
-            self.thread_cache.write().await.insert(cache_key, id);
-            return Some(id);
-        }
-
-        let thread_name = format!("TG {} [{}]", call.talkgroup, date_str);
-        let thread_name = if thread_name.len() > 100 {
-            thread_name[..100].to_string()
-        } else {
-            thread_name
-        };
-
-        match self
-            .discord
-            .create_call_thread(self.channel_id, &thread_name)
-            .await
-        {
-            Ok(id) => {
-                self.thread_cache.write().await.insert(cache_key, id);
-
-                // Persist to DB
-                let db = self.db.lock().await;
-                if let Err(e) = db.set_thread(sys_num, talkgroup, date_str, id.get()) {
-                    tracing::warn!(error = %e, "failed to persist thread to db");
+        match Database::open_hourly(&self.db_path, &now_hour) {
+            Ok(new_db) => {
+                let mut db = self.db.lock().await;
+                if let Err(e) = new_db.copy_threads_from(&db, &today) {
+                    tracing::warn!(error = %e, "failed to copy thread cache to new hourly db");
                 }
-                drop(db);
-
-                Some(id)
+                *db = new_db;
+                tracing::info!(hour = %now_hour, "rotated to new hourly database");
             }
             Err(e) => {
-                tracing::error!(
-                    talkgroup = call.talkgroup,
-                    error = %e,
-                    "failed to create discord thread"
-                );
-                None
+                tracing::error!(error = %e, "failed to open new hourly database");
             }
         }
     }
-
-    async fn handle_call_end(&self, event: proto::CallEndEvent) {
-        let Some(ref call_data) = event.call_data else {
-            return;
-        };
-
-        let key = CallKey {
-            sys_num: SysNum(call_data.sys_num),
-            talkgroup: Talkgroup(call_data.talkgroup),
-        };
-
-        let active = self.calls.write().await.remove(&key);
-        if let Some(active) = active {
-            let _ = active
-                .tx
-                .send(CallMessage::End(event.call_data.map(Box::new)))
-                .await;
-        }
-    }
-
-    /// Reap calls that have been active longer than `MAX_CALL_AGE` without
-    /// receiving a `CallEndEvent`. Safety net for C++ bugs that fail to emit
-    /// `conclude_call`.
-    async fn reap_stuck_calls(&self) {
-        let now = Instant::now();
-        let mut calls = self.calls.write().await;
-        calls.retain(|key, active| {
-            let age = now.duration_since(active.started_at);
-            if age > MAX_CALL_AGE {
-                tracing::warn!(
-                    sys_num = key.sys_num.0,
-                    talkgroup = key.talkgroup.0,
-                    age_secs = age.as_secs(),
-                    "reaping stuck call (no CallEnd received)"
-                );
-                // Send End with no CallData so the handler cleans up
-                let _ = active.tx.try_send(CallMessage::End(None));
-                false
-            } else {
-                true
-            }
-        });
-    }
-
-    /// Spawn a background task that periodically reaps stuck calls.
-    pub fn spawn_reaper(self: &Arc<Self>) {
-        let dispatcher = Arc::clone(self);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(REAP_INTERVAL);
-            interval.tick().await; // first tick is immediate, skip it
-            loop {
-                interval.tick().await;
-                dispatcher.reap_stuck_calls().await;
-            }
-        });
-    }
-
-    async fn handle_signal(&self, event: proto::SignalEvent) {
-        if let Some(call) = &event.call {
-            let key = CallKey {
-                sys_num: SysNum(call.sys_num),
-                talkgroup: Talkgroup(call.talkgroup),
-            };
-            let calls = self.calls.read().await;
-            if let Some(active) = calls.get(&key) {
-                let text = format_signal_event(&event);
-                if let Err(e) = active.tx.try_send(CallMessage::Event(text)) {
-                    tracing::warn!(talkgroup = key.talkgroup.0, "signal event dropped: {e}");
-                }
-                return;
-            }
-        }
-        self.aggregator
-            .send(AggregatorMessage::Signal(Box::new(event)));
-    }
-
-    async fn handle_unit(&self, event: proto::UnitEvent) {
-        if event.talkgroup != 0
-            && let Some(system) = &event.system
-        {
-            let key = CallKey {
-                sys_num: SysNum(system.sys_num),
-                talkgroup: Talkgroup(event.talkgroup),
-            };
-            let calls = self.calls.read().await;
-            if let Some(active) = calls.get(&key) {
-                let text = format_unit_event(&event);
-                if let Err(e) = active.tx.try_send(CallMessage::Event(text)) {
-                    tracing::warn!(talkgroup = key.talkgroup.0, "unit event dropped: {e}");
-                }
-                return;
-            }
-        }
-        self.aggregator.send(AggregatorMessage::Unit(event));
-    }
-}
-
-fn format_signal_event(event: &proto::SignalEvent) -> String {
-    let signal_type = proto::SignalType::try_from(event.signal_type).map_or_else(
-        |_| format!("UNKNOWN({})", event.signal_type),
-        |st| {
-            st.as_str_name()
-                .strip_prefix("SIGNAL_TYPE_")
-                .unwrap_or(st.as_str_name())
-                .to_string()
-        },
-    );
-
-    let unit = if event.unit_alias.is_empty() {
-        format!("unit {}", event.unit_id)
-    } else {
-        format!("{} ({})", event.unit_alias, event.unit_id)
-    };
-
-    format!(
-        "**Signal**: {unit} - {signal_type} ({})",
-        event.signaling_type
-    )
-}
-
-fn format_unit_event(event: &proto::UnitEvent) -> String {
-    let event_type = proto::UnitEventType::try_from(event.r#type).map_or_else(
-        |_| format!("UNKNOWN({})", event.r#type),
-        |et| {
-            et.as_str_name()
-                .strip_prefix("UNIT_EVENT_TYPE_")
-                .unwrap_or(et.as_str_name())
-                .to_string()
-        },
-    );
-
-    let source = if event.source_alias.is_empty() {
-        format!("source {}", event.source_id)
-    } else {
-        format!("{} ({})", event.source_alias, event.source_id)
-    };
-
-    format!("**Unit**: {event_type} - {source} (tg {})", event.talkgroup)
 }

@@ -1124,7 +1124,8 @@ impl CallManager {
                                 ffi::call_recorder_since_last_write_secs(&*c.handle);
                             if since_write > timeout || since_update > timeout {
                                 Self::conclude_call(entry, &self.patch_tables, bridge);
-                                ffi::call_notify_setup_recorder(ctx.as_mut(), &*c.handle);
+                                let handle = &*entry.common().handle;
+                                ffi::call_notify_setup_recorder(ctx.as_mut(), handle);
                                 ended_call = true;
                                 return false;
                             }

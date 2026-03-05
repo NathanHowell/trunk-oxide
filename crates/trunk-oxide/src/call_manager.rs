@@ -1368,8 +1368,8 @@ impl CallManager {
 
         for info in &infos {
             let sys_num = info.sys_num;
-            let policy = match self.config.systems.get(&sys_num) {
-                Some(p) if p.system_type.is_trunked() => p,
+            match self.config.systems.get(&sys_num) {
+                Some(p) if p.system_type.is_trunked() => {}
                 _ => continue,
             };
             let decode_rate = info.decode_rate;

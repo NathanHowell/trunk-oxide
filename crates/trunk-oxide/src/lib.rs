@@ -7,7 +7,9 @@
 //! Events flow: SDR → C++ gnuradio graph → cxx callbacks → EventBridge
 
 mod call_manager;
+mod dedup;
 
+use std::hash::{Hash, Hasher};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -15,6 +17,41 @@ use std::time::Duration;
 use trunk_recorder_sys::{EventNotifier, GrEvent};
 
 pub use call_manager::{CallManagerConfig, SystemPolicy, TalkgroupPolicy};
+
+/// Dedup key derived from a trunk message. Two identical TSBKs parsed by
+/// different decoders on the same system produce the same key.
+struct TrunkMsgKey {
+    sys_num: i32,
+    message_type: u8,
+    opcode: u64,
+    talkgroup: i64,
+    source: i64,
+    freq_bits: u64,
+}
+
+impl From<&ffi::TrTrunkMessage> for TrunkMsgKey {
+    fn from(msg: &ffi::TrTrunkMessage) -> Self {
+        Self {
+            sys_num: msg.sys_num,
+            message_type: msg.message_type.repr,
+            opcode: msg.opcode,
+            talkgroup: msg.talkgroup,
+            source: msg.source,
+            freq_bits: msg.freq.to_bits(),
+        }
+    }
+}
+
+impl Hash for TrunkMsgKey {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.sys_num.hash(state);
+        self.message_type.hash(state);
+        self.opcode.hash(state);
+        self.talkgroup.hash(state);
+        self.source.hash(state);
+        self.freq_bits.hash(state);
+    }
+}
 
 /// Create an interval whose first tick fires after `period` (not immediately).
 fn delayed_interval(period: Duration) -> tokio::time::Interval {
@@ -342,6 +379,8 @@ impl TrunkRecorder {
             call_mgr.add_call(call);
         }
 
+        let mut trunk_dedup = dedup::WindowedDedup::new(64);
+
         let mut tick = delayed_interval(Duration::from_secs(1));
         let mut decode = delayed_interval(Duration::from_secs(3));
         let mut status = delayed_interval(Duration::from_secs(200));
@@ -358,6 +397,10 @@ impl TrunkRecorder {
                     self.pending.fetch_sub(1, Ordering::Relaxed);
                     match event {
                         GrEvent::TrunkMessages(messages) => {
+                            let messages: Vec<_> = messages
+                                .into_iter()
+                                .filter(|m| trunk_dedup.admit(&TrunkMsgKey::from(&*m)))
+                                .collect();
                             if !messages.is_empty() {
                                 let mut by_system: HashMap<i32, Vec<usize>> = HashMap::new();
                                 for (i, msg) in messages.iter().enumerate() {

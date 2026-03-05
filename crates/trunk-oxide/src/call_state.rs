@@ -1806,6 +1806,36 @@ mod tests {
         assert_eq!(entry.state, CallState::Recording);
     }
 
+    // ── Conventional restart updates recorder number ──
+
+    #[test]
+    fn conventional_restart_updates_recorder_for_squelch() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let channel = ConventionalChannel {
+            talkgroup: Talkgroup(1),
+            freq: Freq::from_hz(488_000_000.0),
+            is_analog: true,
+            priority: 0,
+        };
+        let policy = sm.config.systems.get(&1).unwrap().clone();
+        let call_id = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
+        sm.calls[0].state = CallState::Recording;
+
+        // Simulate restart with a new recorder number (C++ may reassign)
+        sm.on_conventional_restarted(call_id, Some(RecorderNum(13)));
+
+        let entry = sm.get_call(call_id).unwrap();
+        assert_eq!(entry.recorder, Some(RecorderNum(13)));
+
+        // Squelch on the NEW recorder must match this call
+        sm.on_squelch(RecorderNum(13), true, -30.0);
+        assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Idle);
+
+        // Squelch on the OLD recorder must NOT match
+        sm.on_squelch(RecorderNum(12), false, -20.0);
+        assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Idle);
+    }
+
     // ── Squelch handling ──
 
     #[test]

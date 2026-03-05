@@ -7,6 +7,7 @@
 //! Events flow: SDR → C++ gnuradio graph → cxx callbacks → EventBridge
 
 mod call_manager;
+mod call_state;
 mod dedup;
 
 use std::hash::{Hash, Hasher};
@@ -17,6 +18,7 @@ use std::time::Duration;
 use trunk_recorder_sys::{EventNotifier, GrEvent};
 
 pub use call_manager::{CallManagerConfig, SystemPolicy, TalkgroupPolicy};
+pub use call_state::Talkgroup;
 
 /// Dedup key derived from a trunk message. Two identical TSBKs parsed by
 /// different decoders on the same system produce the same key.
@@ -260,7 +262,7 @@ impl TrunkRecorderBuilder {
                 .iter()
                 .map(|tg| {
                     (
-                        tg.id,
+                        Talkgroup(tg.id),
                         TalkgroupPolicy {
                             mode: tg.mode,
                             priority: tg.priority,

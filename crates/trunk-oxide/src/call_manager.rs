@@ -14,143 +14,10 @@ use std::sync::Arc;
 
 use trunk_oxide_grpc::EventBridge;
 
-/// Unified call state for both trunked and conventional calls.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CallState {
-    /// Actively recording audio.
-    Recording,
-    /// Between transmissions (squelch closed / no Grant refresh).
-    Idle,
-    /// Not recording for a policy reason.
-    Rejected(RejectReason),
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum RejectReason {
-    UnknownTg,
-    IgnoredTg,
-    NoSource,
-    NoRecorder,
-    Encrypted,
-    Duplicate,
-    Superseded,
-}
-
-impl CallState {
-    /// Map to the proto CallState i32 value for use in TrCallInfo/proto messages.
-    fn to_proto(self) -> i32 {
-        use trunk_oxide_grpc::proto::CallState as ProtoCallState;
-        match self {
-            CallState::Recording => ProtoCallState::Recording as i32,
-            CallState::Idle => ProtoCallState::Idle as i32,
-            CallState::Rejected(RejectReason::UnknownTg) => ProtoCallState::RejectedUnknownTg as i32,
-            CallState::Rejected(RejectReason::IgnoredTg) => ProtoCallState::RejectedIgnoredTg as i32,
-            CallState::Rejected(RejectReason::NoSource) => ProtoCallState::RejectedNoSource as i32,
-            CallState::Rejected(RejectReason::NoRecorder) => ProtoCallState::RejectedNoRecorder as i32,
-            CallState::Rejected(RejectReason::Encrypted) => ProtoCallState::RejectedEncrypted as i32,
-            CallState::Rejected(RejectReason::Duplicate) => ProtoCallState::RejectedDuplicate as i32,
-            CallState::Rejected(RejectReason::Superseded) => ProtoCallState::RejectedSuperseded as i32,
-        }
-    }
-}
-
-impl std::fmt::Display for CallState {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            CallState::Recording => write!(f, "Recording"),
-            CallState::Idle => write!(f, "Idle"),
-            CallState::Rejected(r) => write!(f, "Rejected: {r}"),
-        }
-    }
-}
-
-impl std::fmt::Display for RejectReason {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            RejectReason::UnknownTg => write!(f, "UNKNOWN TG"),
-            RejectReason::IgnoredTg => write!(f, "IGNORED TG"),
-            RejectReason::NoSource => write!(f, "NO SOURCE"),
-            RejectReason::NoRecorder => write!(f, "NO RECORDER"),
-            RejectReason::Encrypted => write!(f, "ENCRYPTED"),
-            RejectReason::Duplicate => write!(f, "DUPLICATE"),
-            RejectReason::Superseded => write!(f, "SUPERSEDED"),
-        }
-    }
-}
-
-/// Per-system patch table: maps supergroup → { talkgroup → last_update }.
-///
-/// Trunked P25 systems dynamically patch talkgroups together via control
-/// channel messages.  Patches expire after 10 seconds without a refresh.
-struct PatchTable {
-    patches: HashMap<u64, HashMap<u64, Instant>>,
-}
-
-impl PatchTable {
-    fn new() -> Self {
-        Self {
-            patches: HashMap::new(),
-        }
-    }
-
-    /// Add/update talkgroups in a patch (from PatchAdd message).
-    fn update(&mut self, pd: &ffi::TrPatchData) {
-        let now = Instant::now();
-        let patch = self.patches.entry(pd.sg).or_default();
-        for &tg in &[pd.sg, pd.ga1, pd.ga2, pd.ga3] {
-            if tg != 0 {
-                patch.insert(tg, now);
-            }
-        }
-    }
-
-    /// Remove ga1/ga2/ga3 from a patch (from PatchDelete message).
-    fn delete(&mut self, pd: &ffi::TrPatchData) {
-        if let Some(patch) = self.patches.get_mut(&pd.sg) {
-            for &tg in &[pd.ga1, pd.ga2, pd.ga3] {
-                if tg != 0 {
-                    patch.remove(&tg);
-                }
-            }
-        }
-    }
-
-    /// Remove entries older than 10 seconds, prune empty patches.
-    fn clear_stale(&mut self) {
-        self.patches.retain(|_, patch| {
-            patch.retain(|_, last_update| last_update.elapsed().as_secs() < 10);
-            !patch.is_empty()
-        });
-    }
-
-    /// Log all active patches for a given system short name.
-    fn log_patches(&self, short_name: &str) {
-        tracing::info!(
-            system = short_name,
-            count = self.patches.len(),
-            "active talkgroup patches"
-        );
-        for (sg, members) in &self.patches {
-            let tgids: Vec<u64> = members.keys().copied().collect();
-            tracing::info!(supergroup = sg, ?tgids, "active patch");
-        }
-    }
-
-    /// Get all talkgroups in the same patch as the given talkgroup.
-    fn get_patch(&self, talkgroup: i64) -> Vec<i64> {
-        let tg = talkgroup as u64;
-        for patch in self.patches.values() {
-            if patch.contains_key(&tg) {
-                return patch.keys().map(|&k| k as i64).collect();
-            }
-        }
-        Vec::new()
-    }
-}
-
-fn format_freq(f: f64) -> String {
-    format!("{:.4} MHz", f / 1_000_000.0)
-}
+use crate::call_state::{
+    CallId, CallMode, CallSegment, CallState, Freq, PatchTable, RecorderNum, RejectReason,
+    SourceId, SysNum, Talkgroup, TrunkedFields,
+};
 
 fn format_recorder_state(state: i32) -> &'static str {
     match state {
@@ -187,7 +54,7 @@ pub struct SystemPolicy {
     pub conversation_mode: bool,
     pub max_duration: f64,
     pub control_channels: Vec<f64>,
-    pub talkgroups: HashMap<i64, TalkgroupPolicy>,
+    pub talkgroups: HashMap<Talkgroup, TalkgroupPolicy>,
     /// Initial P25 identity from config (for LFSR / XOR mask).
     pub sys_id: u64,
     pub wacn: u64,
@@ -244,31 +111,6 @@ impl Recorder {
     fn stop(self, call: Pin<&mut TrCall>) -> ffi::TrStopRecordingResult {
         ffi::call_stop_recording(call)
     }
-}
-
-/// A completed segment within a multi-PTT call. Each time a trunked call is
-/// granted a new frequency, the current segment is closed and a new one begins.
-/// For conventional calls, each squelch-open/close cycle is a segment.
-struct CallSegment {
-    freq: f64,
-    start: Instant,
-    rec_num: i32,
-}
-
-/// P25 multisite fields — only meaningful for trunked calls.
-struct TrunkedFields {
-    multi_site: bool,
-    wacn: u64,
-    rfss: i32,
-    site_id: i32,
-    multi_site_name: String,
-    conversation_mode: bool,
-}
-
-/// Discriminant for trunked vs conventional behavior.
-enum CallMode {
-    Trunked(TrunkedFields),
-    Conventional,
 }
 
 /// A call entry — unified across trunked and conventional.
@@ -538,9 +380,9 @@ impl CallManager {
             patched_talkgroups: patches
                 .get(&c.sys_num)
                 .map(|pt| {
-                    pt.get_patch(c.talkgroup)
+                    pt.get_patch(Talkgroup(c.talkgroup))
                         .into_iter()
-                        .map(|t| t as u64)
+                        .map(|t| t.0 as u64)
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -585,7 +427,7 @@ impl CallManager {
             short_name = %entry.short_name,
             rec_num,
             talkgroup = entry.talkgroup,
-            freq = %format_freq(entry.freq),
+            freq = %Freq::from_hz(entry.freq),
             tdma = entry.phase2_tdma,
             slot = entry.tdma_slot,
             freq_error = format_args!("{:+.0} Hz", metrics.freq_error),
@@ -760,12 +602,14 @@ impl CallManager {
             }
             TrMessageType::PatchAdd => {
                 if let Some(pt) = self.patch_tables.get_mut(&msg.sys_num) {
-                    pt.update(&msg.patch_data);
+                    let pd = &msg.patch_data;
+                    pt.update(pd.sg, pd.ga1, pd.ga2, pd.ga3);
                 }
             }
             TrMessageType::PatchDelete => {
                 if let Some(pt) = self.patch_tables.get_mut(&msg.sys_num) {
-                    pt.delete(&msg.patch_data);
+                    let pd = &msg.patch_data;
+                    pt.delete(pd.sg, pd.ga1, pd.ga2, pd.ga3);
                 }
             }
             TrMessageType::Tdulc => {
@@ -918,8 +762,8 @@ impl CallManager {
                 tracing::info!(
                     short_name = %entry.short_name,
                     talkgroup = entry.talkgroup,
-                    old_freq = %format_freq(old_freq),
-                    new_freq = %format_freq(msg.freq),
+                    old_freq = %Freq::from_hz(old_freq),
+                    new_freq = %Freq::from_hz(msg.freq),
                     segment_count,
                     "retuning call to new frequency"
                 );
@@ -1005,20 +849,20 @@ impl CallManager {
         msg: &TrTrunkMessage,
     ) -> bool {
         let sys_num = msg.sys_num;
-        let tg_id = msg.talkgroup;
+        let tg = Talkgroup(msg.talkgroup);
 
         let sys_policy = match self.config.systems.get(&sys_num) {
             Some(sp) => sp,
             None => return false,
         };
 
-        let tg_policy = sys_policy.talkgroups.get(&tg_id);
+        let tg_policy = sys_policy.talkgroups.get(&tg);
 
         // Query runtime patch data from Rust-owned patch table
         let patch_tgs = self
             .patch_tables
             .get(&sys_num)
-            .map(|pt| pt.get_patch(tg_id))
+            .map(|pt| pt.get_patch(tg))
             .unwrap_or_default();
 
         // 1. Unknown TG check
@@ -1031,7 +875,7 @@ impl CallManager {
                 entry.state = CallState::Rejected(RejectReason::UnknownTg);
                 if !sys_policy.hide_unknown {
                     tracing::info!(
-                        talkgroup = tg_id,
+                        talkgroup = tg.0,
                         sys_num,
                         "not recording: TG not in talkgroup file"
                     );
@@ -1047,7 +891,7 @@ impl CallManager {
             if !sys_policy.monitor_encrypted {
                 entry.state = CallState::Rejected(RejectReason::Encrypted);
                 if !sys_policy.hide_encrypted {
-                    tracing::info!(talkgroup = tg_id, sys_num, "not recording: encrypted");
+                    tracing::info!(talkgroup = tg.0, sys_num, "not recording: encrypted");
                 }
                 return false;
             }
@@ -1065,8 +909,8 @@ impl CallManager {
         // 4. Calculate priority (best among patched TGs)
         let priority = if let Some(tg) = tg_policy {
             let mut p = tg.priority;
-            for &ptg_id in &patch_tgs {
-                if let Some(ptg) = sys_policy.talkgroups.get(&ptg_id) {
+            for &ptg in &patch_tgs {
+                if let Some(ptg) = sys_policy.talkgroups.get(&ptg) {
                     if ptg.priority >= 0 && ptg.priority < p {
                         p = ptg.priority;
                     }
@@ -1081,7 +925,7 @@ impl CallManager {
         if priority == -1 {
             entry.state = CallState::Rejected(RejectReason::IgnoredTg);
             tracing::info!(
-                talkgroup = tg_id,
+                talkgroup = tg.0,
                 sys_num,
                 "not recording: priority disabled (-1)"
             );
@@ -1100,7 +944,7 @@ impl CallManager {
             if priority > available {
                 entry.state = CallState::Rejected(RejectReason::NoRecorder);
                 tracing::error!(
-                    talkgroup = tg_id,
+                    talkgroup = tg.0,
                     sys_num,
                     priority,
                     available,
@@ -1121,8 +965,8 @@ impl CallManager {
                 tracing::info!(
                     short_name = %entry.short_name,
                     rec_num,
-                    talkgroup = tg_id,
-                    freq = %format_freq(entry.freq),
+                    talkgroup = tg.0,
+                    freq = %Freq::from_hz(entry.freq),
                     tdma = entry.phase2_tdma,
                     slot = entry.tdma_slot,
                     analog = is_analog,
@@ -1139,7 +983,7 @@ impl CallManager {
         // No source covered the frequency
         entry.state = CallState::Rejected(RejectReason::NoSource);
         tracing::error!(
-            talkgroup = tg_id,
+            talkgroup = tg.0,
             sys_num,
             "not recording: no source covering freq"
         );
@@ -1198,7 +1042,7 @@ impl CallManager {
                 result.original_idx = Some(idx);
 
                 // Supersede check
-                let call_preferred_nac = self.get_preferred_nac(entry.sys_num, talkgroup);
+                let call_preferred_nac = self.get_preferred_nac(entry.sys_num, Talkgroup(talkgroup));
                 if call_preferred_nac != call_rfss_site && msg.nac == msg_rfss_site {
                     result.is_superseding = true;
                 }
@@ -1224,7 +1068,7 @@ impl CallManager {
     }
 
     /// Look up preferred NAC for a talkgroup from Rust-owned config.
-    fn get_preferred_nac(&self, sys_num: i32, talkgroup: i64) -> u64 {
+    fn get_preferred_nac(&self, sys_num: i32, talkgroup: Talkgroup) -> u64 {
         self.config
             .systems
             .get(&sys_num)
@@ -1396,7 +1240,7 @@ impl CallManager {
                     system = %entry.short_name,
                     call_num = entry.call_num,
                     talkgroup = entry.talkgroup,
-                    freq = format_freq(entry.freq),
+                    freq = %Freq::from_hz(entry.freq),
                     elapsed,
                     state,
                     enabled,
@@ -1407,7 +1251,7 @@ impl CallManager {
                     system = %entry.short_name,
                     call_num = entry.call_num,
                     talkgroup = entry.talkgroup,
-                    freq = format_freq(entry.freq),
+                    freq = %Freq::from_hz(entry.freq),
                     elapsed,
                     state,
                     "call status"
@@ -1429,7 +1273,7 @@ impl CallManager {
                 let decode_rate = self.decode_rates.get(&sys_num).copied().unwrap_or(0);
                 tracing::info!(
                     system = %policy.short_name,
-                    freq = format_freq(cc_freq),
+                    freq = %Freq::from_hz(cc_freq),
                     decode_rate,
                     "msg/sec"
                 );
@@ -1446,7 +1290,7 @@ impl CallManager {
                 current_source = r.source_num;
                 tracing::info!(
                     source = r.source_num,
-                    freq = %format_freq(r.source_center),
+                    freq = %Freq::from_hz(r.source_center),
                     device = %r.source_device,
                     "source"
                 );

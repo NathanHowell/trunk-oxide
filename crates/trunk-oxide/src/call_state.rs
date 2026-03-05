@@ -1258,10 +1258,15 @@ impl TrunkStateMachine {
         effects
     }
 
-    pub(crate) fn on_conventional_restarted(&mut self, call_id: CallId) {
+    pub(crate) fn on_conventional_restarted(
+        &mut self,
+        call_id: CallId,
+        recorder: Option<RecorderNum>,
+    ) {
         if let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) {
             entry.call_num = next_call_num();
             entry.start_time = SystemTime::now();
+            entry.recorder = recorder;
         }
     }
 

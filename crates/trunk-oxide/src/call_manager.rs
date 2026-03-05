@@ -132,9 +132,6 @@ impl CallManager {
                         ffi::call_recorder_set_source(handle.pin_mut(), source_id);
                     }
                 }
-                Effect::DestroyCall { call_id } => {
-                    self.handles.remove(&call_id);
-                }
                 Effect::EmitCallStart { call_id } => {
                     if let Some(entry) = self.state.get_call(call_id) {
                         let info = self.build_call_info(entry);

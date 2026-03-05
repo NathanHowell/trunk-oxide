@@ -30,13 +30,7 @@ pub(crate) fn unix_timestamp_now() -> i64 {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct SysNum(pub(crate) i32);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Talkgroup(pub(crate) i64);
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct SourceId(pub(crate) i64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct RecorderNum(pub(crate) i32);
@@ -378,26 +372,6 @@ impl CallEntry {
     }
 }
 
-// ── Grant input (pure Rust view of a trunk message for call dispatch) ──
-
-pub(crate) struct GrantInput {
-    pub(crate) sys_num: i32,
-    pub(crate) talkgroup: i64,
-    pub(crate) freq: Freq,
-    pub(crate) tdma_slot: i32,
-    pub(crate) phase2_tdma: bool,
-    pub(crate) mode: bool,
-    pub(crate) duplex: bool,
-    pub(crate) emergency: bool,
-    pub(crate) encrypted: bool,
-    pub(crate) source: i64,
-    pub(crate) priority: i32,
-    pub(crate) wacn: u64,
-    pub(crate) nac: u64,
-    pub(crate) sys_rfss: i32,
-    pub(crate) sys_site_id: i32,
-}
-
 // ── Recording result (fed back from executor after FFI) ──
 
 pub(crate) enum RecordingResult {
@@ -439,10 +413,6 @@ pub(crate) enum Effect {
         call_id: CallId,
         source_id: i64,
     },
-    DestroyCall {
-        call_id: CallId,
-    },
-
     // ── Event emission ──
     EmitCallStart {
         call_id: CallId,

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::RwLock;
 
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::ReceiverStream;
@@ -6,7 +7,7 @@ use tonic::{Request, Response, Status};
 use trunk_recorder_sys::ffi::{
     TrCallData, TrCallInfo, TrRecorder, TrSystem, TrTrunkMessage, TrUnitEventType,
 };
-use trunk_recorder_sys::{EventHandler, SystemInfo};
+use trunk_recorder_sys::{CxxCallbacks, SystemInfo};
 
 pub use trunk_oxide_proto as proto;
 
@@ -232,7 +233,7 @@ impl TrunkOxide for TrunkOxideService {
                         tracing::warn!(skipped = n, "event subscriber lagged");
                     }
                     Err(broadcast::error::RecvError::Closed) => {
-                        tracing::warn!("event broadcast channel closed");
+                        tracing::info!("event broadcast channel closed");
                         break;
                     }
                 }
@@ -263,7 +264,7 @@ impl TrunkOxide for TrunkOxideService {
                         tracing::warn!(skipped = n, "audio subscriber lagged");
                     }
                     Err(broadcast::error::RecvError::Closed) => {
-                        tracing::warn!("audio broadcast channel closed");
+                        tracing::info!("audio broadcast channel closed");
                         break;
                     }
                 }
@@ -274,7 +275,7 @@ impl TrunkOxide for TrunkOxideService {
     }
 }
 
-// ── Plugin implementation ──
+// ── EventBridge: lock-free event dispatch ──
 
 const DEFAULT_SOCKET_PATH: &str = "/run/service/grpc.sock";
 
@@ -290,26 +291,37 @@ impl Default for GrpcConfig {
     }
 }
 
-#[derive(Default)]
-pub struct GrpcPlugin {
-    config: GrpcConfig,
-    runtime: Option<tokio::runtime::Runtime>,
-    audio_tx: Option<broadcast::Sender<proto::AudioSample>>,
-    event_tx: Option<broadcast::Sender<proto::PluginEvent>>,
-    /// (short_name, talkgroup_id) → metadata from config CSVs
+/// Bridges trunk-recorder events to gRPC subscribers via broadcast channels.
+///
+/// All methods take `&self` — no mutex needed. The broadcast senders are
+/// inherently `Sync`, talkgroups are read-only after construction, and
+/// `unit_aliases` uses a `RwLock` for rare writes.
+pub struct EventBridge {
+    audio_tx: broadcast::Sender<proto::AudioSample>,
+    event_tx: broadcast::Sender<proto::PluginEvent>,
+    /// (`short_name`, `talkgroup_id`) → metadata from config CSVs
     talkgroups: HashMap<(String, i64), TalkgroupMeta>,
-    /// (sys_num, radio_id) → OTA-discovered alias
-    unit_aliases: HashMap<(i32, i64), String>,
+    /// (`sys_num`, `radio_id`) → OTA-discovered alias
+    unit_aliases: RwLock<HashMap<(i32, i64), String>>,
 }
 
-impl GrpcPlugin {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Populate talkgroup metadata lookup from config data.
-    pub fn set_talkgroups(&mut self, talkgroups: HashMap<(String, i64), TalkgroupMeta>) {
-        self.talkgroups = talkgroups;
+impl EventBridge {
+    pub fn new(
+        talkgroups: HashMap<(String, i64), TalkgroupMeta>,
+    ) -> (
+        Self,
+        broadcast::Sender<proto::AudioSample>,
+        broadcast::Sender<proto::PluginEvent>,
+    ) {
+        let (audio_tx, _) = broadcast::channel::<proto::AudioSample>(4096);
+        let (event_tx, _) = broadcast::channel::<proto::PluginEvent>(4096);
+        let bridge = Self {
+            audio_tx: audio_tx.clone(),
+            event_tx: event_tx.clone(),
+            talkgroups,
+            unit_aliases: RwLock::new(HashMap::new()),
+        };
+        (bridge, audio_tx, event_tx)
     }
 
     fn call_info_from(&self, info: &TrCallInfo) -> proto::CallInfo {
@@ -344,8 +356,17 @@ impl GrpcPlugin {
             conversation_mode: info.conversation_mode,
             current_source_id: info.current_source_id,
             current_length: info.current_length,
-            start_time: info.start_time,
-            elapsed: info.elapsed as i64,
+            start_time: Some(prost_types::Timestamp {
+                seconds: info.start_time,
+                nanos: 0,
+            }),
+            elapsed: {
+                let d = std::time::Duration::from_secs_f64(info.elapsed);
+                Some(prost_types::Duration {
+                    seconds: d.as_secs().try_into().unwrap_or(i64::MAX),
+                    nanos: d.subsec_nanos().try_into().unwrap_or(0),
+                })
+            },
             short_name: info.short_name.clone(),
             talkgroup_alpha_tag: meta.map_or_else(String::new, |m| m.alpha_tag.clone()),
             talkgroup_tag: meta.map_or_else(String::new, |m| m.tag.clone()),
@@ -357,86 +378,21 @@ impl GrpcPlugin {
 
     fn unit_alias(&self, sys_num: i32, unit_id: i64) -> String {
         self.unit_aliases
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
             .get(&(sys_num, unit_id))
             .cloned()
             .unwrap_or_default()
     }
 
     fn send_event(&self, event: proto::plugin_event::Event) {
-        if let Some(tx) = &self.event_tx {
-            let msg = proto::PluginEvent { event: Some(event) };
-            let _ = tx.send(msg);
-        }
-    }
-}
-
-impl EventHandler for GrpcPlugin {
-    fn start(&mut self) {
-        let rt = match tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(2)
-            .enable_all()
-            .build()
-        {
-            Ok(rt) => rt,
-            Err(e) => {
-                tracing::error!("trunk-oxide gRPC server start error: {e}");
-                return;
-            }
-        };
-
-        let (audio_tx, _) = broadcast::channel::<proto::AudioSample>(4096);
-        let (event_tx, _) = broadcast::channel::<proto::PluginEvent>(4096);
-
-        let service = TrunkOxideService {
-            audio_tx: audio_tx.clone(),
-            event_tx: event_tx.clone(),
-        };
-
-        let socket_path = self.config.socket_path.clone();
-
-        rt.spawn(async move {
-            let _ = std::fs::remove_file(&socket_path);
-            let listener = match tokio::net::UnixListener::bind(&socket_path) {
-                Ok(l) => l,
-                Err(e) => {
-                    tracing::error!(path = %socket_path, error = %e, "failed to bind UDS");
-                    return;
-                }
-            };
-            let incoming = tokio_stream::wrappers::UnixListenerStream::new(listener);
-
-            let (reporter, health_service) = tonic_health::server::health_reporter();
-            reporter
-                .set_serving::<TrunkOxideServer<TrunkOxideService>>()
-                .await;
-
-            tracing::info!(path = %socket_path, "trunk-oxide gRPC server listening");
-
-            if let Err(e) = tonic::transport::Server::builder()
-                .add_service(health_service)
-                .add_service(TrunkOxideServer::new(service))
-                .serve_with_incoming(incoming)
-                .await
-            {
-                tracing::error!("gRPC server error: {e}");
-            }
-        });
-
-        self.audio_tx = Some(audio_tx);
-        self.event_tx = Some(event_tx);
-        self.runtime = Some(rt);
-    }
-
-    fn stop(&mut self) {
-        self.audio_tx.take();
-        self.event_tx.take();
-
-        if let Some(rt) = self.runtime.take() {
-            rt.shutdown_timeout(std::time::Duration::from_secs(5));
+        let msg = proto::PluginEvent { event: Some(event) };
+        if let Err(e) = self.event_tx.send(msg) {
+            tracing::trace!(event = %e.0.event.as_ref().map_or("none", |_| "some"), "no event subscribers");
         }
     }
 
-    fn signal(&mut self, unit_id: i64, info: &TrCallInfo) {
+    pub fn signal(&self, unit_id: i64, info: &TrCallInfo) {
         self.send_event(proto::plugin_event::Event::Signal(proto::SignalEvent {
             unit_id,
             signaling_type: String::new(),
@@ -448,8 +404,8 @@ impl EventHandler for GrpcPlugin {
         }));
     }
 
-    fn audio_stream(
-        &mut self,
+    pub fn audio_stream(
+        &self,
         call: Option<&trunk_recorder_sys::ffi::TrCall>,
         recorder: &TrRecorder,
         samples: &[i16],
@@ -458,29 +414,29 @@ impl EventHandler for GrpcPlugin {
         let Some(call) = call else {
             return;
         };
-        if let Some(tx) = &self.audio_tx {
-            let meta = call_get_metadata(call);
-            let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-            let sample_rate_i64 = recorder_get_wav_hz(recorder);
-            let Ok(sample_rate) = i32::try_from(sample_rate_i64) else {
-                tracing::warn!(
-                    sample_rate = sample_rate_i64,
-                    "sample rate outside i32 range; dropping audio chunk"
-                );
-                return;
-            };
-            let msg = proto::AudioSample {
-                talkgroup: meta.talkgroup,
-                sys_num: meta.sys_num,
-                freq: meta.freq,
-                samples: bytes,
-                sample_rate,
-            };
-            let _ = tx.send(msg);
+        let meta = call_get_metadata(call);
+        let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
+        let sample_rate_i64 = recorder_get_wav_hz(recorder);
+        let Ok(sample_rate) = i32::try_from(sample_rate_i64) else {
+            tracing::warn!(
+                sample_rate = sample_rate_i64,
+                "sample rate outside i32 range; dropping audio chunk"
+            );
+            return;
+        };
+        let msg = proto::AudioSample {
+            talkgroup: meta.talkgroup,
+            sys_num: meta.sys_num,
+            freq: meta.freq,
+            samples: bytes,
+            sample_rate,
+        };
+        if let Err(_e) = self.audio_tx.send(msg) {
+            tracing::trace!("no audio subscribers");
         }
     }
 
-    fn call_start(&mut self, info: &TrCallInfo) {
+    pub fn call_start(&self, info: &TrCallInfo) {
         self.send_event(proto::plugin_event::Event::CallStart(
             proto::CallStartEvent {
                 call: Some(self.call_info_from(info)),
@@ -488,13 +444,13 @@ impl EventHandler for GrpcPlugin {
         ));
     }
 
-    fn call_end(&mut self, call_data: &TrCallData) {
+    pub fn call_end(&self, call_data: &TrCallData) {
         self.send_event(proto::plugin_event::Event::CallEnd(proto::CallEndEvent {
             call_data: Some(convert_call_data(call_data)),
         }));
     }
 
-    fn calls_active(&mut self, infos: &[TrCallInfo]) {
+    pub fn calls_active(&self, infos: &[TrCallInfo]) {
         self.send_event(proto::plugin_event::Event::CallsActive(
             proto::CallsActiveEvent {
                 calls: infos.iter().map(|i| self.call_info_from(i)).collect(),
@@ -502,7 +458,7 @@ impl EventHandler for GrpcPlugin {
         ));
     }
 
-    fn setup_recorder(&mut self, recorder: &TrRecorder) {
+    pub fn setup_recorder(&self, recorder: &TrRecorder) {
         self.send_event(proto::plugin_event::Event::SetupRecorder(
             proto::SetupRecorderEvent {
                 recorder: Some(recorder_info(recorder)),
@@ -510,7 +466,7 @@ impl EventHandler for GrpcPlugin {
         ));
     }
 
-    fn setup_system(&mut self, info: &SystemInfo) {
+    pub fn setup_system(&self, info: &SystemInfo) {
         self.send_event(proto::plugin_event::Event::SetupSystem(
             proto::SetupSystemEvent {
                 system: Some(system_info_from(info)),
@@ -518,7 +474,7 @@ impl EventHandler for GrpcPlugin {
         ));
     }
 
-    fn setup_config(&mut self, infos: &[SystemInfo]) {
+    pub fn setup_config(&self, infos: &[SystemInfo]) {
         self.send_event(proto::plugin_event::Event::SetupConfig(
             proto::SetupConfigEvent {
                 sources: vec![],
@@ -527,7 +483,7 @@ impl EventHandler for GrpcPlugin {
         ));
     }
 
-    fn trunk_message(&mut self, messages: &[TrTrunkMessage], info: &SystemInfo) {
+    pub fn trunk_message(&self, messages: &[TrTrunkMessage], info: &SystemInfo) {
         self.send_event(proto::plugin_event::Event::TrunkMessage(
             proto::TrunkMessageEvent {
                 messages: convert_trunk_messages(messages),
@@ -536,7 +492,7 @@ impl EventHandler for GrpcPlugin {
         ));
     }
 
-    fn system_rates(&mut self, infos: &[SystemInfo], time_diff: f32) {
+    pub fn system_rates(&self, infos: &[SystemInfo], time_diff: f32) {
         self.send_event(proto::plugin_event::Event::SystemRates(
             proto::SystemRatesEvent {
                 systems: infos.iter().map(system_info_from).collect(),
@@ -545,8 +501,8 @@ impl EventHandler for GrpcPlugin {
         ));
     }
 
-    fn unit_event(
-        &mut self,
+    pub fn unit_event(
+        &self,
         info: &SystemInfo,
         event_type: TrUnitEventType,
         source_id: i64,
@@ -574,18 +530,19 @@ impl EventHandler for GrpcPlugin {
         }));
     }
 
-    fn unit_alias_discovered(
-        &mut self,
+    pub fn unit_alias_discovered(
+        &self,
         system: &TrSystem,
         radio_id: i64,
         alias: &str,
         source: &str,
         talkgroup_id: i64,
     ) {
-        // unit_alias_discovered still receives &TrSystem from C++ (recorder callback)
-        // We can't easily get TrSystemInfo here without a TrContext, so build a minimal one
         let _ = system;
-        self.unit_aliases.insert((0, radio_id), alias.to_string());
+        self.unit_aliases
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert((0, radio_id), alias.to_string());
         self.send_event(proto::plugin_event::Event::UnitAlias(
             proto::UnitAliasEvent {
                 system: None,
@@ -595,5 +552,66 @@ impl EventHandler for GrpcPlugin {
                 talkgroup_id,
             },
         ));
+    }
+}
+
+impl CxxCallbacks for EventBridge {
+    fn audio_stream(
+        &self,
+        call: Option<&trunk_recorder_sys::ffi::TrCall>,
+        recorder: &TrRecorder,
+        samples: &[i16],
+    ) {
+        Self::audio_stream(self, call, recorder, samples);
+    }
+
+    fn setup_recorder(&self, recorder: &TrRecorder) {
+        Self::setup_recorder(self, recorder);
+    }
+
+    fn unit_alias_discovered(
+        &self,
+        system: &TrSystem,
+        radio_id: i64,
+        alias: &str,
+        source: &str,
+        talkgroup_id: i64,
+    ) {
+        Self::unit_alias_discovered(self, system, radio_id, alias, source, talkgroup_id);
+    }
+}
+
+/// Spawn the gRPC server as an async task.
+pub async fn serve_grpc(
+    socket_path: String,
+    audio_tx: broadcast::Sender<proto::AudioSample>,
+    event_tx: broadcast::Sender<proto::PluginEvent>,
+) {
+    let service = TrunkOxideService { audio_tx, event_tx };
+
+    let _ = std::fs::remove_file(&socket_path);
+    let listener = match tokio::net::UnixListener::bind(&socket_path) {
+        Ok(l) => l,
+        Err(e) => {
+            tracing::error!(path = %socket_path, error = %e, "failed to bind UDS");
+            return;
+        }
+    };
+    let incoming = tokio_stream::wrappers::UnixListenerStream::new(listener);
+
+    let (reporter, health_service) = tonic_health::server::health_reporter();
+    reporter
+        .set_serving::<TrunkOxideServer<TrunkOxideService>>()
+        .await;
+
+    tracing::info!(path = %socket_path, "trunk-oxide gRPC server listening");
+
+    if let Err(e) = tonic::transport::Server::builder()
+        .add_service(health_service)
+        .add_service(TrunkOxideServer::new(service))
+        .serve_with_incoming(incoming)
+        .await
+    {
+        tracing::error!("gRPC server error: {e}");
     }
 }

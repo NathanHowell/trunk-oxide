@@ -2,17 +2,17 @@
 //!
 //! This binary replaces the trunk-recorder executable. It links against
 //! libtrunk-recorder.so, reads the TOML config file, and routes all events
-//! through the gRPC plugin to downstream consumers.
+//! through the gRPC EventBridge to downstream consumers.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result};
 use clap::Parser;
 use opentelemetry::trace::TracerProvider;
 use tracing_subscriber::prelude::*;
 use trunk_oxide::TrunkRecorderBuilder;
-use trunk_oxide_grpc::GrpcPlugin;
+use trunk_oxide_grpc::{EventBridge, TalkgroupMeta};
 
 #[derive(Parser)]
 struct Args {
@@ -83,13 +83,9 @@ fn main() -> Result<()> {
 
     let config = trunk_config::Config::load(config_path).context("failed to load TOML config")?;
 
-    let mut plugin = GrpcPlugin::new();
-
     // Build talkgroup metadata lookup from config
-    {
+    let tg_map = {
         use std::collections::HashMap;
-        use trunk_oxide_grpc::TalkgroupMeta;
-
         let mut tg_map = HashMap::new();
         for (short_name, sys) in &config.system {
             for tg in &sys.talkgroup {
@@ -113,12 +109,18 @@ fn main() -> Result<()> {
                 );
             }
         }
-        plugin.set_talkgroups(tg_map);
-    }
+        tg_map
+    };
 
-    let mut recorder = TrunkRecorderBuilder::from_config(&config, plugin)
+    let (bridge, audio_tx, event_tx) = EventBridge::new(tg_map);
+    let bridge = Arc::new(bridge);
+
+    let mut recorder = TrunkRecorderBuilder::from_config(&config, bridge.clone())
         .context("failed to initialize trunk-recorder")?
         .start();
+
+    // Single runtime for gRPC server, timers, and signal handling
+    let rt = tokio::runtime::Runtime::new()?;
 
     // Register observable gauge for event channel depth
     if meter_provider.is_some() {
@@ -133,25 +135,33 @@ fn main() -> Result<()> {
             .build();
     }
 
+    // Spawn gRPC server as a background task on the runtime
+    let socket_path = trunk_oxide_grpc::GrpcConfig::default().socket_path;
+    rt.spawn(trunk_oxide_grpc::serve_grpc(
+        socket_path,
+        audio_tx,
+        event_tx,
+    ));
+
     tracing::info!("trunk-recorder engine running, press Ctrl+C to stop");
 
-    let shutdown = Arc::new(AtomicBool::new(false));
-    let monitor_shutdown = Arc::clone(&shutdown);
+    // The monitor loop makes FFI calls into C++ (TrContext), which is !Send and
+    // must stay on a single OS thread. We spawn a dedicated thread and use
+    // Handle::block_on to drive the async monitor future on that thread while
+    // sharing the runtime's I/O reactor, timers, and signal handler.
+    let monitor_handle = {
+        let rt_handle = rt.handle().clone();
+        std::thread::Builder::new()
+            .name("monitor".into())
+            .spawn(move || rt_handle.block_on(recorder.run_monitor()))
+            .context("failed to spawn monitor thread")?
+    };
 
-    let monitor_handle = std::thread::spawn(move || recorder.run_monitor(&monitor_shutdown));
-
-    // Block until SIGINT
-    let rt = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()?;
-    rt.block_on(async {
-        tokio::signal::ctrl_c()
-            .await
-            .expect("failed to install signal handler");
-    });
-
-    shutdown.store(true, Ordering::Relaxed);
-    monitor_handle.join().unwrap()?;
+    // Block until the monitor loop finishes (on ctrl_c or error).
+    // join() returns Err only if the thread panicked.
+    let monitor_result = monitor_handle
+        .join()
+        .map_err(|_| anyhow::anyhow!("monitor thread panicked"))?;
 
     if let Some(provider) = meter_provider {
         let _ = provider.shutdown();
@@ -160,5 +170,5 @@ fn main() -> Result<()> {
         let _ = provider.shutdown();
     }
 
-    Ok(())
+    monitor_result
 }

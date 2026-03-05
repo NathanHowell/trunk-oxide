@@ -10,7 +10,9 @@ use trunk_recorder_sys::ffi::{
     TrState, TrTrunkMessage, TrUnitEventType,
 };
 
-use crate::{Handler, lock_handler};
+use std::sync::Arc;
+
+use trunk_oxide_grpc::EventBridge;
 
 /// Per-system patch table: maps supergroup → { talkgroup → last_update }.
 ///
@@ -385,7 +387,7 @@ impl CallEntry {
 pub struct CallManager {
     calls: Vec<CallEntry>,
     config: CallManagerConfig,
-    handler: Handler,
+    bridge: Arc<EventBridge>,
     /// Per-system raw gr::message count (for decode rate calculation).
     message_counts: HashMap<i32, i32>,
     /// Per-system consecutive retune attempt counter.
@@ -406,7 +408,7 @@ struct MultiSiteResult {
 }
 
 impl CallManager {
-    pub fn new(config: CallManagerConfig, handler: Handler) -> Self {
+    pub fn new(config: CallManagerConfig, bridge: Arc<EventBridge>) -> Self {
         let patch_tables = config
             .systems
             .iter()
@@ -432,7 +434,7 @@ impl CallManager {
         Self {
             calls: Vec::new(),
             config,
-            handler,
+            bridge,
             message_counts: HashMap::new(),
             retune_attempts: HashMap::new(),
             decode_rates: HashMap::new(),
@@ -517,7 +519,11 @@ impl CallManager {
 
     // ── Call conclusion (replaces C++ Call_impl::conclude_call) ──
 
-    fn conclude_call(entry: &mut CallEntry, patches: &HashMap<i32, PatchTable>, handler: &Handler) {
+    fn conclude_call(
+        entry: &mut CallEntry,
+        patches: &HashMap<i32, PatchTable>,
+        bridge: &EventBridge,
+    ) {
         let should_stop_recording = entry.state == TrState::Recording
             || (entry.state == TrState::Monitoring
                 && entry.monitoring_state == TrMonitoringState::Superseded);
@@ -566,25 +572,29 @@ impl CallManager {
                         data.freq_error = metrics.freq_error;
                         data.transmission_list =
                             ffi::call_get_dmr_transmission_list(&*entry.handle, slot);
-                        lock_handler(handler).call_end(&data);
+                        bridge.call_end(&data);
                     }
                 } else {
                     let mut data = Self::build_call_data(entry, patches);
                     data.length = metrics.final_length;
                     data.freq_error = metrics.freq_error;
                     data.transmission_list = ffi::call_get_transmission_list(&*entry.handle);
-                    lock_handler(handler).call_end(&data);
+                    bridge.call_end(&data);
                 }
             }
         } else if entry.state == TrState::Monitoring {
             let data = Self::build_call_data(entry, patches);
-            lock_handler(handler).call_end(&data);
+            bridge.call_end(&data);
         }
     }
 
     // ── Source tracking update (replaces C++ Call_impl::update + add_source) ──
 
-    fn update_call_source(entry: &mut CallEntry, msg: &TrTrunkMessage, handler: &Handler) -> bool {
+    fn update_call_source(
+        entry: &mut CallEntry,
+        msg: &TrTrunkMessage,
+        bridge: &EventBridge,
+    ) -> bool {
         entry.last_update = Instant::now();
 
         let src = msg.source;
@@ -597,7 +607,7 @@ impl CallManager {
 
         entry.current_source_id = src;
         ffi::call_recorder_set_source(entry.handle.pin_mut(), src);
-        lock_handler(handler).signal(src, &entry.to_call_info());
+        bridge.signal(src, &entry.to_call_info());
         true
     }
 
@@ -643,7 +653,7 @@ impl CallManager {
                         id.site_id = msg.sys_site_id;
                     }
                     let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
-                    lock_handler(&self.handler).setup_system(&info);
+                    self.bridge.setup_system(&info);
                 }
             }
             TrMessageType::Status => {
@@ -654,32 +664,24 @@ impl CallManager {
                         id.nac = msg.nac;
                     }
                     let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
-                    lock_handler(&self.handler).setup_system(&info);
+                    self.bridge.setup_system(&info);
                 }
             }
 
             // ── Unit-level events ──
             TrMessageType::Registration => {
                 let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
-                lock_handler(&self.handler).unit_event(
-                    &info,
-                    TrUnitEventType::Registration,
-                    msg.source,
-                    0,
-                );
+                self.bridge
+                    .unit_event(&info, TrUnitEventType::Registration, msg.source, 0);
             }
             TrMessageType::Deregistration => {
                 let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
-                lock_handler(&self.handler).unit_event(
-                    &info,
-                    TrUnitEventType::Deregistration,
-                    msg.source,
-                    0,
-                );
+                self.bridge
+                    .unit_event(&info, TrUnitEventType::Deregistration, msg.source, 0);
             }
             TrMessageType::Affiliation => {
                 let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
-                lock_handler(&self.handler).unit_event(
+                self.bridge.unit_event(
                     &info,
                     TrUnitEventType::Affiliation,
                     msg.source,
@@ -688,34 +690,22 @@ impl CallManager {
             }
             TrMessageType::Acknowledge => {
                 let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
-                lock_handler(&self.handler).unit_event(
-                    &info,
-                    TrUnitEventType::Acknowledge,
-                    msg.source,
-                    0,
-                );
+                self.bridge
+                    .unit_event(&info, TrUnitEventType::Acknowledge, msg.source, 0);
             }
             TrMessageType::Location => {
                 let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
-                lock_handler(&self.handler).unit_event(
-                    &info,
-                    TrUnitEventType::Location,
-                    msg.source,
-                    msg.talkgroup,
-                );
+                self.bridge
+                    .unit_event(&info, TrUnitEventType::Location, msg.source, msg.talkgroup);
             }
             TrMessageType::DataGrant => {
                 let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
-                lock_handler(&self.handler).unit_event(
-                    &info,
-                    TrUnitEventType::DataGrant,
-                    msg.source,
-                    0,
-                );
+                self.bridge
+                    .unit_event(&info, TrUnitEventType::DataGrant, msg.source, 0);
             }
             TrMessageType::UuAnsReq => {
                 let info = self.get_system_info(ctx.as_mut(), msg.sys_num);
-                lock_handler(&self.handler).unit_event(
+                self.bridge.unit_event(
                     &info,
                     TrUnitEventType::AnswerRequest,
                     msg.source,
@@ -765,9 +755,9 @@ impl CallManager {
                 && entry.phase2_tdma == msg.phase2_tdma
             {
                 call_found = true;
-                let source_updated = Self::update_call_source(entry, msg, &self.handler);
+                let source_updated = Self::update_call_source(entry, msg, &self.bridge);
                 if source_updated {
-                    lock_handler(&self.handler).call_start(&entry.to_call_info());
+                    self.bridge.call_start(&entry.to_call_info());
                 }
             }
         }
@@ -794,7 +784,7 @@ impl CallManager {
                     let orig = &mut self.calls[orig_idx];
                     orig.state = TrState::Monitoring;
                     orig.monitoring_state = TrMonitoringState::Superseded;
-                    Self::conclude_call(orig, &self.patch_tables, &self.handler);
+                    Self::conclude_call(orig, &self.patch_tables, &self.bridge);
                 }
             }
         } else if multisite.is_duplicate {
@@ -814,10 +804,10 @@ impl CallManager {
         self.calls.push(new_entry);
 
         let last = self.calls.last().unwrap();
-        lock_handler(&self.handler).call_start(&last.to_call_info());
+        self.bridge.call_start(&last.to_call_info());
 
         let infos: Vec<ffi::TrCallInfo> = self.calls.iter().map(|e| e.to_call_info()).collect();
-        lock_handler(&self.handler).calls_active(&infos);
+        self.bridge.calls_active(&infos);
     }
 
     // ── Update handling ──
@@ -835,9 +825,9 @@ impl CallManager {
                     entry.encrypted = true;
                 }
 
-                let source_updated = Self::update_call_source(entry, msg, &self.handler);
+                let source_updated = Self::update_call_source(entry, msg, &self.bridge);
                 if source_updated {
-                    lock_handler(&self.handler).call_start(&entry.to_call_info());
+                    self.bridge.call_start(&entry.to_call_info());
                 }
             }
         }
@@ -1084,7 +1074,7 @@ impl CallManager {
     pub fn tick(&mut self, mut ctx: Pin<&mut TrContext>) {
         let mut ended_call = false;
         let timeout = self.config.call_timeout;
-        let handler = &self.handler;
+        let bridge = &self.bridge;
 
         self.calls.retain_mut(|entry| {
             let since_update = entry.last_update.elapsed().as_secs_f64();
@@ -1092,7 +1082,7 @@ impl CallManager {
             match entry.state {
                 TrState::Monitoring => {
                     if since_update > timeout {
-                        Self::conclude_call(entry, &self.patch_tables, handler);
+                        Self::conclude_call(entry, &self.patch_tables, bridge);
                         ended_call = true;
                         return false; // remove
                     }
@@ -1100,7 +1090,7 @@ impl CallManager {
                 TrState::Recording => {
                     let since_write = ffi::call_recorder_since_last_write_secs(&*entry.handle);
                     if since_write > timeout || since_update > timeout {
-                        Self::conclude_call(entry, &self.patch_tables, handler);
+                        Self::conclude_call(entry, &self.patch_tables, bridge);
                         ffi::call_notify_setup_recorder(ctx.as_mut(), &*entry.handle);
                         ended_call = true;
                         return false;
@@ -1108,7 +1098,7 @@ impl CallManager {
                 }
                 _ => {
                     if since_update > timeout {
-                        Self::conclude_call(entry, &self.patch_tables, handler);
+                        Self::conclude_call(entry, &self.patch_tables, bridge);
                         ended_call = true;
                         return false;
                     }
@@ -1120,7 +1110,7 @@ impl CallManager {
 
         if ended_call {
             let infos: Vec<ffi::TrCallInfo> = self.calls.iter().map(|e| e.to_call_info()).collect();
-            lock_handler(&self.handler).calls_active(&infos);
+            self.bridge.calls_active(&infos);
         }
 
         self.tick_conventional(ctx);
@@ -1193,18 +1183,18 @@ impl CallManager {
                     .unwrap_or(false);
                 if idle_timed_out || (entry.max_duration > 0.0 && length > entry.max_duration) {
                     // Conclude current recording, restart for next transmission
-                    Self::conclude_call(entry, &self.patch_tables, &self.handler);
+                    Self::conclude_call(entry, &self.patch_tables, &self.bridge);
                     ffi::call_restart(entry.handle.pin_mut());
                     entry.refresh_after_restart();
                     entry.idle_since = None;
                     ffi::call_notify_setup_recorder(ctx.as_mut(), &*entry.handle);
-                    lock_handler(&self.handler).call_start(&entry.to_call_info());
+                    self.bridge.call_start(&entry.to_call_info());
                 }
             } else if !ffi::call_get_recorder_is_active(&*entry.handle) {
                 // No recording yet and recorder not active — start initial recording
                 ffi::call_start_initial_recording(entry.handle.pin_mut());
                 entry.state = TrState::Recording;
-                lock_handler(&self.handler).call_start(&entry.to_call_info());
+                self.bridge.call_start(&entry.to_call_info());
             }
         }
     }
@@ -1346,11 +1336,8 @@ impl CallManager {
             infos.push(info);
         }
 
-        {
-            let mut guard = lock_handler(&self.handler);
-            guard.setup_config(&infos);
-            guard.system_rates(&infos, time_diff);
-        }
+        self.bridge.setup_config(&infos);
+        self.bridge.system_rates(&infos, time_diff);
 
         // Per-system retune and warning logic (trunked only).
         for info in &infos {
@@ -1414,12 +1401,12 @@ impl CallManager {
         let _ = ctx;
         for entry in &mut self.calls {
             if entry.state != TrState::Monitoring {
-                Self::conclude_call(entry, &self.patch_tables, &self.handler);
+                Self::conclude_call(entry, &self.patch_tables, &self.bridge);
             }
         }
         self.calls.clear();
 
         let empty: Vec<ffi::TrCallInfo> = Vec::new();
-        lock_handler(&self.handler).calls_active(&empty);
+        self.bridge.calls_active(&empty);
     }
 }

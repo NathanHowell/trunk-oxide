@@ -1,7 +1,7 @@
 #![allow(unsafe_code)]
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
 
 #[cxx::bridge(namespace = "trunk_oxide")]
 pub mod ffi {
@@ -502,6 +502,7 @@ pub mod ffi {
     extern "Rust" {
         type EventNotifier;
 
+        #[allow(clippy::unnecessary_box_returns)]
         fn event_notifier_clone(notifier: &EventNotifier) -> Box<EventNotifier>;
         fn event_notifier_notify_trunk_messages(
             notifier: &EventNotifier,
@@ -516,7 +517,7 @@ pub mod ffi {
 
 /// Events sent from GNU Radio scheduler threads to the monitor loop via channel.
 pub enum GrEvent {
-    /// Parsed trunk messages from a system's msg_queue (already drained+parsed on GR thread).
+    /// Parsed trunk messages from a system's `msg_queue` (already drained+parsed on GR thread).
     TrunkMessages(Vec<ffi::TrTrunkMessage>),
     /// Squelch state change from a recorder's squelch block.
     Squelch {
@@ -533,7 +534,10 @@ pub enum GrEvent {
 pub struct EventNotifier(tokio::sync::mpsc::Sender<GrEvent>, Arc<AtomicUsize>);
 
 impl EventNotifier {
-    pub fn new(sender: tokio::sync::mpsc::Sender<GrEvent>, pending: Arc<AtomicUsize>) -> Self {
+    pub const fn new(
+        sender: tokio::sync::mpsc::Sender<GrEvent>,
+        pending: Arc<AtomicUsize>,
+    ) -> Self {
         Self(sender, pending)
     }
 }
@@ -619,66 +623,35 @@ impl SystemInfo {
     }
 }
 
-/// Opaque type that holds the event handler behind a shared mutex.
-/// C++ holds a `Box<EventHandlerBox>` via cxx for the 3 C++-initiated callbacks.
-/// Rust holds a clone of the inner `Arc` to call methods directly without FFI.
-pub struct EventHandlerBox {
-    inner: Arc<Mutex<Box<dyn EventHandler>>>,
-}
-
-impl EventHandlerBox {
-    pub fn new(inner: Arc<Mutex<Box<dyn EventHandler>>>) -> Self {
-        Self { inner }
-    }
-
-    fn lock(&self) -> MutexGuard<'_, Box<dyn EventHandler>> {
-        match self.inner.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        }
-    }
-}
-
-#[allow(clippy::boxed_local)]
-fn drop_event_handler_box(_handler: Box<EventHandlerBox>) {
-    // Box is dropped automatically
-}
-
-/// Trait for receiving events from the radio system.
-/// Implemented by GrpcPlugin in trunk-oxide-grpc.
-pub trait EventHandler: Send {
-    fn start(&mut self);
-    fn stop(&mut self);
-    fn signal(&mut self, unit_id: i64, info: &ffi::TrCallInfo);
-    fn audio_stream(
-        &mut self,
-        call: Option<&ffi::TrCall>,
-        recorder: &ffi::TrRecorder,
-        samples: &[i16],
-    );
-    fn call_start(&mut self, info: &ffi::TrCallInfo);
-    fn call_end(&mut self, call_data: &ffi::TrCallData);
-    fn calls_active(&mut self, infos: &[ffi::TrCallInfo]);
-    fn setup_recorder(&mut self, recorder: &ffi::TrRecorder);
-    fn setup_system(&mut self, info: &SystemInfo);
-    fn setup_config(&mut self, infos: &[SystemInfo]);
-    fn trunk_message(&mut self, messages: &[ffi::TrTrunkMessage], info: &SystemInfo);
-    fn system_rates(&mut self, infos: &[SystemInfo], time_diff: f32);
-    fn unit_event(
-        &mut self,
-        info: &SystemInfo,
-        event_type: ffi::TrUnitEventType,
-        source_id: i64,
-        talkgroup: i64,
-    );
+/// Trait for the 3 C++-initiated callbacks that come through cxx trampolines.
+/// All methods take `&self` — no mutex needed.
+pub trait CxxCallbacks: Send + Sync {
+    fn audio_stream(&self, call: Option<&ffi::TrCall>, recorder: &ffi::TrRecorder, samples: &[i16]);
+    fn setup_recorder(&self, recorder: &ffi::TrRecorder);
     fn unit_alias_discovered(
-        &mut self,
+        &self,
         system: &ffi::TrSystem,
         radio_id: i64,
         alias: &str,
         source: &str,
         talkgroup_id: i64,
     );
+}
+
+/// Opaque type held by C++ via cxx for the 3 C++-initiated callbacks.
+pub struct EventHandlerBox {
+    inner: Arc<dyn CxxCallbacks>,
+}
+
+impl EventHandlerBox {
+    pub fn new(inner: Arc<dyn CxxCallbacks>) -> Self {
+        Self { inner }
+    }
+}
+
+#[allow(clippy::boxed_local)]
+fn drop_event_handler_box(_handler: Box<EventHandlerBox>) {
+    // Box is dropped automatically
 }
 
 // ── Trampoline functions for C++-initiated callbacks ──
@@ -690,7 +663,7 @@ pub trait EventHandler: Send {
 /// # Safety
 /// The pointer must be valid for the lifetime of the returned reference,
 /// or null.
-unsafe fn nullable<T>(ptr: *const T) -> Option<&'static T> {
+const unsafe fn nullable<T>(ptr: *const T) -> Option<&'static T> {
     if ptr.is_null() {
         None
     } else {
@@ -705,11 +678,11 @@ unsafe fn event_handler_audio_stream(
     samples: &[i16],
 ) {
     let call = unsafe { nullable(call) };
-    handler.lock().audio_stream(call, recorder, samples);
+    handler.inner.audio_stream(call, recorder, samples);
 }
 
 fn event_handler_setup_recorder(handler: &mut EventHandlerBox, recorder: &ffi::TrRecorder) {
-    handler.lock().setup_recorder(recorder);
+    handler.inner.setup_recorder(recorder);
 }
 
 fn event_handler_unit_alias_discovered(
@@ -721,6 +694,6 @@ fn event_handler_unit_alias_discovered(
     talkgroup_id: i64,
 ) {
     handler
-        .lock()
+        .inner
         .unit_alias_discovered(system, radio_id, alias, source, talkgroup_id);
 }

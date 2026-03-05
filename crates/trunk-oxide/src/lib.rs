@@ -4,12 +4,12 @@
 //! loading a Rust plugin via dlopen, this crate links against trunk-recorder
 //! as a shared library and drives it directly.
 //!
-//! Events flow: SDR → C++ gnuradio graph → cxx callbacks → Plugin trait impl
+//! Events flow: SDR → C++ gnuradio graph → cxx callbacks → EventBridge
 
 mod call_manager;
 
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use trunk_recorder_sys::{EventNotifier, GrEvent};
@@ -24,17 +24,8 @@ use call_manager::CallManager;
 use std::collections::HashMap;
 
 use trunk_config::{Config, DefaultMode, Modulation, SourceDriver, SystemType};
-use trunk_recorder_sys::EventHandler;
+use trunk_oxide_grpc::EventBridge;
 use trunk_recorder_sys::ffi;
-
-pub(crate) type Handler = Arc<Mutex<Box<dyn EventHandler>>>;
-
-pub(crate) fn lock_handler(handler: &Handler) -> MutexGuard<'_, Box<dyn EventHandler>> {
-    match handler.lock() {
-        Ok(guard) => guard,
-        Err(poisoned) => poisoned.into_inner(),
-    }
-}
 
 /// Configures and initializes a trunk-recorder instance without starting it.
 ///
@@ -43,14 +34,14 @@ pub(crate) fn lock_handler(handler: &Handler) -> MutexGuard<'_, Box<dyn EventHan
 pub struct TrunkRecorderBuilder {
     ctx: cxx::UniquePtr<ffi::TrContext>,
     call_mgr_config: CallManagerConfig,
-    handler: Handler,
+    bridge: Arc<EventBridge>,
 }
 
 /// A running trunk-recorder instance. Stops automatically on drop.
 pub struct TrunkRecorder {
     ctx: cxx::UniquePtr<ffi::TrContext>,
     call_mgr_config: CallManagerConfig,
-    handler: Handler,
+    bridge: Arc<EventBridge>,
     event_rx: tokio::sync::mpsc::Receiver<GrEvent>,
     pending: Arc<AtomicUsize>,
 }
@@ -69,12 +60,8 @@ impl TrunkRecorderBuilder {
     /// # Errors
     ///
     /// Returns an error if an SDR source fails to open or system setup fails.
-    pub fn from_config<P: EventHandler + 'static>(
-        config: &Config,
-        handler: P,
-    ) -> anyhow::Result<Self> {
-        let handler: Handler = Arc::new(Mutex::new(Box::new(handler)));
-        let handler_box = trunk_recorder_sys::EventHandlerBox::new(handler.clone());
+    pub fn from_config(config: &Config, bridge: Arc<EventBridge>) -> anyhow::Result<Self> {
+        let handler_box = trunk_recorder_sys::EventHandlerBox::new(bridge.clone());
         let mut ctx = ffi::tr_create_from_builder(Box::new(handler_box))?;
 
         // ── Config ──
@@ -273,7 +260,6 @@ impl TrunkRecorderBuilder {
 
         // Fire setup events now that systems are initialized
         {
-            let mut guard = lock_handler(&handler);
             let infos: Vec<trunk_recorder_sys::SystemInfo> = system_policies
                 .iter()
                 .map(|(&sys_idx, policy)| {
@@ -287,11 +273,10 @@ impl TrunkRecorderBuilder {
                     info
                 })
                 .collect();
-            guard.setup_config(&infos);
+            bridge.setup_config(&infos);
             for info in &infos {
-                guard.setup_system(info);
+                bridge.setup_system(info);
             }
-            guard.start();
         }
 
         let rec = config.recorder.as_ref();
@@ -308,7 +293,7 @@ impl TrunkRecorderBuilder {
         Ok(Self {
             ctx,
             call_mgr_config,
-            handler,
+            bridge,
         })
     }
 
@@ -328,7 +313,7 @@ impl TrunkRecorderBuilder {
         TrunkRecorder {
             ctx: self.ctx,
             call_mgr_config: self.call_mgr_config,
-            handler: self.handler,
+            bridge: self.bridge,
             event_rx,
             pending,
         }
@@ -341,20 +326,13 @@ impl TrunkRecorder {
         Arc::clone(&self.pending)
     }
 
-    /// Run the monitor loop on the current thread until `shutdown` is set.
+    /// Run the monitor loop until ctrl_c is received.
     ///
-    /// Uses a single-threaded tokio runtime so `TrContext` (C++ objects) stays
-    /// pinned to this thread. GR blocks push events through the mpsc channel;
-    /// periodic work runs on `tokio::time::interval` timers.
-    pub fn run_monitor(&mut self, shutdown: &AtomicBool) -> anyhow::Result<()> {
-        let rt = tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()?;
-        rt.block_on(self.monitor_loop(shutdown))
-    }
-
-    async fn monitor_loop(&mut self, shutdown: &AtomicBool) -> anyhow::Result<()> {
-        let mut call_mgr = CallManager::new(self.call_mgr_config.clone(), self.handler.clone());
+    /// Must be called from within a tokio runtime context (e.g. via
+    /// `Handle::block_on`). All FFI calls are made on the calling thread,
+    /// keeping `TrContext` (C++ objects) pinned.
+    pub async fn run_monitor(&mut self) -> anyhow::Result<()> {
+        let mut call_mgr = CallManager::new(self.call_mgr_config.clone(), self.bridge.clone());
 
         // Drain conventional calls created by C++ setup_systems during tr_finalize
         loop {
@@ -371,15 +349,12 @@ impl TrunkRecorder {
         let mut autotune = delayed_interval(Duration::from_secs(200));
 
         loop {
-            if shutdown.load(Ordering::Relaxed) {
-                tracing::info!("shutting down");
-                call_mgr.conclude_all(self.ctx.pin_mut());
-                lock_handler(&self.handler).stop();
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                return Ok(());
-            }
-
             tokio::select! {
+                _ = tokio::signal::ctrl_c() => {
+                    tracing::info!("shutting down");
+                    call_mgr.conclude_all(self.ctx.pin_mut());
+                    return Ok(());
+                },
                 Some(event) = self.event_rx.recv() => {
                     self.pending.fetch_sub(1, Ordering::Relaxed);
                     match event {
@@ -394,7 +369,7 @@ impl TrunkRecorder {
                                         indices.iter().map(|&i| messages[i].clone()).collect();
                                     let info =
                                         call_mgr.get_system_info(self.ctx.pin_mut(), sys_num);
-                                    lock_handler(&self.handler).trunk_message(&sys_msgs, &info);
+                                    self.bridge.trunk_message(&sys_msgs, &info);
                                 }
                             }
                             for msg in &messages {

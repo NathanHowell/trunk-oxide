@@ -10,6 +10,7 @@ pub struct Transcriber {
     semaphore: Arc<Semaphore>,
     next_gpu: AtomicUsize,
     language: String,
+    beam_size: usize,
 }
 
 impl Transcriber {
@@ -34,11 +35,18 @@ impl Transcriber {
             "whisper transcriber initialized"
         );
 
+        tracing::info!(
+            beam_size = config.beam_size,
+            "whisper decoding strategy: {}",
+            if config.beam_size > 0 { "beam search" } else { "greedy" }
+        );
+
         Ok(Self {
             contexts,
             semaphore: Arc::new(Semaphore::new(config.max_concurrent)),
             next_gpu: AtomicUsize::new(0),
             language: config.language.clone(),
+            beam_size: config.beam_size,
         })
     }
 
@@ -48,10 +56,19 @@ impl Transcriber {
         let ctx = Arc::clone(&self.contexts[gpu_idx]);
         let language = self.language.clone();
 
+        let beam_size = self.beam_size;
         let result = tokio::task::spawn_blocking(move || {
             let mut state = ctx.create_state()?;
 
-            let mut params = FullParams::new(SamplingStrategy::Greedy { best_of: 1 });
+            let strategy = if beam_size > 0 {
+                SamplingStrategy::BeamSearch {
+                    beam_size: beam_size as std::ffi::c_int,
+                    patience: -1.0,
+                }
+            } else {
+                SamplingStrategy::Greedy { best_of: 1 }
+            };
+            let mut params = FullParams::new(strategy);
             params.set_language(Some(&language));
             params.set_print_special(false);
             params.set_print_progress(false);

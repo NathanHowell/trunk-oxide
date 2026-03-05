@@ -145,10 +145,12 @@ impl Dispatcher {
 
         let calls = self.calls.read().await;
         if let Some(active) = calls.get(&key) {
-            let _ = active.tx.try_send(CallMessage::Audio {
+            if let Err(e) = active.tx.try_send(CallMessage::Audio {
                 samples: sample.samples,
                 sample_rate: sample.sample_rate,
-            });
+            }) {
+                tracing::warn!(talkgroup = key.talkgroup.0, "audio packet dropped: {e}");
+            }
         }
         // Audio arriving before CallStartEvent is silently dropped
     }
@@ -435,7 +437,9 @@ impl Dispatcher {
             let calls = self.calls.read().await;
             if let Some(active) = calls.get(&key) {
                 let text = format_signal_event(&event);
-                let _ = active.tx.try_send(CallMessage::Event(text));
+                if let Err(e) = active.tx.try_send(CallMessage::Event(text)) {
+                    tracing::warn!(talkgroup = key.talkgroup.0, "signal event dropped: {e}");
+                }
                 return;
             }
         }
@@ -454,7 +458,9 @@ impl Dispatcher {
             let calls = self.calls.read().await;
             if let Some(active) = calls.get(&key) {
                 let text = format_unit_event(&event);
-                let _ = active.tx.try_send(CallMessage::Event(text));
+                if let Err(e) = active.tx.try_send(CallMessage::Event(text)) {
+                    tracing::warn!(talkgroup = key.talkgroup.0, "unit event dropped: {e}");
+                }
                 return;
             }
         }

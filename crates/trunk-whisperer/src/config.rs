@@ -28,6 +28,8 @@ pub struct WhisperConfig {
     pub flash_attn: bool,
     #[serde(default = "default_language")]
     pub language: String,
+    #[serde(default = "default_beam_size")]
+    pub beam_size: usize,
 }
 
 const fn default_gpu_count() -> usize {
@@ -41,6 +43,9 @@ const fn default_flash_attn() -> bool {
 }
 fn default_language() -> String {
     "en".to_string()
+}
+const fn default_beam_size() -> usize {
+    5
 }
 
 impl Config {

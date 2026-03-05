@@ -282,6 +282,15 @@ impl CallHandler {
 
         if let Some(detector) = &mut self.tone_detector {
             detector.process(&samples);
+
+            // Check for CTCSS early-fire to start notch filtering as soon as possible
+            if let Some(ctcss_freq) = detector.take_early_ctcss() {
+                if self.notch_filter.is_none() {
+                    tracing::info!(freq = ctcss_freq, "CTCSS early-fire, starting notch filter");
+                    let filter = NotchFilter::new(16000, ctcss_freq, 30.0);
+                    self.notch_filter = Some(filter);
+                }
+            }
         }
 
         let mut samples = samples;
@@ -337,8 +346,11 @@ impl CallHandler {
                 self.audio_buffer.drain(..strip);
             }
 
-            // If CTCSS detected, create notch filter and retroactively filter buffered audio
-            if let Some(freq) = ctcss_freq {
+            // If CTCSS detected and notch filter not already active (via early-fire),
+            // create one and retroactively filter buffered audio
+            if let Some(freq) = ctcss_freq
+                && self.notch_filter.is_none()
+            {
                 let mut filter = NotchFilter::new(16000, freq, 30.0);
                 filter.process(&mut self.audio_buffer);
                 self.notch_filter = Some(filter);

@@ -46,6 +46,11 @@ const DTMF_MIN_WINDOWS: usize = 2;
 const WARBLE_MIN_TRANSITIONS: usize = 4;
 const WARBLE_MIN_TRANSITIONS_PER_SEC: usize = 4;
 
+// Streaming detection constants
+const EARLY_EXIT_WINDOWS: usize = 25; // 500ms at 20ms/hop — no tones seen → done
+const SILENCE_GAP_WINDOWS: usize = 10; // 200ms consecutive silence after tones → done
+const CTCSS_EARLY_FIRE_WINDOWS: usize = 5; // 5 consecutive agreeing CTCSS windows → fire
+
 const fn inclusive_steps(start: u16, end: u16, step: u16) -> u16 {
     ((end - start) / step) + 1
 }
@@ -432,6 +437,17 @@ fn detect_dtmf_digits(window_digits: &[Option<char>]) -> Option<(DetectedTone, u
     }
 }
 
+// --- Streaming state machine ---
+
+enum StreamingState {
+    /// Watching for first evidence of any tone (first 500ms).
+    EarlyWatch,
+    /// At least one tone window seen; watching for a silence gap.
+    ToneActive { consecutive_silent: usize },
+    /// Detection finished (early-exit, silence gap, or max_samples).
+    Done,
+}
+
 // --- ToneDetector ---
 
 pub struct ToneDetector {
@@ -451,6 +467,12 @@ pub struct ToneDetector {
     window_ctcss: Vec<Option<usize>>, // index into CTCSS_FREQS
     detect_ctcss: bool,
     complete: bool,
+    // Streaming state
+    streaming_state: StreamingState,
+    pending_ctcss: Option<f32>,
+    ctcss_fired: bool,
+    ctcss_consecutive_agreeing: usize,
+    ctcss_last_index: Option<usize>,
 }
 
 impl ToneDetector {
@@ -491,6 +513,11 @@ impl ToneDetector {
             window_ctcss: Vec::new(),
             detect_ctcss,
             complete: false,
+            streaming_state: StreamingState::EarlyWatch,
+            pending_ctcss: None,
+            ctcss_fired: false,
+            ctcss_consecutive_agreeing: 0,
+            ctcss_last_index: None,
         }
     }
 
@@ -518,6 +545,11 @@ impl ToneDetector {
 
             let hop = self.hop_size;
             self.pending.drain(..hop);
+
+            self.update_streaming_state();
+            if self.complete {
+                return;
+            }
         }
 
         // CTCSS analysis with longer (200ms) windows
@@ -528,6 +560,8 @@ impl ToneDetector {
                 self.window_ctcss.push(detect_ctcss_window(window, sr));
                 let hop = self.ctcss_hop_size;
                 self.ctcss_pending.drain(..hop);
+
+                self.update_ctcss_early_fire();
             }
         }
 
@@ -540,64 +574,142 @@ impl ToneDetector {
         self.complete
     }
 
+    /// Poll for a CTCSS early-fire event. Returns `Some(freq)` once, then `None` forever.
+    pub fn take_early_ctcss(&mut self) -> Option<f32> {
+        self.pending_ctcss.take()
+    }
+
     pub fn finish(self) -> ToneDetectorResult {
-        let hop_s = HOP_S;
-        let segments = extract_segments(&self.window_freqs);
+        detect_all_internal(
+            &self.window_freqs,
+            &self.window_dtmf,
+            &self.window_ctcss,
+            self.detect_ctcss,
+            self.hop_size,
+        )
+    }
 
-        let mut tones = Vec::new();
-        let mut tone_end_window = 0usize;
-
-        if let Some((dtmf, end)) = detect_dtmf_digits(&self.window_dtmf) {
-            tones.push(dtmf);
-            tone_end_window = tone_end_window.max(end);
+    fn update_streaming_state(&mut self) {
+        if self.complete {
+            return;
         }
 
-        if let Some((tt, end)) = detect_two_tone(&segments, hop_s) {
-            tones.push(tt);
-            tone_end_window = tone_end_window.max(end);
-        }
+        let last_has_tone = self.window_freqs.last().copied().flatten().is_some()
+            || self.window_dtmf.last().copied().flatten().is_some();
 
-        if let Some((lt, end)) = detect_long_tone(&segments, hop_s)
-            && !tones
-                .iter()
-                .any(|t| matches!(t, DetectedTone::TwoTone { .. }))
-        {
-            tones.push(lt);
-            tone_end_window = tone_end_window.max(end);
-        }
-
-        if let Some((w, end)) = detect_warble(&self.window_freqs, hop_s) {
-            tones.push(w);
-            tone_end_window = tone_end_window.max(end);
-        }
-
-        // CTCSS aggregation: find the dominant CTCSS frequency across all windows
-        if self.detect_ctcss && !self.window_ctcss.is_empty() {
-            let mut counts = [0usize; 38];
-            let mut present = 0usize;
-            for w in self.window_ctcss.iter().flatten() {
-                counts[*w] += 1;
-                present += 1;
-            }
-            if present > 0 {
-                let (best_idx, &best_count) =
-                    counts.iter().enumerate().max_by_key(|&(_, c)| *c).unwrap();
-                if best_count.saturating_mul(CTCSS_DOMINANCE_DENOMINATOR)
-                    > present.saturating_mul(CTCSS_DOMINANCE_NUMERATOR)
-                {
-                    tones.push(DetectedTone::Ctcss {
-                        freq: CTCSS_FREQS[best_idx],
-                    });
+        match &mut self.streaming_state {
+            StreamingState::EarlyWatch => {
+                if last_has_tone {
+                    self.streaming_state = StreamingState::ToneActive {
+                        consecutive_silent: 0,
+                    };
+                } else if self.window_freqs.len() >= EARLY_EXIT_WINDOWS {
+                    self.complete = true;
+                    self.streaming_state = StreamingState::Done;
                 }
             }
+            StreamingState::ToneActive {
+                consecutive_silent,
+            } => {
+                if last_has_tone {
+                    *consecutive_silent = 0;
+                } else {
+                    *consecutive_silent += 1;
+                    if *consecutive_silent >= SILENCE_GAP_WINDOWS {
+                        self.complete = true;
+                        self.streaming_state = StreamingState::Done;
+                    }
+                }
+            }
+            StreamingState::Done => {}
         }
+    }
 
-        let tone_end_sample = tone_end_window * self.hop_size;
-
-        ToneDetectorResult {
-            tones,
-            tone_end_sample,
+    fn update_ctcss_early_fire(&mut self) {
+        if !self.detect_ctcss || self.ctcss_fired {
+            return;
         }
+        if let Some(&Some(idx)) = self.window_ctcss.last() {
+            if self.ctcss_last_index == Some(idx) {
+                self.ctcss_consecutive_agreeing += 1;
+            } else {
+                self.ctcss_consecutive_agreeing = 1;
+                self.ctcss_last_index = Some(idx);
+            }
+            if self.ctcss_consecutive_agreeing >= CTCSS_EARLY_FIRE_WINDOWS {
+                self.ctcss_fired = true;
+                self.pending_ctcss = Some(CTCSS_FREQS[idx]);
+            }
+        } else {
+            self.ctcss_consecutive_agreeing = 0;
+            self.ctcss_last_index = None;
+        }
+    }
+}
+
+fn detect_all_internal(
+    window_freqs: &[Option<f32>],
+    window_dtmf: &[Option<char>],
+    window_ctcss: &[Option<usize>],
+    detect_ctcss: bool,
+    hop_size: usize,
+) -> ToneDetectorResult {
+    let hop_s = HOP_S;
+    let segments = extract_segments(window_freqs);
+
+    let mut tones = Vec::new();
+    let mut tone_end_window = 0usize;
+
+    if let Some((dtmf, end)) = detect_dtmf_digits(window_dtmf) {
+        tones.push(dtmf);
+        tone_end_window = tone_end_window.max(end);
+    }
+
+    if let Some((tt, end)) = detect_two_tone(&segments, hop_s) {
+        tones.push(tt);
+        tone_end_window = tone_end_window.max(end);
+    }
+
+    if let Some((lt, end)) = detect_long_tone(&segments, hop_s)
+        && !tones
+            .iter()
+            .any(|t| matches!(t, DetectedTone::TwoTone { .. }))
+    {
+        tones.push(lt);
+        tone_end_window = tone_end_window.max(end);
+    }
+
+    if let Some((w, end)) = detect_warble(window_freqs, hop_s) {
+        tones.push(w);
+        tone_end_window = tone_end_window.max(end);
+    }
+
+    // CTCSS aggregation: find the dominant CTCSS frequency across all windows
+    if detect_ctcss && !window_ctcss.is_empty() {
+        let mut counts = [0usize; 38];
+        let mut present = 0usize;
+        for w in window_ctcss.iter().flatten() {
+            counts[*w] += 1;
+            present += 1;
+        }
+        if present > 0 {
+            let (best_idx, &best_count) =
+                counts.iter().enumerate().max_by_key(|&(_, c)| *c).unwrap();
+            if best_count.saturating_mul(CTCSS_DOMINANCE_DENOMINATOR)
+                > present.saturating_mul(CTCSS_DOMINANCE_NUMERATOR)
+            {
+                tones.push(DetectedTone::Ctcss {
+                    freq: CTCSS_FREQS[best_idx],
+                });
+            }
+        }
+    }
+
+    let tone_end_sample = tone_end_window * hop_size;
+
+    ToneDetectorResult {
+        tones,
+        tone_end_sample,
     }
 }
 
@@ -1151,5 +1263,169 @@ mod tests {
             "tone_end_sample ({}) should be near the 3s boundary",
             result.tone_end_sample
         );
+    }
+
+    // --- Streaming detection tests ---
+
+    #[test]
+    fn streaming_early_exit_no_tones() {
+        let sr = 16000;
+        // Feed 500ms of silence in small chunks
+        let chunk_size = 320; // 20ms at 16kHz
+        let total_samples = sr as usize / 2; // 500ms = 8000 samples
+        let silence = vec![0.0_f32; chunk_size];
+
+        let mut det = ToneDetector::new(sr, 5.0);
+        let mut fed = 0;
+        // Feed enough for 25 windows: first window needs 640 samples, then 320 per hop
+        // 640 + 24*320 = 8320 samples minimum, round up to allow for buffering
+        while fed < total_samples + chunk_size && !det.is_complete() {
+            det.process(&silence);
+            fed += chunk_size;
+        }
+
+        assert!(
+            det.is_complete(),
+            "should complete after ~500ms of silence (fed {} samples)",
+            fed
+        );
+        // Should complete well before the 5s max (80000 samples)
+        assert!(
+            fed <= 12000,
+            "should early-exit, not wait for max_samples (fed {} samples)",
+            fed
+        );
+
+        let result = det.finish();
+        assert!(result.tones.is_empty(), "no tones in silence");
+        assert_eq!(result.tone_end_sample, 0);
+    }
+
+    #[test]
+    fn streaming_completes_after_tone_gap() {
+        let sr = 16000;
+        // 1s tone A + 3s tone B (two-tone) + 200ms+ silence
+        let mut signal = sine_wave(1000.0, sr, 1.0, 0.8);
+        signal.extend(sine_wave(850.0, sr, 3.0, 0.8));
+        signal.extend(vec![0.0_f32; sr as usize / 2]); // 500ms silence
+
+        let chunk_size = 320;
+        let mut det = ToneDetector::new(sr, 10.0); // long max to ensure streaming fires first
+        let mut fed = 0;
+        let mut completed_at = None;
+
+        for chunk in signal.chunks(chunk_size) {
+            det.process(chunk);
+            fed += chunk.len();
+            if det.is_complete() && completed_at.is_none() {
+                completed_at = Some(fed);
+                break;
+            }
+        }
+
+        assert!(
+            det.is_complete(),
+            "should complete after silence gap"
+        );
+        // Should complete around 4s + 200ms gap = ~4.2s = ~67,200 samples
+        let completed_at = completed_at.unwrap();
+        assert!(
+            completed_at < 75000,
+            "should complete well before max_samples (completed at {} samples)",
+            completed_at
+        );
+
+        let result = det.finish();
+        let has_two_tone = result
+            .tones
+            .iter()
+            .any(|t| matches!(t, DetectedTone::TwoTone { .. }));
+        assert!(has_two_tone, "should detect two-tone, got: {:?}", result.tones);
+    }
+
+    #[test]
+    fn streaming_no_complete_during_active_tone() {
+        let sr = 16000;
+        // 2s of continuous tone — should NOT complete (tone still active)
+        let signal = sine_wave(1000.0, sr, 2.0, 0.8);
+
+        let chunk_size = 320;
+        let mut det = ToneDetector::new(sr, 10.0);
+
+        for chunk in signal.chunks(chunk_size) {
+            det.process(chunk);
+        }
+
+        assert!(
+            !det.is_complete(),
+            "should NOT complete while tone is still active"
+        );
+    }
+
+    #[test]
+    fn streaming_max_samples_fallback() {
+        let sr = 16000;
+        // Continuous tone for 6s with max_duration 5s
+        let signal = sine_wave(1000.0, sr, 6.0, 0.8);
+
+        let chunk_size = 320;
+        let mut det = ToneDetector::new(sr, 5.0);
+
+        for chunk in signal.chunks(chunk_size) {
+            det.process(chunk);
+        }
+
+        assert!(
+            det.is_complete(),
+            "max_samples should still act as hard upper bound"
+        );
+    }
+
+    #[test]
+    fn streaming_ctcss_early_fire() {
+        let sr = 16000;
+        // 2s of CTCSS at 118.8 Hz mixed with voice-like content
+        let n = sr as usize * 2;
+        let signal: Vec<f32> = (0..n)
+            .map(|i| {
+                let t = i as f32 / sr as f32;
+                let ctcss = 0.15 * (2.0 * PI * 118.8 * t).sin();
+                let voice = 0.3 * (2.0 * PI * 350.0 * t).sin()
+                    + 0.2 * (2.0 * PI * 800.0 * t).sin();
+                ctcss + voice
+            })
+            .collect();
+
+        let chunk_size = 320;
+        let mut det = ToneDetector::with_ctcss(sr, 5.0, true);
+        let mut early_ctcss = None;
+        let mut early_at = 0;
+
+        for chunk in signal.chunks(chunk_size) {
+            det.process(chunk);
+            early_at += chunk.len();
+            if let Some(freq) = det.take_early_ctcss() {
+                early_ctcss = Some(freq);
+                break;
+            }
+        }
+
+        assert!(
+            early_ctcss.is_some(),
+            "should early-fire CTCSS"
+        );
+        assert_eq!(
+            early_ctcss.unwrap(),
+            118.8,
+            "should detect 118.8 Hz CTCSS"
+        );
+        // Should fire within ~1s (CTCSS needs 200ms windows, 5 consecutive = ~600ms minimum)
+        assert!(
+            early_at < sr as usize * 2,
+            "should fire early, not wait for full duration (fired at {} samples)",
+            early_at
+        );
+        // Subsequent calls should return None
+        assert!(det.take_early_ctcss().is_none(), "should only fire once");
     }
 }

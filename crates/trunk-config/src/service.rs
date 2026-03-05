@@ -44,7 +44,7 @@ impl Default for AudioConfig {
 }
 
 const fn default_buffer_duration_ms() -> u64 {
-    10000
+    5000
 }
 const fn default_tone_detection() -> bool {
     true

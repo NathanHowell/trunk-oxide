@@ -67,9 +67,13 @@ mod tests {
         // Window full: [1, 2, 3]. Adding 4 evicts 1.
         assert!(d.admit(&4));
         // 1 was evicted, should be admitted again.
+        // Window becomes [3, 4, 1] (2 evicted).
         assert!(d.admit(&1));
-        // 2 should still be in window.
-        assert!(!d.admit(&2));
+        // 2 was evicted by the previous admit, so it's admitted again.
+        // Window becomes [4, 1, 2] (3 evicted).
+        assert!(d.admit(&2));
+        // 3 was evicted, 4 should still be in window.
+        assert!(!d.admit(&4));
     }
 
     #[test]

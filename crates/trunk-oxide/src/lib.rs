@@ -304,7 +304,7 @@ impl TrunkRecorderBuilder {
                     multi_site_name: sys.multi_site_system_name.clone(),
                     conversation_mode: sys.conversation_mode,
                     max_duration: sys.max_duration,
-                    control_channels: sys.control_channels.clone(),
+                    control_channels: sys.control_channels.iter().map(|&f| Freq::from_hz(f)).collect(),
                     talkgroups,
                     channels,
                     sys_id: sys.sys_id,

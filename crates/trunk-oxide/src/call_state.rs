@@ -188,7 +188,7 @@ pub struct SystemPolicy {
     pub multi_site_name: String,
     pub conversation_mode: bool,
     pub max_duration: f64,
-    pub control_channels: Vec<f64>,
+    pub control_channels: Vec<Freq>,
     pub talkgroups: HashMap<Talkgroup, TalkgroupPolicy>,
     pub channels: Vec<ConventionalChannel>,
     pub sys_id: u64,
@@ -311,7 +311,7 @@ pub(crate) struct CallEntry {
     pub(crate) duplex: bool,
     pub(crate) emergency: bool,
     pub(crate) start_time: i64,
-    pub(crate) freq: f64,
+    pub(crate) freq: Freq,
     pub(crate) state: CallState,
     pub(crate) encrypted: bool,
     pub(crate) is_analog: bool,
@@ -342,7 +342,7 @@ impl Default for CallEntry {
             duplex: false,
             emergency: false,
             start_time: unix_timestamp_now(),
-            freq: 0.0,
+            freq: Freq::from_hz(0.0),
             state: CallState::Idle,
             encrypted: false,
             is_analog: false,
@@ -383,7 +383,7 @@ impl CallEntry {
 pub(crate) struct GrantInput {
     pub(crate) sys_num: i32,
     pub(crate) talkgroup: i64,
-    pub(crate) freq: f64,
+    pub(crate) freq: Freq,
     pub(crate) tdma_slot: i32,
     pub(crate) phase2_tdma: bool,
     pub(crate) mode: bool,
@@ -424,7 +424,7 @@ pub(crate) enum Effect {
     },
     RequestRecording {
         call_id: CallId,
-        freq: f64,
+        freq: Freq,
         is_analog: bool,
         priority: i32,
     },
@@ -433,7 +433,7 @@ pub(crate) enum Effect {
     },
     SetFreq {
         call_id: CallId,
-        freq: f64,
+        freq: Freq,
     },
     SetSource {
         call_id: CallId,
@@ -471,7 +471,7 @@ pub(crate) enum Effect {
     // ── FFI pass-through ──
     AddControlChannel {
         sys_num: i32,
-        freq: f64,
+        freq: Freq,
     },
 
     // ── Conventional ──
@@ -530,7 +530,7 @@ pub(crate) struct TrunkMessage {
     pub(crate) message_type: MessageType,
     pub(crate) sys_num: i32,
     pub(crate) talkgroup: i64,
-    pub(crate) freq: f64,
+    pub(crate) freq: Freq,
     pub(crate) source: i64,
     pub(crate) tdma_slot: i32,
     pub(crate) phase2_tdma: bool,
@@ -773,7 +773,7 @@ impl TrunkStateMachine {
                 // (TDULC already closed the segment on PTT end)
                 if entry.state == CallState::Recording {
                     entry.segments.push(CallSegment {
-                        freq: Freq::from_hz(old_freq),
+                        freq: old_freq,
                         start: entry.segment_start,
                         rec_num,
                     });
@@ -922,7 +922,7 @@ impl TrunkStateMachine {
             // Close current segment, transition to Idle
             let rec_num = entry.recorder.unwrap_or(RecorderNum(-1));
             entry.segments.push(CallSegment {
-                freq: Freq::from_hz(entry.freq),
+                freq: entry.freq,
                 start: entry.segment_start,
                 rec_num,
             });
@@ -1093,7 +1093,7 @@ impl TrunkStateMachine {
                     short_name = %entry.short_name,
                     rec_num = rec_num.0,
                     talkgroup = entry.talkgroup,
-                    freq = %Freq::from_hz(entry.freq),
+                    freq = %entry.freq,
                     tdma = entry.phase2_tdma,
                     slot = entry.tdma_slot,
                     analog = entry.is_analog,
@@ -1324,7 +1324,7 @@ impl TrunkStateMachine {
                 entry.noise = pwr_db;
                 if entry.state == CallState::Recording {
                     entry.segments.push(CallSegment {
-                        freq: Freq::from_hz(entry.freq),
+                        freq: entry.freq,
                         start: entry.segment_start,
                         rec_num: recorder_num,
                     });
@@ -1361,7 +1361,7 @@ impl TrunkStateMachine {
             talkgroup: channel.talkgroup.0,
             sys_num,
             short_name: policy.short_name.clone(),
-            freq: channel.freq.as_hz(),
+            freq: channel.freq,
             is_analog: channel.is_analog,
             priority: channel.priority,
             max_duration: policy.max_duration,

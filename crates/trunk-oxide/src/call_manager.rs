@@ -79,7 +79,7 @@ impl CallManager {
             message_type,
             sys_num: msg.sys_num,
             talkgroup: msg.talkgroup,
-            freq: msg.freq,
+            freq: Freq::from_hz(msg.freq),
             source: msg.source,
             tdma_slot: msg.tdma_slot,
             phase2_tdma: msg.phase2_tdma,
@@ -121,7 +121,7 @@ impl CallManager {
                 }
                 Effect::SetFreq { call_id, freq } => {
                     if let Some(handle) = self.handles.get_mut(&call_id) {
-                        ffi::call_set_freq(handle.pin_mut(), freq);
+                        ffi::call_set_freq(handle.pin_mut(), freq.as_hz());
                     }
                 }
                 Effect::SetSource {
@@ -192,7 +192,7 @@ impl CallManager {
                     }
                 }
                 Effect::AddControlChannel { sys_num, freq } => {
-                    ffi::tr_system_add_control_channel_runtime(ctx.as_mut(), sys_num, freq);
+                    ffi::tr_system_add_control_channel_runtime(ctx.as_mut(), sys_num, freq.as_hz());
                 }
                 Effect::ConventionalRestart { call_id } => {
                     if let Some(handle) = self.handles.get_mut(&call_id) {
@@ -230,11 +230,12 @@ impl CallManager {
     fn exec_request_recording(
         &mut self,
         call_id: CallId,
-        freq: f64,
+        freq: Freq,
         is_analog: bool,
         priority: i32,
         ctx: &mut Pin<&mut TrContext>,
     ) {
+        let freq_hz = freq.as_hz();
         let handle = match self.handles.get_mut(&call_id) {
             Some(h) => h,
             None => return,
@@ -244,7 +245,7 @@ impl CallManager {
         let mut result = RecordingResult::NoSource;
 
         for source_idx in 0..source_count {
-            if !ffi::tr_source_covers_freq(&**ctx, source_idx, freq) {
+            if !ffi::tr_source_covers_freq(&**ctx, source_idx, freq_hz) {
                 continue;
             }
 
@@ -295,7 +296,7 @@ impl CallManager {
                 short_name = %entry.short_name,
                 rec_num = rec_num.0,
                 talkgroup = entry.talkgroup,
-                freq = %Freq::from_hz(entry.freq),
+                freq = %entry.freq,
                 tdma = entry.phase2_tdma,
                 slot = entry.tdma_slot,
                 freq_error = format_args!("{:+.0} Hz", metrics.freq_error),
@@ -359,7 +360,7 @@ impl CallManager {
                     short_name = %entry.short_name,
                     rec_num = rec_num.0,
                     talkgroup = entry.talkgroup,
-                    freq = %Freq::from_hz(entry.freq),
+                    freq = %entry.freq,
                     tdma = entry.phase2_tdma,
                     slot = entry.tdma_slot,
                     freq_error = format_args!("{:+.0} Hz", metrics.freq_error),
@@ -609,7 +610,7 @@ impl CallManager {
                     system = %entry.short_name,
                     call_num = entry.call_num,
                     talkgroup = entry.talkgroup,
-                    freq = %Freq::from_hz(entry.freq),
+                    freq = %entry.freq,
                     elapsed,
                     state,
                     enabled,
@@ -620,7 +621,7 @@ impl CallManager {
                     system = %entry.short_name,
                     call_num = entry.call_num,
                     talkgroup = entry.talkgroup,
-                    freq = %Freq::from_hz(entry.freq),
+                    freq = %entry.freq,
                     elapsed,
                     state,
                     "call status"
@@ -751,7 +752,7 @@ impl CallManager {
             talkgroup: entry.talkgroup,
             call_num: entry.call_num,
             sys_num: entry.sys_num,
-            freq: entry.freq,
+            freq: entry.freq.as_hz(),
             signal: entry.signal,
             noise: entry.noise,
             freq_error: handle.map_or(0, |h| ffi::call_get_freq_error(&**h)),
@@ -806,7 +807,7 @@ impl CallManager {
                 })
                 .unwrap_or_default(),
             call_num: entry.call_num,
-            freq: entry.freq,
+            freq: entry.freq.as_hz(),
             freq_error: handle.map_or(0, |h| ffi::call_get_freq_error(&**h)),
             source_num: 0,
             recorder_num: entry.recorder.map_or(-1, |r| r.0),
@@ -837,7 +838,7 @@ impl CallManager {
     fn build_proto_segments_final(
         &self,
         call_id: CallId,
-        final_freq: f64,
+        final_freq: Freq,
         final_rec_num: i32,
     ) -> Vec<trunk_oxide_grpc::proto::CallSegment> {
         let entry = match self.state.get_call(call_id) {
@@ -852,7 +853,7 @@ impl CallManager {
             .collect();
         if entry.is_trunked() || !entry.segments.is_empty() {
             segments.push(Self::make_proto_segment(
-                final_freq,
+                final_freq.as_hz(),
                 entry.segment_start,
                 final_rec_num,
             ));
@@ -897,7 +898,7 @@ fn build_ffi_message(entry: &crate::call_state::CallEntry) -> TrTrunkMessage {
         message_type: TrMessageType::Grant,
         sys_num: entry.sys_num,
         talkgroup: entry.talkgroup,
-        freq: entry.freq,
+        freq: entry.freq.as_hz(),
         source: entry.current_source_id,
         tdma_slot: entry.tdma_slot,
         phase2_tdma: entry.phase2_tdma,

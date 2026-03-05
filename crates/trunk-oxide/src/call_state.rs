@@ -16,11 +16,24 @@ impl CallId {
     }
 }
 
+/// Monotonic call number counter, replacing C++'s `Call::call_counter`.
+static NEXT_CALL_NUM: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+
+pub(crate) fn next_call_num() -> i64 {
+    NEXT_CALL_NUM.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+pub(crate) fn unix_timestamp_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64)
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct SysNum(pub(crate) i32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct Talkgroup(pub(crate) i64);
+pub struct Talkgroup(pub(crate) i64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct SourceId(pub(crate) i64);
@@ -29,10 +42,10 @@ pub(crate) struct SourceId(pub(crate) i64);
 pub(crate) struct RecorderNum(pub(crate) i32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct Freq(pub(crate) u64);
+pub struct Freq(pub(crate) u64);
 
 impl Freq {
-    pub(crate) fn from_hz(hz: f64) -> Self {
+    pub fn from_hz(hz: f64) -> Self {
         Self(hz as u64)
     }
 
@@ -156,6 +169,14 @@ pub struct TalkgroupPolicy {
 }
 
 #[derive(Clone)]
+pub struct ConventionalChannel {
+    pub talkgroup: Talkgroup,
+    pub freq: Freq,
+    pub is_analog: bool,
+    pub priority: i32,
+}
+
+#[derive(Clone)]
 pub struct SystemPolicy {
     pub system_type: SystemType,
     pub short_name: String,
@@ -169,6 +190,7 @@ pub struct SystemPolicy {
     pub max_duration: f64,
     pub control_channels: Vec<f64>,
     pub talkgroups: HashMap<Talkgroup, TalkgroupPolicy>,
+    pub channels: Vec<ConventionalChannel>,
     pub sys_id: u64,
     pub wacn: u64,
     pub nac: u64,
@@ -188,6 +210,7 @@ pub(crate) static DEFAULT_POLICY: std::sync::LazyLock<SystemPolicy> =
         max_duration: 0.0,
         control_channels: Vec::new(),
         talkgroups: HashMap::new(),
+        channels: Vec::new(),
         sys_id: 0,
         wacn: 0,
         nac: 0,
@@ -305,6 +328,39 @@ pub(crate) struct CallEntry {
     pub(crate) call_mode: CallMode,
 }
 
+impl Default for CallEntry {
+    fn default() -> Self {
+        Self {
+            id: CallId::next(),
+            call_num: next_call_num(),
+            talkgroup: 0,
+            sys_num: 0,
+            short_name: String::new(),
+            tdma_slot: 0,
+            phase2_tdma: false,
+            mode: false,
+            duplex: false,
+            emergency: false,
+            start_time: unix_timestamp_now(),
+            freq: 0.0,
+            state: CallState::Idle,
+            encrypted: false,
+            is_analog: false,
+            current_source_id: 0,
+            signal: 0.0,
+            noise: 0.0,
+            priority: 0,
+            recorder: None,
+            last_update: Instant::now(),
+            max_duration: 0.0,
+            segments: Vec::new(),
+            segment_start: Instant::now(),
+            idle_since: None,
+            call_mode: CallMode::Conventional,
+        }
+    }
+}
+
 impl CallEntry {
     pub(crate) fn is_conventional(&self) -> bool {
         matches!(self.call_mode, CallMode::Conventional)
@@ -365,7 +421,6 @@ pub(crate) enum Effect {
     // ── Recorder lifecycle ──
     CreateCall {
         call_id: CallId,
-        grant: CreateCallData,
     },
     RequestRecording {
         call_id: CallId,
@@ -426,13 +481,11 @@ pub(crate) enum Effect {
     ConventionalStartInitial {
         call_id: CallId,
     },
-}
 
-#[derive(Debug)]
-pub(crate) struct CreateCallData {
-    pub(crate) sys_num: i32,
-    pub(crate) talkgroup: i64,
-    pub(crate) freq: f64,
+    // ── Diagnostics ──
+    Warn {
+        message: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -690,24 +743,25 @@ impl TrunkStateMachine {
         if let Some(idx) = existing_idx {
             let same_freq = self.calls[idx].freq == msg.freq;
             if same_freq {
-                let entry = &mut self.calls[idx];
+                {
+                    let entry = &mut self.calls[idx];
 
-                // TDULC may have moved this call to Idle — resume recording
-                if entry.state == CallState::Idle && entry.is_trunked() {
-                    entry.state = CallState::Recording;
-                    entry.idle_since = None;
-                    entry.segment_start = Instant::now();
-                    tracing::trace!(
-                        short_name = %entry.short_name,
-                        talkgroup = entry.talkgroup,
-                        "Grant on Idle call: Idle → Recording"
-                    );
+                    // TDULC may have moved this call to Idle — resume recording
+                    if entry.state == CallState::Idle && entry.is_trunked() {
+                        entry.state = CallState::Recording;
+                        entry.idle_since = None;
+                        entry.segment_start = Instant::now();
+                        tracing::trace!(
+                            short_name = %entry.short_name,
+                            talkgroup = entry.talkgroup,
+                            "Grant on Idle call: Idle → Recording"
+                        );
+                    }
                 }
 
                 if self.update_call_source(idx, msg.source, &mut effects) {
-                    effects.push(Effect::EmitCallStart {
-                        call_id: entry.id,
-                    });
+                    let call_id = self.calls[idx].id;
+                    effects.push(Effect::EmitCallStart { call_id });
                 }
             } else {
                 // Retune: close current segment (if Recording), start new one
@@ -756,10 +810,7 @@ impl TrunkStateMachine {
             .get(&msg.sys_num)
             .unwrap_or(&DEFAULT_POLICY);
 
-        let call_id = CallId::next();
         let new_entry = CallEntry {
-            id: call_id,
-            call_num: 0, // set by executor after C++ call creation
             talkgroup: msg.talkgroup,
             sys_num: msg.sys_num,
             short_name: policy.short_name.clone(),
@@ -768,21 +819,11 @@ impl TrunkStateMachine {
             mode: msg.mode,
             duplex: msg.duplex,
             emergency: msg.emergency,
-            start_time: 0, // set by executor after C++ call creation
             freq: msg.freq,
-            state: CallState::Idle,
             encrypted: msg.encrypted,
-            is_analog: false,
             current_source_id: msg.source,
-            signal: 0.0,
-            noise: 0.0,
             priority: msg.priority,
-            recorder: None,
-            last_update: Instant::now(),
             max_duration: policy.max_duration,
-            segments: Vec::new(),
-            segment_start: Instant::now(),
-            idle_since: None,
             call_mode: CallMode::Trunked(TrunkedFields {
                 multi_site: policy.multi_site,
                 wacn: msg.wacn,
@@ -791,19 +832,14 @@ impl TrunkStateMachine {
                 multi_site_name: policy.multi_site_name.clone(),
                 conversation_mode: policy.conversation_mode,
             }),
+            ..Default::default()
         };
+        let call_id = new_entry.id;
 
         self.calls.push(new_entry);
         let new_idx = self.calls.len() - 1;
 
-        effects.push(Effect::CreateCall {
-            call_id,
-            grant: CreateCallData {
-                sys_num: msg.sys_num,
-                talkgroup: msg.talkgroup,
-                freq: msg.freq,
-            },
-        });
+        effects.push(Effect::CreateCall { call_id });
 
         if multisite.is_superseding {
             let policy_effects = self.evaluate_recording_policy(new_idx, msg);
@@ -847,7 +883,7 @@ impl TrunkStateMachine {
     fn on_update(&mut self, msg: &TrunkMessage) -> Vec<Effect> {
         let mut effects = Vec::new();
 
-        for (idx, entry) in self.calls.iter_mut().enumerate() {
+        for entry in self.calls.iter_mut() {
             if entry.talkgroup == msg.talkgroup
                 && entry.sys_num == msg.sys_num
                 && entry.freq == msg.freq
@@ -858,7 +894,7 @@ impl TrunkStateMachine {
                     entry.encrypted = true;
                 }
 
-                if self.update_call_source_entry(entry, msg.source, &mut effects) {
+                if Self::update_call_source_entry(entry, msg.source, &mut effects) {
                     effects.push(Effect::EmitCallStart {
                         call_id: entry.id,
                     });
@@ -1209,7 +1245,7 @@ impl TrunkStateMachine {
     }
 
     fn tick_conventional(&mut self) -> Vec<Effect> {
-        let mut effects = Vec::new();
+        let effects = Vec::new();
 
         for entry in &mut self.calls {
             if !entry.is_conventional() {
@@ -1253,15 +1289,10 @@ impl TrunkStateMachine {
         effects
     }
 
-    pub(crate) fn on_conventional_restarted(
-        &mut self,
-        call_id: CallId,
-        call_num: i64,
-        start_time: i64,
-    ) {
+    pub(crate) fn on_conventional_restarted(&mut self, call_id: CallId) {
         if let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) {
-            entry.call_num = call_num;
-            entry.start_time = start_time;
+            entry.call_num = next_call_num();
+            entry.start_time = unix_timestamp_now();
         }
     }
 
@@ -1317,66 +1348,29 @@ impl TrunkStateMachine {
 
     // ── Call creation callback (executor feeds back C++ metadata) ──
 
-    pub(crate) fn on_call_created(&mut self, call_id: CallId, call_num: i64, start_time: i64) {
-        if let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) {
-            entry.call_num = call_num;
-            entry.start_time = start_time;
-        }
-    }
-
     // ── Conventional call addition ──
 
     pub(crate) fn add_conventional_call(
         &mut self,
-        call_id: CallId,
-        call_num: i64,
-        talkgroup: i64,
-        freq: f64,
+        channel: &ConventionalChannel,
         sys_num: i32,
-        start_time: i64,
-        short_name: String,
-        tdma_slot: i32,
-        phase2_tdma: bool,
-        mode: bool,
-        duplex: bool,
-        emergency: bool,
-        encrypted: bool,
-        is_analog: bool,
-        current_source_id: i64,
-        signal: f64,
-        noise: f64,
-        priority: i32,
-        max_duration: f64,
+        policy: &SystemPolicy,
         recorder: Option<RecorderNum>,
-    ) {
-        self.calls.push(CallEntry {
-            id: call_id,
-            call_num,
-            talkgroup,
+    ) -> CallId {
+        let entry = CallEntry {
+            talkgroup: channel.talkgroup.0,
             sys_num,
-            short_name,
-            tdma_slot,
-            phase2_tdma,
-            mode,
-            duplex,
-            emergency,
-            start_time,
-            freq,
-            state: CallState::Idle,
-            encrypted,
-            is_analog,
-            current_source_id,
-            signal,
-            noise,
-            priority,
+            short_name: policy.short_name.clone(),
+            freq: channel.freq.as_hz(),
+            is_analog: channel.is_analog,
+            priority: channel.priority,
+            max_duration: policy.max_duration,
             recorder,
-            last_update: Instant::now(),
-            max_duration,
-            segments: Vec::new(),
-            segment_start: Instant::now(),
-            idle_since: None,
-            call_mode: CallMode::Conventional,
-        });
+            ..Default::default()
+        };
+        let call_id = entry.id;
+        self.calls.push(entry);
+        call_id
     }
 
     // ── Recorder stop callback ──

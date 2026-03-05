@@ -410,11 +410,12 @@ impl EventBridge {
         recorder: &TrRecorder,
         samples: &[i16],
     ) {
-        use trunk_recorder_sys::ffi::{call_get_metadata, recorder_get_wav_hz};
+        use trunk_recorder_sys::ffi::{
+            call_get_freq, call_get_sys_num, call_get_talkgroup, recorder_get_wav_hz,
+        };
         let Some(call) = call else {
             return;
         };
-        let meta = call_get_metadata(call);
         let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
         let sample_rate_i64 = recorder_get_wav_hz(recorder);
         let Ok(sample_rate) = i32::try_from(sample_rate_i64) else {
@@ -425,9 +426,9 @@ impl EventBridge {
             return;
         };
         let msg = proto::AudioSample {
-            talkgroup: meta.talkgroup,
-            sys_num: meta.sys_num,
-            freq: meta.freq,
+            talkgroup: call_get_talkgroup(call),
+            sys_num: call_get_sys_num(call),
+            freq: call_get_freq(call),
             samples: bytes,
             sample_rate,
         };

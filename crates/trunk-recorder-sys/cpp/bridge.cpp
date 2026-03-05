@@ -662,7 +662,19 @@ std::unique_ptr<TrCall> tr_context_take_next_conventional_call(TrContext &ctx) {
     return std::make_unique<TrCall>(call_ptr);
 }
 
-// ── Phase C: Call Management — additional call accessors (most removed — Rust owns via CallEntry) ──
+// ── Call accessors for audio stream callback (C++ calls into Rust with TrCall pointer) ──
+
+int64_t call_get_talkgroup(const TrCall &call) {
+    return call.ptr->get_talkgroup();
+}
+
+int32_t call_get_sys_num(const TrCall &call) {
+    return call.ptr->get_sys_num();
+}
+
+double call_get_freq(const TrCall &call) {
+    return call.ptr->get_freq();
+}
 
 // ── Phase C: Call Management — additional recorder accessors ──
 
@@ -686,31 +698,6 @@ std::unique_ptr<TrCall> tr_context_create_call(TrContext &ctx, const TrTrunkMess
     return std::make_unique<TrCall>(call);
 }
 
-TrCallMetadata call_get_metadata(const TrCall &call) {
-    auto *c = call.ptr.get();
-    TrCallMetadata m;
-    m.call_num = c->get_call_num();
-    m.talkgroup = c->get_talkgroup();
-    m.freq = c->get_freq();
-    m.sys_num = c->get_sys_num();
-    m.short_name = rust::String(c->get_short_name());
-    m.tdma_slot = c->get_tdma_slot();
-    m.phase2_tdma = c->get_phase2_tdma();
-    m.mode = c->get_mode();
-    m.duplex = c->get_duplex();
-    m.emergency = c->get_emergency();
-    m.is_conventional = c->is_conventional();
-    m.start_time = static_cast<int64_t>(c->get_start_time());
-    m.encrypted = c->get_encrypted();
-    m.is_analog = c->get_is_analog();
-    m.current_source_id = c->get_current_source_id();
-    m.signal = c->get_signal();
-    m.noise = c->get_noise();
-    m.priority = c->get_priority();
-    return m;
-}
-
-// State/monitoring/encrypted/is_analog setters removed — Rust owns all call state
 
 int32_t tr_context_source_count(const TrContext &ctx) {
     return static_cast<int32_t>(ctx.impl->trunk_ctx.sources.size());

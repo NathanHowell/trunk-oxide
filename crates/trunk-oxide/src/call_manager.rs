@@ -14,11 +14,11 @@ use std::sync::Arc;
 use trunk_oxide_grpc::EventBridge;
 
 use crate::call_state::{
-    CallId, CallState, CreateCallData, Effect, Freq, MessageType, RecorderNum, RecordingResult,
-    RejectReason, Talkgroup, TrunkMessage, TrunkStateMachine, UnitEventType,
+    CallId, CallState, Effect, Freq, MessageType, RecorderNum, RecordingResult, RejectReason,
+    Talkgroup, TrunkMessage, TrunkStateMachine, UnitEventType,
 };
 
-pub use crate::call_state::{CallManagerConfig, SystemPolicy, TalkgroupPolicy};
+pub use crate::call_state::{CallManagerConfig, ConventionalChannel, SystemPolicy, TalkgroupPolicy};
 
 fn format_recorder_state(state: i32) -> &'static str {
     match state {
@@ -105,8 +105,8 @@ impl CallManager {
     fn process_effects(&mut self, effects: Vec<Effect>, ctx: &mut Pin<&mut TrContext>) {
         for effect in effects {
             match effect {
-                Effect::CreateCall { call_id, grant } => {
-                    self.exec_create_call(call_id, grant, ctx);
+                Effect::CreateCall { call_id } => {
+                    self.exec_create_call(call_id, ctx);
                 }
                 Effect::RequestRecording {
                     call_id,
@@ -197,9 +197,7 @@ impl CallManager {
                 Effect::ConventionalRestart { call_id } => {
                     if let Some(handle) = self.handles.get_mut(&call_id) {
                         ffi::call_restart(handle.pin_mut());
-                        let m = ffi::call_get_metadata(&**handle);
-                        self.state
-                            .on_conventional_restarted(call_id, m.call_num, m.start_time);
+                        self.state.on_conventional_restarted(call_id);
                     }
                 }
                 Effect::ConventionalStartInitial { call_id } => {
@@ -216,26 +214,16 @@ impl CallManager {
 
     // ── Effect executors ──
 
-    fn exec_create_call(
-        &mut self,
-        call_id: CallId,
-        grant: CreateCallData,
-        ctx: &mut Pin<&mut TrContext>,
-    ) {
-        // We need to build a minimal TrTrunkMessage for the C++ side.
-        // The C++ create_call only reads freq, talkgroup, sys_num from it.
+    fn exec_create_call(&mut self, call_id: CallId, ctx: &mut Pin<&mut TrContext>) {
         let entry = match self.state.get_call(call_id) {
             Some(e) => e,
             None => return,
         };
 
-        // Build a TrTrunkMessage from the call entry's fields for the C++ call creation.
-        // This is a temporary bridge — Phase 5 will simplify this.
+        // Build a minimal TrTrunkMessage for C++ call creation (it only reads
+        // freq, talkgroup, sys_num from it). Rust owns all call state.
         let ffi_msg = build_ffi_message(entry);
         let handle = ffi::tr_context_create_call(ctx.as_mut(), &ffi_msg);
-        let m = ffi::call_get_metadata(&*handle);
-
-        self.state.on_call_created(call_id, m.call_num, m.start_time);
         self.handles.insert(call_id, handle);
     }
 
@@ -536,51 +524,34 @@ impl CallManager {
     }
 
     pub fn process_recorder_queues(&self) {
-        for (call_id, handle) in &self.handles {
+        for handle in self.handles.values() {
             ffi::call_process_recorder_queue(&**handle);
         }
     }
 
-    pub fn add_call(&mut self, call: UniquePtr<TrCall>) {
-        let m = ffi::call_get_metadata(&*call);
-        let sys_num = m.sys_num;
+    pub fn add_call(
+        &mut self,
+        call: UniquePtr<TrCall>,
+        channel: &ConventionalChannel,
+        sys_num: i32,
+    ) {
         let policy = self
             .state
             .config
             .systems
             .get(&sys_num)
-            .unwrap_or(&crate::call_state::DEFAULT_POLICY);
+            .cloned()
+            .unwrap_or_else(|| crate::call_state::DEFAULT_POLICY.clone());
 
-        let has_recorder = ffi::call_has_recorder(&*call);
-        let rec_num = if has_recorder {
+        let rec_num = if ffi::call_has_recorder(&*call) {
             Some(RecorderNum(ffi::call_get_recorder_num(&*call)))
         } else {
             None
         };
 
-        let call_id = CallId::next();
-        self.state.add_conventional_call(
-            call_id,
-            m.call_num,
-            m.talkgroup,
-            m.freq,
-            m.sys_num,
-            m.start_time,
-            m.short_name,
-            m.tdma_slot,
-            m.phase2_tdma,
-            m.mode,
-            m.duplex,
-            m.emergency,
-            m.encrypted,
-            m.is_analog,
-            m.current_source_id,
-            m.signal,
-            m.noise,
-            m.priority,
-            policy.max_duration,
-            rec_num,
-        );
+        let call_id = self
+            .state
+            .add_conventional_call(channel, sys_num, &policy, rec_num);
         self.handles.insert(call_id, call);
     }
 
@@ -952,5 +923,7 @@ fn build_ffi_message(entry: &crate::call_state::CallEntry) -> TrTrunkMessage {
             ga2: 0,
             ga3: 0,
         },
+        meta: String::new(),
+        opcode: 0,
     }
 }

@@ -23,7 +23,6 @@ struct TrCallSource;
 struct TrCallError;
 struct TrCallData;
 struct TrCallInfo;
-struct TrCallMetadata;
 struct TrSystemInfo;
 struct TrRecorderStatus;
 struct EventHandlerBox;
@@ -55,9 +54,12 @@ struct TrRecorder final {
     explicit TrRecorder(const std::shared_ptr<Recorder> &p) : ptr(p) {}
 };
 
-// ── Call accessor wrappers (most removed — Rust owns call state via CallEntry) ──
+// ── Call accessor wrappers ──
 int32_t call_get_freq_error(const TrCall &call);
 double call_get_current_length(const TrCall &call);
+int64_t call_get_talkgroup(const TrCall &call);
+int32_t call_get_sys_num(const TrCall &call);
+double call_get_freq(const TrCall &call);
 
 // ── Recorder accessor wrappers ──
 int32_t recorder_get_num(const TrRecorder &rec);
@@ -148,7 +150,6 @@ int32_t recorder_get_type(const TrRecorder &rec);
 
 // ── Phase C: Call Management — lifecycle operations ──
 std::unique_ptr<TrCall> tr_context_create_call(TrContext &ctx, const TrTrunkMessage &msg);
-TrCallMetadata call_get_metadata(const TrCall &call);
 
 // ── Phase C: Call Management — recording policy support ──
 int32_t tr_context_source_count(const TrContext &ctx);

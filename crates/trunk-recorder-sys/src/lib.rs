@@ -195,28 +195,6 @@ pub mod ffi {
         pub call_state: i32,
     }
 
-    #[derive(Debug, Clone)]
-    struct TrCallMetadata {
-        pub call_num: i64,
-        pub talkgroup: i64,
-        pub freq: f64,
-        pub sys_num: i32,
-        pub short_name: String,
-        pub tdma_slot: i32,
-        pub phase2_tdma: bool,
-        pub mode: bool,
-        pub duplex: bool,
-        pub emergency: bool,
-        pub is_conventional: bool,
-        pub start_time: i64,
-        pub encrypted: bool,
-        pub is_analog: bool,
-        pub current_source_id: i64,
-        pub signal: f64,
-        pub noise: f64,
-        pub priority: i32,
-    }
-
     /// C++-provided fields only. Rust-owned fields live in [`SystemInfo`].
     #[derive(Debug, Clone)]
     struct TrSystemInfo {
@@ -334,9 +312,12 @@ pub mod ffi {
         type TrCall;
         type TrSystem;
         type TrRecorder;
-        // ── Call accessors (most removed — Rust owns call state via CallEntry) ──
+        // ── Call accessors ──
         fn call_get_freq_error(call: &TrCall) -> i32;
         fn call_get_current_length(call: &TrCall) -> f64;
+        fn call_get_talkgroup(call: &TrCall) -> i64;
+        fn call_get_sys_num(call: &TrCall) -> i32;
+        fn call_get_freq(call: &TrCall) -> f64;
 
         // ── System info bulk read (replaces 15 individual system_get_* functions) ──
         fn tr_context_get_system_info(ctx: Pin<&mut TrContext>, sys_num: i32) -> TrSystemInfo;
@@ -417,7 +398,6 @@ pub mod ffi {
             ctx: Pin<&mut TrContext>,
             msg: &TrTrunkMessage,
         ) -> UniquePtr<TrCall>;
-        fn call_get_metadata(call: &TrCall) -> TrCallMetadata;
 
         // ── Phase C: Call Management — recording policy support ──
         fn tr_context_source_count(ctx: &TrContext) -> i32;

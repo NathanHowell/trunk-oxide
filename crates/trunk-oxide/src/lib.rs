@@ -17,8 +17,8 @@ use std::time::Duration;
 
 use trunk_recorder_sys::{EventNotifier, GrEvent};
 
-pub use call_manager::{CallManagerConfig, SystemPolicy, TalkgroupPolicy};
-pub use call_state::Talkgroup;
+pub use call_manager::{CallManagerConfig, ConventionalChannel, SystemPolicy, TalkgroupPolicy};
+pub use call_state::{Freq, Talkgroup};
 
 /// Dedup key derived from a trunk message. Two identical TSBKs parsed by
 /// different decoders on the same system produce the same key.
@@ -272,6 +272,25 @@ impl TrunkRecorderBuilder {
                 })
                 .collect();
 
+            let channels = sys
+                .channel
+                .iter()
+                .map(|ch| {
+                    let is_analog = sys.system_type == SystemType::Conventional;
+                    let priority = sys
+                        .talkgroup
+                        .iter()
+                        .find(|tg| tg.id == ch.id)
+                        .map_or(0, |tg| tg.priority);
+                    ConventionalChannel {
+                        talkgroup: Talkgroup(ch.id),
+                        freq: Freq::from_hz(ch.freq),
+                        is_analog,
+                        priority,
+                    }
+                })
+                .collect();
+
             system_policies.insert(
                 sys_idx,
                 SystemPolicy {
@@ -287,6 +306,7 @@ impl TrunkRecorderBuilder {
                     max_duration: sys.max_duration,
                     control_channels: sys.control_channels.clone(),
                     talkgroups,
+                    channels,
                     sys_id: sys.sys_id,
                     wacn: sys.wacn,
                     nac: sys.nac,
@@ -372,13 +392,16 @@ impl TrunkRecorder {
     pub async fn run_monitor(&mut self) -> anyhow::Result<()> {
         let mut call_mgr = CallManager::new(self.call_mgr_config.clone(), self.bridge.clone());
 
-        // Drain conventional calls created by C++ setup_systems during tr_finalize
-        loop {
-            let call = ffi::tr_context_take_next_conventional_call(self.ctx.pin_mut());
-            if call.is_null() {
-                break;
+        // Drain conventional calls created by C++ setup_systems during tr_finalize.
+        // C++ creates one Call per channel in config order — match them up.
+        for (&sys_num, policy) in &self.call_mgr_config.systems {
+            for channel in &policy.channels {
+                let call = ffi::tr_context_take_next_conventional_call(self.ctx.pin_mut());
+                if call.is_null() {
+                    break;
+                }
+                call_mgr.add_call(call, channel, sys_num);
             }
-            call_mgr.add_call(call);
         }
 
         let mut trunk_dedup = dedup::WindowedDedup::new(64);

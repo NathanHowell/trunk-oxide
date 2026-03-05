@@ -2950,6 +2950,7 @@ dependencies = [
  "csv",
  "serde",
  "toml",
+ "tracing",
 ]
 
 [[package]]
@@ -2971,6 +2972,7 @@ dependencies = [
  "anyhow",
  "argfile",
  "audiopus",
+ "audiopus_sys",
  "chrono",
  "clap",
  "hyper-util",

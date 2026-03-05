@@ -18,7 +18,7 @@ pub enum SystemType {
 }
 
 impl SystemType {
-    pub fn is_trunked(self) -> bool {
+    pub const fn is_trunked(self) -> bool {
         matches!(self, Self::P25 | Self::Smartnet)
     }
 }
@@ -154,7 +154,7 @@ pub enum TalkgroupDisplayFormat {
 
 /// Recording mode for a talkgroup.
 ///
-/// Values match the RadioReference CSV "Mode" column.
+/// Values match the `RadioReference` CSV "Mode" column.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TalkgroupMode {
     /// Analog voice ("A")
@@ -171,14 +171,14 @@ pub enum TalkgroupMode {
 }
 
 impl TalkgroupMode {
-    pub fn is_encrypted(self) -> bool {
+    pub const fn is_encrypted(self) -> bool {
         matches!(
             self,
             Self::Encrypted | Self::TrunkedEncrypted | Self::DigitalEncrypted
         )
     }
 
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Analog => "A",
             Self::Digital => "D",
@@ -201,7 +201,7 @@ impl<'de> Deserialize<'de> for TalkgroupMode {
         D: serde::Deserializer<'de>,
     {
         let s = String::deserialize(deserializer)?;
-        Ok(TalkgroupMode::from_str(&s))
+        Ok(Self::from_str(&s))
     }
 }
 
@@ -213,7 +213,13 @@ impl TalkgroupMode {
             "E" => Self::Encrypted,
             "TE" => Self::TrunkedEncrypted,
             "DE" => Self::DigitalEncrypted,
-            _ => Self::Digital, // unknown modes default to digital
+            other => {
+                tracing::warn!(
+                    mode = other,
+                    "unknown talkgroup mode, defaulting to digital"
+                );
+                Self::Digital
+            }
         }
     }
 }
@@ -410,11 +416,11 @@ fn apply_overlay(tg: &mut TalkgroupConfig, table: &toml::Table) {
     if let Some(v) = table.get("group").and_then(|v| v.as_str()) {
         tg.group = v.to_string();
     }
-    if let Some(v) = table.get("priority").and_then(|v| v.as_integer()) {
-        tg.priority = v as i32;
+    if let Some(v) = table.get("priority").and_then(toml::Value::as_integer) {
+        tg.priority = i32::try_from(v).unwrap_or(i32::MAX);
     }
-    if let Some(v) = table.get("preferred_nac").and_then(|v| v.as_integer()) {
-        tg.preferred_nac = v as u64;
+    if let Some(v) = table.get("preferred_nac").and_then(toml::Value::as_integer) {
+        tg.preferred_nac = v.cast_unsigned();
     }
 }
 
@@ -441,7 +447,7 @@ pub(crate) fn resolve_talkgroups(
 
         let id = table
             .get("id")
-            .and_then(|v| v.as_integer())
+            .and_then(toml::Value::as_integer)
             .context("talkgroup entry missing required 'id' field")?;
 
         let tg = map.entry(id).or_insert_with(|| TalkgroupConfig {
@@ -550,10 +556,10 @@ pub(crate) fn load_channels_csv(path: &Path) -> Result<HashMap<i64, ChannelConfi
 
 /// Apply a TOML table overlay onto a `ChannelConfig`.
 fn apply_channel_overlay(ch: &mut ChannelConfig, table: &toml::Table) {
-    if let Some(v) = table.get("freq").and_then(|v| v.as_float()) {
+    if let Some(v) = table.get("freq").and_then(toml::Value::as_float) {
         ch.freq = v;
     }
-    if let Some(v) = table.get("tone").and_then(|v| v.as_float()) {
+    if let Some(v) = table.get("tone").and_then(toml::Value::as_float) {
         ch.tone = v;
     }
     if let Some(v) = table.get("alpha_tag").and_then(|v| v.as_str()) {
@@ -568,10 +574,10 @@ fn apply_channel_overlay(ch: &mut ChannelConfig, table: &toml::Table) {
     if let Some(v) = table.get("group").and_then(|v| v.as_str()) {
         ch.group = v.to_string();
     }
-    if let Some(v) = table.get("squelch_db").and_then(|v| v.as_float()) {
+    if let Some(v) = table.get("squelch_db").and_then(toml::Value::as_float) {
         ch.squelch_db = v;
     }
-    if let Some(v) = table.get("signal_detection").and_then(|v| v.as_bool()) {
+    if let Some(v) = table.get("signal_detection").and_then(toml::Value::as_bool) {
         ch.signal_detection = v;
     }
 }
@@ -597,7 +603,7 @@ pub(crate) fn resolve_channels(
 
         let id = table
             .get("id")
-            .and_then(|v| v.as_integer())
+            .and_then(toml::Value::as_integer)
             .context("channel entry missing required 'id' field")?;
 
         let ch = map.entry(id).or_insert_with(|| ChannelConfig {

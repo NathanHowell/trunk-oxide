@@ -58,7 +58,7 @@ impl Config {
             .any(|sys| sys.talkgroup_file.is_some() || sys.channel_file.is_some());
 
         if needs_resolve {
-            let config_dir = Path::new(path).parent().unwrap_or(Path::new("."));
+            let config_dir = Path::new(path).parent().unwrap_or_else(|| Path::new("."));
 
             // Re-parse raw TOML to detect which fields were explicitly set
             let raw: toml::Value = toml::from_str(&content)?;
@@ -70,7 +70,7 @@ impl Config {
                         .and_then(|s| s.get(name))
                         .and_then(|v| v.get("talkgroup"))
                         .and_then(|v| v.as_array())
-                        .map(|a| a.as_slice())
+                        .map(std::vec::Vec::as_slice)
                         .unwrap_or_default();
 
                     sys.talkgroup = system::resolve_talkgroups(
@@ -85,7 +85,7 @@ impl Config {
                         .and_then(|s| s.get(name))
                         .and_then(|v| v.get("channel"))
                         .and_then(|v| v.as_array())
-                        .map(|a| a.as_slice())
+                        .map(std::vec::Vec::as_slice)
                         .unwrap_or_default();
 
                     sys.channel = system::resolve_channels(

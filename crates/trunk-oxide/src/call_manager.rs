@@ -441,10 +441,6 @@ impl CallManager {
         }
     }
 
-    pub fn config(&self) -> &CallManagerConfig {
-        &self.config
-    }
-
     /// Build full SystemInfo from C++ DSP fields + Rust-owned metadata.
     pub(crate) fn get_system_info(&self, ctx: Pin<&mut TrContext>, sys_num: i32) -> SystemInfo {
         let ffi_info = ffi::tr_context_get_system_info(ctx, sys_num);
@@ -826,8 +822,8 @@ impl CallManager {
 
     // ── Update handling ──
 
-    fn handle_update(&mut self, mut ctx: Pin<&mut TrContext>, msg: &TrTrunkMessage) {
-        let _ = ctx; // still needed for potential future FFI calls
+    fn handle_update(&mut self, ctx: Pin<&mut TrContext>, msg: &TrTrunkMessage) {
+        let _ = ctx;
         for entry in &mut self.calls {
             if entry.talkgroup == msg.talkgroup
                 && entry.sys_num == msg.sys_num
@@ -945,13 +941,10 @@ impl CallManager {
         // 6. Find source and acquire recorder
         let source_count = ffi::tr_context_source_count(&*ctx);
         let freq = entry.freq;
-        let mut found_source = false;
-
         for source_idx in 0..source_count {
             if !ffi::tr_source_covers_freq(&*ctx, source_idx, freq) {
                 continue;
             }
-            found_source = true;
 
             let available = ffi::tr_source_available_recorders(&*ctx, source_idx, is_analog);
             if priority > available {
@@ -994,15 +987,14 @@ impl CallManager {
             return false;
         }
 
-        if !found_source {
-            entry.state = TrState::Monitoring;
-            entry.monitoring_state = TrMonitoringState::NoSource;
-            tracing::error!(
-                talkgroup = tg_id,
-                sys_num,
-                "not recording: no source covering freq"
-            );
-        }
+        // No source covered the frequency
+        entry.state = TrState::Monitoring;
+        entry.monitoring_state = TrMonitoringState::NoSource;
+        tracing::error!(
+            talkgroup = tg_id,
+            sys_num,
+            "not recording: no source covering freq"
+        );
         false
     }
 
@@ -1414,8 +1406,8 @@ impl CallManager {
         Ok(())
     }
 
-    pub fn conclude_all(&mut self, mut ctx: Pin<&mut TrContext>) {
-        let _ = ctx; // retained for potential future FFI needs
+    pub fn conclude_all(&mut self, ctx: Pin<&mut TrContext>) {
+        let _ = ctx;
         for entry in &mut self.calls {
             if entry.state != TrState::Monitoring {
                 Self::conclude_call(entry, &self.patch_tables, &self.handler);

@@ -40,7 +40,7 @@ struct ActiveCall {
 }
 
 /// Maximum time a call can be active before being reaped.
-/// This is a safety net for C++ bugs that fail to emit CallEndEvent.
+/// This is a safety net for C++ bugs that fail to emit `CallEndEvent`.
 const MAX_CALL_AGE: Duration = Duration::from_secs(10 * 60);
 
 /// How often to check for stuck calls.
@@ -387,8 +387,8 @@ impl Dispatcher {
     }
 
     /// Reap calls that have been active longer than `MAX_CALL_AGE` without
-    /// receiving a CallEndEvent. Safety net for C++ bugs that fail to emit
-    /// conclude_call.
+    /// receiving a `CallEndEvent`. Safety net for C++ bugs that fail to emit
+    /// `conclude_call`.
     async fn reap_stuck_calls(&self) {
         let now = Instant::now();
         let mut calls = self.calls.write().await;

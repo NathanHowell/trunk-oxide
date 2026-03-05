@@ -203,7 +203,7 @@ impl CallManager {
                     }
                 }
                 Effect::Warn { message } => {
-                    tracing::warn!(%message, "state machine warning");
+                    tracing::debug!(%message, "state machine warning");
                 }
             }
         }

@@ -50,7 +50,7 @@ pub struct CallHandler {
     // Single-embed state
     embed_message_id: Option<MessageId>,
     transcription_text: String,
-    detected_tones: Vec<String>,
+    detected_tones: Vec<DetectedTone>,
     events: Vec<String>,
     call_ended: bool,
     call_end_duration: Option<Duration>,
@@ -221,7 +221,8 @@ impl CallHandler {
 
         // Tones (added when detected)
         if !self.detected_tones.is_empty() {
-            embed = embed.field("Tones", self.detected_tones.join(", "), false);
+            let tones_str: Vec<String> = self.detected_tones.iter().map(|t| format!("{t}")).collect();
+            embed = embed.field("Tones", tones_str.join(", "), false);
         }
 
         // Signal/unit events
@@ -321,7 +322,13 @@ impl CallHandler {
         let result = detector.finish();
 
         if !result.tones.is_empty() {
-            self.detected_tones = result.tones.iter().map(|t| format!("{t}")).collect();
+            // Extract CTCSS freq before moving tones
+            let ctcss_freq = result.tones.iter().find_map(|t| match t {
+                DetectedTone::Ctcss { freq } => Some(*freq),
+                _ => None,
+            });
+
+            self.detected_tones = result.tones;
             self.update_embed().await?;
 
             // Strip dispatch tone samples from the front of the audio buffer
@@ -331,12 +338,8 @@ impl CallHandler {
             }
 
             // If CTCSS detected, create notch filter and retroactively filter buffered audio
-            if let Some(DetectedTone::Ctcss { freq }) = result
-                .tones
-                .iter()
-                .find(|t| matches!(t, DetectedTone::Ctcss { .. }))
-            {
-                let mut filter = NotchFilter::new(16000, *freq, 30.0);
+            if let Some(freq) = ctcss_freq {
+                let mut filter = NotchFilter::new(16000, freq, 30.0);
                 filter.process(&mut self.audio_buffer);
                 self.notch_filter = Some(filter);
             }
@@ -407,9 +410,14 @@ impl CallHandler {
             self.call_end_signal = data.signal.map(SignalDb);
         }
 
-        // Delete the embed if the call produced nothing useful
+        // Delete the embed if the call produced nothing useful.
+        // CTCSS tones alone don't count — they're just squelch signaling.
+        let has_interesting_tones = self
+            .detected_tones
+            .iter()
+            .any(|t| !matches!(t, DetectedTone::Ctcss { .. }));
         let has_content = !self.transcription_text.is_empty()
-            || !self.detected_tones.is_empty()
+            || has_interesting_tones
             || !self.events.is_empty();
         if !has_content {
             if let Some(msg_id) = self.embed_message_id
@@ -473,7 +481,7 @@ impl CallHandler {
                 tones: if self.detected_tones.is_empty() {
                     None
                 } else {
-                    Some(self.detected_tones.clone())
+                    Some(self.detected_tones.iter().map(|t| format!("{t}")).collect())
                 },
                 events: if self.events.is_empty() {
                     None

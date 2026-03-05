@@ -513,7 +513,10 @@ double tr_system_get_current_control_channel(TrContext &ctx, int32_t sys_num) {
 double tr_system_get_control_channel_pwr(TrContext &ctx, int32_t sys_num) {
     auto sys = find_system_by_num(ctx, sys_num);
     if (!sys) return std::numeric_limits<double>::quiet_NaN();
-    return sys->get_control_channel_pwr();
+    double pwr = sys->get_control_channel_pwr();
+    // DB_UNSET (999.0) means the probe hasn't measured yet (e.g. right after retune)
+    if (pwr >= 998.0) return std::numeric_limits<double>::quiet_NaN();
+    return pwr;
 }
 
 // ── Phase A: Loop Control ──

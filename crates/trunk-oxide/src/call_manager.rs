@@ -202,6 +202,10 @@ impl CallManager {
                         ffi::call_start_initial_recording(handle.pin_mut());
                     }
                 }
+                Effect::RemoveCall { call_id } => {
+                    self.handles.remove(&call_id);
+                    self.state.remove_call(call_id);
+                }
                 Effect::Warn { message } => {
                     tracing::debug!(%message, "state machine warning");
                 }

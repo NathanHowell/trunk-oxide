@@ -451,6 +451,11 @@ pub(crate) enum Effect {
         call_id: CallId,
     },
 
+    // ── Lifecycle ──
+    RemoveCall {
+        call_id: CallId,
+    },
+
     // ── Diagnostics ──
     Warn {
         message: String,
@@ -822,9 +827,9 @@ impl TrunkStateMachine {
                 if let Some(orig_idx) = multisite.original_idx {
                     let orig = &mut self.calls[orig_idx];
                     orig.state = CallState::Rejected(RejectReason::Superseded);
-                    effects.push(Effect::EmitCallEnd {
-                        call_id: orig.id,
-                    });
+                    let orig_id = orig.id;
+                    effects.push(Effect::EmitCallEnd { call_id: orig_id });
+                    effects.push(Effect::RemoveCall { call_id: orig_id });
                 }
             }
         } else if multisite.is_duplicate {
@@ -1173,35 +1178,30 @@ impl TrunkStateMachine {
         let timeout = self.config.call_timeout;
         let mut ended_call = false;
 
-        self.calls.retain_mut(|entry| {
+        for entry in &self.calls {
             if entry.is_conventional() {
-                return true;
+                continue;
             }
 
             let since_update = entry.last_update.elapsed().as_secs_f64();
+            if since_update <= timeout {
+                continue;
+            }
 
             match entry.state {
                 CallState::Recording => {
-                    // Executor must check recorder write time via FFI and call
-                    // on_recorder_timeout if needed. Here we only check update timeout.
-                    if since_update > timeout {
-                        effects.push(Effect::EmitCallEnd { call_id: entry.id });
-                        effects.push(Effect::EmitSetupRecorder { call_id: entry.id });
-                        ended_call = true;
-                        return false;
-                    }
+                    effects.push(Effect::EmitCallEnd { call_id: entry.id });
+                    effects.push(Effect::EmitSetupRecorder { call_id: entry.id });
+                    effects.push(Effect::RemoveCall { call_id: entry.id });
+                    ended_call = true;
                 }
                 CallState::Idle | CallState::Rejected(_) => {
-                    if since_update > timeout {
-                        effects.push(Effect::EmitCallEnd { call_id: entry.id });
-                        ended_call = true;
-                        return false;
-                    }
+                    effects.push(Effect::EmitCallEnd { call_id: entry.id });
+                    effects.push(Effect::RemoveCall { call_id: entry.id });
+                    ended_call = true;
                 }
             }
-
-            true
-        });
+        }
 
         if ended_call {
             effects.push(Effect::EmitCallsActive);
@@ -1379,8 +1379,8 @@ impl TrunkStateMachine {
             if entry.state == CallState::Recording || entry.state == CallState::Idle {
                 effects.push(Effect::EmitCallEnd { call_id: entry.id });
             }
+            effects.push(Effect::RemoveCall { call_id: entry.id });
         }
-        self.calls.clear();
         effects.push(Effect::EmitCallsActive);
         effects
     }
@@ -1393,5 +1393,453 @@ impl TrunkStateMachine {
 
     pub(crate) fn get_call_mut(&mut self, call_id: CallId) -> Option<&mut CallEntry> {
         self.calls.iter_mut().find(|e| e.id == call_id)
+    }
+
+    pub(crate) fn remove_call(&mut self, call_id: CallId) {
+        self.calls.retain(|e| e.id != call_id);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_config() -> CallManagerConfig {
+        let mut systems = HashMap::new();
+        systems.insert(1, SystemPolicy {
+            system_type: SystemType::P25,
+            short_name: "test".into(),
+            record_unknown: true,
+            hide_unknown: false,
+            hide_encrypted: false,
+            monitor_encrypted: false,
+            multi_site: false,
+            multi_site_name: String::new(),
+            conversation_mode: false,
+            max_duration: 0.0,
+            control_channels: Vec::new(),
+            talkgroups: HashMap::new(),
+            channels: Vec::new(),
+            sys_id: 0,
+            wacn: 0,
+            nac: 0,
+        });
+        CallManagerConfig {
+            call_timeout: 1.0,
+            new_call_from_update: false,
+            record_uu_v_calls: false,
+            default_mode: DefaultMode::Digital,
+            control_warn_rate: 0,
+            systems,
+        }
+    }
+
+    fn grant_msg(talkgroup: i64, freq_hz: f64) -> TrunkMessage {
+        TrunkMessage {
+            message_type: MessageType::Grant,
+            sys_num: 1,
+            talkgroup,
+            freq: Freq::from_hz(freq_hz),
+            source: 100,
+            tdma_slot: 0,
+            phase2_tdma: false,
+            mode: false,
+            duplex: false,
+            emergency: false,
+            encrypted: false,
+            priority: 0,
+            wacn: 0,
+            nac: 0,
+            sys_id: 0,
+            sys_rfss: 0,
+            sys_site_id: 0,
+            patch_sg: 0,
+            patch_ga1: 0,
+            patch_ga2: 0,
+            patch_ga3: 0,
+        }
+    }
+
+    /// Verify effects contain the expected variant names in order.
+    /// Only checks the variants listed — extra effects in between are allowed.
+    fn assert_effects_contain_ordered(effects: &[Effect], expected: &[&str]) {
+        let names: Vec<&str> = effects.iter().map(|e| match e {
+            Effect::CreateCall { .. } => "CreateCall",
+            Effect::RequestRecording { .. } => "RequestRecording",
+            Effect::StopRecording { .. } => "StopRecording",
+            Effect::SetFreq { .. } => "SetFreq",
+            Effect::SetSource { .. } => "SetSource",
+            Effect::EmitCallStart { .. } => "EmitCallStart",
+            Effect::EmitCallEnd { .. } => "EmitCallEnd",
+            Effect::EmitCallsActive => "EmitCallsActive",
+            Effect::EmitSignal { .. } => "EmitSignal",
+            Effect::EmitUnitEvent { .. } => "EmitUnitEvent",
+            Effect::EmitSetupSystem { .. } => "EmitSetupSystem",
+            Effect::EmitSetupRecorder { .. } => "EmitSetupRecorder",
+            Effect::AddControlChannel { .. } => "AddControlChannel",
+            Effect::ConventionalRestart { .. } => "ConventionalRestart",
+            Effect::ConventionalStartInitial { .. } => "ConventionalStartInitial",
+            Effect::RemoveCall { .. } => "RemoveCall",
+            Effect::Warn { .. } => "Warn",
+        }).collect();
+
+        let mut name_iter = names.iter();
+        for &exp in expected {
+            let found = name_iter.any(|&n| n == exp);
+            assert!(found, "expected {exp} in effects, got: {names:?}");
+        }
+    }
+
+    /// Return the CallId from a CreateCall effect.
+    fn extract_create_call_id(effects: &[Effect]) -> CallId {
+        effects.iter().find_map(|e| match e {
+            Effect::CreateCall { call_id } => Some(*call_id),
+            _ => None,
+        }).expect("no CreateCall effect found")
+    }
+
+    // ── Grant creates a call ──
+
+    #[test]
+    fn grant_creates_call_with_recording_request() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let msg = grant_msg(100, 851_000_000.0);
+
+        let effects = sm.on_message(&msg);
+
+        assert_effects_contain_ordered(&effects, &[
+            "CreateCall",
+            "RequestRecording",
+            "EmitCallStart",
+        ]);
+        assert_eq!(sm.calls.len(), 1);
+        assert_eq!(sm.calls[0].talkgroup, 100);
+    }
+
+    // ── Grant on existing call with same freq updates source ──
+
+    #[test]
+    fn grant_same_freq_updates_source() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let msg = grant_msg(100, 851_000_000.0);
+        sm.on_message(&msg);
+
+        let mut msg2 = grant_msg(100, 851_000_000.0);
+        msg2.source = 200;
+        let effects = sm.on_message(&msg2);
+
+        assert_effects_contain_ordered(&effects, &["SetSource", "EmitSignal"]);
+        assert_eq!(sm.calls.len(), 1);
+    }
+
+    // ── Grant on existing call with different freq retunes ──
+
+    #[test]
+    fn grant_different_freq_retunes() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let msg = grant_msg(100, 851_000_000.0);
+        let effects = sm.on_message(&msg);
+        let call_id = extract_create_call_id(&effects);
+
+        // Simulate recording started
+        sm.on_recording_result(call_id, RecordingResult::Started {
+            rec_num: RecorderNum(0),
+        });
+
+        let msg2 = grant_msg(100, 852_000_000.0);
+        let effects = sm.on_message(&msg2);
+
+        assert_effects_contain_ordered(&effects, &[
+            "StopRecording",
+            "SetFreq",
+            "RequestRecording",
+        ]);
+    }
+
+    // ── Recording result updates state ──
+
+    #[test]
+    fn recording_result_success_sets_recording_state() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let msg = grant_msg(100, 851_000_000.0);
+        let effects = sm.on_message(&msg);
+        let call_id = extract_create_call_id(&effects);
+
+        let effects = sm.on_recording_result(call_id, RecordingResult::Started {
+            rec_num: RecorderNum(5),
+        });
+
+        assert_eq!(sm.calls[0].state, CallState::Recording);
+        assert_eq!(sm.calls[0].recorder, Some(RecorderNum(5)));
+        assert_effects_contain_ordered(&effects, &["EmitSetupRecorder"]);
+    }
+
+    #[test]
+    fn recording_result_no_source_rejects() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let msg = grant_msg(100, 851_000_000.0);
+        let effects = sm.on_message(&msg);
+        let call_id = extract_create_call_id(&effects);
+
+        sm.on_recording_result(call_id, RecordingResult::NoSource);
+
+        assert_eq!(sm.calls[0].state, CallState::Rejected(RejectReason::NoSource));
+    }
+
+    // ── TDULC transitions Recording → Idle ──
+
+    #[test]
+    fn tdulc_transitions_recording_to_idle() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let msg = grant_msg(100, 851_000_000.0);
+        let effects = sm.on_message(&msg);
+        let call_id = extract_create_call_id(&effects);
+        sm.on_recording_result(call_id, RecordingResult::Started {
+            rec_num: RecorderNum(0),
+        });
+
+        let tdulc = TrunkMessage {
+            message_type: MessageType::Tdulc,
+            talkgroup: 100,
+            sys_num: 1,
+            ..grant_msg(100, 0.0)
+        };
+        sm.on_message(&tdulc);
+
+        assert_eq!(sm.calls[0].state, CallState::Idle);
+        assert_eq!(sm.calls[0].segments.len(), 1);
+    }
+
+    // ── Grant on Idle call resumes recording ──
+
+    #[test]
+    fn grant_on_idle_resumes_recording() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let msg = grant_msg(100, 851_000_000.0);
+        let effects = sm.on_message(&msg);
+        let call_id = extract_create_call_id(&effects);
+        sm.on_recording_result(call_id, RecordingResult::Started {
+            rec_num: RecorderNum(0),
+        });
+
+        // TDULC → Idle
+        let tdulc = TrunkMessage {
+            message_type: MessageType::Tdulc,
+            talkgroup: 100,
+            sys_num: 1,
+            ..grant_msg(100, 0.0)
+        };
+        sm.on_message(&tdulc);
+        assert_eq!(sm.calls[0].state, CallState::Idle);
+
+        // Grant again → Recording
+        sm.on_message(&msg);
+        assert_eq!(sm.calls[0].state, CallState::Recording);
+    }
+
+    // ── Tick: timed-out call emits EmitCallEnd BEFORE RemoveCall ──
+
+    #[test]
+    fn tick_emits_call_end_before_remove() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let msg = grant_msg(100, 851_000_000.0);
+        let effects = sm.on_message(&msg);
+        let call_id = extract_create_call_id(&effects);
+        sm.on_recording_result(call_id, RecordingResult::Started {
+            rec_num: RecorderNum(0),
+        });
+
+        // Force the call to be timed out
+        sm.calls[0].last_update = Instant::now() - std::time::Duration::from_secs(10);
+
+        let effects = sm.tick();
+
+        // EmitCallEnd must come before RemoveCall
+        let end_pos = effects.iter().position(|e| matches!(e, Effect::EmitCallEnd { .. }));
+        let remove_pos = effects.iter().position(|e| matches!(e, Effect::RemoveCall { .. }));
+
+        assert!(end_pos.is_some(), "expected EmitCallEnd in tick effects");
+        assert!(remove_pos.is_some(), "expected RemoveCall in tick effects");
+        assert!(
+            end_pos.unwrap() < remove_pos.unwrap(),
+            "EmitCallEnd must come before RemoveCall, got end={} remove={}",
+            end_pos.unwrap(),
+            remove_pos.unwrap()
+        );
+
+        // Call entry must still exist until RemoveCall is processed
+        assert!(sm.get_call(call_id).is_some(), "entry must exist until RemoveCall is executed");
+    }
+
+    #[test]
+    fn tick_emits_call_end_before_remove_for_rejected() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let msg = grant_msg(100, 851_000_000.0);
+        let effects = sm.on_message(&msg);
+        let call_id = extract_create_call_id(&effects);
+        sm.on_recording_result(call_id, RecordingResult::NoSource);
+
+        sm.calls[0].last_update = Instant::now() - std::time::Duration::from_secs(10);
+
+        let effects = sm.tick();
+
+        let end_pos = effects.iter().position(|e| matches!(e, Effect::EmitCallEnd { .. }));
+        let remove_pos = effects.iter().position(|e| matches!(e, Effect::RemoveCall { .. }));
+
+        assert!(end_pos.is_some());
+        assert!(remove_pos.is_some());
+        assert!(end_pos.unwrap() < remove_pos.unwrap());
+    }
+
+    // ── Tick: call within timeout is NOT removed ──
+
+    #[test]
+    fn tick_does_not_remove_active_call() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let msg = grant_msg(100, 851_000_000.0);
+        let effects = sm.on_message(&msg);
+        let call_id = extract_create_call_id(&effects);
+        sm.on_recording_result(call_id, RecordingResult::Started {
+            rec_num: RecorderNum(0),
+        });
+
+        let effects = sm.tick();
+
+        assert!(!effects.iter().any(|e| matches!(e, Effect::RemoveCall { .. })));
+        assert_eq!(sm.calls.len(), 1);
+    }
+
+    // ── conclude_all emits EmitCallEnd BEFORE RemoveCall ──
+
+    #[test]
+    fn conclude_all_emits_call_end_before_remove() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let msg = grant_msg(100, 851_000_000.0);
+        let effects = sm.on_message(&msg);
+        let call_id = extract_create_call_id(&effects);
+        sm.on_recording_result(call_id, RecordingResult::Started {
+            rec_num: RecorderNum(0),
+        });
+
+        let effects = sm.conclude_all();
+
+        let end_pos = effects.iter().position(|e| matches!(e, Effect::EmitCallEnd { .. }));
+        let remove_pos = effects.iter().position(|e| matches!(e, Effect::RemoveCall { .. }));
+
+        assert!(end_pos.is_some(), "expected EmitCallEnd");
+        assert!(remove_pos.is_some(), "expected RemoveCall");
+        assert!(
+            end_pos.unwrap() < remove_pos.unwrap(),
+            "EmitCallEnd must come before RemoveCall"
+        );
+
+        // Entries still exist until executor processes RemoveCall
+        assert!(sm.get_call(call_id).is_some());
+    }
+
+    // ── remove_call actually removes ──
+
+    #[test]
+    fn remove_call_removes_entry() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let msg = grant_msg(100, 851_000_000.0);
+        let effects = sm.on_message(&msg);
+        let call_id = extract_create_call_id(&effects);
+
+        assert_eq!(sm.calls.len(), 1);
+        sm.remove_call(call_id);
+        assert_eq!(sm.calls.len(), 0);
+    }
+
+    // ── Conventional calls are NOT removed by tick ──
+
+    #[test]
+    fn tick_skips_conventional_calls() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let channel = ConventionalChannel {
+            talkgroup: Talkgroup(1),
+            freq: Freq::from_hz(488_000_000.0),
+            is_analog: true,
+            priority: 0,
+        };
+        let policy = sm.config.systems.get(&1).unwrap().clone();
+        let call_id = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(0)));
+
+        sm.calls[0].last_update = Instant::now() - std::time::Duration::from_secs(10);
+
+        let effects = sm.tick();
+
+        assert!(!effects.iter().any(|e| matches!(e, Effect::RemoveCall { .. })));
+        assert!(sm.get_call(call_id).is_some());
+    }
+
+    // ── Squelch handling ──
+
+    #[test]
+    fn squelch_muted_transitions_to_idle() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let channel = ConventionalChannel {
+            talkgroup: Talkgroup(1),
+            freq: Freq::from_hz(488_000_000.0),
+            is_analog: true,
+            priority: 0,
+        };
+        let policy = sm.config.systems.get(&1).unwrap().clone();
+        sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(5)));
+        sm.calls[0].state = CallState::Recording;
+
+        sm.on_squelch(RecorderNum(5), true, -30.0);
+
+        assert_eq!(sm.calls[0].state, CallState::Idle);
+        assert_eq!(sm.calls[0].segments.len(), 1);
+    }
+
+    #[test]
+    fn squelch_unmuted_transitions_to_recording() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let channel = ConventionalChannel {
+            talkgroup: Talkgroup(1),
+            freq: Freq::from_hz(488_000_000.0),
+            is_analog: true,
+            priority: 0,
+        };
+        let policy = sm.config.systems.get(&1).unwrap().clone();
+        sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(5)));
+        sm.calls[0].state = CallState::Idle;
+
+        sm.on_squelch(RecorderNum(5), false, -20.0);
+
+        assert_eq!(sm.calls[0].state, CallState::Recording);
+    }
+
+    // ── Unknown message type produces Warn ──
+
+    #[test]
+    fn unknown_message_type_produces_warn() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let msg = TrunkMessage {
+            message_type: MessageType::Unknown(99),
+            ..grant_msg(0, 0.0)
+        };
+        let effects = sm.on_message(&msg);
+
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(&effects[0], Effect::Warn { message } if message.contains("99")));
+    }
+
+    // ── Encrypted call is rejected ──
+
+    #[test]
+    fn encrypted_call_rejected_when_not_monitoring() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let mut msg = grant_msg(100, 851_000_000.0);
+        msg.encrypted = true;
+
+        let effects = sm.on_message(&msg);
+
+        assert_effects_contain_ordered(&effects, &["CreateCall", "EmitCallStart"]);
+        // Should NOT contain RequestRecording
+        assert!(!effects.iter().any(|e| matches!(e, Effect::RequestRecording { .. })));
+        assert_eq!(sm.calls[0].state, CallState::Rejected(RejectReason::Encrypted));
     }
 }

@@ -34,6 +34,10 @@ pub struct CallHandlerConfig {
 /// Max chars for embed description before we truncate from the front.
 const MAX_DESCRIPTION_LEN: usize = 3800;
 
+/// RMS threshold below which post-filter audio is considered silent.
+/// Samples are normalized to [-1.0, 1.0]; an RMS of 0.005 is ~-46 dBFS.
+const SILENCE_RMS_THRESHOLD: f64 = 0.005;
+
 pub struct CallHandler {
     call_info: proto::CallInfo,
     rx: mpsc::Receiver<CallMessage>,
@@ -57,6 +61,10 @@ pub struct CallHandler {
     call_end_signal: Option<SignalDb>,
     start_time_str: String,
     tag: String,
+
+    // Audio energy tracking (post-filter)
+    audio_energy_sum: f64,
+    audio_sample_count: u64,
 
     // Database
     db: Arc<Mutex<Database>>,
@@ -126,6 +134,8 @@ impl CallHandler {
             call_end_signal: None,
             start_time_str,
             tag,
+            audio_energy_sum: 0.0,
+            audio_sample_count: 0,
             db,
             call_row_id,
         })
@@ -298,6 +308,10 @@ impl CallHandler {
             filter.process(&mut samples);
         }
 
+        // Track audio energy after filtering for silence detection
+        self.audio_energy_sum += samples.iter().map(|&s| (s as f64) * (s as f64)).sum::<f64>();
+        self.audio_sample_count += samples.len() as u64;
+
         if let Some(enc) = &mut self.ogg_encoder {
             enc.process(&samples)?;
         }
@@ -428,7 +442,16 @@ impl CallHandler {
             .detected_tones
             .iter()
             .any(|t| !matches!(t, DetectedTone::Ctcss { .. }));
-        let has_content = !self.transcription_text.is_empty()
+        let audio_rms = if self.audio_sample_count > 0 {
+            (self.audio_energy_sum / self.audio_sample_count as f64).sqrt()
+        } else {
+            0.0
+        };
+        let audio_is_silent = audio_rms < SILENCE_RMS_THRESHOLD;
+        if audio_is_silent {
+            tracing::info!(rms = format_args!("{audio_rms:.6}"), "audio below silence threshold");
+        }
+        let has_content = (!self.transcription_text.is_empty() && !audio_is_silent)
             || has_interesting_tones
             || !self.events.is_empty();
         if !has_content {

@@ -86,8 +86,11 @@ impl CallHandler {
             None
         };
 
-        let start_time =
-            DateTime::<Utc>::from_timestamp(call_info.start_time, 0).unwrap_or_else(Utc::now);
+        let start_time = call_info
+            .start_time
+            .as_ref()
+            .and_then(|ts| DateTime::<Utc>::from_timestamp(ts.seconds, ts.nanos.try_into().unwrap_or(0)))
+            .unwrap_or_else(Utc::now);
         let start_time_str = start_time.format("%H:%M:%S UTC").to_string();
 
         let tag = if call_info.talkgroup_alpha_tag.is_empty() {
@@ -426,7 +429,11 @@ impl CallHandler {
         {
             match encoder.finish() {
                 Ok(ogg_data) => {
-                    let start_time = DateTime::<Utc>::from_timestamp(self.call_info.start_time, 0)
+                    let start_time = self
+                        .call_info
+                        .start_time
+                        .as_ref()
+                        .and_then(|ts| DateTime::<Utc>::from_timestamp(ts.seconds, ts.nanos.try_into().unwrap_or(0)))
                         .unwrap_or_else(Utc::now);
                     let filename = format!(
                         "call_{}_{}.ogg",

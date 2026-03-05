@@ -218,8 +218,11 @@ impl Dispatcher {
             channel
         } else {
             // Fallback — create/reuse a per-talkgroup-per-day thread
-            let start_time =
-                DateTime::<Utc>::from_timestamp(call.start_time, 0).unwrap_or_else(Utc::now);
+            let start_time = call
+                .start_time
+                .as_ref()
+                .and_then(|ts| DateTime::<Utc>::from_timestamp(ts.seconds, ts.nanos.try_into().unwrap_or(0)))
+                .unwrap_or_else(Utc::now);
             let date_str = start_time.format("%Y-%m-%d").to_string();
 
             let cache_key = ThreadCacheKey {
@@ -252,7 +255,7 @@ impl Dispatcher {
                 freq: proto::types::Freq(call.freq),
                 encrypted: call.encrypted,
                 emergency: call.emergency,
-                start_time: call.start_time,
+                start_time: call.start_time.as_ref().map_or(0, |ts| ts.seconds),
                 tag: call.talkgroup.to_string(),
                 short_name: call.short_name.clone(),
                 thread_id: Some(post_channel.get()),

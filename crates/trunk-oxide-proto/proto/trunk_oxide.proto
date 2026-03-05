@@ -1,7 +1,9 @@
 syntax = "proto3";
 package trunk_oxide;
 
+import "google/protobuf/duration.proto";
 import "google/protobuf/empty.proto";
+import "google/protobuf/timestamp.proto";
 
 // ── Service ──
 // trunk-oxide acts as a gRPC SERVER; clients subscribe to streams.
@@ -91,8 +93,8 @@ message CallInfo {
   bool conversation_mode = 17;
   int64 current_source_id = 18;
   double current_length = 19;
-  int64 start_time = 20;
-  int64 elapsed = 21;
+  google.protobuf.Timestamp start_time = 20;
+  google.protobuf.Duration elapsed = 21;
   string short_name = 22;
   string talkgroup_alpha_tag = 23; // e.g. "SMC SO Pat 1"
   string talkgroup_tag = 24;       // e.g. "Law Dispatch"

@@ -130,6 +130,7 @@ bool tr_system_update_status(TrContext &ctx, const TrTrunkMessage &msg);
 
 // ── Phase B: Decode Rate Checking (called from Rust check_decode_rates) ──
 double tr_system_get_current_control_channel(TrContext &ctx, int32_t sys_num);
+double tr_system_get_control_channel_pwr(TrContext &ctx, int32_t sys_num);
 
 // ── Conventional call management — recorder status (null-guarded) ──
 bool call_has_recorder(const TrCall &call);

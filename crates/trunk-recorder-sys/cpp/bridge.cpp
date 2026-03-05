@@ -7,6 +7,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <map>
 
 #include "trunk-recorder/trunk_context.h"
@@ -507,6 +508,12 @@ bool tr_system_update_status(TrContext &ctx, const TrTrunkMessage &msg) {
 double tr_system_get_current_control_channel(TrContext &ctx, int32_t sys_num) {
     auto sys = find_system_by_num(ctx, sys_num);
     return sys ? sys->get_current_control_channel() : 0.0;
+}
+
+double tr_system_get_control_channel_pwr(TrContext &ctx, int32_t sys_num) {
+    auto sys = find_system_by_num(ctx, sys_num);
+    if (!sys) return std::numeric_limits<double>::quiet_NaN();
+    return sys->get_control_channel_pwr();
 }
 
 // ── Phase A: Loop Control ──

@@ -1385,18 +1385,22 @@ impl CallManager {
 
             if decode_rate < self.config.control_warn_rate {
                 let freq = ffi::tr_system_get_current_control_channel(ctx.as_mut(), sys_num);
+                let pwr_db = ffi::tr_system_get_control_channel_pwr(ctx.as_mut(), sys_num);
                 tracing::warn!(
                     sys_num,
                     freq_mhz = freq / 1e6,
+                    pwr_db,
                     decode_rate,
                     count,
                     "low decode rate",
                 );
             } else if self.config.control_warn_rate == -1 {
                 let freq = ffi::tr_system_get_current_control_channel(ctx.as_mut(), sys_num);
+                let pwr_db = ffi::tr_system_get_control_channel_pwr(ctx.as_mut(), sys_num);
                 tracing::info!(
                     sys_num,
                     freq_mhz = freq / 1e6,
+                    pwr_db,
                     decode_rate,
                     count,
                     "decode rate",

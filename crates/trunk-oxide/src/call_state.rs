@@ -1773,6 +1773,34 @@ mod tests {
         assert!(sm.get_call(call_id).is_some());
     }
 
+    // ── Conventional idle timeout preserves recorder ──
+
+    #[test]
+    fn conventional_idle_timeout_preserves_recorder() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let channel = ConventionalChannel {
+            talkgroup: Talkgroup(1),
+            freq: Freq::from_hz(488_000_000.0),
+            is_analog: true,
+            priority: 0,
+        };
+        let policy = sm.config.systems.get(&1).unwrap().clone();
+        let call_id = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
+        sm.calls[0].state = CallState::Recording;
+
+        let effects = sm.on_conventional_idle_timeout(call_id);
+
+        // Must emit EmitCallEnd followed by ConventionalRestart
+        assert!(effects.iter().any(|e| matches!(e, Effect::EmitCallEnd { .. })));
+        assert!(effects.iter().any(|e| matches!(e, Effect::ConventionalRestart { .. })));
+
+        // Recorder must still be set after timeout — the executor conclude path
+        // must NOT clear it, or tick_conventional will skip this call forever.
+        let entry = sm.get_call(call_id).unwrap();
+        assert_eq!(entry.recorder, Some(RecorderNum(12)));
+        assert_eq!(entry.state, CallState::Recording);
+    }
+
     // ── Squelch handling ──
 
     #[test]

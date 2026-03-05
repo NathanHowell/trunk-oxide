@@ -199,12 +199,37 @@ impl Recorder {
     }
 }
 
-/// Fields shared by all call types (trunked and conventional).
-struct CallCommon {
+/// A completed segment within a multi-PTT call. Each time a trunked call is
+/// granted a new frequency, the current segment is closed and a new one begins.
+/// For conventional calls, each squelch-open/close cycle is a segment.
+struct CallSegment {
+    freq: f64,
+    start: Instant,
+    rec_num: i32,
+}
+
+/// P25 multisite fields — only meaningful for trunked calls.
+struct TrunkedFields {
+    multi_site: bool,
+    wacn: u64,
+    rfss: i32,
+    site_id: i32,
+    multi_site_name: String,
+    conversation_mode: bool,
+}
+
+/// Discriminant for trunked vs conventional behavior.
+enum CallMode {
+    Trunked(TrunkedFields),
+    Conventional,
+}
+
+/// A call entry — unified across trunked and conventional.
+struct CallEntry {
     /// C++ Call — recorder handle only.
     handle: UniquePtr<TrCall>,
 
-    // Immutable (set at creation)
+    // Identity (set at creation)
     call_num: i64,
     talkgroup: i64,
     sys_num: i32,
@@ -216,7 +241,7 @@ struct CallCommon {
     emergency: bool,
     start_time: i64,
 
-    // Mutable (Rust-owned, no C++ sync)
+    // Mutable state (Rust-owned)
     freq: f64,
     state: TrState,
     monitoring_state: TrMonitoringState,
@@ -226,18 +251,24 @@ struct CallCommon {
     signal: f64,
     noise: f64,
     priority: i32,
-    /// The recorder assigned to this call, if any.
     recorder: Option<Recorder>,
-
-    // Rust-only timing
     last_update: Instant,
-
-    // System-derived (cached at creation)
     max_duration: f64,
+
+    // Segment tracking (shared across both modes)
+    segments: Vec<CallSegment>,
+    segment_start: Instant,
+
+    // Idle tracking (shared across both modes)
+    idle_since: Option<Instant>,
+
+    // Mode-specific fields
+    call_mode: CallMode,
 }
 
-impl From<UniquePtr<TrCall>> for CallCommon {
-    fn from(call: UniquePtr<TrCall>) -> Self {
+impl CallEntry {
+    /// Initialize common fields from C++ metadata.
+    fn from_cpp(call: UniquePtr<TrCall>) -> Self {
         let m = ffi::call_get_metadata(&*call);
         Self {
             handle: call,
@@ -263,93 +294,38 @@ impl From<UniquePtr<TrCall>> for CallCommon {
             recorder: None,
             last_update: Instant::now(),
             max_duration: 0.0,
-        }
-    }
-}
-
-/// A completed segment within a multi-PTT call. Each time a trunked call is
-/// granted a new frequency, the current segment is closed and a new one begins.
-struct CallSegment {
-    freq: f64,
-    start: Instant,
-    rec_num: i32,
-}
-
-/// P25 multisite fields — only meaningful for trunked calls.
-struct TrunkedFields {
-    multi_site: bool,
-    wacn: u64,
-    rfss: i32,
-    site_id: i32,
-    multi_site_name: String,
-    conversation_mode: bool,
-
-    /// Completed segments (each PTT on a potentially different freq).
-    segments: Vec<CallSegment>,
-    /// When the current segment started.
-    segment_start: Instant,
-}
-
-/// Squelch-based idle tracking — only meaningful for conventional calls.
-struct ConventionalFields {
-    /// When the squelch last closed (idle start). None = squelch open / active.
-    idle_since: Option<Instant>,
-}
-
-/// A call entry that forces callers to handle trunked vs conventional via match.
-enum CallEntry {
-    Trunked {
-        common: CallCommon,
-        trunked: TrunkedFields,
-    },
-    Conventional {
-        common: CallCommon,
-        conv: ConventionalFields,
-    },
-}
-
-impl CallEntry {
-    fn common(&self) -> &CallCommon {
-        match self {
-            CallEntry::Trunked { common, .. } | CallEntry::Conventional { common, .. } => common,
-        }
-    }
-
-    fn common_mut(&mut self) -> &mut CallCommon {
-        match self {
-            CallEntry::Trunked { common, .. } | CallEntry::Conventional { common, .. } => common,
+            segments: Vec::new(),
+            segment_start: Instant::now(),
+            idle_since: None,
+            call_mode: CallMode::Conventional, // overridden by caller
         }
     }
 
     /// Create from a trunked grant message.
     fn new_trunked(call: UniquePtr<TrCall>, msg: &TrTrunkMessage, policy: &SystemPolicy) -> Self {
-        let mut common = CallCommon::from(call);
+        let mut entry = Self::from_cpp(call);
         // Override fields that come from the message rather than C++ metadata
-        common.talkgroup = msg.talkgroup;
-        common.freq = msg.freq;
-        common.tdma_slot = msg.tdma_slot;
-        common.phase2_tdma = msg.phase2_tdma;
-        common.mode = msg.mode;
-        common.duplex = msg.duplex;
-        common.emergency = msg.emergency;
-        common.encrypted = msg.encrypted;
-        common.is_analog = false;
-        common.current_source_id = msg.source;
-        common.priority = msg.priority;
-        common.max_duration = policy.max_duration;
-        CallEntry::Trunked {
-            common,
-            trunked: TrunkedFields {
-                multi_site: policy.multi_site,
-                wacn: msg.wacn,
-                rfss: msg.sys_rfss,
-                site_id: msg.sys_site_id,
-                multi_site_name: policy.multi_site_name.clone(),
-                conversation_mode: policy.conversation_mode,
-                segments: Vec::new(),
-                segment_start: Instant::now(),
-            },
-        }
+        entry.talkgroup = msg.talkgroup;
+        entry.freq = msg.freq;
+        entry.tdma_slot = msg.tdma_slot;
+        entry.phase2_tdma = msg.phase2_tdma;
+        entry.mode = msg.mode;
+        entry.duplex = msg.duplex;
+        entry.emergency = msg.emergency;
+        entry.encrypted = msg.encrypted;
+        entry.is_analog = false;
+        entry.current_source_id = msg.source;
+        entry.priority = msg.priority;
+        entry.max_duration = policy.max_duration;
+        entry.call_mode = CallMode::Trunked(TrunkedFields {
+            multi_site: policy.multi_site,
+            wacn: msg.wacn,
+            rfss: msg.sys_rfss,
+            site_id: msg.sys_site_id,
+            multi_site_name: policy.multi_site_name.clone(),
+            conversation_mode: policy.conversation_mode,
+        });
+        entry
     }
 
     /// Create from an existing C++ call (conventional calls at startup).
@@ -360,49 +336,60 @@ impl CallEntry {
         } else {
             None
         };
-        let mut common = CallCommon::from(call);
-        common.max_duration = policy.max_duration;
-        common.recorder = rec_num.map(|rec_num| Recorder { rec_num });
-        CallEntry::Conventional {
-            common,
-            conv: ConventionalFields { idle_since: None },
+        let mut entry = Self::from_cpp(call);
+        entry.max_duration = policy.max_duration;
+        entry.recorder = rec_num.map(|rec_num| Recorder { rec_num });
+        entry.call_mode = CallMode::Conventional;
+        entry
+    }
+
+    fn is_conventional(&self) -> bool {
+        matches!(self.call_mode, CallMode::Conventional)
+    }
+
+    fn is_trunked(&self) -> bool {
+        matches!(self.call_mode, CallMode::Trunked(_))
+    }
+
+    fn trunked_fields(&self) -> Option<&TrunkedFields> {
+        match &self.call_mode {
+            CallMode::Trunked(t) => Some(t),
+            _ => None,
         }
     }
 
     /// Build a lightweight `TrCallInfo` for event dispatch.
     fn to_call_info(&self) -> ffi::TrCallInfo {
-        let c = self.common();
         let now_secs = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |d| d.as_secs() as i64);
         ffi::TrCallInfo {
-            talkgroup: c.talkgroup,
-            call_num: c.call_num,
-            sys_num: c.sys_num,
-            freq: c.freq,
-            signal: c.signal,
-            noise: c.noise,
-            freq_error: ffi::call_get_freq_error(&*c.handle),
-            encrypted: c.encrypted,
-            emergency: c.emergency,
-            is_analog: c.is_analog,
-            is_conventional: matches!(self, CallEntry::Conventional { .. }),
-            phase2_tdma: c.phase2_tdma,
-            tdma_slot: c.tdma_slot,
-            priority: c.priority,
-            mode: c.mode,
-            duplex: c.duplex,
-            conversation_mode: match self {
-                CallEntry::Trunked { trunked, .. } => trunked.conversation_mode,
-                CallEntry::Conventional { .. } => false,
-            },
-            current_source_id: c.current_source_id,
-            current_length: ffi::call_get_current_length(&*c.handle),
-            start_time: c.start_time,
-            elapsed: (now_secs - c.start_time) as f64,
-            short_name: c.short_name.clone(),
-            state: c.state,
-            monitoring_state: c.monitoring_state,
+            talkgroup: self.talkgroup,
+            call_num: self.call_num,
+            sys_num: self.sys_num,
+            freq: self.freq,
+            signal: self.signal,
+            noise: self.noise,
+            freq_error: ffi::call_get_freq_error(&*self.handle),
+            encrypted: self.encrypted,
+            emergency: self.emergency,
+            is_analog: self.is_analog,
+            is_conventional: self.is_conventional(),
+            phase2_tdma: self.phase2_tdma,
+            tdma_slot: self.tdma_slot,
+            priority: self.priority,
+            mode: self.mode,
+            duplex: self.duplex,
+            conversation_mode: self
+                .trunked_fields()
+                .map_or(false, |t| t.conversation_mode),
+            current_source_id: self.current_source_id,
+            current_length: ffi::call_get_current_length(&*self.handle),
+            start_time: self.start_time,
+            elapsed: (now_secs - self.start_time) as f64,
+            short_name: self.short_name.clone(),
+            state: self.state,
+            monitoring_state: self.monitoring_state,
         }
     }
 }
@@ -488,7 +475,7 @@ impl CallManager {
 
     // ── Call data construction ──
 
-    fn build_call_data(c: &CallCommon, patches: &HashMap<i32, PatchTable>) -> TrCallData {
+    fn build_call_data(c: &CallEntry, patches: &HashMap<i32, PatchTable>) -> TrCallData {
         let audio_type = if c.is_analog {
             "analog"
         } else if c.phase2_tdma {
@@ -546,17 +533,17 @@ impl CallManager {
 
     /// Stop the active recorder without concluding the call. Returns the
     /// recorder number and stop metrics, or `None` if no recorder was active.
-    fn stop_recorder(c: &mut CallCommon) -> Option<(i32, ffi::TrStopRecordingResult)> {
-        let recorder = c.recorder.take()?;
+    fn stop_recorder(entry: &mut CallEntry) -> Option<(i32, ffi::TrStopRecordingResult)> {
+        let recorder = entry.recorder.take()?;
         let rec_num = recorder.rec_num;
-        let metrics = recorder.stop(c.handle.pin_mut());
+        let metrics = recorder.stop(entry.handle.pin_mut());
         tracing::info!(
-            short_name = %c.short_name,
+            short_name = %entry.short_name,
             rec_num,
-            talkgroup = c.talkgroup,
-            freq = %format_freq(c.freq),
-            tdma = c.phase2_tdma,
-            slot = c.tdma_slot,
+            talkgroup = entry.talkgroup,
+            freq = %format_freq(entry.freq),
+            tdma = entry.phase2_tdma,
+            slot = entry.tdma_slot,
             freq_error = format_args!("{:+.0} Hz", metrics.freq_error),
             "stopping recorder"
         );
@@ -570,25 +557,24 @@ impl CallManager {
         patches: &HashMap<i32, PatchTable>,
         bridge: &EventBridge,
     ) {
-        let is_conventional = matches!(entry, CallEntry::Conventional { .. });
+        let is_conventional = entry.is_conventional();
 
         // Snapshot fields we need before any mutable borrows.
-        let state = entry.common().state;
-        let monitoring_state = entry.common().monitoring_state;
-        let final_freq = entry.common().freq;
+        let state = entry.state;
+        let monitoring_state = entry.monitoring_state;
+        let final_freq = entry.freq;
 
         let should_stop_recording = state == TrState::Recording
             || (state == TrState::Monitoring
                 && monitoring_state == TrMonitoringState::Superseded);
 
         if should_stop_recording {
-            let c = entry.common_mut();
-            if let Some((rec_num, metrics)) = Self::stop_recorder(c) {
+            if let Some((rec_num, metrics)) = Self::stop_recorder(entry) {
                 if is_conventional {
                     if metrics.recorder_idle {
-                        c.noise = metrics.recorder_pwr;
+                        entry.noise = metrics.recorder_pwr;
                     } else {
-                        c.signal = metrics.recorder_pwr;
+                        entry.signal = metrics.recorder_pwr;
                     }
                 }
 
@@ -596,16 +582,15 @@ impl CallManager {
                 let segments = Self::build_proto_segments_final(
                     entry, final_freq, rec_num,
                 );
-                let c = entry.common_mut();
 
                 let elapsed = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
                     .map_or(0, |d| d.as_secs() as i64)
-                    - c.start_time;
+                    - entry.start_time;
                 tracing::info!(
-                    short_name = %c.short_name,
-                    call_num = c.call_num,
-                    talkgroup = c.talkgroup,
+                    short_name = %entry.short_name,
+                    call_num = entry.call_num,
+                    talkgroup = entry.talkgroup,
                     elapsed,
                     final_length = metrics.final_length,
                     segments = segments.len(),
@@ -614,26 +599,25 @@ impl CallManager {
 
                 if metrics.is_dmr {
                     for slot in 0..2i32 {
-                        let mut data = Self::build_call_data(c, patches);
+                        let mut data = Self::build_call_data(entry, patches);
                         data.tdma_slot = slot;
                         data.length = metrics.final_length;
                         data.freq_error = metrics.freq_error;
                         data.transmission_list =
-                            ffi::call_get_dmr_transmission_list(&*c.handle, slot);
+                            ffi::call_get_dmr_transmission_list(&*entry.handle, slot);
                         bridge.call_end(&data, &segments);
                     }
                 } else {
-                    let mut data = Self::build_call_data(c, patches);
+                    let mut data = Self::build_call_data(entry, patches);
                     data.length = metrics.final_length;
                     data.freq_error = metrics.freq_error;
-                    data.transmission_list = ffi::call_get_transmission_list(&*c.handle);
+                    data.transmission_list = ffi::call_get_transmission_list(&*entry.handle);
                     bridge.call_end(&data, &segments);
                 }
             }
         } else if state == TrState::Monitoring {
             let segments = Self::build_proto_segments_final(entry, final_freq, -1);
-            let c = entry.common_mut();
-            let data = Self::build_call_data(c, patches);
+            let data = Self::build_call_data(entry, patches);
             bridge.call_end(&data, &segments);
         }
     }
@@ -644,22 +628,20 @@ impl CallManager {
         final_freq: f64,
         final_rec_num: i32,
     ) -> Vec<trunk_oxide_grpc::proto::CallSegment> {
-        match entry {
-            CallEntry::Trunked { trunked, .. } => {
-                let mut segments: Vec<_> = trunked
-                    .segments
-                    .iter()
-                    .map(|s| Self::make_proto_segment(s.freq, s.start, s.rec_num))
-                    .collect();
-                segments.push(Self::make_proto_segment(
-                    final_freq,
-                    trunked.segment_start,
-                    final_rec_num,
-                ));
-                segments
-            }
-            CallEntry::Conventional { .. } => Vec::new(),
+        let mut segments: Vec<_> = entry
+            .segments
+            .iter()
+            .map(|s| Self::make_proto_segment(s.freq, s.start, s.rec_num))
+            .collect();
+        // Add the final active segment (current freq/start)
+        if entry.is_trunked() || !entry.segments.is_empty() {
+            segments.push(Self::make_proto_segment(
+                final_freq,
+                entry.segment_start,
+                final_rec_num,
+            ));
         }
+        segments
     }
 
     fn make_proto_segment(
@@ -695,19 +677,18 @@ impl CallManager {
         msg: &TrTrunkMessage,
         bridge: &EventBridge,
     ) -> bool {
-        let c = entry.common_mut();
-        c.last_update = Instant::now();
+        entry.last_update = Instant::now();
 
         let src = msg.source;
         if src == -1 {
             return false;
         }
-        if src == c.current_source_id {
+        if src == entry.current_source_id {
             return false;
         }
 
-        c.current_source_id = src;
-        ffi::call_recorder_set_source(c.handle.pin_mut(), src);
+        entry.current_source_id = src;
+        ffi::call_recorder_set_source(entry.handle.pin_mut(), src);
         let info = entry.to_call_info();
         bridge.signal(src, &info);
         true
@@ -851,15 +832,14 @@ impl CallManager {
         // In P25 trunking each PTT can be granted a different frequency, but
         // it's the same logical conversation.
         let existing_idx = self.calls.iter().position(|entry| {
-            let c = entry.common();
-            c.talkgroup == msg.talkgroup
-                && c.sys_num == msg.sys_num
-                && c.tdma_slot == msg.tdma_slot
-                && c.phase2_tdma == msg.phase2_tdma
+            entry.talkgroup == msg.talkgroup
+                && entry.sys_num == msg.sys_num
+                && entry.tdma_slot == msg.tdma_slot
+                && entry.phase2_tdma == msg.phase2_tdma
         });
 
         if let Some(idx) = existing_idx {
-            let same_freq = self.calls[idx].common().freq == msg.freq;
+            let same_freq = self.calls[idx].freq == msg.freq;
             if same_freq {
                 // Same freq — just update source tracking
                 let entry = &mut self.calls[idx];
@@ -872,39 +852,33 @@ impl CallManager {
                 // Temporarily remove the entry to avoid borrow conflicts with
                 // self.try_start_recording.
                 let mut entry = self.calls.swap_remove(idx);
-                let old_freq = entry.common().freq;
-                let rec_num = entry
-                    .common()
-                    .recorder
-                    .as_ref()
-                    .map_or(-1, |r| r.rec_num);
+                let old_freq = entry.freq;
+                let rec_num = entry.recorder.as_ref().map_or(-1, |r| r.rec_num);
 
                 // Record completed segment and stop recorder
-                if let CallEntry::Trunked { trunked, common } = &mut entry {
-                    trunked.segments.push(CallSegment {
-                        freq: old_freq,
-                        start: trunked.segment_start,
-                        rec_num,
-                    });
-                    trunked.segment_start = Instant::now();
+                entry.segments.push(CallSegment {
+                    freq: old_freq,
+                    start: entry.segment_start,
+                    rec_num,
+                });
+                entry.segment_start = Instant::now();
 
-                    Self::stop_recorder(common);
+                Self::stop_recorder(&mut entry);
 
-                    // Update frequency on both Rust and C++ sides
-                    common.freq = msg.freq;
-                    ffi::call_set_freq(common.handle.pin_mut(), msg.freq);
-                    common.last_update = Instant::now();
+                // Update frequency on both Rust and C++ sides
+                entry.freq = msg.freq;
+                ffi::call_set_freq(entry.handle.pin_mut(), msg.freq);
+                entry.last_update = Instant::now();
 
-                    let segment_count = trunked.segments.len();
-                    tracing::info!(
-                        short_name = %common.short_name,
-                        talkgroup = common.talkgroup,
-                        old_freq = %format_freq(old_freq),
-                        new_freq = %format_freq(msg.freq),
-                        segment_count,
-                        "retuning call to new frequency"
-                    );
-                }
+                let segment_count = entry.segments.len();
+                tracing::info!(
+                    short_name = %entry.short_name,
+                    talkgroup = entry.talkgroup,
+                    old_freq = %format_freq(old_freq),
+                    new_freq = %format_freq(msg.freq),
+                    segment_count,
+                    "retuning call to new frequency"
+                );
 
                 // Start new recorder on the new freq
                 self.try_start_recording(&mut ctx, &mut entry, msg);
@@ -929,16 +903,14 @@ impl CallManager {
             if recording_started {
                 if let Some(orig_idx) = multisite.original_idx {
                     let orig = &mut self.calls[orig_idx];
-                    let oc = orig.common_mut();
-                    oc.state = TrState::Monitoring;
-                    oc.monitoring_state = TrMonitoringState::Superseded;
+                    orig.state = TrState::Monitoring;
+                    orig.monitoring_state = TrMonitoringState::Superseded;
                     Self::conclude_call(orig, &self.patch_tables, &self.bridge);
                 }
             }
         } else if multisite.is_duplicate {
-            let c = new_entry.common_mut();
-            c.state = TrState::Monitoring;
-            c.monitoring_state = TrMonitoringState::Duplicate;
+            new_entry.state = TrState::Monitoring;
+            new_entry.monitoring_state = TrMonitoringState::Duplicate;
         } else {
             let recording_started = self.try_start_recording(&mut ctx, &mut new_entry, msg);
             if recording_started && !is_grant_message {
@@ -964,15 +936,14 @@ impl CallManager {
     fn handle_update(&mut self, ctx: Pin<&mut TrContext>, msg: &TrTrunkMessage) {
         let _ = ctx;
         for entry in &mut self.calls {
-            let c = entry.common();
-            if c.talkgroup == msg.talkgroup
-                && c.sys_num == msg.sys_num
-                && c.freq == msg.freq
-                && c.tdma_slot == msg.tdma_slot
-                && c.phase2_tdma == msg.phase2_tdma
+            if entry.talkgroup == msg.talkgroup
+                && entry.sys_num == msg.sys_num
+                && entry.freq == msg.freq
+                && entry.tdma_slot == msg.tdma_slot
+                && entry.phase2_tdma == msg.phase2_tdma
             {
                 if msg.encrypted {
-                    entry.common_mut().encrypted = true;
+                    entry.encrypted = true;
                 }
 
                 let source_updated = Self::update_call_source(entry, msg, &self.bridge);
@@ -1008,8 +979,6 @@ impl CallManager {
             .map(|pt| pt.get_patch(tg_id))
             .unwrap_or_default();
 
-        let c = entry.common_mut();
-
         // 1. Unknown TG check
         if tg_policy.is_none() {
             let patched_with_known = patch_tgs
@@ -1017,8 +986,8 @@ impl CallManager {
                 .any(|&ptg| sys_policy.talkgroups.contains_key(&ptg));
 
             if !sys_policy.record_unknown && !patched_with_known {
-                c.state = TrState::Monitoring;
-                c.monitoring_state = TrMonitoringState::UnknownTg;
+                entry.state = TrState::Monitoring;
+                entry.monitoring_state = TrMonitoringState::UnknownTg;
                 if !sys_policy.hide_unknown {
                     tracing::info!(
                         talkgroup = tg_id,
@@ -1033,10 +1002,10 @@ impl CallManager {
         // 2. Encryption check
         let is_encrypted = msg.encrypted || tg_policy.map_or(false, |tg| tg.mode.is_encrypted());
         if is_encrypted {
-            c.encrypted = true;
+            entry.encrypted = true;
             if !sys_policy.monitor_encrypted {
-                c.state = TrState::Monitoring;
-                c.monitoring_state = TrMonitoringState::Encrypted;
+                entry.state = TrState::Monitoring;
+                entry.monitoring_state = TrMonitoringState::Encrypted;
                 if !sys_policy.hide_encrypted {
                     tracing::info!(talkgroup = tg_id, sys_num, "not recording: encrypted");
                 }
@@ -1051,7 +1020,7 @@ impl CallManager {
             self.config.default_mode == DefaultMode::Analog
                 && sys_policy.system_type == SystemType::Smartnet
         };
-        c.is_analog = is_analog;
+        entry.is_analog = is_analog;
 
         // 4. Calculate priority (best among patched TGs)
         let priority = if let Some(tg) = tg_policy {
@@ -1070,8 +1039,8 @@ impl CallManager {
 
         // 5. Priority = -1 means disabled
         if priority == -1 {
-            c.state = TrState::Monitoring;
-            c.monitoring_state = TrMonitoringState::IgnoredTg;
+            entry.state = TrState::Monitoring;
+            entry.monitoring_state = TrMonitoringState::IgnoredTg;
             tracing::info!(
                 talkgroup = tg_id,
                 sys_num,
@@ -1082,7 +1051,7 @@ impl CallManager {
 
         // 6. Find source and acquire recorder
         let source_count = ffi::tr_context_source_count(&*ctx);
-        let freq = c.freq;
+        let freq = entry.freq;
         for source_idx in 0..source_count {
             if !ffi::tr_source_covers_freq(&*ctx, source_idx, freq) {
                 continue;
@@ -1090,8 +1059,8 @@ impl CallManager {
 
             let available = ffi::tr_source_available_recorders(&*ctx, source_idx, is_analog);
             if priority > available {
-                c.state = TrState::Monitoring;
-                c.monitoring_state = TrMonitoringState::NoRecorder;
+                entry.state = TrState::Monitoring;
+                entry.monitoring_state = TrMonitoringState::NoRecorder;
                 tracing::error!(
                     talkgroup = tg_id,
                     sys_num,
@@ -1105,19 +1074,19 @@ impl CallManager {
             if ffi::tr_source_start_recording(
                 ctx.as_mut(),
                 source_idx,
-                c.handle.pin_mut(),
+                entry.handle.pin_mut(),
                 is_analog,
             ) {
-                c.state = TrState::Recording;
-                let rec_num = ffi::call_get_recorder_num(&*c.handle);
-                c.recorder = Some(Recorder { rec_num });
+                entry.state = TrState::Recording;
+                let rec_num = ffi::call_get_recorder_num(&*entry.handle);
+                entry.recorder = Some(Recorder { rec_num });
                 tracing::info!(
-                    short_name = %c.short_name,
+                    short_name = %entry.short_name,
                     rec_num,
                     talkgroup = tg_id,
-                    freq = %format_freq(c.freq),
-                    tdma = c.phase2_tdma,
-                    slot = c.tdma_slot,
+                    freq = %format_freq(entry.freq),
+                    tdma = entry.phase2_tdma,
+                    slot = entry.tdma_slot,
                     analog = is_analog,
                     "starting recorder"
                 );
@@ -1125,13 +1094,13 @@ impl CallManager {
             }
 
             // Recorder allocation or start failed
-            c.state = TrState::Monitoring;
+            entry.state = TrState::Monitoring;
             return false;
         }
 
         // No source covered the frequency
-        c.state = TrState::Monitoring;
-        c.monitoring_state = TrMonitoringState::NoSource;
+        entry.state = TrState::Monitoring;
+        entry.monitoring_state = TrMonitoringState::NoSource;
         tracing::error!(
             talkgroup = tg_id,
             sys_num,
@@ -1155,19 +1124,19 @@ impl CallManager {
         };
 
         for (idx, entry) in self.calls.iter().enumerate() {
-            let CallEntry::Trunked { common: c, trunked } = entry else {
+            let Some(trunked) = entry.trunked_fields() else {
                 continue;
             };
-            if c.talkgroup != talkgroup {
+            if entry.talkgroup != talkgroup {
                 continue;
             }
-            if c.sys_num == sys_num {
+            if entry.sys_num == sys_num {
                 continue;
             }
             if !trunked.multi_site {
                 continue;
             }
-            if c.state != TrState::Recording {
+            if entry.state != TrState::Recording {
                 continue;
             }
 
@@ -1192,7 +1161,7 @@ impl CallManager {
                 result.original_idx = Some(idx);
 
                 // Supersede check
-                let call_preferred_nac = self.get_preferred_nac(c.sys_num, talkgroup);
+                let call_preferred_nac = self.get_preferred_nac(entry.sys_num, talkgroup);
                 if call_preferred_nac != call_rfss_site && msg.nac == msg_rfss_site {
                     result.is_superseding = true;
                 }
@@ -1234,42 +1203,40 @@ impl CallManager {
         let bridge = &self.bridge;
 
         self.calls.retain_mut(|entry| {
-            match entry {
-                CallEntry::Conventional { .. } => true, // never removed by tick
-                CallEntry::Trunked { common: c, .. } => {
-                    let since_update = c.last_update.elapsed().as_secs_f64();
+            if entry.is_conventional() {
+                return true; // never removed by tick
+            }
+            // Trunked calls
+            let since_update = entry.last_update.elapsed().as_secs_f64();
 
-                    match c.state {
-                        TrState::Monitoring => {
-                            if since_update > timeout {
-                                Self::conclude_call(entry, &self.patch_tables, bridge);
-                                ended_call = true;
-                                return false;
-                            }
-                        }
-                        TrState::Recording => {
-                            let since_write =
-                                ffi::call_recorder_since_last_write_secs(&*c.handle);
-                            if since_write > timeout || since_update > timeout {
-                                Self::conclude_call(entry, &self.patch_tables, bridge);
-                                let handle = &*entry.common().handle;
-                                ffi::call_notify_setup_recorder(ctx.as_mut(), handle);
-                                ended_call = true;
-                                return false;
-                            }
-                        }
-                        _ => {
-                            if since_update > timeout {
-                                Self::conclude_call(entry, &self.patch_tables, bridge);
-                                ended_call = true;
-                                return false;
-                            }
-                        }
+            match entry.state {
+                TrState::Monitoring => {
+                    if since_update > timeout {
+                        Self::conclude_call(entry, &self.patch_tables, bridge);
+                        ended_call = true;
+                        return false;
                     }
-
-                    true
+                }
+                TrState::Recording => {
+                    let since_write =
+                        ffi::call_recorder_since_last_write_secs(&*entry.handle);
+                    if since_write > timeout || since_update > timeout {
+                        Self::conclude_call(entry, &self.patch_tables, bridge);
+                        ffi::call_notify_setup_recorder(ctx.as_mut(), &*entry.handle);
+                        ended_call = true;
+                        return false;
+                    }
+                }
+                _ => {
+                    if since_update > timeout {
+                        Self::conclude_call(entry, &self.patch_tables, bridge);
+                        ended_call = true;
+                        return false;
+                    }
                 }
             }
+
+            true
         });
 
         if ended_call {
@@ -1284,7 +1251,7 @@ impl CallManager {
 
     pub fn process_recorder_queues(&self) {
         for entry in &self.calls {
-            ffi::call_process_recorder_queue(&*entry.common().handle);
+            ffi::call_process_recorder_queue(&*entry.handle);
         }
     }
 
@@ -1302,23 +1269,20 @@ impl CallManager {
     /// and updates its idle tracking state.
     pub fn handle_squelch_event(&mut self, recorder_num: i32, muted: bool, pwr_db: f64) {
         for entry in &mut self.calls {
-            let CallEntry::Conventional { common: c, conv } = entry else {
+            if !entry.is_conventional() {
                 continue;
-            };
-            if c.recorder
-                .as_ref()
-                .map_or(true, |r| r.rec_num != recorder_num)
-            {
+            }
+            if entry.recorder.as_ref().map_or(true, |r| r.rec_num != recorder_num) {
                 continue;
             }
             if muted {
-                c.noise = pwr_db;
-                if conv.idle_since.is_none() {
-                    conv.idle_since = Some(Instant::now());
+                entry.noise = pwr_db;
+                if entry.idle_since.is_none() {
+                    entry.idle_since = Some(Instant::now());
                 }
             } else {
-                c.signal = pwr_db;
-                conv.idle_since = None;
+                entry.signal = pwr_db;
+                entry.idle_since = None;
             }
             return;
         }
@@ -1327,39 +1291,37 @@ impl CallManager {
     /// Manage conventional call idle detection via squelch events, conclude+restart, and initial recording.
     fn tick_conventional(&mut self, mut ctx: Pin<&mut TrContext>) {
         for entry in &mut self.calls {
-            let CallEntry::Conventional { common: c, conv } = entry else {
+            if !entry.is_conventional() {
                 continue;
-            };
-            if c.recorder.is_none() {
+            }
+            if entry.recorder.is_none() {
                 continue;
             }
 
-            let length = ffi::call_get_current_length(&*c.handle);
+            let length = ffi::call_get_current_length(&*entry.handle);
             if length > 0.0 {
-                let idle_timed_out = conv
+                let idle_timed_out = entry
                     .idle_since
                     .map(|t| t.elapsed().as_secs_f64() > self.config.call_timeout)
                     .unwrap_or(false);
-                if idle_timed_out || (c.max_duration > 0.0 && length > c.max_duration) {
+                if idle_timed_out || (entry.max_duration > 0.0 && length > entry.max_duration) {
                     Self::conclude_call(entry, &self.patch_tables, &self.bridge);
-                    // Re-destructure after conclude_call borrows entry
-                    let CallEntry::Conventional { common: c, conv } = entry else {
-                        unreachable!()
-                    };
-                    ffi::call_restart(c.handle.pin_mut());
-                    let m = ffi::call_get_metadata(&*c.handle);
-                    c.call_num = m.call_num;
-                    c.start_time = m.start_time;
-                    c.state = m.state;
-                    c.monitoring_state = m.monitoring_state;
-                    c.last_update = Instant::now();
-                    conv.idle_since = None;
-                    ffi::call_notify_setup_recorder(ctx.as_mut(), &*c.handle);
+                    ffi::call_restart(entry.handle.pin_mut());
+                    let m = ffi::call_get_metadata(&*entry.handle);
+                    entry.call_num = m.call_num;
+                    entry.start_time = m.start_time;
+                    entry.state = m.state;
+                    entry.monitoring_state = m.monitoring_state;
+                    entry.last_update = Instant::now();
+                    entry.idle_since = None;
+                    entry.segments.clear();
+                    entry.segment_start = Instant::now();
+                    ffi::call_notify_setup_recorder(ctx.as_mut(), &*entry.handle);
                     self.bridge.call_start(&entry.to_call_info());
                 }
-            } else if !ffi::call_get_recorder_is_active(&*c.handle) {
-                ffi::call_start_initial_recording(c.handle.pin_mut());
-                c.state = TrState::Recording;
+            } else if !ffi::call_get_recorder_is_active(&*entry.handle) {
+                ffi::call_start_initial_recording(entry.handle.pin_mut());
+                entry.state = TrState::Recording;
                 self.bridge.call_start(&entry.to_call_info());
             }
         }
@@ -1396,39 +1358,35 @@ impl CallManager {
 
         tracing::info!(count = self.calls.len(), "Active Calls");
         for entry in &self.calls {
-            let c = entry.common();
-            let elapsed = now_secs - c.start_time;
-            let state = format_call_state(c.state, c.monitoring_state);
+            let elapsed = now_secs - entry.start_time;
+            let state = format_call_state(entry.state, entry.monitoring_state);
 
-            match entry {
-                CallEntry::Conventional { .. } => {
-                    let enabled = ffi::call_get_recorder_is_enabled(&*c.handle);
-                    tracing::info!(
-                        system = %c.short_name,
-                        call_num = c.call_num,
-                        talkgroup = c.talkgroup,
-                        freq = format_freq(c.freq),
-                        elapsed,
-                        state,
-                        enabled,
-                        "call status"
-                    );
-                }
-                CallEntry::Trunked { .. } => {
-                    tracing::info!(
-                        system = %c.short_name,
-                        call_num = c.call_num,
-                        talkgroup = c.talkgroup,
-                        freq = format_freq(c.freq),
-                        elapsed,
-                        state,
-                        "call status"
-                    );
-                }
+            if entry.is_conventional() {
+                let enabled = ffi::call_get_recorder_is_enabled(&*entry.handle);
+                tracing::info!(
+                    system = %entry.short_name,
+                    call_num = entry.call_num,
+                    talkgroup = entry.talkgroup,
+                    freq = format_freq(entry.freq),
+                    elapsed,
+                    state,
+                    enabled,
+                    "call status"
+                );
+            } else {
+                tracing::info!(
+                    system = %entry.short_name,
+                    call_num = entry.call_num,
+                    talkgroup = entry.talkgroup,
+                    freq = format_freq(entry.freq),
+                    elapsed,
+                    state,
+                    "call status"
+                );
             }
 
-            if let Some(recorder) = &c.recorder {
-                let rec_state = format_recorder_state(ffi::call_get_recorder_state(&*c.handle));
+            if let Some(recorder) = &entry.recorder {
+                let rec_state = format_recorder_state(ffi::call_get_recorder_state(&*entry.handle));
                 tracing::info!(rec_num = recorder.rec_num, rec_state, "  recorder");
             }
         }
@@ -1541,7 +1499,7 @@ impl CallManager {
     pub fn conclude_all(&mut self, ctx: Pin<&mut TrContext>) {
         let _ = ctx;
         for entry in &mut self.calls {
-            if entry.common().state != TrState::Monitoring {
+            if entry.state != TrState::Monitoring {
                 Self::conclude_call(entry, &self.patch_tables, &self.bridge);
             }
         }

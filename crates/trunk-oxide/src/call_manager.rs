@@ -406,8 +406,6 @@ impl CallManager {
                     data.transmission_list = ffi::call_get_transmission_list(&**handle);
                     self.bridge.call_end(&data, &segments);
                 }
-
-                self.state.on_recorder_stopped(call_id);
             }
         } else if matches!(state, CallState::Rejected(_)) {
             let segments = self.build_proto_segments_final(call_id, final_freq, -1);

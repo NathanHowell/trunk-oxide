@@ -3013,6 +3013,7 @@ dependencies = [
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "pid1",
+ "prost-types",
  "tokio",
  "tracing",
  "tracing-opentelemetry",

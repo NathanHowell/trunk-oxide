@@ -877,6 +877,10 @@ void call_recorder_set_source(TrCall &call, int64_t src) {
     if (rec) rec->set_source(src);
 }
 
+void call_set_freq(TrCall &call, double freq) {
+    call.ptr->set_freq(freq);
+}
+
 // ── Phase C: Call Management — call-level recorder accessors ──
 
 double call_recorder_since_last_write_secs(const TrCall &call) {

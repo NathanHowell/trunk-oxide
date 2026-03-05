@@ -207,7 +207,6 @@ struct CallCommon {
     // Immutable (set at creation)
     call_num: i64,
     talkgroup: i64,
-    freq: f64,
     sys_num: i32,
     short_name: String,
     tdma_slot: i32,
@@ -218,6 +217,7 @@ struct CallCommon {
     start_time: i64,
 
     // Mutable (Rust-owned, no C++ sync)
+    freq: f64,
     state: TrState,
     monitoring_state: TrMonitoringState,
     encrypted: bool,
@@ -267,6 +267,14 @@ impl From<UniquePtr<TrCall>> for CallCommon {
     }
 }
 
+/// A completed segment within a multi-PTT call. Each time a trunked call is
+/// granted a new frequency, the current segment is closed and a new one begins.
+struct CallSegment {
+    freq: f64,
+    start: Instant,
+    rec_num: i32,
+}
+
 /// P25 multisite fields — only meaningful for trunked calls.
 struct TrunkedFields {
     multi_site: bool,
@@ -275,6 +283,11 @@ struct TrunkedFields {
     site_id: i32,
     multi_site_name: String,
     conversation_mode: bool,
+
+    /// Completed segments (each PTT on a potentially different freq).
+    segments: Vec<CallSegment>,
+    /// When the current segment started.
+    segment_start: Instant,
 }
 
 /// Squelch-based idle tracking — only meaningful for conventional calls.
@@ -333,6 +346,8 @@ impl CallEntry {
                 site_id: msg.sys_site_id,
                 multi_site_name: policy.multi_site_name.clone(),
                 conversation_mode: policy.conversation_mode,
+                segments: Vec::new(),
+                segment_start: Instant::now(),
             },
         }
     }
@@ -527,6 +542,27 @@ impl CallManager {
         }
     }
 
+    // ── Recorder stop (without concluding the call) ──
+
+    /// Stop the active recorder without concluding the call. Returns the
+    /// recorder number and stop metrics, or `None` if no recorder was active.
+    fn stop_recorder(c: &mut CallCommon) -> Option<(i32, ffi::TrStopRecordingResult)> {
+        let recorder = c.recorder.take()?;
+        let rec_num = recorder.rec_num;
+        let metrics = recorder.stop(c.handle.pin_mut());
+        tracing::info!(
+            short_name = %c.short_name,
+            rec_num,
+            talkgroup = c.talkgroup,
+            freq = %format_freq(c.freq),
+            tdma = c.phase2_tdma,
+            slot = c.tdma_slot,
+            freq_error = format_args!("{:+.0} Hz", metrics.freq_error),
+            "stopping recorder"
+        );
+        Some((rec_num, metrics))
+    }
+
     // ── Call conclusion (replaces C++ Call_impl::conclude_call) ──
 
     fn conclude_call(
@@ -535,26 +571,19 @@ impl CallManager {
         bridge: &EventBridge,
     ) {
         let is_conventional = matches!(entry, CallEntry::Conventional { .. });
-        let c = entry.common_mut();
 
-        let should_stop_recording = c.state == TrState::Recording
-            || (c.state == TrState::Monitoring
-                && c.monitoring_state == TrMonitoringState::Superseded);
+        // Snapshot fields we need before any mutable borrows.
+        let state = entry.common().state;
+        let monitoring_state = entry.common().monitoring_state;
+        let final_freq = entry.common().freq;
+
+        let should_stop_recording = state == TrState::Recording
+            || (state == TrState::Monitoring
+                && monitoring_state == TrMonitoringState::Superseded);
 
         if should_stop_recording {
-            if let Some(recorder) = c.recorder.take() {
-                let rec_num = recorder.rec_num;
-                let metrics = recorder.stop(c.handle.pin_mut());
-                tracing::info!(
-                    short_name = %c.short_name,
-                    rec_num,
-                    talkgroup = c.talkgroup,
-                    freq = %format_freq(c.freq),
-                    tdma = c.phase2_tdma,
-                    slot = c.tdma_slot,
-                    freq_error = format_args!("{:+.0} Hz", metrics.freq_error),
-                    "stopping recorder"
-                );
+            let c = entry.common_mut();
+            if let Some((rec_num, metrics)) = Self::stop_recorder(c) {
                 if is_conventional {
                     if metrics.recorder_idle {
                         c.noise = metrics.recorder_pwr;
@@ -562,6 +591,12 @@ impl CallManager {
                         c.signal = metrics.recorder_pwr;
                     }
                 }
+
+                // Build proto segments: completed segments + the final active one.
+                let segments = Self::build_proto_segments_final(
+                    entry, final_freq, rec_num,
+                );
+                let c = entry.common_mut();
 
                 let elapsed = std::time::SystemTime::now()
                     .duration_since(std::time::UNIX_EPOCH)
@@ -573,6 +608,7 @@ impl CallManager {
                     talkgroup = c.talkgroup,
                     elapsed,
                     final_length = metrics.final_length,
+                    segments = segments.len(),
                     "concluding recorded call"
                 );
 
@@ -584,19 +620,71 @@ impl CallManager {
                         data.freq_error = metrics.freq_error;
                         data.transmission_list =
                             ffi::call_get_dmr_transmission_list(&*c.handle, slot);
-                        bridge.call_end(&data);
+                        bridge.call_end(&data, &segments);
                     }
                 } else {
                     let mut data = Self::build_call_data(c, patches);
                     data.length = metrics.final_length;
                     data.freq_error = metrics.freq_error;
                     data.transmission_list = ffi::call_get_transmission_list(&*c.handle);
-                    bridge.call_end(&data);
+                    bridge.call_end(&data, &segments);
                 }
             }
-        } else if c.state == TrState::Monitoring {
+        } else if state == TrState::Monitoring {
+            let segments = Self::build_proto_segments_final(entry, final_freq, -1);
+            let c = entry.common_mut();
             let data = Self::build_call_data(c, patches);
-            bridge.call_end(&data);
+            bridge.call_end(&data, &segments);
+        }
+    }
+
+    /// Build proto segments: all completed segments plus the final active one.
+    fn build_proto_segments_final(
+        entry: &CallEntry,
+        final_freq: f64,
+        final_rec_num: i32,
+    ) -> Vec<trunk_oxide_grpc::proto::CallSegment> {
+        match entry {
+            CallEntry::Trunked { trunked, .. } => {
+                let mut segments: Vec<_> = trunked
+                    .segments
+                    .iter()
+                    .map(|s| Self::make_proto_segment(s.freq, s.start, s.rec_num))
+                    .collect();
+                segments.push(Self::make_proto_segment(
+                    final_freq,
+                    trunked.segment_start,
+                    final_rec_num,
+                ));
+                segments
+            }
+            CallEntry::Conventional { .. } => Vec::new(),
+        }
+    }
+
+    fn make_proto_segment(
+        freq: f64,
+        start: Instant,
+        rec_num: i32,
+    ) -> trunk_oxide_grpc::proto::CallSegment {
+        use prost_types::{Duration as ProstDuration, Timestamp};
+        let elapsed = start.elapsed();
+        // Approximate wall-clock start from (now - elapsed)
+        let wall_start = std::time::SystemTime::now() - elapsed;
+        let since_epoch = wall_start
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        trunk_oxide_grpc::proto::CallSegment {
+            freq,
+            start_time: Some(Timestamp {
+                seconds: since_epoch.as_secs() as i64,
+                nanos: since_epoch.subsec_nanos() as i32,
+            }),
+            duration: Some(ProstDuration {
+                seconds: elapsed.as_secs() as i64,
+                nanos: elapsed.subsec_nanos() as i32,
+            }),
+            rec_num,
         }
     }
 
@@ -759,25 +847,69 @@ impl CallManager {
         msg: &TrTrunkMessage,
         is_grant_message: bool,
     ) {
-        // Check for exact match on existing calls
-        let mut call_found = false;
-        for entry in &mut self.calls {
+        // Check for existing call on the same talkgroup (ignoring freq).
+        // In P25 trunking each PTT can be granted a different frequency, but
+        // it's the same logical conversation.
+        let existing_idx = self.calls.iter().position(|entry| {
             let c = entry.common();
-            if c.talkgroup == msg.talkgroup
+            c.talkgroup == msg.talkgroup
                 && c.sys_num == msg.sys_num
-                && c.freq == msg.freq
                 && c.tdma_slot == msg.tdma_slot
                 && c.phase2_tdma == msg.phase2_tdma
-            {
-                call_found = true;
+        });
+
+        if let Some(idx) = existing_idx {
+            let same_freq = self.calls[idx].common().freq == msg.freq;
+            if same_freq {
+                // Same freq — just update source tracking
+                let entry = &mut self.calls[idx];
                 let source_updated = Self::update_call_source(entry, msg, &self.bridge);
                 if source_updated {
                     self.bridge.call_start(&entry.to_call_info());
                 }
-            }
-        }
+            } else {
+                // Different freq — retune: close current segment, start new one.
+                // Temporarily remove the entry to avoid borrow conflicts with
+                // self.try_start_recording.
+                let mut entry = self.calls.swap_remove(idx);
+                let old_freq = entry.common().freq;
+                let rec_num = entry
+                    .common()
+                    .recorder
+                    .as_ref()
+                    .map_or(-1, |r| r.rec_num);
 
-        if call_found {
+                // Record completed segment and stop recorder
+                if let CallEntry::Trunked { trunked, common } = &mut entry {
+                    trunked.segments.push(CallSegment {
+                        freq: old_freq,
+                        start: trunked.segment_start,
+                        rec_num,
+                    });
+                    trunked.segment_start = Instant::now();
+
+                    Self::stop_recorder(common);
+
+                    // Update frequency on both Rust and C++ sides
+                    common.freq = msg.freq;
+                    ffi::call_set_freq(common.handle.pin_mut(), msg.freq);
+                    common.last_update = Instant::now();
+
+                    let segment_count = trunked.segments.len();
+                    tracing::info!(
+                        short_name = %common.short_name,
+                        talkgroup = common.talkgroup,
+                        old_freq = %format_freq(old_freq),
+                        new_freq = %format_freq(msg.freq),
+                        segment_count,
+                        "retuning call to new frequency"
+                    );
+                }
+
+                // Start new recorder on the new freq
+                self.try_start_recording(&mut ctx, &mut entry, msg);
+                self.calls.push(entry);
+            }
             return;
         }
 

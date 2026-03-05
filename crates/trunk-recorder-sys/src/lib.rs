@@ -460,6 +460,7 @@ pub mod ffi {
 
         // ── Phase C: Call Management — update source tracking ──
         fn call_recorder_set_source(call: Pin<&mut TrCall>, src: i64);
+        fn call_set_freq(call: Pin<&mut TrCall>, freq: f64);
 
         // ── Recorder setup notification (extracts recorder from call, fires through event_sink) ──
         fn call_notify_setup_recorder(ctx: Pin<&mut TrContext>, call: &TrCall);

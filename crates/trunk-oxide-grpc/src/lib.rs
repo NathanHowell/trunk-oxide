@@ -139,6 +139,7 @@ fn convert_call_data(cd: &TrCallData) -> proto::CallData {
             })
             .collect(),
         status: i32::from(cd.status.repr),
+        segments: Vec::new(), // populated by caller if applicable
     }
 }
 
@@ -444,9 +445,11 @@ impl EventBridge {
         ));
     }
 
-    pub fn call_end(&self, call_data: &TrCallData) {
+    pub fn call_end(&self, call_data: &TrCallData, segments: &[proto::CallSegment]) {
+        let mut data = convert_call_data(call_data);
+        data.segments = segments.to_vec();
         self.send_event(proto::plugin_event::Event::CallEnd(proto::CallEndEvent {
-            call_data: Some(convert_call_data(call_data)),
+            call_data: Some(data),
         }));
     }
 

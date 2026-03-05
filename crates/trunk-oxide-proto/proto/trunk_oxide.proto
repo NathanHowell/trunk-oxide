@@ -206,6 +206,7 @@ message CallData {
   repeated CallError errors = 32;
   repeated Transmission transmissions = 33;
   int32 status = 34;
+  repeated CallSegment segments = 35;
 }
 
 message Transmission {
@@ -228,6 +229,13 @@ message CallSource {
   bool emergency = 3;
   string signal_system = 4;
   string tag = 5;
+}
+
+message CallSegment {
+  double freq = 1;
+  google.protobuf.Timestamp start_time = 2;
+  google.protobuf.Duration duration = 3;
+  int32 rec_num = 4;
 }
 
 message CallError {

@@ -9,6 +9,11 @@ use crate::{CHANNEL_HALFWIDTH, Channel, Signal, Source};
 /// Given a sample rate, returns the per-side guard band (`if1 / 2`) that
 /// trunk-recorder subtracts from each edge to get the usable bandwidth.
 /// The usable range is `center ± (rate/2 - guard)`.
+///
+/// **Important:** This only produces a meaningful guard when `rate / if_freq`
+/// is even for at least one IF frequency (24000, 25000, 32000). Rates where
+/// all quotients are odd fall through to a degenerate ~50 Hz guard. The solver
+/// must filter such rates out via `valid_rates()`.
 fn decimation_guard(rate: i64) -> i64 {
     let if_freqs: [i64; 3] = [24000, 25000, 32000];
     let mut decim: i64 = 24000; // trunk-recorder default
@@ -149,30 +154,40 @@ fn build_problem(opt: &z3::Optimize, channels: &[Channel], devices: &[Device]) -
     }
 }
 
-/// Enumerate all valid sample rates for a device.
+/// Minimum acceptable guard band (per side).  Rates where `decimation_guard`
+/// returns less than this are excluded — they would place channels at the
+/// extreme edge of the SDR bandwidth where RF rolloff kills the signal.
+const MIN_GUARD: i64 = 12_000;
+
+/// Enumerate all valid sample rates for a device, excluding rates that produce
+/// degenerate decimation guard bands.
 fn valid_rates(device: &Device) -> impl Iterator<Item = i64> + '_ {
-    device.sample_rates.iter().flat_map(move |sr| {
-        let mul = device.rate_multiple;
-        match *sr {
-            SampleRate::Exact(v) => {
-                let lo_mult = v / mul;
-                let hi_mult = lo_mult;
-                (lo_mult..=hi_mult)
-                    .map(move |m| m * mul)
-                    .filter(move |&r| r == v)
-                    .collect::<Vec<_>>()
-                    .into_iter()
+    device
+        .sample_rates
+        .iter()
+        .flat_map(move |sr| {
+            let mul = device.rate_multiple;
+            match *sr {
+                SampleRate::Exact(v) => {
+                    let lo_mult = v / mul;
+                    let hi_mult = lo_mult;
+                    (lo_mult..=hi_mult)
+                        .map(move |m| m * mul)
+                        .filter(move |&r| r == v)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                }
+                SampleRate::Range(lo, hi) => {
+                    let lo_mult = (lo + mul - 1) / mul; // ceil division
+                    let hi_mult = hi / mul;
+                    (lo_mult..=hi_mult)
+                        .map(move |m| m * mul)
+                        .collect::<Vec<_>>()
+                        .into_iter()
+                }
             }
-            SampleRate::Range(lo, hi) => {
-                let lo_mult = (lo + mul - 1) / mul; // ceil division
-                let hi_mult = hi / mul;
-                (lo_mult..=hi_mult)
-                    .map(move |m| m * mul)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-            }
-        }
-    })
+        })
+        .filter(|&rate| decimation_guard(rate) >= MIN_GUARD)
 }
 
 pub fn solve(channels: &[Channel], devices: &[Device]) -> Result<Vec<Source>> {
@@ -321,12 +336,24 @@ mod tests {
         // Rate 2,500,000: 2500000/25000=100 (even, >=40, %4==0) → decim=25, if1=100000
         assert_eq!(decimation_guard(2_500_000), 50_000);
 
-        // Rate 2,088,000: 2088000/24000=87 (odd, skipped) → fallback decim=24000
-        // if1 = 2088000/24000 = 87, guard = 43
-        assert_eq!(decimation_guard(2_088_000), 43);
+        // Rates with odd quotients produce degenerate guards (valid_rates filters these out)
+        assert!(decimation_guard(2_088_000) < MIN_GUARD); // q=87, odd
+        assert!(decimation_guard(2_472_000) < MIN_GUARD); // q=103, odd
+    }
 
-        // Rate where no if_freq divides evenly → fallback decim=24000
-        assert_eq!(decimation_guard(999_999), 20);
+    #[test]
+    fn test_no_degenerate_rates() {
+        // Every rate produced by valid_rates() must have a meaningful guard band
+        for device in [Device::rtlsdr(), Device::airspy()] {
+            for rate in valid_rates(&device) {
+                let guard = decimation_guard(rate);
+                assert!(
+                    guard >= MIN_GUARD,
+                    "device {:?} rate {rate} has degenerate guard {guard}",
+                    device.driver,
+                );
+            }
+        }
     }
 
     #[test]

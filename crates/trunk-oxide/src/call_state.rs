@@ -579,7 +579,7 @@ impl TrunkStateMachine {
                 vec![]
             }
 
-            MessageType::Tdulc => vec![],
+            MessageType::Tdulc => self.on_tdulc(msg.sys_num, msg.talkgroup),
 
             MessageType::Sysid => {
                 if let Some(id) = self.system_identities.get_mut(&msg.sys_num) {
@@ -691,23 +691,41 @@ impl TrunkStateMachine {
             let same_freq = self.calls[idx].freq == msg.freq;
             if same_freq {
                 let entry = &mut self.calls[idx];
+
+                // TDULC may have moved this call to Idle — resume recording
+                if entry.state == CallState::Idle && entry.is_trunked() {
+                    entry.state = CallState::Recording;
+                    entry.idle_since = None;
+                    entry.segment_start = Instant::now();
+                    tracing::trace!(
+                        short_name = %entry.short_name,
+                        talkgroup = entry.talkgroup,
+                        "Grant on Idle call: Idle → Recording"
+                    );
+                }
+
                 if self.update_call_source(idx, msg.source, &mut effects) {
                     effects.push(Effect::EmitCallStart {
                         call_id: entry.id,
                     });
                 }
             } else {
-                // Retune: close current segment, start new one
+                // Retune: close current segment (if Recording), start new one
                 let entry = &mut self.calls[idx];
                 let old_freq = entry.freq;
                 let rec_num = entry.recorder.unwrap_or(RecorderNum(-1));
 
-                entry.segments.push(CallSegment {
-                    freq: Freq::from_hz(old_freq),
-                    start: entry.segment_start,
-                    rec_num,
-                });
+                // Only push a segment if we're actively recording
+                // (TDULC already closed the segment on PTT end)
+                if entry.state == CallState::Recording {
+                    entry.segments.push(CallSegment {
+                        freq: Freq::from_hz(old_freq),
+                        start: entry.segment_start,
+                        rec_num,
+                    });
+                }
                 entry.segment_start = Instant::now();
+                entry.idle_since = None;
 
                 if entry.recorder.is_some() {
                     effects.push(Effect::StopRecording {
@@ -849,6 +867,43 @@ impl TrunkStateMachine {
         }
 
         effects
+    }
+
+    // ── TDULC handling (P25 Terminator Data Unit) ──
+
+    fn on_tdulc(&mut self, sys_num: i32, talkgroup: i64) -> Vec<Effect> {
+        for entry in &mut self.calls {
+            if entry.sys_num != sys_num || entry.talkgroup != talkgroup {
+                continue;
+            }
+            if !entry.is_trunked() {
+                continue;
+            }
+            if entry.state != CallState::Recording {
+                continue;
+            }
+
+            // Close current segment, transition to Idle
+            let rec_num = entry.recorder.unwrap_or(RecorderNum(-1));
+            entry.segments.push(CallSegment {
+                freq: Freq::from_hz(entry.freq),
+                start: entry.segment_start,
+                rec_num,
+            });
+            entry.segment_start = Instant::now();
+            entry.state = CallState::Idle;
+            entry.idle_since = Some(Instant::now());
+
+            tracing::trace!(
+                short_name = %entry.short_name,
+                talkgroup = entry.talkgroup,
+                sys_num,
+                segments = entry.segments.len(),
+                "TDULC: PTT end, Recording → Idle"
+            );
+            return vec![];
+        }
+        vec![]
     }
 
     // ── Source tracking ──
@@ -1234,13 +1289,27 @@ impl TrunkStateMachine {
                 continue;
             }
             if muted {
+                // Squelch closed — close current segment, transition to Idle
                 entry.noise = pwr_db;
-                if entry.idle_since.is_none() {
+                if entry.state == CallState::Recording {
+                    entry.segments.push(CallSegment {
+                        freq: Freq::from_hz(entry.freq),
+                        start: entry.segment_start,
+                        rec_num: recorder_num,
+                    });
+                    entry.state = CallState::Idle;
+                    entry.idle_since = Some(Instant::now());
+                } else if entry.idle_since.is_none() {
                     entry.idle_since = Some(Instant::now());
                 }
             } else {
+                // Squelch open — start new segment, transition to Recording
                 entry.signal = pwr_db;
                 entry.idle_since = None;
+                if entry.state == CallState::Idle {
+                    entry.state = CallState::Recording;
+                    entry.segment_start = Instant::now();
+                }
             }
             return;
         }

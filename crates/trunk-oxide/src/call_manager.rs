@@ -6,13 +6,77 @@ use cxx::UniquePtr;
 use trunk_config::{DefaultMode, SystemType, TalkgroupMode};
 use trunk_recorder_sys::SystemInfo;
 use trunk_recorder_sys::ffi::{
-    self, TrCall, TrCallData, TrCallDataStatus, TrContext, TrMessageType, TrMonitoringState,
-    TrState, TrTrunkMessage, TrUnitEventType,
+    self, TrCall, TrCallData, TrCallDataStatus, TrContext, TrMessageType, TrTrunkMessage,
+    TrUnitEventType,
 };
 
 use std::sync::Arc;
 
 use trunk_oxide_grpc::EventBridge;
+
+/// Unified call state for both trunked and conventional calls.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CallState {
+    /// Actively recording audio.
+    Recording,
+    /// Between transmissions (squelch closed / no Grant refresh).
+    Idle,
+    /// Not recording for a policy reason.
+    Rejected(RejectReason),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RejectReason {
+    UnknownTg,
+    IgnoredTg,
+    NoSource,
+    NoRecorder,
+    Encrypted,
+    Duplicate,
+    Superseded,
+}
+
+impl CallState {
+    /// Map to the proto CallState i32 value for use in TrCallInfo/proto messages.
+    fn to_proto(self) -> i32 {
+        use trunk_oxide_grpc::proto::CallState as ProtoCallState;
+        match self {
+            CallState::Recording => ProtoCallState::Recording as i32,
+            CallState::Idle => ProtoCallState::Idle as i32,
+            CallState::Rejected(RejectReason::UnknownTg) => ProtoCallState::RejectedUnknownTg as i32,
+            CallState::Rejected(RejectReason::IgnoredTg) => ProtoCallState::RejectedIgnoredTg as i32,
+            CallState::Rejected(RejectReason::NoSource) => ProtoCallState::RejectedNoSource as i32,
+            CallState::Rejected(RejectReason::NoRecorder) => ProtoCallState::RejectedNoRecorder as i32,
+            CallState::Rejected(RejectReason::Encrypted) => ProtoCallState::RejectedEncrypted as i32,
+            CallState::Rejected(RejectReason::Duplicate) => ProtoCallState::RejectedDuplicate as i32,
+            CallState::Rejected(RejectReason::Superseded) => ProtoCallState::RejectedSuperseded as i32,
+        }
+    }
+}
+
+impl std::fmt::Display for CallState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            CallState::Recording => write!(f, "Recording"),
+            CallState::Idle => write!(f, "Idle"),
+            CallState::Rejected(r) => write!(f, "Rejected: {r}"),
+        }
+    }
+}
+
+impl std::fmt::Display for RejectReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RejectReason::UnknownTg => write!(f, "UNKNOWN TG"),
+            RejectReason::IgnoredTg => write!(f, "IGNORED TG"),
+            RejectReason::NoSource => write!(f, "NO SOURCE"),
+            RejectReason::NoRecorder => write!(f, "NO RECORDER"),
+            RejectReason::Encrypted => write!(f, "ENCRYPTED"),
+            RejectReason::Duplicate => write!(f, "DUPLICATE"),
+            RejectReason::Superseded => write!(f, "SUPERSEDED"),
+        }
+    }
+}
 
 /// Per-system patch table: maps supergroup → { talkgroup → last_update }.
 ///
@@ -86,23 +150,6 @@ impl PatchTable {
 
 fn format_freq(f: f64) -> String {
     format!("{:.4} MHz", f / 1_000_000.0)
-}
-
-fn format_call_state(state: TrState, monitoring: TrMonitoringState) -> &'static str {
-    match state {
-        TrState::Monitoring => match monitoring {
-            TrMonitoringState::UnknownTg => "Monitoring: UNKNOWN TG",
-            TrMonitoringState::IgnoredTg => "Monitoring: IGNORED TG",
-            TrMonitoringState::NoSource => "Monitoring: NO SOURCE",
-            TrMonitoringState::NoRecorder => "Monitoring: NO RECORDER",
-            TrMonitoringState::Encrypted => "Monitoring: ENCRYPTED",
-            TrMonitoringState::Duplicate => "Monitoring: DUPLICATE",
-            TrMonitoringState::Superseded => "Monitoring: SUPERSEDED",
-            _ => "Monitoring",
-        },
-        TrState::Recording => "Recording",
-        _ => "Unknown",
-    }
 }
 
 fn format_recorder_state(state: i32) -> &'static str {
@@ -243,8 +290,7 @@ struct CallEntry {
 
     // Mutable state (Rust-owned)
     freq: f64,
-    state: TrState,
-    monitoring_state: TrMonitoringState,
+    state: CallState,
     encrypted: bool,
     is_analog: bool,
     current_source_id: i64,
@@ -283,8 +329,7 @@ impl CallEntry {
             duplex: m.duplex,
             emergency: m.emergency,
             start_time: m.start_time,
-            state: m.state,
-            monitoring_state: m.monitoring_state,
+            state: CallState::Idle,
             encrypted: m.encrypted,
             is_analog: m.is_analog,
             current_source_id: m.current_source_id,
@@ -388,8 +433,7 @@ impl CallEntry {
             start_time: self.start_time,
             elapsed: (now_secs - self.start_time) as f64,
             short_name: self.short_name.clone(),
-            state: self.state,
-            monitoring_state: self.monitoring_state,
+            call_state: self.state.to_proto(),
         }
     }
 }
@@ -561,12 +605,12 @@ impl CallManager {
 
         // Snapshot fields we need before any mutable borrows.
         let state = entry.state;
-        let monitoring_state = entry.monitoring_state;
         let final_freq = entry.freq;
 
-        let should_stop_recording = state == TrState::Recording
-            || (state == TrState::Monitoring
-                && monitoring_state == TrMonitoringState::Superseded);
+        let should_stop_recording = matches!(
+            state,
+            CallState::Recording | CallState::Idle | CallState::Rejected(RejectReason::Superseded)
+        );
 
         if should_stop_recording {
             if let Some((rec_num, metrics)) = Self::stop_recorder(entry) {
@@ -615,7 +659,7 @@ impl CallManager {
                     bridge.call_end(&data, &segments);
                 }
             }
-        } else if state == TrState::Monitoring {
+        } else if matches!(state, CallState::Rejected(_)) {
             let segments = Self::build_proto_segments_final(entry, final_freq, -1);
             let data = Self::build_call_data(entry, patches);
             bridge.call_end(&data, &segments);
@@ -903,14 +947,12 @@ impl CallManager {
             if recording_started {
                 if let Some(orig_idx) = multisite.original_idx {
                     let orig = &mut self.calls[orig_idx];
-                    orig.state = TrState::Monitoring;
-                    orig.monitoring_state = TrMonitoringState::Superseded;
+                    orig.state = CallState::Rejected(RejectReason::Superseded);
                     Self::conclude_call(orig, &self.patch_tables, &self.bridge);
                 }
             }
         } else if multisite.is_duplicate {
-            new_entry.state = TrState::Monitoring;
-            new_entry.monitoring_state = TrMonitoringState::Duplicate;
+            new_entry.state = CallState::Rejected(RejectReason::Duplicate);
         } else {
             let recording_started = self.try_start_recording(&mut ctx, &mut new_entry, msg);
             if recording_started && !is_grant_message {
@@ -986,8 +1028,7 @@ impl CallManager {
                 .any(|&ptg| sys_policy.talkgroups.contains_key(&ptg));
 
             if !sys_policy.record_unknown && !patched_with_known {
-                entry.state = TrState::Monitoring;
-                entry.monitoring_state = TrMonitoringState::UnknownTg;
+                entry.state = CallState::Rejected(RejectReason::UnknownTg);
                 if !sys_policy.hide_unknown {
                     tracing::info!(
                         talkgroup = tg_id,
@@ -1004,8 +1045,7 @@ impl CallManager {
         if is_encrypted {
             entry.encrypted = true;
             if !sys_policy.monitor_encrypted {
-                entry.state = TrState::Monitoring;
-                entry.monitoring_state = TrMonitoringState::Encrypted;
+                entry.state = CallState::Rejected(RejectReason::Encrypted);
                 if !sys_policy.hide_encrypted {
                     tracing::info!(talkgroup = tg_id, sys_num, "not recording: encrypted");
                 }
@@ -1039,8 +1079,7 @@ impl CallManager {
 
         // 5. Priority = -1 means disabled
         if priority == -1 {
-            entry.state = TrState::Monitoring;
-            entry.monitoring_state = TrMonitoringState::IgnoredTg;
+            entry.state = CallState::Rejected(RejectReason::IgnoredTg);
             tracing::info!(
                 talkgroup = tg_id,
                 sys_num,
@@ -1059,8 +1098,7 @@ impl CallManager {
 
             let available = ffi::tr_source_available_recorders(&*ctx, source_idx, is_analog);
             if priority > available {
-                entry.state = TrState::Monitoring;
-                entry.monitoring_state = TrMonitoringState::NoRecorder;
+                entry.state = CallState::Rejected(RejectReason::NoRecorder);
                 tracing::error!(
                     talkgroup = tg_id,
                     sys_num,
@@ -1077,7 +1115,7 @@ impl CallManager {
                 entry.handle.pin_mut(),
                 is_analog,
             ) {
-                entry.state = TrState::Recording;
+                entry.state = CallState::Recording;
                 let rec_num = ffi::call_get_recorder_num(&*entry.handle);
                 entry.recorder = Some(Recorder { rec_num });
                 tracing::info!(
@@ -1094,13 +1132,12 @@ impl CallManager {
             }
 
             // Recorder allocation or start failed
-            entry.state = TrState::Monitoring;
+            entry.state = CallState::Rejected(RejectReason::NoRecorder);
             return false;
         }
 
         // No source covered the frequency
-        entry.state = TrState::Monitoring;
-        entry.monitoring_state = TrMonitoringState::NoSource;
+        entry.state = CallState::Rejected(RejectReason::NoSource);
         tracing::error!(
             talkgroup = tg_id,
             sys_num,
@@ -1136,7 +1173,7 @@ impl CallManager {
             if !trunked.multi_site {
                 continue;
             }
-            if entry.state != TrState::Recording {
+            if entry.state != CallState::Recording {
                 continue;
             }
 
@@ -1210,14 +1247,7 @@ impl CallManager {
             let since_update = entry.last_update.elapsed().as_secs_f64();
 
             match entry.state {
-                TrState::Monitoring => {
-                    if since_update > timeout {
-                        Self::conclude_call(entry, &self.patch_tables, bridge);
-                        ended_call = true;
-                        return false;
-                    }
-                }
-                TrState::Recording => {
+                CallState::Recording => {
                     let since_write =
                         ffi::call_recorder_since_last_write_secs(&*entry.handle);
                     if since_write > timeout || since_update > timeout {
@@ -1227,7 +1257,7 @@ impl CallManager {
                         return false;
                     }
                 }
-                _ => {
+                CallState::Idle | CallState::Rejected(_) => {
                     if since_update > timeout {
                         Self::conclude_call(entry, &self.patch_tables, bridge);
                         ended_call = true;
@@ -1310,8 +1340,7 @@ impl CallManager {
                     let m = ffi::call_get_metadata(&*entry.handle);
                     entry.call_num = m.call_num;
                     entry.start_time = m.start_time;
-                    entry.state = m.state;
-                    entry.monitoring_state = m.monitoring_state;
+                    entry.state = CallState::Recording;
                     entry.last_update = Instant::now();
                     entry.idle_since = None;
                     entry.segments.clear();
@@ -1321,7 +1350,7 @@ impl CallManager {
                 }
             } else if !ffi::call_get_recorder_is_active(&*entry.handle) {
                 ffi::call_start_initial_recording(entry.handle.pin_mut());
-                entry.state = TrState::Recording;
+                entry.state = CallState::Recording;
                 self.bridge.call_start(&entry.to_call_info());
             }
         }
@@ -1359,7 +1388,7 @@ impl CallManager {
         tracing::info!(count = self.calls.len(), "Active Calls");
         for entry in &self.calls {
             let elapsed = now_secs - entry.start_time;
-            let state = format_call_state(entry.state, entry.monitoring_state);
+            let state = entry.state.to_string();
 
             if entry.is_conventional() {
                 let enabled = ffi::call_get_recorder_is_enabled(&*entry.handle);
@@ -1499,7 +1528,7 @@ impl CallManager {
     pub fn conclude_all(&mut self, ctx: Pin<&mut TrContext>) {
         let _ = ctx;
         for entry in &mut self.calls {
-            if entry.state != TrState::Monitoring {
+            if entry.state == CallState::Recording || entry.state == CallState::Idle {
                 Self::conclude_call(entry, &self.patch_tables, &self.bridge);
             }
         }

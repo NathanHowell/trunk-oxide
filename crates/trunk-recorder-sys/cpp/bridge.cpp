@@ -59,28 +59,6 @@ static TrMessageType convert_message_type(MessageType mt) {
     }
 }
 
-static TrState convert_state(CallState s) {
-    switch (s) {
-        case MONITORING: return TrState::Monitoring;
-        case RECORDING: return TrState::Recording;
-        default: return TrState::Monitoring;
-    }
-}
-
-static TrMonitoringState convert_monitoring_state(MonitoringState ms) {
-    switch (ms) {
-        case UNSPECIFIED: return TrMonitoringState::Unspecified;
-        case UNKNOWN_TG: return TrMonitoringState::UnknownTg;
-        case IGNORED_TG: return TrMonitoringState::IgnoredTg;
-        case NO_SOURCE: return TrMonitoringState::NoSource;
-        case NO_RECORDER: return TrMonitoringState::NoRecorder;
-        case ENCRYPTED: return TrMonitoringState::Encrypted;
-        case DUPLICATE: return TrMonitoringState::Duplicate;
-        case SUPERSEDED: return TrMonitoringState::Superseded;
-        default: return TrMonitoringState::Unspecified;
-    }
-}
-
 // ── EventBridge implementation ──
 
 EventBridge::EventBridge(rust::Box<EventNotifier> n) : prototype_(std::move(n)) {}
@@ -407,26 +385,6 @@ static MessageType convert_message_type_back(TrMessageType mt) {
     }
 }
 
-static CallState convert_state_back(TrState s) {
-    switch (s) {
-        case TrState::Recording: return RECORDING;
-        default: return MONITORING;
-    }
-}
-
-static MonitoringState convert_monitoring_state_back(TrMonitoringState ms) {
-    switch (ms) {
-        case TrMonitoringState::UnknownTg: return UNKNOWN_TG;
-        case TrMonitoringState::IgnoredTg: return IGNORED_TG;
-        case TrMonitoringState::NoSource: return NO_SOURCE;
-        case TrMonitoringState::NoRecorder: return NO_RECORDER;
-        case TrMonitoringState::Encrypted: return ENCRYPTED;
-        case TrMonitoringState::Duplicate: return DUPLICATE;
-        case TrMonitoringState::Superseded: return SUPERSEDED;
-        default: return UNSPECIFIED;
-    }
-}
-
 static TrunkMessage convert_trunk_message_back(const TrTrunkMessage &msg) {
     TrunkMessage out;
     out.message_type = convert_message_type_back(msg.message_type);
@@ -743,8 +701,6 @@ TrCallMetadata call_get_metadata(const TrCall &call) {
     m.emergency = c->get_emergency();
     m.is_conventional = c->is_conventional();
     m.start_time = static_cast<int64_t>(c->get_start_time());
-    m.state = convert_state(c->get_state());
-    m.monitoring_state = convert_monitoring_state(c->get_monitoring_state());
     m.encrypted = c->get_encrypted();
     m.is_analog = c->get_is_analog();
     m.current_source_id = c->get_current_source_id();

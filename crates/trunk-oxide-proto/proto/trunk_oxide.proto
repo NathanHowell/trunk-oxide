@@ -98,9 +98,23 @@ message CallInfo {
   string short_name = 22;
   string talkgroup_alpha_tag = 23; // e.g. "SMC SO Pat 1"
   string talkgroup_tag = 24;       // e.g. "Law Dispatch"
-  int32 state = 25;
-  int32 monitoring_state = 26;
-  string talkgroup_group = 27;     // e.g. "County Sheriff"
+  CallState call_state = 25;
+  string talkgroup_group = 26;     // e.g. "County Sheriff"
+}
+
+// ── Call state ──
+
+enum CallState {
+  CALL_STATE_UNSPECIFIED = 0;
+  CALL_STATE_RECORDING = 1;
+  CALL_STATE_IDLE = 2;
+  CALL_STATE_REJECTED_UNKNOWN_TG = 10;
+  CALL_STATE_REJECTED_IGNORED_TG = 11;
+  CALL_STATE_REJECTED_NO_SOURCE = 12;
+  CALL_STATE_REJECTED_NO_RECORDER = 13;
+  CALL_STATE_REJECTED_ENCRYPTED = 14;
+  CALL_STATE_REJECTED_DUPLICATE = 15;
+  CALL_STATE_REJECTED_SUPERSEDED = 16;
 }
 
 // ── System type ──

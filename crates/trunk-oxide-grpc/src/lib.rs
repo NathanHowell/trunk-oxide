@@ -372,8 +372,7 @@ impl EventBridge {
             talkgroup_alpha_tag: meta.map_or_else(String::new, |m| m.alpha_tag.clone()),
             talkgroup_tag: meta.map_or_else(String::new, |m| m.tag.clone()),
             talkgroup_group: meta.map_or_else(String::new, |m| m.group.clone()),
-            state: i32::from(info.state.repr),
-            monitoring_state: i32::from(info.monitoring_state.repr),
+            call_state: info.call_state,
         }
     }
 

@@ -46,24 +46,6 @@ pub mod ffi {
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum TrState {
-        Monitoring = 0,
-        Recording = 1,
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum TrMonitoringState {
-        Unspecified = 0,
-        UnknownTg = 1,
-        IgnoredTg = 2,
-        NoSource = 3,
-        NoRecorder = 4,
-        Encrypted = 5,
-        Duplicate = 6,
-        Superseded = 7,
-    }
-
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum TrUnitEventType {
         Registration = 0,
         Deregistration = 1,
@@ -207,8 +189,10 @@ pub mod ffi {
         pub start_time: i64,
         pub elapsed: f64,
         pub short_name: String,
-        pub state: TrState,
-        pub monitoring_state: TrMonitoringState,
+        // TODO(phase3): Move TrCallInfo out of CXX bridge and use CallState
+        // directly instead of i32. This is i32 only because CXX shared structs
+        // cannot hold Rust-native enums with data variants.
+        pub call_state: i32,
     }
 
     #[derive(Debug, Clone)]
@@ -225,8 +209,6 @@ pub mod ffi {
         pub emergency: bool,
         pub is_conventional: bool,
         pub start_time: i64,
-        pub state: TrState,
-        pub monitoring_state: TrMonitoringState,
         pub encrypted: bool,
         pub is_analog: bool,
         pub current_source_id: i64,

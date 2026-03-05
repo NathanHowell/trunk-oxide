@@ -41,6 +41,10 @@ pub struct SystemConfig {
     // Trunked system fields
     #[serde(default)]
     pub control_channels: Vec<f64>,
+    #[serde(default)]
+    pub preferred_control_channel: Option<f64>,
+    #[serde(default)]
+    pub voice_channels: Vec<f64>,
 
     // Conventional system channels — CSV file with optional TOML overrides
     #[serde(default)]

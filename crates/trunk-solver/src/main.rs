@@ -3,15 +3,15 @@ use std::path::PathBuf;
 use anyhow::{Result, bail};
 use clap::Parser;
 
-use trunk_solver::config::TrunkConfig;
+use trunk_solver::config::SolverConfig;
 use trunk_solver::device::Device;
 use trunk_solver::solver::solve;
 
 #[derive(Parser)]
 #[command(about = "Optimally assign SDR devices to cover radio frequencies")]
 struct Cli {
-    /// Path to trunk-recorder config file
-    #[arg(long, default_value = "trunk-recorder.conf")]
+    /// Path to TOML config file
+    #[arg(long, default_value = "config.toml")]
     config: PathBuf,
 
     /// Device types to use (e.g., rtlsdr, airspy). Repeat for multiple devices.
@@ -27,7 +27,7 @@ struct Cli {
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    let mut config = TrunkConfig::load(&cli.config)?;
+    let config = SolverConfig::load(&cli.config)?;
     let config_dir = cli
         .config
         .parent()
@@ -40,7 +40,12 @@ fn main() -> Result<()> {
 
     eprintln!("Solving for these frequencies:");
     for c in &channels {
-        eprintln!("  {} {:?}", c.frequency, c.signal);
+        let tag_str = match c.tag {
+            Some(trunk_solver::Tag::Primary) => " [primary]",
+            Some(trunk_solver::Tag::Alternate) => " [alternate]",
+            None => "",
+        };
+        eprintln!("  {} {:?}{}", c.frequency, c.signal, tag_str);
     }
 
     let devices = build_device_list(&cli, &config)?;
@@ -57,13 +62,20 @@ fn main() -> Result<()> {
 
     let sources = solve(&channels, &devices)?;
 
-    config.patch_sources(&sources);
-    println!("{}", config.to_json_pretty());
+    for source in &sources {
+        println!(
+            "center={:.6} MHz  rate={}  gain={}  device={}",
+            source.center as f64 / 1e6,
+            source.rate,
+            source.gain,
+            source.device,
+        );
+    }
 
     Ok(())
 }
 
-fn build_device_list(cli: &Cli, config: &TrunkConfig) -> Result<Vec<Device>> {
+fn build_device_list(cli: &Cli, config: &SolverConfig) -> Result<Vec<Device>> {
     if cli.devices.is_empty() && cli.count.is_none() {
         let devices = config.devices()?;
         if devices.is_empty() {

@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
@@ -6,94 +7,93 @@ use serde::Deserialize;
 use crate::device::Device;
 use crate::{Channel, Signal, Tag};
 
-/// Full trunk-recorder config, preserved as raw JSON.
-///
-/// Unknown fields (plugins, capture dir, system details, etc.) round-trip
-/// untouched. Typed views are deserialized on demand from the relevant
-/// sub-trees.
-pub struct TrunkConfig {
-    raw: serde_json::Value,
+/// Solver config loaded from the TOML config file.
+pub struct SolverConfig {
+    sources: Vec<ConfigSource>,
+    systems: BTreeMap<String, ConfigSystem>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ConfigFile {
+    #[serde(default)]
+    source: Vec<ConfigSource>,
+    #[serde(default)]
+    system: BTreeMap<String, ConfigSystem>,
 }
 
 /// Typed view of a source entry — only the fields the solver needs.
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct ConfigSource {
-    #[serde(default = "default_true")]
-    enabled: bool,
     #[serde(default)]
     device: String,
     #[serde(default)]
-    gain: i64,
+    gain: f64,
     #[serde(default)]
-    ppm: i64,
+    ppm: f64,
 }
 
 /// Typed view of a system entry — only the fields the solver needs.
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
 struct ConfigSystem {
-    #[serde(default = "default_true")]
-    enabled: bool,
     #[serde(rename = "type")]
     system_type: String,
-    #[serde(default, alias = "control_channels")]
-    control_channels: Vec<i64>,
-    #[serde(default, alias = "voice_channels")]
-    voice_channels: Vec<i64>,
+    #[serde(default)]
+    control_channels: Vec<f64>,
+    #[serde(default)]
+    preferred_control_channel: Option<f64>,
+    #[serde(default)]
+    voice_channels: Vec<f64>,
+    #[serde(default)]
     channel_file: Option<PathBuf>,
 }
 
-const fn default_true() -> bool {
-    true
-}
-
-impl TrunkConfig {
+impl SolverConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
-        let raw: serde_json::Value =
-            serde_json::from_str(&content).context("Failed to parse config JSON")?;
-        Ok(Self { raw })
+        let file: ConfigFile =
+            toml::from_str(&content).context("Failed to parse TOML config")?;
+        Ok(Self {
+            sources: file.source,
+            systems: file.system,
+        })
     }
 
     /// Infer [`Device`] definitions from the existing `sources` array.
     pub fn devices(&self) -> Result<Vec<Device>> {
-        let sources: Vec<ConfigSource> =
-            serde_json::from_value(self.raw["sources"].clone()).unwrap_or_default();
-        sources
+        self.sources
             .iter()
-            .filter(|s| s.enabled)
             .map(|s| {
-                Device::from_source_config(&s.device, s.gain, s.ppm)
+                Device::from_source_config(&s.device, s.gain as i64, s.ppm as i64)
                     .ok_or_else(|| anyhow::anyhow!("Unknown device type: {}", s.device))
             })
             .collect()
     }
 
-    /// Extract all channel frequencies from the `systems` array.
+    /// Extract all channel frequencies from the systems.
     pub fn channels(&self, config_dir: &Path) -> Result<Vec<Channel>> {
-        let systems: Vec<ConfigSystem> =
-            serde_json::from_value(self.raw["systems"].clone()).unwrap_or_default();
         let mut channels = Vec::new();
 
-        for (i, system) in systems.iter().enumerate() {
-            if !system.enabled {
-                continue;
-            }
+        for (i, system) in self.systems.values().enumerate() {
             match system.system_type.as_str() {
                 "p25" => {
                     for &freq in &system.control_channels {
+                        let freq_hz = freq as i64;
+                        let tag = match system.preferred_control_channel {
+                            Some(pref) if pref as i64 == freq_hz => Tag::Primary,
+                            Some(_) => Tag::Alternate,
+                            None => Tag::Primary,
+                        };
                         channels.push(Channel {
-                            frequency: freq,
+                            frequency: freq_hz,
                             signal: Signal::Digital,
-                            tag: Some(Tag::Primary),
+                            tag: Some(tag),
                             system: Some(i),
                         });
                     }
                     for &freq in &system.voice_channels {
                         channels.push(Channel {
-                            frequency: freq,
+                            frequency: freq as i64,
                             signal: Signal::Digital,
                             tag: None,
                             system: Some(i),
@@ -112,17 +112,6 @@ impl TrunkConfig {
         }
 
         Ok(channels)
-    }
-
-    /// Replace the `sources` array in the config with solver output,
-    /// preserving everything else.
-    pub fn patch_sources(&mut self, sources: &[impl serde::Serialize]) {
-        self.raw["sources"] = serde_json::to_value(sources).expect("Source is always serializable");
-    }
-
-    /// Serialize the full config back to pretty-printed JSON.
-    pub fn to_json_pretty(&self) -> String {
-        serde_json::to_string_pretty(&self.raw).expect("Value is always serializable")
     }
 }
 

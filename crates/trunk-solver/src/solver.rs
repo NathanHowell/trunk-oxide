@@ -144,7 +144,13 @@ fn build_problem(opt: &z3::Optimize, channels: &[Channel], devices: &[Device]) -
             })
             .collect();
 
-        opt.assert(&Bool::or(&in_range_options));
+        let coverage = Bool::or(&in_range_options);
+        if channel.tag == Some(crate::Tag::Alternate) {
+            // Alternate control channels are covered if possible but not required.
+            opt.assert_soft(&coverage, 1, None);
+        } else {
+            opt.assert(&coverage);
+        }
     }
 
     Problem {
@@ -455,5 +461,39 @@ mod tests {
 
         let result = solve(&channels, &devices);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_preferred_control_channel() {
+        // Two P25 systems with control channels spread across ~771–774 MHz.
+        // With preferred channels set, the solver only requires coverage of
+        // the preferred one per system; alternates are soft constraints.
+        let channels = vec![
+            // System 0: preferred = 772_306_250
+            Channel { frequency: 771_856_250, signal: Signal::Digital, tag: Some(Tag::Alternate), system: Some(0) },
+            Channel { frequency: 772_156_250, signal: Signal::Digital, tag: Some(Tag::Alternate), system: Some(0) },
+            Channel { frequency: 772_306_250, signal: Signal::Digital, tag: Some(Tag::Primary), system: Some(0) },
+            Channel { frequency: 772_456_250, signal: Signal::Digital, tag: Some(Tag::Alternate), system: Some(0) },
+            // System 1: preferred = 773_481_250
+            Channel { frequency: 772_031_250, signal: Signal::Digital, tag: Some(Tag::Alternate), system: Some(1) },
+            Channel { frequency: 773_481_250, signal: Signal::Digital, tag: Some(Tag::Primary), system: Some(1) },
+        ];
+
+        let devices = vec![Device::rtlsdr(), Device::rtlsdr()];
+        let sources = solve(&channels, &devices).expect("should find a solution with preferred channels");
+        assert!(!sources.is_empty());
+
+        // The two Primary channels must be covered
+        for ch in &channels {
+            if ch.tag == Some(Tag::Primary) {
+                let covered = sources.iter().any(|s| {
+                    let guard = decimation_guard(s.rate);
+                    let min = s.center - s.rate / 2 + guard;
+                    let max = s.center + s.rate / 2 - guard;
+                    ch.frequency >= min + CHANNEL_HALFWIDTH && ch.frequency <= max - CHANNEL_HALFWIDTH
+                });
+                assert!(covered, "preferred channel {} not covered", ch.frequency);
+            }
+        }
     }
 }

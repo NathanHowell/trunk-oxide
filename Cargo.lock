@@ -3067,7 +3067,7 @@ dependencies = [
  "clap",
  "csv",
  "serde",
- "serde_json",
+ "toml",
  "z3",
 ]
 

@@ -124,7 +124,6 @@ void tr_context_autotune_control_channels(TrContext &ctx);
 // ── Phase B: Message Routing (called from Rust handle_message) ──
 enum class TrUnitEventType : uint8_t;
 void tr_system_add_control_channel_runtime(TrContext &ctx, int32_t sys_num, double freq);
-void tr_system_retune(TrContext &ctx, int32_t sys_num);
 bool tr_system_update_sysid(TrContext &ctx, const TrTrunkMessage &msg);
 bool tr_system_update_status(TrContext &ctx, const TrTrunkMessage &msg);
 

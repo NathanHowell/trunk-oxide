@@ -285,7 +285,6 @@ impl TrunkRecorderBuilder {
             new_call_from_update: rec.map_or(true, |r| r.new_call_from_update),
             record_uu_v_calls: rec.map_or(true, |r| r.record_uu_v_calls),
             default_mode: rec.map_or(DefaultMode::default(), |r| r.default_mode),
-            control_retune_limit: rec.map_or(0, |r| r.control_retune_limit),
             control_warn_rate: rec.map_or(10, |r| r.control_warn_rate),
             systems: system_policies,
         };

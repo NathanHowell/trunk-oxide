@@ -182,7 +182,6 @@ pub struct CallManagerConfig {
     pub new_call_from_update: bool,
     pub record_uu_v_calls: bool,
     pub default_mode: DefaultMode,
-    pub control_retune_limit: i32,
     pub control_warn_rate: i32,
     pub systems: HashMap<i32, SystemPolicy>,
 }
@@ -404,8 +403,6 @@ pub struct CallManager {
     bridge: Arc<EventBridge>,
     /// Per-system raw gr::message count (for decode rate calculation).
     message_counts: HashMap<i32, i32>,
-    /// Per-system consecutive retune attempt counter.
-    retune_attempts: HashMap<i32, i32>,
     /// Per-system computed decode rate (messages/sec, for event dispatch).
     decode_rates: HashMap<i32, i32>,
     /// Per-system patch tables (P25 systems only).
@@ -450,7 +447,6 @@ impl CallManager {
             config,
             bridge,
             message_counts: HashMap::new(),
-            retune_attempts: HashMap::new(),
             decode_rates: HashMap::new(),
             patch_tables,
             system_identities,
@@ -660,7 +656,7 @@ impl CallManager {
                 }
             }
             TrMessageType::Tdulc => {
-                ffi::tr_system_retune(ctx, msg.sys_num);
+                tracing::trace!(sys_num = msg.sys_num, "TDULC received, no retune needed (multi-decoder)");
             }
 
             // ── System identity (once-only, fire setup_system if changed) ──
@@ -1380,24 +1376,7 @@ impl CallManager {
             let count = info.message_count;
 
             if decode_rate < 2 {
-                let attempts = self.retune_attempts.entry(sys_num).or_insert(0);
-                *attempts += 1;
-                if self.config.control_retune_limit > 0
-                    && *attempts > self.config.control_retune_limit
-                {
-                    anyhow::bail!(
-                        "Control channel retune limit exceeded after {} tries for sys {}",
-                        attempts,
-                        sys_num
-                    );
-                }
-                if policy.control_channels.len() > 1 {
-                    ffi::tr_system_retune(ctx.as_mut(), sys_num);
-                } else {
-                    tracing::error!(sys_num, "only one control channel defined");
-                }
-            } else {
-                self.retune_attempts.insert(sys_num, 0);
+                tracing::warn!(sys_num, decode_rate, "low decode rate (multi-decoder, no retune)");
             }
 
             if decode_rate < self.config.control_warn_rate {

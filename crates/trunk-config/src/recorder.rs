@@ -35,8 +35,6 @@ pub struct RecorderConfig {
     #[serde(default = "default_control_warn_rate")]
     pub control_warn_rate: i32,
     #[serde(default)]
-    pub control_retune_limit: i32,
-    #[serde(default)]
     pub broadcast_signals: bool,
     #[serde(default)]
     pub soft_vocoder: bool,

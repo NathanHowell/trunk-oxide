@@ -406,7 +406,6 @@ pub mod ffi {
 
         // ── Phase B: Message Routing (called from Rust handle_message) ──
         fn tr_system_add_control_channel_runtime(ctx: Pin<&mut TrContext>, sys_num: i32, freq: f64);
-        fn tr_system_retune(ctx: Pin<&mut TrContext>, sys_num: i32);
         fn tr_system_update_sysid(ctx: Pin<&mut TrContext>, msg: &TrTrunkMessage) -> bool;
         fn tr_system_update_status(ctx: Pin<&mut TrContext>, msg: &TrTrunkMessage) -> bool;
 

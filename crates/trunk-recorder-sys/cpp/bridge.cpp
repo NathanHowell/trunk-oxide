@@ -475,17 +475,6 @@ void tr_system_add_control_channel_runtime(TrContext &ctx, int32_t sys_num, doub
     }
 }
 
-void tr_system_retune(TrContext &ctx, int32_t sys_num) {
-    auto sys = find_system_by_num(ctx, sys_num);
-    if (!sys) return;
-    auto &tb = ctx.impl->trunk_ctx.tb;
-    auto &sources = ctx.impl->trunk_ctx.sources;
-    sys->retune_trunking(tb, sources);
-    if (sys->get_source() && sys->get_source()->get_autotune_source() && sys->get_system_type() == SYS_P25) {
-        autotune_control_channel(sys, false);
-    }
-}
-
 bool tr_system_update_sysid(TrContext &ctx, const TrTrunkMessage &msg) {
     auto sys = find_system_by_num(ctx, msg.sys_num);
     if (!sys) return false;
@@ -553,49 +542,51 @@ void tr_context_wire_event_notifiers(TrContext &ctx) {
     auto &bridge = ctx.impl->event_bridge;
     if (!bridge) return;
 
-    // Phase 2: wire trunk message callbacks on trunked systems
+    // Phase 2: wire trunk message callbacks — one per decoder for thread safety
     for (auto &system : ctx.impl->trunk_ctx.systems) {
         auto sys_type = system->get_system_type();
         if (sys_type != SYS_SMARTNET && sys_type != SYS_P25) continue;
 
-        auto state = std::shared_ptr<TrunkDrainState>(
-            new TrunkDrainState(bridge->make_notifier()));
+        for (auto &decoder : system->get_decoders()) {
+            auto state = std::shared_ptr<TrunkDrainState>(
+                new TrunkDrainState(bridge->make_notifier()));
 
-        if (sys_type == SYS_SMARTNET) {
-            SmartnetParserConfig config;
-            config.sys_num = system->get_sys_num();
-            config.bandplan = system->get_bandplan();
-            config.bandfreq = system->get_bandfreq();
-            config.bandplan_base = system->get_bandplan_base();
-            config.bandplan_high = system->get_bandplan_high();
-            config.bandplan_spacing = system->get_bandplan_spacing();
-            config.bandplan_offset = system->get_bandplan_offset();
-            state->smartnet_parser = std::make_unique<SmartnetParser>(std::move(config));
-        } else if (sys_type == SYS_P25) {
-            state->p25_parser = std::make_unique<P25Parser>();
-            P25ParserConfig p25_config;
-            p25_config.sys_num = system->get_sys_num();
-            p25_config.short_name = system->get_short_name();
-            p25_config.custom_freq_table_file = system->has_custom_freq_table_file()
-                ? system->get_custom_freq_table_file() : "";
-            state->p25_config = std::move(p25_config);
+            if (sys_type == SYS_SMARTNET) {
+                SmartnetParserConfig config;
+                config.sys_num = system->get_sys_num();
+                config.bandplan = system->get_bandplan();
+                config.bandfreq = system->get_bandfreq();
+                config.bandplan_base = system->get_bandplan_base();
+                config.bandplan_high = system->get_bandplan_high();
+                config.bandplan_spacing = system->get_bandplan_spacing();
+                config.bandplan_offset = system->get_bandplan_offset();
+                state->smartnet_parser = std::make_unique<SmartnetParser>(std::move(config));
+            } else if (sys_type == SYS_P25) {
+                state->p25_parser = std::make_unique<P25Parser>();
+                P25ParserConfig p25_config;
+                p25_config.sys_num = system->get_sys_num();
+                p25_config.short_name = system->get_short_name();
+                p25_config.custom_freq_table_file = system->has_custom_freq_table_file()
+                    ? system->get_custom_freq_table_file() : "";
+                state->p25_config = std::move(p25_config);
+            }
+
+            decoder->set_msg_callback([state](gr::message::sptr msg) {
+                std::vector<TrunkMessage> parsed;
+                if (state->smartnet_parser) {
+                    parsed = state->smartnet_parser->parse_message(msg);
+                } else if (state->p25_parser) {
+                    parsed = state->p25_parser->parse_message(msg, state->p25_config);
+                }
+                if (parsed.empty()) return;
+
+                rust::Vec<TrTrunkMessage> result;
+                for (const auto &m : parsed) {
+                    result.push_back(convert_trunk_message(m));
+                }
+                event_notifier_notify_trunk_messages(*state->notifier, std::move(result));
+            });
         }
-
-        system->set_msg_callback([state](gr::message::sptr msg) {
-            std::vector<TrunkMessage> parsed;
-            if (state->smartnet_parser) {
-                parsed = state->smartnet_parser->parse_message(msg);
-            } else if (state->p25_parser) {
-                parsed = state->p25_parser->parse_message(msg, state->p25_config);
-            }
-            if (parsed.empty()) return;
-
-            rust::Vec<TrTrunkMessage> result;
-            for (const auto &m : parsed) {
-                result.push_back(convert_trunk_message(m));
-            }
-            event_notifier_notify_trunk_messages(*state->notifier, std::move(result));
-        });
     }
 
     // Phase 3: wire squelch callbacks on recorder blocks

@@ -134,11 +134,6 @@ static TrSystemInfo build_system_info(System &sys) {
 // ── Call accessor implementations (most removed — Rust owns call state via CallEntry) ──
 
 int32_t call_get_freq_error(const TrCall &call) { return call.ptr->get_freq_error(); }
-double call_get_current_length(const TrCall &call) {
-    // Bypass Call_impl::get_current_length() state check — Rust owns state
-    auto rec = call.ptr->get_recorder();
-    return rec ? rec->get_current_length() : 0.0;
-}
 
 // ── Recorder accessor implementations ──
 
@@ -626,11 +621,6 @@ rust::Vec<TrRecorderStatus> tr_context_get_recorder_status(const TrContext &ctx)
 
 bool call_has_recorder(const TrCall &call) {
     return call.ptr->get_recorder() != nullptr;
-}
-
-bool call_get_recorder_is_active(const TrCall &call) {
-    auto rec = call.ptr->get_recorder();
-    return rec ? rec->is_active() : false;
 }
 
 bool call_get_recorder_is_enabled(const TrCall &call) {

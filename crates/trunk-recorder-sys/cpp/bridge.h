@@ -56,7 +56,6 @@ struct TrRecorder final {
 
 // ── Call accessor wrappers ──
 int32_t call_get_freq_error(const TrCall &call);
-double call_get_current_length(const TrCall &call);
 int64_t call_get_talkgroup(const TrCall &call);
 int32_t call_get_sys_num(const TrCall &call);
 double call_get_freq(const TrCall &call);
@@ -133,7 +132,6 @@ double tr_system_get_control_channel_pwr(TrContext &ctx, int32_t sys_num);
 
 // ── Conventional call management — recorder status (null-guarded) ──
 bool call_has_recorder(const TrCall &call);
-bool call_get_recorder_is_active(const TrCall &call);
 bool call_get_recorder_is_enabled(const TrCall &call);
 int32_t call_get_recorder_state(const TrCall &call);
 

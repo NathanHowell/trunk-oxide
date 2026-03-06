@@ -492,53 +492,6 @@ impl CallManager {
         let effects = self.state.tick();
         self.process_effects(effects, &mut ctx);
 
-        // Conventional tick: check FFI state and call back into state machine
-        self.tick_conventional(ctx);
-    }
-
-    fn tick_conventional(&mut self, mut ctx: Pin<&mut TrContext>) {
-        let timeout = self.state.config.call_timeout;
-        let mut actions: Vec<(CallId, ConventionalAction)> = Vec::new();
-
-        for entry in &self.state.calls {
-            if !entry.is_conventional()
-                || entry.recorder.is_none()
-                || entry.state == crate::call_state::CallState::Disabled
-            {
-                continue;
-            }
-
-            let handle = match self.handles.get(&entry.id) {
-                Some(h) => h,
-                None => continue,
-            };
-
-            let length = ffi::call_get_current_length(&**handle);
-            if length > 0.0 {
-                let idle_timed_out = entry
-                    .idle_since
-                    .map(|t| t.elapsed().as_secs_f64() > timeout)
-                    .unwrap_or(false);
-                if idle_timed_out || (entry.max_duration > 0.0 && length > entry.max_duration) {
-                    actions.push((entry.id, ConventionalAction::IdleTimeout));
-                }
-            } else if !ffi::call_get_recorder_is_active(&**handle) {
-                actions.push((entry.id, ConventionalAction::StartInitial));
-            }
-        }
-
-        for (call_id, action) in actions {
-            match action {
-                ConventionalAction::IdleTimeout => {
-                    let effects = self.state.on_conventional_idle_timeout(call_id);
-                    self.process_effects(effects, &mut ctx);
-                }
-                ConventionalAction::StartInitial => {
-                    let effects = self.state.on_conventional_start_initial(call_id);
-                    self.process_effects(effects, &mut ctx);
-                }
-            }
-        }
     }
 
     pub fn process_recorder_queues(&self) {
@@ -812,7 +765,6 @@ impl CallManager {
                 .trunked_fields()
                 .map_or(false, |t| t.conversation_mode),
             current_source_id: entry.current_source_id,
-            current_length: handle.map_or(0.0, |h| ffi::call_get_current_length(&**h)),
             start_time: crate::call_state::system_time_to_unix(entry.start_time),
             elapsed: elapsed.as_secs_f64(),
             short_name: entry.short_name.clone(),
@@ -926,11 +878,6 @@ impl CallManager {
             rec_num,
         }
     }
-}
-
-enum ConventionalAction {
-    IdleTimeout,
-    StartInitial,
 }
 
 /// Build a minimal TrTrunkMessage from a CallEntry for C++ call creation.

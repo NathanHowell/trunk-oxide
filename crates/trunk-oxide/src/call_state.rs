@@ -1222,20 +1222,34 @@ impl TrunkStateMachine {
     }
 
     fn tick_conventional(&mut self) -> Vec<Effect> {
-        let effects = Vec::new();
+        let timeout = self.config.call_timeout;
+        let mut timed_out = Vec::new();
 
-        for entry in &mut self.calls {
-            if !entry.is_conventional() {
+        for entry in &self.calls {
+            if !entry.is_conventional() || entry.recorder.is_none() {
                 continue;
             }
-            if entry.recorder.is_none() {
+            if entry.state == CallState::Disabled {
                 continue;
             }
 
-            // The executor checks call_get_current_length and call_get_recorder_is_active
-            // via FFI, then calls on_conventional_idle_timeout or on_conventional_start_initial.
+            let idle_timed_out = entry
+                .idle_since
+                .is_some_and(|t| t.elapsed().as_secs_f64() > timeout);
+
+            let elapsed = entry.start_time.elapsed().map_or(0.0, |d| d.as_secs_f64());
+            let max_duration_exceeded =
+                entry.max_duration > 0.0 && elapsed > entry.max_duration;
+
+            if idle_timed_out || max_duration_exceeded {
+                timed_out.push(entry.id);
+            }
         }
 
+        let mut effects = Vec::new();
+        for call_id in timed_out {
+            effects.extend(self.on_conventional_idle_timeout(call_id));
+        }
         effects
     }
 

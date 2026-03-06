@@ -185,7 +185,6 @@ pub mod ffi {
         pub duplex: bool,
         pub conversation_mode: bool,
         pub current_source_id: i64,
-        pub current_length: f64,
         pub start_time: i64,
         pub elapsed: f64,
         pub short_name: String,
@@ -320,7 +319,6 @@ pub mod ffi {
         type TrRecorder;
         // ── Call accessors ──
         fn call_get_freq_error(call: &TrCall) -> i32;
-        fn call_get_current_length(call: &TrCall) -> f64;
         fn call_get_talkgroup(call: &TrCall) -> i64;
         fn call_get_sys_num(call: &TrCall) -> i32;
         fn call_get_freq(call: &TrCall) -> f64;
@@ -383,7 +381,6 @@ pub mod ffi {
 
         // ── Conventional call management — recorder status (null-guarded) ──
         fn call_has_recorder(call: &TrCall) -> bool;
-        fn call_get_recorder_is_active(call: &TrCall) -> bool;
         fn call_get_recorder_is_enabled(call: &TrCall) -> bool;
         fn call_get_recorder_state(call: &TrCall) -> i32;
 

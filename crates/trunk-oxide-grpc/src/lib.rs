@@ -356,7 +356,6 @@ impl EventBridge {
             duplex: info.duplex,
             conversation_mode: info.conversation_mode,
             current_source_id: info.current_source_id,
-            current_length: info.current_length,
             start_time: Some(prost_types::Timestamp {
                 seconds: info.start_time,
                 nanos: 0,

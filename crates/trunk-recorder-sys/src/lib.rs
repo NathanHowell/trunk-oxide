@@ -397,9 +397,8 @@ pub mod ffi {
         // ── Call — recorder status (null-guarded) ──
         fn call_has_recorder(call: &TrCall) -> bool;
 
-        // ── Call — Rust call ID round-trip ──
+        // ── Call — Rust call ID ──
         fn call_set_rust_call_id(call: Pin<&mut TrCall>, id: u64);
-        fn call_get_rust_call_id(call: &TrCall) -> u64;
 
         // ── Call — lifecycle ──
         fn call_restart(call: Pin<&mut TrCall>);
@@ -408,10 +407,6 @@ pub mod ffi {
 
         // ── Conventional call management — context-level ──
         fn tr_context_take_next_conventional_call(ctx: Pin<&mut TrContext>) -> UniquePtr<TrCall>;
-
-        // ── Phase C: Call Management — additional recorder accessors ──
-        fn recorder_since_last_write_secs(rec: &TrRecorder) -> f64;
-        fn recorder_get_type(rec: &TrRecorder) -> i32;
 
         // ── Phase C: Call Management — lifecycle operations ──
         fn tr_context_create_call(
@@ -447,8 +442,6 @@ pub mod ffi {
 
         // ── Recorder setup notification (extracts recorder from call, fires through event_sink) ──
         fn call_notify_setup_recorder(ctx: Pin<&mut TrContext>, call: &TrCall);
-
-        fn tr_recorder_process_queue(rec: &TrRecorder);
 
         // ── Event channel wiring ──
         fn tr_context_set_event_notifier(ctx: Pin<&mut TrContext>, notifier: Box<EventNotifier>);

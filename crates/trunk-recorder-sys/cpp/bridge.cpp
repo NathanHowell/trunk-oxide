@@ -631,10 +631,6 @@ void call_set_rust_call_id(TrCall &call, uint64_t id) {
     call.ptr->set_rust_call_id(id);
 }
 
-uint64_t call_get_rust_call_id(const TrCall &call) {
-    return call.ptr->get_rust_call_id();
-}
-
 // ── Config conversion (Rust TrRecorderConfig → C++ RecorderConfig) ──
 
 static RecorderConfig to_cpp_config(const TrRecorderConfig &cfg) {
@@ -686,16 +682,6 @@ std::unique_ptr<TrCall> tr_context_take_next_conventional_call(TrContext &ctx) {
 }
 
 // ── Call accessors (audio callback now uses rust_call_id round-trip) ──
-
-// ── Phase C: Call Management — additional recorder accessors ──
-
-double recorder_since_last_write_secs(const TrRecorder &rec) {
-    return rec.ptr->since_last_write().count();
-}
-
-int32_t recorder_get_type(const TrRecorder &rec) {
-    return static_cast<int32_t>(rec.ptr->get_type());
-}
 
 // ── Phase C: Call Management — lifecycle operations ──
 
@@ -859,15 +845,6 @@ void call_notify_setup_recorder(TrContext &ctx, const TrCall &call) {
     auto recorder = call.ptr->get_recorder();
     if (recorder) {
         ctx.impl->trunk_ctx.config.event_sink->setup_recorder(recorder);
-    }
-}
-
-void tr_recorder_process_queue(const TrRecorder &rec) {
-    if (rec.ptr && (rec.ptr->get_type() == P25 || rec.ptr->get_type() == P25C)) {
-        auto p25_rec = std::dynamic_pointer_cast<p25_recorder>(rec.ptr);
-        if (p25_rec && p25_rec->is_active()) {
-            p25_rec->process_message_queues();
-        }
     }
 }
 

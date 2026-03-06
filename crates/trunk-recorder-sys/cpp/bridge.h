@@ -130,9 +130,8 @@ double tr_system_get_control_channel_pwr(TrContext &ctx, int32_t sys_num);
 // ── Call — recorder status ──
 bool call_has_recorder(const TrCall &call);
 
-// ── Call — Rust call ID round-trip ──
+// ── Call — Rust call ID ──
 void call_set_rust_call_id(TrCall &call, uint64_t id);
-uint64_t call_get_rust_call_id(const TrCall &call);
 
 // ── Call — lifecycle ──
 void call_restart(TrCall &call);
@@ -141,8 +140,6 @@ void call_set_recorder_enabled(TrCall &call, bool enabled);
 std::unique_ptr<TrCall> tr_context_take_next_conventional_call(TrContext &ctx);
 
 // ── Call — recorder accessors ──
-double recorder_since_last_write_secs(const TrRecorder &rec);
-int32_t recorder_get_type(const TrRecorder &rec);
 
 // ── Call — creation and recording ──
 std::unique_ptr<TrCall> tr_context_create_call(TrContext &ctx, const TrTrunkMessage &msg);
@@ -168,6 +165,5 @@ void call_process_recorder_queue(const TrCall &call);
 
 // ── Recorder setup notification ──
 void call_notify_setup_recorder(TrContext &ctx, const TrCall &call);
-void tr_recorder_process_queue(const TrRecorder &rec);
 
 } // namespace trunk_oxide

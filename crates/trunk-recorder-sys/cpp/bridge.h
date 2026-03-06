@@ -5,6 +5,7 @@
 
 // trunk-recorder headers — these provide the real type definitions.
 // Include paths are set by build.rs (gnuradio, boost, op25_repeater, etc.)
+#include "trunk-recorder/call.h"
 #include "trunk-recorder/recorders/recorder.h"
 #include "trunk-recorder/systems/parser.h"
 

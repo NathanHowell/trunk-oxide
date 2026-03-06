@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SystemType {
     Conventional,
@@ -14,6 +14,7 @@ pub enum SystemType {
     #[serde(rename = "conventionalSIGMF")]
     ConventionalSigmf,
     Smartnet,
+    #[default]
     P25,
 }
 

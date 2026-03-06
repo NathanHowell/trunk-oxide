@@ -289,6 +289,7 @@ impl TrunkRecorderBuilder {
                         priority,
                         signal_detection: ch.signal_detection,
                         squelch_db: ch.squelch_db,
+                        tone: ch.tone,
                     }
                 })
                 .collect();

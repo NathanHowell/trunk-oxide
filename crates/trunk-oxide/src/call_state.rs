@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::sync::LazyLock;
 use std::time::{Instant, SystemTime};
 
 use trunk_config::{DefaultMode, SystemType, TalkgroupMode};
@@ -32,13 +33,13 @@ pub(crate) fn system_time_to_unix(t: SystemTime) -> i64 {
         .map_or(0, |d| d.as_secs() as i64)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Talkgroup(pub(crate) i64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct RecorderNum(pub(crate) i32);
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Freq(pub(crate) u64);
 
 impl Freq {
@@ -168,7 +169,7 @@ pub struct TalkgroupPolicy {
     pub preferred_nac: u64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ConventionalChannel {
     pub talkgroup: Talkgroup,
     pub freq: Freq,
@@ -176,9 +177,10 @@ pub struct ConventionalChannel {
     pub priority: i32,
     pub signal_detection: bool,
     pub squelch_db: f64,
+    pub tone: f64,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct SystemPolicy {
     pub system_type: SystemType,
     pub short_name: String,
@@ -200,27 +202,8 @@ pub struct SystemPolicy {
     pub nac: u64,
 }
 
-pub(crate) static DEFAULT_POLICY: std::sync::LazyLock<SystemPolicy> =
-    std::sync::LazyLock::new(|| SystemPolicy {
-        system_type: SystemType::P25,
-        short_name: String::new(),
-        record_unknown: false,
-        hide_unknown: false,
-        hide_encrypted: false,
-        monitor_encrypted: false,
-        multi_site: false,
-        multi_site_name: String::new(),
-        conversation_mode: false,
-        max_duration: 0.0,
-        control_channels: Vec::new(),
-        talkgroups: HashMap::new(),
-        channels: Vec::new(),
-        squelch_db: 0.0,
-        digital_levels: 0.0,
-        sys_id: 0,
-        wacn: 0,
-        nac: 0,
-    });
+pub(crate) static DEFAULT_POLICY: LazyLock<SystemPolicy> =
+    LazyLock::new(SystemPolicy::default);
 
 #[derive(Clone)]
 pub struct CallManagerConfig {
@@ -1523,22 +1506,9 @@ mod tests {
     fn test_config() -> CallManagerConfig {
         let mut systems = HashMap::new();
         systems.insert(1, SystemPolicy {
-            system_type: SystemType::P25,
             short_name: "test".into(),
             record_unknown: true,
-            hide_unknown: false,
-            hide_encrypted: false,
-            monitor_encrypted: false,
-            multi_site: false,
-            multi_site_name: String::new(),
-            conversation_mode: false,
-            max_duration: 0.0,
-            control_channels: Vec::new(),
-            talkgroups: HashMap::new(),
-            channels: Vec::new(),
-            sys_id: 0,
-            wacn: 0,
-            nac: 0,
+            ..Default::default()
         });
         CallManagerConfig {
             call_timeout: 1.0,
@@ -1546,6 +1516,7 @@ mod tests {
             record_uu_v_calls: false,
             default_mode: DefaultMode::Digital,
             control_warn_rate: 0,
+            temp_dir: String::new(),
             systems,
         }
     }
@@ -1877,8 +1848,7 @@ mod tests {
             talkgroup: Talkgroup(1),
             freq: Freq::from_hz(488_000_000.0),
             is_analog: true,
-            priority: 0,
-            signal_detection: false,
+            ..Default::default()
         };
         let policy = sm.config.systems.get(&1).unwrap().clone();
         let (call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(0)));
@@ -1900,8 +1870,7 @@ mod tests {
             talkgroup: Talkgroup(1),
             freq: Freq::from_hz(488_000_000.0),
             is_analog: true,
-            priority: 0,
-            signal_detection: false,
+            ..Default::default()
         };
         let policy = sm.config.systems.get(&1).unwrap().clone();
         let (call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
@@ -1929,8 +1898,7 @@ mod tests {
             talkgroup: Talkgroup(1),
             freq: Freq::from_hz(488_000_000.0),
             is_analog: true,
-            priority: 0,
-            signal_detection: false,
+            ..Default::default()
         };
         let policy = sm.config.systems.get(&1).unwrap().clone();
         let (call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
@@ -1960,8 +1928,7 @@ mod tests {
             talkgroup: Talkgroup(1),
             freq: Freq::from_hz(488_000_000.0),
             is_analog: true,
-            priority: 0,
-            signal_detection: false,
+            ..Default::default()
         };
         let policy = sm.config.systems.get(&1).unwrap().clone();
         let _ = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(5)));
@@ -1980,8 +1947,7 @@ mod tests {
             talkgroup: Talkgroup(1),
             freq: Freq::from_hz(488_000_000.0),
             is_analog: true,
-            priority: 0,
-            signal_detection: false,
+            ..Default::default()
         };
         let policy = sm.config.systems.get(&1).unwrap().clone();
         let _ = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(5)));
@@ -2030,8 +1996,8 @@ mod tests {
             talkgroup: Talkgroup(1),
             freq: Freq::from_hz(488_000_000.0),
             is_analog: true,
-            priority: 0,
             signal_detection: true,
+            ..Default::default()
         }
     }
 
@@ -2125,8 +2091,7 @@ mod tests {
             talkgroup: Talkgroup(1),
             freq: Freq::from_hz(488_000_000.0),
             is_analog: true,
-            priority: 0,
-            signal_detection: false,
+            ..Default::default()
         };
         let policy = sm.config.systems.get(&1).unwrap().clone();
         let (call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
@@ -2141,8 +2106,7 @@ mod tests {
             talkgroup: Talkgroup(1),
             freq: Freq::from_hz(488_000_000.0),
             is_analog: true,
-            priority: 0,
-            signal_detection: false,
+            ..Default::default()
         };
         let policy = sm.config.systems.get(&1).unwrap().clone();
         let (call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));

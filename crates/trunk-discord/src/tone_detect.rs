@@ -444,7 +444,7 @@ enum StreamingState {
     EarlyWatch,
     /// At least one tone window seen; watching for a silence gap.
     ToneActive { consecutive_silent: usize },
-    /// Detection finished (early-exit, silence gap, or max_samples).
+    /// Detection finished (early-exit, silence gap, or `max_samples`).
     Done,
 }
 
@@ -575,7 +575,7 @@ impl ToneDetector {
     }
 
     /// Poll for a CTCSS early-fire event. Returns `Some(freq)` once, then `None` forever.
-    pub fn take_early_ctcss(&mut self) -> Option<f32> {
+    pub const fn take_early_ctcss(&mut self) -> Option<f32> {
         self.pending_ctcss.take()
     }
 

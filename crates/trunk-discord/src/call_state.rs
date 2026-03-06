@@ -37,7 +37,7 @@ pub enum CallEffect {
     Log { message: String },
 }
 
-/// Database update payload (mirrors trunk_database::CallUpdate without the dep).
+/// Database update payload (mirrors `trunk_database::CallUpdate` without the dep).
 #[derive(Debug, Clone)]
 pub struct CallUpdate {
     pub duration: Option<Duration>,
@@ -105,7 +105,7 @@ pub struct CallState {
     call_end_duration: Option<Duration>,
     call_end_signal: Option<SignalDb>,
     audio_energy_sum: f64,
-    audio_sample_count: u64,
+    audio_sample_count: u32,
 }
 
 impl CallState {
@@ -161,7 +161,7 @@ impl CallState {
     /// Returns a `Transcribe` effect when the buffer exceeds the configured threshold.
     pub fn on_audio_processed(
         &mut self,
-        sample_count: u64,
+        sample_count: u32,
         energy: f64,
         buffer_len: usize,
         audio_drain: Vec<f32>,
@@ -272,28 +272,28 @@ impl CallState {
         }
 
         // Attach audio if available and non-silent
-        if self.config.audio_attachment {
-            if let Some(ogg_data) = ogg_data {
-                let audio_is_silent = self.audio_rms() < SILENCE_RMS_THRESHOLD;
-                if audio_is_silent {
-                    tracing::debug!(
-                        talkgroup = self.talkgroup,
-                        rms = self.audio_rms(),
-                        ogg_bytes = ogg_data.len(),
-                        "skipping audio attachment (silent)"
-                    );
-                } else {
-                    let filename = format!(
-                        "call_{}_{}.ogg",
-                        self.talkgroup,
-                        self.start_time.format("%Y%m%dT%H%M%SZ"),
-                    );
-                    effects.push(CallEffect::AttachAudio {
-                        embed: self.build_embed(),
-                        ogg_data,
-                        filename,
-                    });
-                }
+        if self.config.audio_attachment
+            && let Some(ogg_data) = ogg_data
+        {
+            let audio_is_silent = self.audio_rms() < SILENCE_RMS_THRESHOLD;
+            if audio_is_silent {
+                tracing::debug!(
+                    talkgroup = self.talkgroup,
+                    rms = self.audio_rms(),
+                    ogg_bytes = ogg_data.len(),
+                    "skipping audio attachment (silent)"
+                );
+            } else {
+                let filename = format!(
+                    "call_{}_{}.ogg",
+                    self.talkgroup,
+                    self.start_time.format("%Y%m%dT%H%M%SZ"),
+                );
+                effects.push(CallEffect::AttachAudio {
+                    embed: self.build_embed(),
+                    ogg_data,
+                    filename,
+                });
             }
         }
 
@@ -312,7 +312,7 @@ impl CallState {
     /// Compute audio RMS from accumulated energy.
     fn audio_rms(&self) -> f64 {
         if self.audio_sample_count > 0 {
-            (self.audio_energy_sum / self.audio_sample_count as f64).sqrt()
+            (self.audio_energy_sum / f64::from(self.audio_sample_count)).sqrt()
         } else {
             0.0
         }

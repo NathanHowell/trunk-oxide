@@ -53,7 +53,7 @@ pub struct CallHandler {
 impl CallHandler {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        call_info: proto::CallInfo,
+        call_info: &proto::CallInfo,
         rx: mpsc::Receiver<CallMessage>,
         whisperer: WhispererConnection,
         discord: Arc<DiscordClient>,
@@ -85,7 +85,7 @@ impl CallHandler {
             .saturating_mul(16);
 
         let state = CallState::new(
-            &call_info,
+            call_info,
             CallStateConfig {
                 buffer_threshold,
                 audio_attachment: config.audio_attachment,
@@ -166,12 +166,11 @@ impl CallHandler {
                     }
                 }
                 CallEffect::DeleteEmbed => {
-                    if let Some(msg_id) = self.embed_message_id {
-                        if let Err(e) =
+                    if let Some(msg_id) = self.embed_message_id
+                        && let Err(e) =
                             self.discord.delete_message(self.post_channel, msg_id).await
-                        {
-                            tracing::warn!(error = %e, "failed to delete empty call embed");
-                        }
+                    {
+                        tracing::warn!(error = %e, "failed to delete empty call embed");
                     }
                 }
                 CallEffect::AttachAudio {
@@ -248,12 +247,12 @@ impl CallHandler {
             detector.process(&samples);
 
             // Check for CTCSS early-fire to start notch filtering as soon as possible
-            if let Some(ctcss_freq) = detector.take_early_ctcss() {
-                if self.notch_filter.is_none() {
-                    tracing::info!(freq = ctcss_freq, "CTCSS early-fire, starting notch filter");
-                    let filter = NotchFilter::new(16000, ctcss_freq, 30.0);
-                    self.notch_filter = Some(filter);
-                }
+            if let Some(ctcss_freq) = detector.take_early_ctcss()
+                && self.notch_filter.is_none()
+            {
+                tracing::info!(freq = ctcss_freq, "CTCSS early-fire, starting notch filter");
+                let filter = NotchFilter::new(16000, ctcss_freq, 30.0);
+                self.notch_filter = Some(filter);
             }
         }
 
@@ -263,8 +262,8 @@ impl CallHandler {
         }
 
         // Compute energy for silence detection
-        let energy: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum();
-        let sample_count = samples.len() as u64;
+        let energy: f64 = samples.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
+        let sample_count: u32 = samples.len().try_into().expect("audio chunk exceeds u32");
 
         if let Some(enc) = &mut self.ogg_encoder {
             enc.process(&samples)?;

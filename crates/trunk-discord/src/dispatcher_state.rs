@@ -41,7 +41,7 @@ pub enum DispatchEffect {
         key: CallKey,
         call_data: Option<Box<proto::CallData>>,
     },
-    /// Reap a stuck call (no CallEnd received).
+    /// Reap a stuck call (no `CallEnd` received).
     ReapCall { key: CallKey },
     /// Forward a message to the aggregator.
     ForwardToAggregator { message: AggregatorMessage },
@@ -117,11 +117,12 @@ impl DispatcherState {
 
     /// Handle a plugin event. Single entry point for all event routing.
     pub fn on_event(&mut self, event: proto::PluginEvent) -> Vec<DispatchEffect> {
+        use proto::plugin_event::Event;
+
         let Some(event) = event.event else {
             return vec![];
         };
 
-        use proto::plugin_event::Event;
         match event {
             Event::CallStart(e) => self.on_call_start(e),
             Event::CallEnd(e) => self.on_call_end(e),
@@ -182,7 +183,7 @@ impl DispatcherState {
     }
 
     /// Two-phase callback: executor resolved the post channel for a new call.
-    /// Registers the call as active and emits SpawnCallHandler.
+    /// Registers the call as active and emits `SpawnCallHandler`.
     pub fn on_channel_resolved(
         &mut self,
         call: proto::CallInfo,
@@ -238,16 +239,16 @@ impl DispatcherState {
     }
 
     fn on_unit(&self, event: proto::UnitEvent) -> Vec<DispatchEffect> {
-        if event.talkgroup != 0 {
-            if let Some(system) = &event.system {
-                let key = CallKey {
-                    sys_num: SysNum(system.sys_num),
-                    talkgroup: Talkgroup(event.talkgroup),
-                };
-                if self.active_calls.contains_key(&key) {
-                    let text = format_unit_event(&event);
-                    return vec![DispatchEffect::SendEvent { key, text }];
-                }
+        if event.talkgroup != 0
+            && let Some(system) = &event.system
+        {
+            let key = CallKey {
+                sys_num: SysNum(system.sys_num),
+                talkgroup: Talkgroup(event.talkgroup),
+            };
+            if self.active_calls.contains_key(&key) {
+                let text = format_unit_event(&event);
+                return vec![DispatchEffect::SendEvent { key, text }];
             }
         }
         vec![DispatchEffect::ForwardToAggregator {

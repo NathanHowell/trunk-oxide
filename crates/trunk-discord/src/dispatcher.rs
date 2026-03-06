@@ -115,22 +115,22 @@ impl Dispatcher {
                     sample_rate,
                 } => {
                     let calls = self.calls.lock().await;
-                    if let Some(active) = calls.get(&key) {
-                        if let Err(e) = active.tx.try_send(CallMessage::Audio {
+                    if let Some(active) = calls.get(&key)
+                        && let Err(e) = active.tx.try_send(CallMessage::Audio {
                             samples,
                             sample_rate,
-                        }) {
-                            tracing::warn!(talkgroup = key.talkgroup.0, "audio packet dropped: {e}");
-                        }
+                        })
+                    {
+                        tracing::warn!(talkgroup = key.talkgroup.0, "audio packet dropped: {e}");
                     }
                 }
 
                 DispatchEffect::SendEvent { key, text } => {
                     let calls = self.calls.lock().await;
-                    if let Some(active) = calls.get(&key) {
-                        if let Err(e) = active.tx.try_send(CallMessage::Event(text)) {
-                            tracing::warn!(talkgroup = key.talkgroup.0, "event dropped: {e}");
-                        }
+                    if let Some(active) = calls.get(&key)
+                        && let Err(e) = active.tx.try_send(CallMessage::Event(text))
+                    {
+                        tracing::warn!(talkgroup = key.talkgroup.0, "event dropped: {e}");
                     }
                 }
 
@@ -239,8 +239,7 @@ impl Dispatcher {
         };
 
         if let Some(id) = db_thread {
-            let mut state = self.state.lock().await;
-            state.cache_thread(cache_key, id);
+            self.state.lock().await.cache_thread(cache_key, id);
             return Some(id);
         }
 
@@ -258,12 +257,13 @@ impl Dispatcher {
             .await
         {
             Ok(id) => {
-                let mut state = self.state.lock().await;
-                state.cache_thread(cache_key, id);
+                self.state.lock().await.cache_thread(cache_key, id);
 
-                let db = self.db.lock().await;
-                if let Err(e) = db.set_thread(sys_num, talkgroup, &date_str, id.get()) {
-                    tracing::warn!(error = %e, "failed to persist thread to db");
+                {
+                    let db = self.db.lock().await;
+                    if let Err(e) = db.set_thread(sys_num, talkgroup, &date_str, id.get()) {
+                        tracing::warn!(error = %e, "failed to persist thread to db");
+                    }
                 }
 
                 Some(id)
@@ -319,7 +319,7 @@ impl Dispatcher {
         );
 
         let handler = match CallHandler::new(
-            call,
+            &call,
             rx,
             self.whisperer.clone(),
             Arc::clone(&self.discord),
@@ -351,11 +351,13 @@ impl Dispatcher {
 
         match Database::open_hourly(&self.db_path, &now_hour) {
             Ok(new_db) => {
-                let mut db = self.db.lock().await;
-                if let Err(e) = new_db.copy_threads_from(&db, &today) {
-                    tracing::warn!(error = %e, "failed to copy thread cache to new hourly db");
+                {
+                    let mut db = self.db.lock().await;
+                    if let Err(e) = new_db.copy_threads_from(&db, &today) {
+                        tracing::warn!(error = %e, "failed to copy thread cache to new hourly db");
+                    }
+                    *db = new_db;
                 }
-                *db = new_db;
                 tracing::info!(hour = %now_hour, "rotated to new hourly database");
             }
             Err(e) => {

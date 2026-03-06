@@ -142,14 +142,13 @@ impl AggregatorExecutor {
                             (self.current_thread_id, self.activity_embed_id)
                         }
                     };
-                    if let (Some(tid), Some(mid)) = (thread_id, msg_id) {
-                        if let Err(e) = self
+                    if let (Some(tid), Some(mid)) = (thread_id, msg_id)
+                        && let Err(e) = self
                             .discord
                             .edit_embed(tid, mid, embed_data_to_serenity(&embed))
                             .await
-                        {
-                            tracing::error!(error = %e, "failed to edit embed");
-                        }
+                    {
+                        tracing::error!(error = %e, "failed to edit embed");
                     }
                 }
                 AggEffect::InsertActivity { snapshot } => {

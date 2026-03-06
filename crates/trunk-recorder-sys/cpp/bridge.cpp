@@ -701,6 +701,7 @@ std::unique_ptr<TrCall> tr_create_conventional_call(
         call->set_recorder(rec);
     } else if (sys_type == SYS_CONVENTIONAL_P25) {
         auto rec = source->create_digital_conventional_recorder(tb);
+        rec->set_system(system);
         call->set_recorder(rec);
     } else if (sys_type == SYS_CONVENTIONAL_SIGMF) {
         auto rec = source->create_sigmf_conventional_recorder(tb);
@@ -753,6 +754,7 @@ bool tr_source_start_recording(TrContext &ctx, int32_t source_idx, TrCall &call,
     }
 
     call.ptr->set_recorder(recorder);
+    recorder->set_system(call.ptr->get_system());
     config.event_sink->setup_recorder(recorder);
 
     // Debug recorder

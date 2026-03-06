@@ -196,7 +196,9 @@ pub struct SystemPolicy {
     pub talkgroups: HashMap<Talkgroup, TalkgroupPolicy>,
     pub channels: Vec<ConventionalChannel>,
     pub squelch_db: f64,
+    pub analog_levels: f64,
     pub digital_levels: f64,
+    pub bandplan: String,
     pub sys_id: u64,
     pub wacn: u64,
     pub nac: u64,
@@ -222,6 +224,9 @@ pub(crate) struct SystemIdentity {
     pub(crate) nac: u64,
     pub(crate) rfss: i32,
     pub(crate) site_id: i32,
+    /// P25 Phase 2 LFSR XOR mask, computed by C++ from (sys_id, wacn, nac).
+    /// Each byte is a dibit (0–3).
+    pub(crate) xor_mask: Vec<u8>,
 }
 
 // ── Patch Table ──
@@ -555,6 +560,7 @@ impl TrunkStateMachine {
                 (
                     sys_num,
                     SystemIdentity {
+                        xor_mask: crate::p25_lfsr::compute_xor_mask(sp.nac, sp.sys_id, sp.wacn),
                         sys_id: sp.sys_id,
                         wacn: sp.wacn,
                         nac: sp.nac,
@@ -625,6 +631,8 @@ impl TrunkStateMachine {
                     id.sys_id = msg.sys_id;
                     id.wacn = msg.wacn;
                     id.nac = msg.nac;
+                    id.xor_mask =
+                        crate::p25_lfsr::compute_xor_mask(msg.nac, msg.sys_id, msg.wacn);
                 }
                 vec![Effect::EmitSetupSystem {
                     sys_num: msg.sys_num,

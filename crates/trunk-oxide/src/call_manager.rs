@@ -12,7 +12,9 @@ use trunk_recorder_sys::ffi::{
 
 use std::sync::Arc;
 
+use trunk_config::SystemType;
 use trunk_oxide_grpc::EventBridge;
+use trunk_oxide_grpc::proto::SystemType as ProtoSystemType;
 
 use crate::call_state::{
     CallId, CallState, Effect, Freq, MessageType, RecorderNum, RecordingResult, RejectReason,
@@ -22,6 +24,17 @@ use crate::call_state::{
 pub use crate::call_state::{CallManagerConfig, ConventionalChannel, SystemPolicy, TalkgroupPolicy};
 
 use trunk_oxide_grpc::AudioMeta;
+
+const fn system_type_to_proto(st: SystemType) -> i32 {
+    match st {
+        SystemType::Conventional => ProtoSystemType::Conventional as i32,
+        SystemType::ConventionalP25 => ProtoSystemType::ConventionalP25 as i32,
+        SystemType::ConventionalDMR => ProtoSystemType::ConventionalDmr as i32,
+        SystemType::ConventionalSigmf => ProtoSystemType::ConventionalSigmf as i32,
+        SystemType::Smartnet => ProtoSystemType::Smartnet as i32,
+        SystemType::P25 => ProtoSystemType::P25 as i32,
+    }
+}
 
 fn format_recorder_state(state: i32) -> &'static str {
     match state {
@@ -209,13 +222,12 @@ impl CallManager {
                         UnitEventType::DataGrant => TrUnitEventType::DataGrant,
                         UnitEventType::AnswerRequest => TrUnitEventType::AnswerRequest,
                     };
-                    let info = self.get_system_info(ctx.as_mut(), sys_num);
+                    let info = self.get_system_info(sys_num);
                     self.bridge
                         .unit_event(&info, ffi_type, source_id, talkgroup);
                 }
                 Effect::EmitSetupSystem { sys_num } => {
-                    // Also fire FFI update (Sysid/Status pass-through)
-                    let info = self.get_system_info(ctx.as_mut(), sys_num);
+                    let info = self.get_system_info(sys_num);
                     self.bridge.setup_system(&info);
                 }
                 Effect::EmitSetupRecorder { call_id } => {
@@ -240,9 +252,7 @@ impl CallManager {
                 }
                 Effect::ConventionalStartInitial { call_id } => {
                     if let Some(entry) = self.state.get_call(call_id) {
-                        let sys_info =
-                            ffi::tr_context_get_system_info(ctx.as_mut(), entry.sys_num);
-                        let cfg = self.build_recorder_config(entry, &sys_info.xor_mask);
+                        let cfg = self.build_recorder_config(entry);
                         if let Some(handle) = self.handles.get_mut(&call_id) {
                             ffi::call_start_initial_recording(handle.pin_mut(), &cfg);
                         }
@@ -308,8 +318,7 @@ impl CallManager {
         };
 
         // Build recorder config from Rust state (replaces C++ build_recorder_config)
-        let sys_info = ffi::tr_context_get_system_info(ctx.as_mut(), entry.sys_num);
-        let cfg = self.build_recorder_config(entry, &sys_info.xor_mask);
+        let cfg = self.build_recorder_config(entry);
 
         let freq_hz = freq.as_hz();
         let source_idx = self.find_source(freq_hz);
@@ -620,21 +629,32 @@ impl CallManager {
         self.process_effects(effects, &mut ctx);
     }
 
-    pub(crate) fn get_system_info(&self, ctx: Pin<&mut TrContext>, sys_num: i32) -> SystemInfo {
-        let ffi_info = ffi::tr_context_get_system_info(ctx, sys_num);
-        let mut info = SystemInfo::from_ffi(&ffi_info);
-        if let Some(policy) = self.state.config.systems.get(&sys_num) {
-            info.short_name = policy.short_name.clone();
-            info.conversation_mode = policy.conversation_mode;
+    pub(crate) fn get_system_info(&self, sys_num: i32) -> SystemInfo {
+        let policy = self
+            .state
+            .config
+            .systems
+            .get(&sys_num)
+            .unwrap_or(&crate::call_state::DEFAULT_POLICY);
+        let id = self.state.system_identities.get(&sys_num);
+
+        SystemInfo {
+            sys_num,
+            system_type: system_type_to_proto(policy.system_type),
+            short_name: policy.short_name.clone(),
+            sys_id: id.map_or(0, |id| id.sys_id),
+            wacn: id.map_or(0, |id| id.wacn),
+            nac: id.map_or(0, |id| id.nac),
+            rfss: id.map_or(0, |id| id.rfss),
+            site_id: id.map_or(0, |id| id.site_id),
+            bandplan: policy.bandplan.clone(),
+            analog_levels: policy.analog_levels,
+            digital_levels: policy.digital_levels,
+            squelch_db: policy.squelch_db,
+            conversation_mode: policy.conversation_mode,
+            message_count: self.state.message_counts.get(&sys_num).copied().unwrap_or(0),
+            decode_rate: self.state.decode_rates.get(&sys_num).copied().unwrap_or(0),
         }
-        if let Some(id) = self.state.system_identities.get(&sys_num) {
-            info.sys_id = id.sys_id;
-            info.wacn = id.wacn;
-            info.nac = id.nac;
-            info.rfss = id.rfss;
-            info.site_id = id.site_id;
-        }
-        info
     }
 
     /// Build a `TrRecorderConfig` from a Rust `CallEntry` and system metadata.
@@ -642,7 +662,6 @@ impl CallManager {
     pub(crate) fn build_recorder_config(
         &self,
         entry: &crate::call_state::CallEntry,
-        xor_mask: &str,
     ) -> TrRecorderConfig {
         let policy = self
             .state
@@ -650,6 +669,12 @@ impl CallManager {
             .systems
             .get(&entry.sys_num)
             .unwrap_or(&crate::call_state::DEFAULT_POLICY);
+
+        let xor_mask = self
+            .state
+            .system_identities
+            .get(&entry.sys_num)
+            .map_or_else(Vec::new, |id| id.xor_mask.clone());
 
         TrRecorderConfig {
             talkgroup: entry.talkgroup,
@@ -659,7 +684,7 @@ impl CallManager {
             temp_dir: self.state.config.temp_dir.clone(),
             phase2_tdma: entry.phase2_tdma,
             tdma_slot: entry.tdma_slot,
-            xor_mask: xor_mask.into(),
+            xor_mask,
             squelch_db: entry.squelch_db,
             digital_levels: policy.digital_levels,
             rust_call_id: entry.id.as_u64(),
@@ -730,7 +755,7 @@ impl CallManager {
     ) -> anyhow::Result<()> {
         let mut infos = Vec::new();
         for (&sys_num, policy) in &self.state.config.systems {
-            let mut info = self.get_system_info(ctx.as_mut(), sys_num);
+            let mut info = self.get_system_info(sys_num);
             if policy.system_type.is_trunked() {
                 let count = self.state.message_counts.remove(&sys_num).unwrap_or(0);
                 let decode_rate = (count as f32 / time_diff).floor() as i32;

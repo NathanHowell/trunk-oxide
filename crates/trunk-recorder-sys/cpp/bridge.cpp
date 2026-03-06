@@ -114,24 +114,6 @@ static TrTransmission convert_transmission(const Transmission &tx) {
     return out;
 }
 
-// ── System info bulk read (replaces 15 individual system_get_* functions) ──
-
-static TrSystemInfo build_system_info(System &sys) {
-    TrSystemInfo info{};
-    info.sys_num = sys.get_sys_num();
-    // Map C++ SystemType enum (0-based) to proto SystemType enum (1-based, 0 = UNSPECIFIED)
-    info.system_type = static_cast<int32_t>(sys.get_system_type()) + 1;
-    // DSP parameters (read by recorders at start time)
-    info.bandplan = rust::String(sys.get_bandplan());
-    info.analog_levels = sys.get_analog_levels();
-    info.digital_levels = sys.get_digital_levels();
-    info.squelch_db = sys.get_squelch_db();
-    info.xor_mask = rust::String(sys.get_xor_mask());
-    // Remaining fields (short_name, identity, conversation_mode, rates)
-    // are zero-initialized — Rust fills them from its own caches.
-    return info;
-}
-
 
 // ── Call accessor implementations (most removed — Rust owns call state via CallEntry) ──
 
@@ -204,16 +186,6 @@ TrContext::~TrContext() = default;
 TrContext::TrContext(TrContext &&) noexcept = default;
 TrContext &TrContext::operator=(TrContext &&) noexcept = default;
 
-TrSystemInfo tr_context_get_system_info(TrContext &ctx, int32_t sys_num) {
-    for (auto &sys : ctx.impl->trunk_ctx.systems) {
-        if (sys->get_sys_num() == sys_num) {
-            return build_system_info(*sys);
-        }
-    }
-    TrSystemInfo info = {};
-    info.sys_num = sys_num;
-    return info;
-}
 
 // ── Lifecycle function implementations ──
 
@@ -642,7 +614,7 @@ static RecorderConfig to_cpp_config(const TrRecorderConfig &cfg) {
         .temp_dir = std::string(cfg.temp_dir),
         .phase2_tdma = cfg.phase2_tdma,
         .tdma_slot = cfg.tdma_slot,
-        .xor_mask = std::string(cfg.xor_mask),
+        .xor_mask = std::string(reinterpret_cast<const char*>(cfg.xor_mask.data()), cfg.xor_mask.size()),
         .squelch_db = cfg.squelch_db,
         .digital_levels = cfg.digital_levels,
         .rust_call_id = cfg.rust_call_id,

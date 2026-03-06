@@ -194,18 +194,6 @@ pub mod ffi {
         pub call_state: i32,
     }
 
-    /// C++-provided fields only. Rust-owned fields live in [`SystemInfo`].
-    #[derive(Debug, Clone)]
-    struct TrSystemInfo {
-        pub sys_num: i32,
-        pub system_type: i32,
-        pub bandplan: String,
-        pub analog_levels: f64,
-        pub digital_levels: f64,
-        pub squelch_db: f64,
-        pub xor_mask: String,
-    }
-
     #[derive(Debug, Clone)]
     struct TrStopRecordingResult {
         pub final_length: f64,
@@ -319,7 +307,7 @@ pub mod ffi {
         pub temp_dir: String,
         pub phase2_tdma: bool,
         pub tdma_slot: i32,
-        pub xor_mask: String,
+        pub xor_mask: Vec<u8>,
         pub squelch_db: f64,
         pub digital_levels: f64,
         pub rust_call_id: u64,
@@ -337,9 +325,6 @@ pub mod ffi {
         type TrRecorder;
         // ── Call accessors ──
         fn call_get_freq_error(call: &TrCall) -> i32;
-
-        // ── System info bulk read (replaces 15 individual system_get_* functions) ──
-        fn tr_context_get_system_info(ctx: Pin<&mut TrContext>, sys_num: i32) -> TrSystemInfo;
 
         // ── Recorder accessors ──
         fn recorder_get_num(rec: &TrRecorder) -> i32;
@@ -600,7 +585,7 @@ fn event_notifier_notify_signals_detected(
     }
 }
 
-/// Full system info combining C++-provided DSP fields with Rust-owned metadata.
+/// Full system info built entirely from Rust-side caches (config + identity).
 #[derive(Debug, Clone)]
 pub struct SystemInfo {
     pub sys_num: i32,
@@ -615,34 +600,9 @@ pub struct SystemInfo {
     pub analog_levels: f64,
     pub digital_levels: f64,
     pub squelch_db: f64,
-    pub xor_mask: String,
     pub conversation_mode: bool,
     pub message_count: i32,
     pub decode_rate: i32,
-}
-
-impl SystemInfo {
-    /// Build from the C++ FFI struct, filling Rust-owned fields with defaults.
-    pub fn from_ffi(info: &ffi::TrSystemInfo) -> Self {
-        Self {
-            sys_num: info.sys_num,
-            system_type: info.system_type,
-            short_name: String::new(),
-            sys_id: 0,
-            wacn: 0,
-            nac: 0,
-            rfss: 0,
-            site_id: 0,
-            bandplan: info.bandplan.clone(),
-            analog_levels: info.analog_levels,
-            digital_levels: info.digital_levels,
-            squelch_db: info.squelch_db,
-            xor_mask: info.xor_mask.to_string(),
-            conversation_mode: false,
-            message_count: 0,
-            decode_rate: 0,
-        }
-    }
 }
 
 /// Trait for the 3 C++-initiated callbacks that come through cxx trampolines.

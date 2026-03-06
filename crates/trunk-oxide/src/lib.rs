@@ -9,6 +9,7 @@
 mod call_manager;
 mod call_state;
 mod dedup;
+mod p25_lfsr;
 
 use std::hash::{Hash, Hasher};
 use std::ops::RangeInclusive;
@@ -319,7 +320,9 @@ impl TrunkRecorderBuilder {
                     talkgroups,
                     channels,
                     squelch_db: sys.squelch,
+                    analog_levels: sys.analog_levels,
                     digital_levels: sys.digital_levels,
+                    bandplan: sys.bandplan.clone().unwrap_or_default(),
                     sys_id: sys.sys_id,
                     wacn: sys.wacn,
                     nac: sys.nac,
@@ -335,14 +338,32 @@ impl TrunkRecorderBuilder {
             let infos: Vec<trunk_recorder_sys::SystemInfo> = system_policies
                 .iter()
                 .map(|(&sys_idx, policy)| {
-                    let ffi_info = ffi::tr_context_get_system_info(ctx.pin_mut(), sys_idx);
-                    let mut info = trunk_recorder_sys::SystemInfo::from_ffi(&ffi_info);
-                    info.short_name = policy.short_name.clone();
-                    info.conversation_mode = policy.conversation_mode;
-                    info.sys_id = policy.sys_id;
-                    info.wacn = policy.wacn;
-                    info.nac = policy.nac;
-                    info
+                    use trunk_oxide_grpc::proto::SystemType as P;
+                    let system_type = match policy.system_type {
+                        trunk_config::SystemType::Conventional => P::Conventional as i32,
+                        trunk_config::SystemType::ConventionalP25 => P::ConventionalP25 as i32,
+                        trunk_config::SystemType::ConventionalDMR => P::ConventionalDmr as i32,
+                        trunk_config::SystemType::ConventionalSigmf => P::ConventionalSigmf as i32,
+                        trunk_config::SystemType::Smartnet => P::Smartnet as i32,
+                        trunk_config::SystemType::P25 => P::P25 as i32,
+                    };
+                    trunk_recorder_sys::SystemInfo {
+                        sys_num: sys_idx,
+                        system_type,
+                        short_name: policy.short_name.clone(),
+                        sys_id: policy.sys_id,
+                        wacn: policy.wacn,
+                        nac: policy.nac,
+                        rfss: 0,
+                        site_id: 0,
+                        bandplan: policy.bandplan.clone(),
+                        analog_levels: policy.analog_levels,
+                        digital_levels: policy.digital_levels,
+                        squelch_db: policy.squelch_db,
+                        conversation_mode: policy.conversation_mode,
+                        message_count: 0,
+                        decode_rate: 0,
+                    }
                 })
                 .collect();
             bridge.setup_config(&infos);
@@ -492,8 +513,7 @@ impl TrunkRecorder {
                                 for (&sys_num, indices) in &by_system {
                                     let sys_msgs: Vec<ffi::TrTrunkMessage> =
                                         indices.iter().map(|&i| messages[i].clone()).collect();
-                                    let info =
-                                        call_mgr.get_system_info(self.ctx.pin_mut(), sys_num);
+                                    let info = call_mgr.get_system_info(sys_num);
                                     self.bridge.trunk_message(&sys_msgs, &info);
                                 }
                             }

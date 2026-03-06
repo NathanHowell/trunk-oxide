@@ -23,7 +23,6 @@ struct TrCallSource;
 struct TrCallError;
 struct TrCallData;
 struct TrCallInfo;
-struct TrSystemInfo;
 struct TrRecorderConfig;
 struct TrRecorderStatus;
 struct EventHandlerBox;
@@ -79,9 +78,6 @@ struct TrContext {
     TrContext(TrContext &&) noexcept;
     TrContext &operator=(TrContext &&) noexcept;
 };
-
-// ── System info bulk read ──
-TrSystemInfo tr_context_get_system_info(TrContext &ctx, int32_t sys_num);
 
 // ── Lifecycle functions ──
 std::unique_ptr<TrContext> tr_create_from_builder(rust::Box<EventHandlerBox> handler);

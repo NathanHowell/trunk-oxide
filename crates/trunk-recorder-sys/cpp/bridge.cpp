@@ -159,10 +159,10 @@ public:
 
     void audio_callback(const std::shared_ptr<Call> &call, const std::shared_ptr<Recorder> &recorder,
                         int16_t *samples, int sampleCount) override {
-        TrCall tr_call(call);
+        if (!call) return;
         TrRecorder tr_rec(recorder);
         rust::Slice<const int16_t> slice(samples, static_cast<size_t>(sampleCount));
-        event_handler_audio_stream(*handler_, call ? &tr_call : nullptr, tr_rec, slice);
+        event_handler_audio_stream(*handler_, call->get_rust_call_id(), tr_rec, slice);
     }
 
     void setup_recorder(const std::shared_ptr<Recorder> &recorder) override {
@@ -617,26 +617,23 @@ rust::Vec<TrRecorderStatus> tr_context_get_recorder_status(const TrContext &ctx)
     return result;
 }
 
-// ── Conventional call management — recorder status (null-guarded) ──
+// ── Call — recorder status (null-guarded) ──
 
 bool call_has_recorder(const TrCall &call) {
     return call.ptr->get_recorder() != nullptr;
 }
 
-bool call_get_recorder_is_enabled(const TrCall &call) {
-    auto rec = call.ptr->get_recorder();
-    return rec ? rec->is_enabled() : false;
+// ── Call — Rust call ID round-trip ──
+
+void call_set_rust_call_id(TrCall &call, uint64_t id) {
+    call.ptr->set_rust_call_id(id);
 }
 
-int32_t call_get_recorder_state(const TrCall &call) {
-    auto rec = call.ptr->get_recorder();
-    return rec ? static_cast<int32_t>(rec->get_state()) : static_cast<int32_t>(REC_INACTIVE);
+uint64_t call_get_rust_call_id(const TrCall &call) {
+    return call.ptr->get_rust_call_id();
 }
 
-// ── Conventional call management — signal/noise (removed — Rust owns) ──
-// ── Conventional call management — system info (removed — Rust owns via CallEntry::max_duration) ──
-
-// ── Conventional call management — lifecycle ──
+// ── Call — lifecycle ──
 
 void call_restart(TrCall &call) {
     call.ptr->restart_call();
@@ -668,19 +665,7 @@ std::unique_ptr<TrCall> tr_context_take_next_conventional_call(TrContext &ctx) {
     return std::make_unique<TrCall>(call_ptr);
 }
 
-// ── Call accessors for audio stream callback (C++ calls into Rust with TrCall pointer) ──
-
-int64_t call_get_talkgroup(const TrCall &call) {
-    return call.ptr->get_talkgroup();
-}
-
-int32_t call_get_sys_num(const TrCall &call) {
-    return call.ptr->get_sys_num();
-}
-
-double call_get_freq(const TrCall &call) {
-    return call.ptr->get_freq();
-}
+// ── Call accessors (audio callback now uses rust_call_id round-trip) ──
 
 // ── Phase C: Call Management — additional recorder accessors ──
 

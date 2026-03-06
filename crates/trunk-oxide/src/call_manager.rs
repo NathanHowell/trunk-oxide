@@ -20,6 +20,8 @@ use crate::call_state::{
 
 pub use crate::call_state::{CallManagerConfig, ConventionalChannel, SystemPolicy, TalkgroupPolicy};
 
+use trunk_oxide_grpc::AudioMeta;
+
 fn format_recorder_state(state: i32) -> &'static str {
     match state {
         1 => "Recording",
@@ -100,6 +102,21 @@ impl CallManager {
         }
     }
 
+    // ── Audio metadata management ──
+
+    fn register_audio_meta(&self, call_id: CallId) {
+        if let Some(entry) = self.state.get_call(call_id) {
+            self.bridge.register_audio_meta(
+                call_id.as_u64(),
+                AudioMeta {
+                    talkgroup: entry.talkgroup,
+                    sys_num: entry.sys_num,
+                    freq: entry.freq.as_hz(),
+                },
+            );
+        }
+    }
+
     // ── Effect processing ──
 
     fn process_effects(&mut self, effects: Vec<Effect>, ctx: &mut Pin<&mut TrContext>) {
@@ -123,6 +140,8 @@ impl CallManager {
                     if let Some(handle) = self.handles.get_mut(&call_id) {
                         ffi::call_set_freq(handle.pin_mut(), freq.as_hz());
                     }
+                    self.bridge
+                        .update_audio_meta_freq(call_id.as_u64(), freq.as_hz());
                 }
                 Effect::SetSource {
                     call_id,
@@ -221,6 +240,7 @@ impl CallManager {
                     }
                 }
                 Effect::RemoveCall { call_id } => {
+                    self.bridge.unregister_audio_meta(call_id.as_u64());
                     self.handles.remove(&call_id);
                     self.state.remove_call(call_id);
                 }
@@ -242,7 +262,11 @@ impl CallManager {
         // Build a minimal TrTrunkMessage for C++ call creation (it only reads
         // freq, talkgroup, sys_num from it). Rust owns all call state.
         let ffi_msg = build_ffi_message(entry);
-        let handle = ffi::tr_context_create_call(ctx.as_mut(), &ffi_msg);
+        let mut handle = ffi::tr_context_create_call(ctx.as_mut(), &ffi_msg);
+
+        // Set rust_call_id on C++ Call for audio callback round-trip
+        ffi::call_set_rust_call_id(handle.pin_mut(), call_id.as_u64());
+        self.register_audio_meta(call_id);
         self.handles.insert(call_id, handle);
     }
 
@@ -467,25 +491,10 @@ impl CallManager {
             }
         }
 
-        // Conclude timed-out-by-write calls before the state machine tick
-        for call_id in &timed_out_ids {
-            self.exec_conclude_call(*call_id);
-            if let Some(handle) = self.handles.get(&*call_id) {
-                ffi::call_notify_setup_recorder(ctx.as_mut(), handle);
-            }
-        }
-        // Remove them from state
-        self.state
-            .calls
-            .retain(|e| !timed_out_ids.contains(&e.id));
-        if !timed_out_ids.is_empty() {
-            let infos: Vec<ffi::TrCallInfo> = self
-                .state
-                .calls
-                .iter()
-                .map(|e| self.build_call_info(e))
-                .collect();
-            self.bridge.calls_active(&infos);
+        // Expire timed-out-by-write calls through the effect system
+        for call_id in timed_out_ids {
+            let effects = self.state.expire_call(call_id);
+            self.process_effects(effects, &mut ctx);
         }
 
         // Now run the state machine tick (handles update timeouts + conventional)
@@ -502,7 +511,7 @@ impl CallManager {
 
     pub fn add_call(
         &mut self,
-        call: UniquePtr<TrCall>,
+        mut call: UniquePtr<TrCall>,
         channel: &ConventionalChannel,
         sys_num: i32,
     ) {
@@ -523,6 +532,10 @@ impl CallManager {
         let (call_id, effects) = self
             .state
             .add_conventional_call(channel, sys_num, &policy, rec_num);
+
+        // Set rust_call_id on the C++ handle for audio callback round-trip
+        ffi::call_set_rust_call_id(call.pin_mut(), call_id.as_u64());
+        self.register_audio_meta(call_id);
         self.handles.insert(call_id, call);
 
         // C++ start() no longer enables conventional recorders — Rust decides.
@@ -575,7 +588,6 @@ impl CallManager {
         let mut ctx = ctx;
         let effects = self.state.conclude_all();
         self.process_effects(effects, &mut ctx);
-        self.handles.clear();
     }
 
     pub(crate) fn get_system_info(&self, ctx: Pin<&mut TrContext>, sys_num: i32) -> SystemInfo {
@@ -601,38 +613,16 @@ impl CallManager {
             let elapsed = entry.start_time.elapsed().map_or(0, |d| d.as_secs() as i64);
             let state = entry.state.to_string();
 
-            if entry.is_conventional() {
-                let handle = self.handles.get(&entry.id);
-                let enabled = handle.map_or(false, |h| ffi::call_get_recorder_is_enabled(&**h));
-                tracing::info!(
-                    system = %entry.short_name,
-                    call_num = entry.call_num,
-                    talkgroup = entry.talkgroup,
-                    freq = %entry.freq,
-                    elapsed,
-                    state,
-                    enabled,
-                    "call status"
-                );
-            } else {
-                tracing::info!(
-                    system = %entry.short_name,
-                    call_num = entry.call_num,
-                    talkgroup = entry.talkgroup,
-                    freq = %entry.freq,
-                    elapsed,
-                    state,
-                    "call status"
-                );
-            }
-
-            if let Some(rec_num) = entry.recorder {
-                if let Some(handle) = self.handles.get(&entry.id) {
-                    let rec_state =
-                        format_recorder_state(ffi::call_get_recorder_state(&**handle));
-                    tracing::info!(rec_num = rec_num.0, rec_state, "  recorder");
-                }
-            }
+            tracing::info!(
+                system = %entry.short_name,
+                call_num = entry.call_num,
+                talkgroup = entry.talkgroup,
+                freq = %entry.freq,
+                elapsed,
+                state,
+                rec_num = entry.recorder.map(|r| r.0),
+                "call status"
+            );
         }
 
         tracing::info!("Control Channel Decode Rates");

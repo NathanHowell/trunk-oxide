@@ -14,6 +14,10 @@ impl CallId {
     pub(crate) fn next() -> Self {
         Self(NEXT_CALL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
     }
+
+    pub(crate) fn as_u64(self) -> u64 {
+        self.0
+    }
 }
 
 /// Monotonic call number counter, replacing C++'s `Call::call_counter`.
@@ -1477,6 +1481,24 @@ impl TrunkStateMachine {
 
     pub(crate) fn get_call_mut(&mut self, call_id: CallId) -> Option<&mut CallEntry> {
         self.calls.iter_mut().find(|e| e.id == call_id)
+    }
+
+    /// Expire a trunked call due to recorder write timeout.
+    /// Returns effects to conclude and remove the call.
+    pub(crate) fn expire_call(&mut self, call_id: CallId) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        if let Some(entry) = self.get_call(call_id) {
+            if matches!(
+                entry.state,
+                CallState::Recording | CallState::Idle
+            ) {
+                effects.push(Effect::EmitCallEnd { call_id });
+            }
+        }
+        effects.push(Effect::EmitSetupRecorder { call_id });
+        effects.push(Effect::RemoveCall { call_id });
+        effects.push(Effect::EmitCallsActive);
+        effects
     }
 
     pub(crate) fn remove_call(&mut self, call_id: CallId) {

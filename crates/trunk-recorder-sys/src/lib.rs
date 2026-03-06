@@ -319,9 +319,6 @@ pub mod ffi {
         type TrRecorder;
         // ── Call accessors ──
         fn call_get_freq_error(call: &TrCall) -> i32;
-        fn call_get_talkgroup(call: &TrCall) -> i64;
-        fn call_get_sys_num(call: &TrCall) -> i32;
-        fn call_get_freq(call: &TrCall) -> f64;
 
         // ── System info bulk read (replaces 15 individual system_get_* functions) ──
         fn tr_context_get_system_info(ctx: Pin<&mut TrContext>, sys_num: i32) -> TrSystemInfo;
@@ -379,12 +376,14 @@ pub mod ffi {
         fn tr_system_get_current_control_channel(ctx: Pin<&mut TrContext>, sys_num: i32) -> f64;
         fn tr_system_get_control_channel_pwr(ctx: Pin<&mut TrContext>, sys_num: i32) -> f64;
 
-        // ── Conventional call management — recorder status (null-guarded) ──
+        // ── Call — recorder status (null-guarded) ──
         fn call_has_recorder(call: &TrCall) -> bool;
-        fn call_get_recorder_is_enabled(call: &TrCall) -> bool;
-        fn call_get_recorder_state(call: &TrCall) -> i32;
 
-        // ── Conventional call management — lifecycle ──
+        // ── Call — Rust call ID round-trip ──
+        fn call_set_rust_call_id(call: Pin<&mut TrCall>, id: u64);
+        fn call_get_rust_call_id(call: &TrCall) -> u64;
+
+        // ── Call — lifecycle ──
         fn call_restart(call: Pin<&mut TrCall>);
         fn call_start_initial_recording(call: Pin<&mut TrCall>);
         fn call_set_recorder_enabled(call: Pin<&mut TrCall>, enabled: bool);
@@ -445,9 +444,9 @@ pub mod ffi {
         // Forces cxx to generate the Box<EventHandlerBox> C++ template instantiation.
         fn drop_event_handler_box(handler: Box<EventHandlerBox>);
 
-        unsafe fn event_handler_audio_stream(
+        fn event_handler_audio_stream(
             handler: &mut EventHandlerBox,
-            call: *const TrCall,
+            rust_call_id: u64,
             recorder: &TrRecorder,
             samples: &[i16],
         );
@@ -632,7 +631,7 @@ impl SystemInfo {
 /// Trait for the 3 C++-initiated callbacks that come through cxx trampolines.
 /// All methods take `&self` — no mutex needed.
 pub trait CxxCallbacks: Send + Sync {
-    fn audio_stream(&self, call: Option<&ffi::TrCall>, recorder: &ffi::TrRecorder, samples: &[i16]);
+    fn audio_stream(&self, rust_call_id: u64, recorder: &ffi::TrRecorder, samples: &[i16]);
     fn setup_recorder(&self, recorder: &ffi::TrRecorder);
     fn unit_alias_discovered(
         &self,
@@ -664,27 +663,13 @@ fn drop_event_handler_box(_handler: Box<EventHandlerBox>) {
 // Only 3 remain: audio_stream, setup_recorder, unit_alias_discovered.
 // All other events are fired directly from Rust without FFI.
 
-/// Convert a nullable opaque pointer to `Option<&T>`.
-///
-/// # Safety
-/// The pointer must be valid for the lifetime of the returned reference,
-/// or null.
-const unsafe fn nullable<T>(ptr: *const T) -> Option<&'static T> {
-    if ptr.is_null() {
-        None
-    } else {
-        Some(unsafe { &*ptr })
-    }
-}
-
-unsafe fn event_handler_audio_stream(
+fn event_handler_audio_stream(
     handler: &mut EventHandlerBox,
-    call: *const ffi::TrCall,
+    rust_call_id: u64,
     recorder: &ffi::TrRecorder,
     samples: &[i16],
 ) {
-    let call = unsafe { nullable(call) };
-    handler.inner.audio_stream(call, recorder, samples);
+    handler.inner.audio_stream(rust_call_id, recorder, samples);
 }
 
 fn event_handler_setup_recorder(handler: &mut EventHandlerBox, recorder: &ffi::TrRecorder) {

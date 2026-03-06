@@ -292,11 +292,20 @@ impl Default for GrpcConfig {
     }
 }
 
+/// Audio metadata registered by Rust for each active call, keyed by CallId.
+/// This avoids FFI round-trips in the hot audio callback path.
+#[derive(Debug, Clone, Copy)]
+pub struct AudioMeta {
+    pub talkgroup: i64,
+    pub sys_num: i32,
+    pub freq: f64,
+}
+
 /// Bridges trunk-recorder events to gRPC subscribers via broadcast channels.
 ///
 /// All methods take `&self` — no mutex needed. The broadcast senders are
 /// inherently `Sync`, talkgroups are read-only after construction, and
-/// `unit_aliases` uses a `RwLock` for rare writes.
+/// `unit_aliases`/`audio_meta` use `RwLock` for rare writes.
 pub struct EventBridge {
     audio_tx: broadcast::Sender<proto::AudioSample>,
     event_tx: broadcast::Sender<proto::PluginEvent>,
@@ -304,6 +313,8 @@ pub struct EventBridge {
     talkgroups: HashMap<(String, i64), TalkgroupMeta>,
     /// (`sys_num`, `radio_id`) → OTA-discovered alias
     unit_aliases: RwLock<HashMap<(i32, i64), String>>,
+    /// `rust_call_id` → audio metadata (set by Rust, read by GR audio callback)
+    audio_meta: RwLock<HashMap<u64, AudioMeta>>,
 }
 
 impl EventBridge {
@@ -321,6 +332,7 @@ impl EventBridge {
             event_tx: event_tx.clone(),
             talkgroups,
             unit_aliases: RwLock::new(HashMap::new()),
+            audio_meta: RwLock::new(HashMap::new()),
         };
         (bridge, audio_tx, event_tx)
     }
@@ -403,17 +415,40 @@ impl EventBridge {
         }));
     }
 
+    /// Register audio metadata for a call. Called when a call starts recording.
+    pub fn register_audio_meta(&self, rust_call_id: u64, meta: AudioMeta) {
+        self.audio_meta.write().unwrap().insert(rust_call_id, meta);
+    }
+
+    /// Remove audio metadata for a call. Called when a call ends.
+    pub fn unregister_audio_meta(&self, rust_call_id: u64) {
+        self.audio_meta.write().unwrap().remove(&rust_call_id);
+    }
+
+    /// Update the frequency for a call (e.g. on retune).
+    pub fn update_audio_meta_freq(&self, rust_call_id: u64, freq: f64) {
+        if let Some(meta) = self.audio_meta.write().unwrap().get_mut(&rust_call_id) {
+            meta.freq = freq;
+        }
+    }
+
     pub fn audio_stream(
         &self,
-        call: Option<&trunk_recorder_sys::ffi::TrCall>,
+        rust_call_id: u64,
         recorder: &TrRecorder,
         samples: &[i16],
     ) {
-        use trunk_recorder_sys::ffi::{
-            call_get_freq, call_get_sys_num, call_get_talkgroup, recorder_get_wav_hz,
-        };
-        let Some(call) = call else {
+        use trunk_recorder_sys::ffi::recorder_get_wav_hz;
+
+        if rust_call_id == 0 {
             return;
+        }
+        let meta = {
+            let guard = self.audio_meta.read().unwrap();
+            match guard.get(&rust_call_id) {
+                Some(&m) => m,
+                None => return,
+            }
         };
         let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
         let sample_rate_i64 = recorder_get_wav_hz(recorder);
@@ -425,9 +460,9 @@ impl EventBridge {
             return;
         };
         let msg = proto::AudioSample {
-            talkgroup: call_get_talkgroup(call),
-            sys_num: call_get_sys_num(call),
-            freq: call_get_freq(call),
+            talkgroup: meta.talkgroup,
+            sys_num: meta.sys_num,
+            freq: meta.freq,
             samples: bytes,
             sample_rate,
         };
@@ -560,11 +595,11 @@ impl EventBridge {
 impl CxxCallbacks for EventBridge {
     fn audio_stream(
         &self,
-        call: Option<&trunk_recorder_sys::ffi::TrCall>,
+        rust_call_id: u64,
         recorder: &TrRecorder,
         samples: &[i16],
     ) {
-        Self::audio_stream(self, call, recorder, samples);
+        Self::audio_stream(self, rust_call_id, recorder, samples);
     }
 
     fn setup_recorder(&self, recorder: &TrRecorder) {

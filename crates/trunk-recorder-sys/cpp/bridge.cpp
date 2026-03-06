@@ -126,6 +126,7 @@ static TrSystemInfo build_system_info(System &sys) {
     info.analog_levels = sys.get_analog_levels();
     info.digital_levels = sys.get_digital_levels();
     info.squelch_db = sys.get_squelch_db();
+    info.xor_mask = rust::String(sys.get_xor_mask());
     // Remaining fields (short_name, identity, conversation_mode, rates)
     // are zero-initialized — Rust fills them from its own caches.
     return info;

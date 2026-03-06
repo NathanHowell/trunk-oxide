@@ -5,8 +5,8 @@ use std::time::Instant;
 use cxx::UniquePtr;
 use trunk_recorder_sys::SystemInfo;
 use trunk_recorder_sys::ffi::{
-    self, TrCall, TrCallData, TrCallDataStatus, TrContext, TrMessageType, TrTrunkMessage,
-    TrUnitEventType,
+    self, TrCall, TrCallData, TrCallDataStatus, TrContext, TrMessageType, TrRecorderConfig,
+    TrTrunkMessage, TrUnitEventType,
 };
 
 use std::sync::Arc;
@@ -605,6 +605,35 @@ impl CallManager {
             info.site_id = id.site_id;
         }
         info
+    }
+
+    /// Build a `TrRecorderConfig` from a Rust `CallEntry` and system metadata.
+    /// This replaces the C++ `build_recorder_config(shared_ptr<Call>)`.
+    pub(crate) fn build_recorder_config(
+        &self,
+        entry: &crate::call_state::CallEntry,
+        xor_mask: &str,
+    ) -> TrRecorderConfig {
+        let policy = self
+            .state
+            .config
+            .systems
+            .get(&entry.sys_num)
+            .unwrap_or(&crate::call_state::DEFAULT_POLICY);
+
+        TrRecorderConfig {
+            talkgroup: entry.talkgroup,
+            call_num: entry.call_num,
+            freq: entry.freq.as_hz(),
+            short_name: entry.short_name.clone(),
+            temp_dir: self.state.config.temp_dir.clone(),
+            phase2_tdma: entry.phase2_tdma,
+            tdma_slot: entry.tdma_slot,
+            xor_mask: xor_mask.into(),
+            squelch_db: entry.squelch_db,
+            digital_levels: policy.digital_levels,
+            rust_call_id: entry.id.as_u64(),
+        }
     }
 
     pub fn print_status(&self, mut ctx: Pin<&mut TrContext>) {

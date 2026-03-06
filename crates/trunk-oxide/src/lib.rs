@@ -288,6 +288,7 @@ impl TrunkRecorderBuilder {
                         is_analog,
                         priority,
                         signal_detection: ch.signal_detection,
+                        squelch_db: ch.squelch_db,
                     }
                 })
                 .collect();
@@ -308,6 +309,8 @@ impl TrunkRecorderBuilder {
                     control_channels: sys.control_channels.iter().map(|&f| Freq::from_hz(f)).collect(),
                     talkgroups,
                     channels,
+                    squelch_db: sys.squelch,
+                    digital_levels: sys.digital_levels,
                     sys_id: sys.sys_id,
                     wacn: sys.wacn,
                     nac: sys.nac,
@@ -340,12 +343,17 @@ impl TrunkRecorderBuilder {
         }
 
         let rec = config.recorder.as_ref();
+        let temp_dir = rec.map_or_else(
+            || std::env::temp_dir().display().to_string(),
+            |r| r.temp_dir.clone(),
+        );
         let call_mgr_config = CallManagerConfig {
             call_timeout: rec.map_or(3.0, |r| r.call_timeout),
             new_call_from_update: rec.map_or(true, |r| r.new_call_from_update),
             record_uu_v_calls: rec.map_or(true, |r| r.record_uu_v_calls),
             default_mode: rec.map_or(DefaultMode::default(), |r| r.default_mode),
             control_warn_rate: rec.map_or(10, |r| r.control_warn_rate),
+            temp_dir,
             systems: system_policies,
         };
 

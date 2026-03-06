@@ -175,6 +175,7 @@ pub struct ConventionalChannel {
     pub is_analog: bool,
     pub priority: i32,
     pub signal_detection: bool,
+    pub squelch_db: f64,
 }
 
 #[derive(Clone)]
@@ -192,6 +193,8 @@ pub struct SystemPolicy {
     pub control_channels: Vec<Freq>,
     pub talkgroups: HashMap<Talkgroup, TalkgroupPolicy>,
     pub channels: Vec<ConventionalChannel>,
+    pub squelch_db: f64,
+    pub digital_levels: f64,
     pub sys_id: u64,
     pub wacn: u64,
     pub nac: u64,
@@ -212,6 +215,8 @@ pub(crate) static DEFAULT_POLICY: std::sync::LazyLock<SystemPolicy> =
         control_channels: Vec::new(),
         talkgroups: HashMap::new(),
         channels: Vec::new(),
+        squelch_db: 0.0,
+        digital_levels: 0.0,
         sys_id: 0,
         wacn: 0,
         nac: 0,
@@ -224,6 +229,7 @@ pub struct CallManagerConfig {
     pub record_uu_v_calls: bool,
     pub default_mode: DefaultMode,
     pub control_warn_rate: i32,
+    pub temp_dir: String,
     pub systems: HashMap<i32, SystemPolicy>,
 }
 
@@ -328,6 +334,7 @@ pub(crate) struct CallEntry {
     pub(crate) idle_since: Option<Instant>,
     pub(crate) call_mode: CallMode,
     pub(crate) signal_detection: bool,
+    pub(crate) squelch_db: f64,
 }
 
 impl Default for CallEntry {
@@ -360,6 +367,7 @@ impl Default for CallEntry {
             idle_since: None,
             call_mode: CallMode::Conventional,
             signal_detection: false,
+            squelch_db: 0.0,
         }
     }
 }
@@ -810,6 +818,7 @@ impl TrunkStateMachine {
             current_source_id: msg.source,
             priority: msg.priority,
             max_duration: policy.max_duration,
+            squelch_db: policy.squelch_db,
             call_mode: CallMode::Trunked(TrunkedFields {
                 multi_site: policy.multi_site,
                 wacn: msg.wacn,
@@ -1418,6 +1427,7 @@ impl TrunkStateMachine {
             recorder,
             state,
             signal_detection: channel.signal_detection,
+            squelch_db: channel.squelch_db,
             ..Default::default()
         };
         let call_id = entry.id;

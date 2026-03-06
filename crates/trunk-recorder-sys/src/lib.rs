@@ -203,6 +203,7 @@ pub mod ffi {
         pub analog_levels: f64,
         pub digital_levels: f64,
         pub squelch_db: f64,
+        pub xor_mask: String,
     }
 
     #[derive(Debug, Clone)]
@@ -305,6 +306,23 @@ pub mod ffi {
         pub talkgroups: Vec<TrTalkgroupConfig>,
         pub unit_tags: Vec<TrUnitTagConfig>,
         pub unit_tags_mode: String,
+    }
+
+    /// Recorder start configuration, built by Rust and passed to C++.
+    /// Maps 1:1 to the C++ RecorderConfig POD struct.
+    #[derive(Debug, Clone)]
+    struct TrRecorderConfig {
+        pub talkgroup: i64,
+        pub call_num: i64,
+        pub freq: f64,
+        pub short_name: String,
+        pub temp_dir: String,
+        pub phase2_tdma: bool,
+        pub tdma_slot: i32,
+        pub xor_mask: String,
+        pub squelch_db: f64,
+        pub digital_levels: f64,
+        pub rust_call_id: u64,
     }
 
     // ── Opaque C++ types ──
@@ -600,6 +618,7 @@ pub struct SystemInfo {
     pub analog_levels: f64,
     pub digital_levels: f64,
     pub squelch_db: f64,
+    pub xor_mask: String,
     pub conversation_mode: bool,
     pub message_count: i32,
     pub decode_rate: i32,
@@ -621,6 +640,7 @@ impl SystemInfo {
             analog_levels: info.analog_levels,
             digital_levels: info.digital_levels,
             squelch_db: info.squelch_db,
+            xor_mask: info.xor_mask.to_string(),
             conversation_mode: false,
             message_count: 0,
             decode_rate: 0,

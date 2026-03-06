@@ -637,11 +637,6 @@ uint64_t call_get_rust_call_id(const TrCall &call) {
 // ── Call — config builder ──
 
 static RecorderConfig build_recorder_config(const std::shared_ptr<Call> &call) {
-    auto sys = call->get_system();
-    double squelch = call->is_conventional()
-        ? std::dynamic_pointer_cast<Call_conventional>(call)->get_squelch_db()
-        : sys->get_squelch_db();
-
     return RecorderConfig{
         .talkgroup = call->get_talkgroup(),
         .call_num = call->get_call_num(),
@@ -651,8 +646,8 @@ static RecorderConfig build_recorder_config(const std::shared_ptr<Call> &call) {
         .phase2_tdma = call->get_phase2_tdma(),
         .tdma_slot = call->get_tdma_slot(),
         .xor_mask = call->get_xor_mask(),
-        .squelch_db = squelch,
-        .digital_levels = sys->get_digital_levels(),
+        .squelch_db = call->get_squelch_db(),
+        .digital_levels = call->get_system()->get_digital_levels(),
         .rust_call_id = call->get_rust_call_id(),
     };
 }
@@ -742,8 +737,8 @@ bool tr_source_start_recording(TrContext &ctx, int32_t source_idx, TrCall &call,
     auto &config = ctx.impl->trunk_ctx.config;
 
     std::shared_ptr<Recorder> recorder = is_analog
-        ? source->get_analog_recorder(call.ptr)
-        : source->get_digital_recorder(call.ptr);
+        ? source->get_analog_recorder()
+        : source->get_digital_recorder();
 
     auto rc = build_recorder_config(call.ptr);
 

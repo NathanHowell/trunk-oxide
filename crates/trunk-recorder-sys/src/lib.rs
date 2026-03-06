@@ -267,6 +267,12 @@ pub mod ffi {
         pub signal_detection: bool,
     }
 
+    struct TrDetectedSignal {
+        pub center_freq: f64,
+        pub max_rssi: i32,
+        pub threshold: i32,
+    }
+
     struct TrUnitTagConfig {
         pub pattern: String,
         pub tag: String,
@@ -362,7 +368,6 @@ pub mod ffi {
         fn tr_stop_gnuradio(ctx: Pin<&mut TrContext>);
 
         // ── Phase B: Message Draining ──
-        fn tr_context_check_conventional_detection(ctx: Pin<&mut TrContext>);
         fn tr_context_check_sources(ctx: Pin<&mut TrContext>) -> Result<()>;
         fn tr_context_get_recorder_status(ctx: &TrContext) -> Vec<TrRecorderStatus>;
         fn tr_context_autotune_control_channels(ctx: Pin<&mut TrContext>);
@@ -385,6 +390,7 @@ pub mod ffi {
         // ── Conventional call management — lifecycle ──
         fn call_restart(call: Pin<&mut TrCall>);
         fn call_start_initial_recording(call: Pin<&mut TrCall>);
+        fn call_set_recorder_enabled(call: Pin<&mut TrCall>, enabled: bool);
 
         // ── Conventional call management — context-level ──
         fn tr_context_take_next_conventional_call(ctx: Pin<&mut TrContext>) -> UniquePtr<TrCall>;
@@ -471,11 +477,27 @@ pub mod ffi {
             messages: Vec<TrTrunkMessage>,
         );
         fn event_notifier_notify_squelch(notifier: &EventNotifier, rec: i32, muted: bool, pwr: f64);
-        fn event_notifier_notify_signal_detected(notifier: &EventNotifier);
+        fn event_notifier_notify_signals_detected(
+            notifier: &EventNotifier,
+            source_num: i32,
+            source_center_freq: f64,
+            signals: Vec<TrDetectedSignal>,
+        );
     }
 }
 
 // ── GR event channel types ──
+
+/// A signal detected by the signal detector FFT block.
+#[derive(Debug, Clone)]
+pub struct DetectedSignal {
+    /// Center frequency relative to source center, in Hz.
+    pub center_freq: f64,
+    /// Maximum RSSI in dB.
+    pub max_rssi: i32,
+    /// Detection threshold in dB.
+    pub threshold: i32,
+}
 
 /// Events sent from GNU Radio scheduler threads to the monitor loop via channel.
 pub enum GrEvent {
@@ -487,8 +509,12 @@ pub enum GrEvent {
         muted: bool,
         pwr_db: f64,
     },
-    /// Signal detected on a conventional source.
-    SignalDetected,
+    /// Signals detected on a conventional source by the signal detector.
+    SignalsDetected {
+        source_num: i32,
+        source_center_freq: f64,
+        signals: Vec<DetectedSignal>,
+    },
 }
 
 /// Opaque notifier that wraps a cloned `tokio::sync::mpsc::Sender<GrEvent>`.
@@ -536,8 +562,29 @@ fn event_notifier_notify_squelch(notifier: &EventNotifier, rec: i32, muted: bool
     }
 }
 
-fn event_notifier_notify_signal_detected(notifier: &EventNotifier) {
-    if notifier.0.try_send(GrEvent::SignalDetected).is_ok() {
+fn event_notifier_notify_signals_detected(
+    notifier: &EventNotifier,
+    source_num: i32,
+    source_center_freq: f64,
+    signals: Vec<ffi::TrDetectedSignal>,
+) {
+    let signals: Vec<DetectedSignal> = signals
+        .into_iter()
+        .map(|s| DetectedSignal {
+            center_freq: s.center_freq,
+            max_rssi: s.max_rssi,
+            threshold: s.threshold,
+        })
+        .collect();
+    if notifier
+        .0
+        .try_send(GrEvent::SignalsDetected {
+            source_num,
+            source_center_freq,
+            signals,
+        })
+        .is_ok()
+    {
         notifier.1.fetch_add(1, Ordering::Relaxed);
     }
 }

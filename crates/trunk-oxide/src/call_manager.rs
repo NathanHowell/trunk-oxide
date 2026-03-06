@@ -208,6 +208,11 @@ impl CallManager {
                         ffi::call_start_initial_recording(handle.pin_mut());
                     }
                 }
+                Effect::EnableRecorder { call_id } => {
+                    if let Some(handle) = self.handles.get_mut(&call_id) {
+                        ffi::call_set_recorder_enabled(handle.pin_mut(), true);
+                    }
+                }
                 Effect::RemoveCall { call_id } => {
                     self.handles.remove(&call_id);
                     self.state.remove_call(call_id);
@@ -489,7 +494,10 @@ impl CallManager {
         let mut actions: Vec<(CallId, ConventionalAction)> = Vec::new();
 
         for entry in &self.state.calls {
-            if !entry.is_conventional() || entry.recorder.is_none() {
+            if !entry.is_conventional()
+                || entry.recorder.is_none()
+                || entry.state == crate::call_state::CallState::Disabled
+            {
                 continue;
             }
 
@@ -561,6 +569,18 @@ impl CallManager {
     pub fn handle_squelch_event(&mut self, recorder_num: i32, muted: bool, pwr_db: f64) {
         self.state
             .on_squelch(RecorderNum(recorder_num), muted, pwr_db);
+    }
+
+    pub fn handle_signals_detected(
+        &mut self,
+        mut ctx: Pin<&mut TrContext>,
+        source_center_freq: f64,
+        signals: &[trunk_recorder_sys::DetectedSignal],
+    ) {
+        let effects = self
+            .state
+            .on_signals_detected(source_center_freq, signals);
+        self.process_effects(effects, &mut ctx);
     }
 
     pub fn clear_stale_patches(&mut self) {

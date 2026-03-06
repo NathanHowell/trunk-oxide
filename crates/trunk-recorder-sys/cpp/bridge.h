@@ -101,6 +101,7 @@ struct TrGainStage;
 struct TrSystemConfig;
 struct TrTalkgroupConfig;
 struct TrChannelConfig;
+struct TrDetectedSignal;
 struct TrUnitTagConfig;
 int32_t tr_add_source_from_config(TrContext &ctx, const TrSourceConfig &cfg);
 int32_t tr_add_system_from_config(TrContext &ctx, const TrSystemConfig &cfg);
@@ -116,7 +117,6 @@ TrTrunkMessage convert_trunk_message(const TrunkMessage &msg);
 void tr_start_gnuradio(TrContext &ctx);
 void tr_stop_gnuradio(TrContext &ctx);
 
-void tr_context_check_conventional_detection(TrContext &ctx);
 void tr_context_check_sources(TrContext &ctx);
 rust::Vec<TrRecorderStatus> tr_context_get_recorder_status(const TrContext &ctx);
 void tr_context_autotune_control_channels(TrContext &ctx);
@@ -140,6 +140,7 @@ int32_t call_get_recorder_state(const TrCall &call);
 // ── Conventional call management — lifecycle ──
 void call_restart(TrCall &call);
 void call_start_initial_recording(TrCall &call);
+void call_set_recorder_enabled(TrCall &call, bool enabled);
 
 // ── Conventional call management — context-level ──
 std::unique_ptr<TrCall> tr_context_take_next_conventional_call(TrContext &ctx);

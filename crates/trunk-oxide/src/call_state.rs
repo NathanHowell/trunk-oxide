@@ -59,6 +59,8 @@ impl std::fmt::Display for Freq {
 pub(crate) enum CallState {
     Recording,
     Idle,
+    /// Recorder is disabled, waiting for signal detection to enable it.
+    Disabled,
     Rejected(RejectReason),
 }
 
@@ -78,7 +80,7 @@ impl CallState {
         use trunk_oxide_grpc::proto::CallState as ProtoCallState;
         match self {
             CallState::Recording => ProtoCallState::Recording as i32,
-            CallState::Idle => ProtoCallState::Idle as i32,
+            CallState::Idle | CallState::Disabled => ProtoCallState::Idle as i32,
             CallState::Rejected(RejectReason::UnknownTg) => {
                 ProtoCallState::RejectedUnknownTg as i32
             }
@@ -109,6 +111,7 @@ impl std::fmt::Display for CallState {
         match self {
             CallState::Recording => write!(f, "Recording"),
             CallState::Idle => write!(f, "Idle"),
+            CallState::Disabled => write!(f, "Disabled"),
             CallState::Rejected(r) => write!(f, "Rejected: {r}"),
         }
     }
@@ -167,6 +170,7 @@ pub struct ConventionalChannel {
     pub freq: Freq,
     pub is_analog: bool,
     pub priority: i32,
+    pub signal_detection: bool,
 }
 
 #[derive(Clone)]
@@ -319,6 +323,7 @@ pub(crate) struct CallEntry {
     pub(crate) segment_start: Instant,
     pub(crate) idle_since: Option<Instant>,
     pub(crate) call_mode: CallMode,
+    pub(crate) signal_detection: bool,
 }
 
 impl Default for CallEntry {
@@ -350,6 +355,7 @@ impl Default for CallEntry {
             segment_start: Instant::now(),
             idle_since: None,
             call_mode: CallMode::Conventional,
+            signal_detection: false,
         }
     }
 }
@@ -448,6 +454,9 @@ pub(crate) enum Effect {
         call_id: CallId,
     },
     ConventionalStartInitial {
+        call_id: CallId,
+    },
+    EnableRecorder {
         call_id: CallId,
     },
 
@@ -1195,7 +1204,7 @@ impl TrunkStateMachine {
                     effects.push(Effect::RemoveCall { call_id: entry.id });
                     ended_call = true;
                 }
-                CallState::Idle | CallState::Rejected(_) => {
+                CallState::Idle | CallState::Disabled | CallState::Rejected(_) => {
                     effects.push(Effect::EmitCallEnd { call_id: entry.id });
                     effects.push(Effect::RemoveCall { call_id: entry.id });
                     ended_call = true;
@@ -1246,7 +1255,13 @@ impl TrunkStateMachine {
 
         // After restart, executor reads new call_num/start_time from C++ and
         // calls on_conventional_restarted.
-        entry.state = CallState::Recording;
+        // When signal_detection is enabled, start in Disabled state — the recorder
+        // is disabled by C++ start() and must wait for signal detection to re-enable.
+        entry.state = if entry.signal_detection {
+            CallState::Disabled
+        } else {
+            CallState::Recording
+        };
         entry.last_update = Instant::now();
         entry.idle_since = None;
         entry.segments.clear();
@@ -1320,6 +1335,33 @@ impl TrunkStateMachine {
         }
     }
 
+    // ── Signal detection ──
+
+    pub(crate) fn on_signals_detected(
+        &mut self,
+        source_center_freq: f64,
+        signals: &[trunk_recorder_sys::DetectedSignal],
+    ) -> Vec<Effect> {
+        let mut effects = Vec::new();
+        for signal in signals {
+            let abs_freq = source_center_freq + signal.center_freq;
+            for entry in &mut self.calls {
+                if !entry.is_conventional() || !entry.signal_detection {
+                    continue;
+                }
+                if entry.state != CallState::Disabled {
+                    continue;
+                }
+                if (entry.freq.as_hz() - abs_freq).abs() < 12_500.0 {
+                    entry.state = CallState::Idle;
+                    entry.idle_since = Some(Instant::now());
+                    effects.push(Effect::EnableRecorder { call_id: entry.id });
+                }
+            }
+        }
+        effects
+    }
+
     // ── Call creation callback (executor feeds back C++ metadata) ──
 
     // ── Conventional call addition ──
@@ -1331,6 +1373,11 @@ impl TrunkStateMachine {
         policy: &SystemPolicy,
         recorder: Option<RecorderNum>,
     ) -> CallId {
+        let state = if channel.signal_detection {
+            CallState::Disabled
+        } else {
+            CallState::Idle
+        };
         let entry = CallEntry {
             talkgroup: channel.talkgroup.0,
             sys_num,
@@ -1340,6 +1387,8 @@ impl TrunkStateMachine {
             priority: channel.priority,
             max_duration: policy.max_duration,
             recorder,
+            state,
+            signal_detection: channel.signal_detection,
             ..Default::default()
         };
         let call_id = entry.id;
@@ -1381,7 +1430,7 @@ impl TrunkStateMachine {
     pub(crate) fn conclude_all(&mut self) -> Vec<Effect> {
         let mut effects = Vec::new();
         for entry in &self.calls {
-            if entry.state == CallState::Recording || entry.state == CallState::Idle {
+            if matches!(entry.state, CallState::Recording | CallState::Idle | CallState::Disabled) {
                 effects.push(Effect::EmitCallEnd { call_id: entry.id });
             }
             effects.push(Effect::RemoveCall { call_id: entry.id });
@@ -1484,6 +1533,7 @@ mod tests {
             Effect::AddControlChannel { .. } => "AddControlChannel",
             Effect::ConventionalRestart { .. } => "ConventionalRestart",
             Effect::ConventionalStartInitial { .. } => "ConventionalStartInitial",
+            Effect::EnableRecorder { .. } => "EnableRecorder",
             Effect::RemoveCall { .. } => "RemoveCall",
             Effect::Warn { .. } => "Warn",
         }).collect();
@@ -1766,6 +1816,7 @@ mod tests {
             freq: Freq::from_hz(488_000_000.0),
             is_analog: true,
             priority: 0,
+            signal_detection: false,
         };
         let policy = sm.config.systems.get(&1).unwrap().clone();
         let call_id = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(0)));
@@ -1788,6 +1839,7 @@ mod tests {
             freq: Freq::from_hz(488_000_000.0),
             is_analog: true,
             priority: 0,
+            signal_detection: false,
         };
         let policy = sm.config.systems.get(&1).unwrap().clone();
         let call_id = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
@@ -1816,6 +1868,7 @@ mod tests {
             freq: Freq::from_hz(488_000_000.0),
             is_analog: true,
             priority: 0,
+            signal_detection: false,
         };
         let policy = sm.config.systems.get(&1).unwrap().clone();
         let call_id = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
@@ -1846,6 +1899,7 @@ mod tests {
             freq: Freq::from_hz(488_000_000.0),
             is_analog: true,
             priority: 0,
+            signal_detection: false,
         };
         let policy = sm.config.systems.get(&1).unwrap().clone();
         sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(5)));
@@ -1865,6 +1919,7 @@ mod tests {
             freq: Freq::from_hz(488_000_000.0),
             is_analog: true,
             priority: 0,
+            signal_detection: false,
         };
         let policy = sm.config.systems.get(&1).unwrap().clone();
         sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(5)));
@@ -1904,5 +1959,154 @@ mod tests {
         // Should NOT contain RequestRecording
         assert!(!effects.iter().any(|e| matches!(e, Effect::RequestRecording { .. })));
         assert_eq!(sm.calls[0].state, CallState::Rejected(RejectReason::Encrypted));
+    }
+
+    // ── Signal detection ──
+
+    fn signal_detection_channel() -> ConventionalChannel {
+        ConventionalChannel {
+            talkgroup: Talkgroup(1),
+            freq: Freq::from_hz(488_000_000.0),
+            is_analog: true,
+            priority: 0,
+            signal_detection: true,
+        }
+    }
+
+    #[test]
+    fn signal_detection_starts_disabled() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let channel = signal_detection_channel();
+        let policy = sm.config.systems.get(&1).unwrap().clone();
+        let call_id = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
+
+        assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Disabled);
+    }
+
+    #[test]
+    fn signal_detection_restart_transitions_to_disabled() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let channel = signal_detection_channel();
+        let policy = sm.config.systems.get(&1).unwrap().clone();
+        let call_id = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
+        sm.calls[0].state = CallState::Recording;
+
+        let effects = sm.on_conventional_idle_timeout(call_id);
+
+        assert!(effects.iter().any(|e| matches!(e, Effect::ConventionalRestart { .. })));
+        assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Disabled);
+    }
+
+    #[test]
+    fn signals_detected_enables_matching_recorder() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let channel = signal_detection_channel();
+        let policy = sm.config.systems.get(&1).unwrap().clone();
+        let call_id = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
+        assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Disabled);
+
+        // Source center 487 MHz, signal at +1 MHz offset → 488 MHz absolute
+        let signals = vec![trunk_recorder_sys::DetectedSignal {
+            center_freq: 1_000_000.0,
+            max_rssi: -20,
+            threshold: -45,
+        }];
+        let effects = sm.on_signals_detected(487_000_000.0, &signals);
+
+        assert!(effects.iter().any(|e| matches!(e, Effect::EnableRecorder { .. })));
+        assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Idle);
+    }
+
+    #[test]
+    fn signals_detected_no_match_when_freq_too_far() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let channel = signal_detection_channel();
+        let policy = sm.config.systems.get(&1).unwrap().clone();
+        let call_id = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
+
+        // Signal at 490 MHz, channel at 488 MHz — 2 MHz apart, way beyond 12.5kHz tolerance
+        let signals = vec![trunk_recorder_sys::DetectedSignal {
+            center_freq: 3_000_000.0,
+            max_rssi: -20,
+            threshold: -45,
+        }];
+        let effects = sm.on_signals_detected(487_000_000.0, &signals);
+
+        assert!(effects.is_empty());
+        assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Disabled);
+    }
+
+    #[test]
+    fn signals_detected_skips_already_recording() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let channel = signal_detection_channel();
+        let policy = sm.config.systems.get(&1).unwrap().clone();
+        let call_id = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
+        sm.calls[0].state = CallState::Recording;
+
+        let signals = vec![trunk_recorder_sys::DetectedSignal {
+            center_freq: 1_000_000.0,
+            max_rssi: -20,
+            threshold: -45,
+        }];
+        let effects = sm.on_signals_detected(487_000_000.0, &signals);
+
+        assert!(effects.is_empty());
+        assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Recording);
+    }
+
+    #[test]
+    fn no_signal_detection_starts_idle() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let channel = ConventionalChannel {
+            talkgroup: Talkgroup(1),
+            freq: Freq::from_hz(488_000_000.0),
+            is_analog: true,
+            priority: 0,
+            signal_detection: false,
+        };
+        let policy = sm.config.systems.get(&1).unwrap().clone();
+        let call_id = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
+
+        assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Idle);
+    }
+
+    #[test]
+    fn no_signal_detection_restart_stays_recording() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let channel = ConventionalChannel {
+            talkgroup: Talkgroup(1),
+            freq: Freq::from_hz(488_000_000.0),
+            is_analog: true,
+            priority: 0,
+            signal_detection: false,
+        };
+        let policy = sm.config.systems.get(&1).unwrap().clone();
+        let call_id = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
+        sm.calls[0].state = CallState::Recording;
+
+        let effects = sm.on_conventional_idle_timeout(call_id);
+
+        assert!(effects.iter().any(|e| matches!(e, Effect::ConventionalRestart { .. })));
+        assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Recording);
+    }
+
+    #[test]
+    fn signals_detected_within_tolerance() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let channel = signal_detection_channel();
+        let policy = sm.config.systems.get(&1).unwrap().clone();
+        let call_id = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
+
+        // Signal at 488_010_000 Hz (10kHz offset from channel) — within 12.5kHz tolerance
+        let signals = vec![trunk_recorder_sys::DetectedSignal {
+            center_freq: 1_010_000.0,
+            max_rssi: -20,
+            threshold: -45,
+        }];
+        let effects = sm.on_signals_detected(487_000_000.0, &signals);
+
+        assert!(effects.iter().any(|e| matches!(e, Effect::EnableRecorder { .. })));
+        assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Idle);
     }
 }

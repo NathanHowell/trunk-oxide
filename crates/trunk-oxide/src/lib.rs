@@ -287,6 +287,7 @@ impl TrunkRecorderBuilder {
                         freq: Freq::from_hz(ch.freq),
                         is_analog,
                         priority,
+                        signal_detection: ch.signal_detection,
                     }
                 })
                 .collect();
@@ -450,8 +451,16 @@ impl TrunkRecorder {
                         } => {
                             call_mgr.handle_squelch_event(recorder_num, muted, pwr_db);
                         }
-                        GrEvent::SignalDetected => {
-                            ffi::tr_context_check_conventional_detection(self.ctx.pin_mut());
+                        GrEvent::SignalsDetected {
+                            source_center_freq,
+                            signals,
+                            ..
+                        } => {
+                            call_mgr.handle_signals_detected(
+                                self.ctx.pin_mut(),
+                                source_center_freq,
+                                &signals,
+                            );
                         }
                     }
                 },

@@ -549,7 +549,8 @@ void tr_context_wire_event_notifiers(TrContext &ctx) {
 
     // Phase 3: wire squelch callbacks on recorder blocks
     for (auto &source : ctx.impl->trunk_ctx.sources) {
-        for (auto &rec : source->get_recorders()) {
+        auto recs = source->get_recorders();
+        for (auto &rec : recs) {
             auto notifier = bridge->make_notifier();
             int rec_num = rec->get_num();
             rec->set_squelch_callback(
@@ -561,18 +562,26 @@ void tr_context_wire_event_notifiers(TrContext &ctx) {
     }
 
     // Phase 4: wire signal detection callbacks on sources
+    // The callback receives detected signals directly from the signal detector's
+    // work() method and passes them to Rust for frequency matching and routing.
     for (auto &source : ctx.impl->trunk_ctx.sources) {
         auto notifier = bridge->make_notifier();
+        int src_num = source->get_num();
+        double center = source->get_center();
         source->set_detection_callback(
-            [notifier = std::make_shared<rust::Box<EventNotifier>>(std::move(notifier))]() {
-                event_notifier_notify_signal_detected(**notifier);
+            [notifier = std::make_shared<rust::Box<EventNotifier>>(std::move(notifier)),
+             src_num, center](std::vector<Detected_Signal> signals) {
+                rust::Vec<TrDetectedSignal> rust_signals;
+                for (const auto &s : signals) {
+                    TrDetectedSignal rs;
+                    rs.center_freq = s.center_freq;
+                    rs.max_rssi = s.max_rssi;
+                    rs.threshold = s.threshold;
+                    rust_signals.push_back(rs);
+                }
+                event_notifier_notify_signals_detected(
+                    **notifier, src_num, center, std::move(rust_signals));
             });
-    }
-}
-
-void tr_context_check_conventional_detection(TrContext &ctx) {
-    for (auto &source : ctx.impl->trunk_ctx.sources) {
-        source->enable_detected_recorders();
     }
 }
 
@@ -647,6 +656,13 @@ void call_start_initial_recording(TrCall &call) {
     auto rec = call.ptr->get_recorder();
     if (rec) {
         rec->start(call.ptr);
+    }
+}
+
+void call_set_recorder_enabled(TrCall &call, bool enabled) {
+    auto rec = call.ptr->get_recorder();
+    if (rec) {
+        rec->set_enabled(enabled);
     }
 }
 

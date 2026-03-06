@@ -12,6 +12,7 @@
 
 #include "trunk-recorder/trunk_context.h"
 #include "trunk-recorder/call_conventional.h"
+#include "trunk-recorder/recorder_config.h"
 #include "trunk-recorder/event_sink.h"
 #include "trunk-recorder/formatter.h"
 #include "trunk-recorder/recorders/dmr_recorder.h"
@@ -157,12 +158,12 @@ class CxxEventSink : public EventSink {
 public:
     explicit CxxEventSink(EventHandlerBox *handler) : handler_(handler) {}
 
-    void audio_callback(const std::shared_ptr<Call> &call, const std::shared_ptr<Recorder> &recorder,
+    void audio_callback(const std::shared_ptr<Recorder> &recorder,
                         int16_t *samples, int sampleCount) override {
-        if (!call) return;
+        if (!recorder) return;
         TrRecorder tr_rec(recorder);
         rust::Slice<const int16_t> slice(samples, static_cast<size_t>(sampleCount));
-        event_handler_audio_stream(*handler_, call->get_rust_call_id(), tr_rec, slice);
+        event_handler_audio_stream(*handler_, recorder->get_rust_call_id(), tr_rec, slice);
     }
 
     void setup_recorder(const std::shared_ptr<Recorder> &recorder) override {
@@ -633,6 +634,29 @@ uint64_t call_get_rust_call_id(const TrCall &call) {
     return call.ptr->get_rust_call_id();
 }
 
+// ── Call — config builder ──
+
+static RecorderConfig build_recorder_config(const std::shared_ptr<Call> &call) {
+    auto sys = call->get_system();
+    double squelch = call->is_conventional()
+        ? std::dynamic_pointer_cast<Call_conventional>(call)->get_squelch_db()
+        : sys->get_squelch_db();
+
+    return RecorderConfig{
+        .talkgroup = call->get_talkgroup(),
+        .call_num = call->get_call_num(),
+        .freq = call->get_freq(),
+        .short_name = call->get_short_name(),
+        .temp_dir = call->get_temp_dir(),
+        .phase2_tdma = call->get_phase2_tdma(),
+        .tdma_slot = call->get_tdma_slot(),
+        .xor_mask = call->get_xor_mask(),
+        .squelch_db = squelch,
+        .digital_levels = sys->get_digital_levels(),
+        .rust_call_id = call->get_rust_call_id(),
+    };
+}
+
 // ── Call — lifecycle ──
 
 void call_restart(TrCall &call) {
@@ -642,7 +666,8 @@ void call_restart(TrCall &call) {
 void call_start_initial_recording(TrCall &call) {
     auto rec = call.ptr->get_recorder();
     if (rec) {
-        rec->start(call.ptr);
+        auto rc = build_recorder_config(call.ptr);
+        rec->start(rc);
     }
 }
 
@@ -720,18 +745,19 @@ bool tr_source_start_recording(TrContext &ctx, int32_t source_idx, TrCall &call,
         ? source->get_analog_recorder(call.ptr)
         : source->get_digital_recorder(call.ptr);
 
-    if (!recorder || !recorder->start(call.ptr)) {
+    auto rc = build_recorder_config(call.ptr);
+
+    if (!recorder || !recorder->start(rc)) {
         return false;
     }
 
     call.ptr->set_recorder(recorder);
-    // State is now owned by Rust — caller sets entry.state = Recording
     config.event_sink->setup_recorder(recorder);
 
     // Debug recorder
     auto debug_recorder = source->get_debug_recorder();
     if (debug_recorder) {
-        debug_recorder->start(call.ptr);
+        debug_recorder->start(rc);
         call.ptr->set_debug_recorder(debug_recorder);
         call.ptr->set_debug_recording(true);
         config.event_sink->setup_recorder(debug_recorder);
@@ -740,7 +766,7 @@ bool tr_source_start_recording(TrContext &ctx, int32_t source_idx, TrCall &call,
     // SigMF recorder
     auto sigmf_recorder = source->get_sigmf_recorder();
     if (sigmf_recorder) {
-        sigmf_recorder->start(call.ptr);
+        sigmf_recorder->start(rc);
         call.ptr->set_sigmf_recorder(sigmf_recorder);
         call.ptr->set_sigmf_recording(true);
         config.event_sink->setup_recorder(sigmf_recorder);

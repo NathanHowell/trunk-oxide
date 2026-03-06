@@ -223,8 +223,13 @@ impl CallManager {
                     }
                 }
                 Effect::ConventionalStartInitial { call_id } => {
-                    if let Some(handle) = self.handles.get_mut(&call_id) {
-                        ffi::call_start_initial_recording(handle.pin_mut());
+                    if let Some(entry) = self.state.get_call(call_id) {
+                        let sys_info =
+                            ffi::tr_context_get_system_info(ctx.as_mut(), entry.sys_num);
+                        let cfg = self.build_recorder_config(entry, &sys_info.xor_mask);
+                        if let Some(handle) = self.handles.get_mut(&call_id) {
+                            ffi::call_start_initial_recording(handle.pin_mut(), &cfg);
+                        }
                     }
                 }
                 Effect::EnableRecorder { call_id } => {
@@ -278,6 +283,18 @@ impl CallManager {
         priority: i32,
         ctx: &mut Pin<&mut TrContext>,
     ) {
+        let entry = match self.state.get_call(call_id) {
+            Some(e) => e,
+            None => {
+                tracing::error!(?call_id, "exec_request_recording: CallEntry missing");
+                return;
+            }
+        };
+
+        // Build recorder config from Rust state (replaces C++ build_recorder_config)
+        let sys_info = ffi::tr_context_get_system_info(ctx.as_mut(), entry.sys_num);
+        let cfg = self.build_recorder_config(entry, &sys_info.xor_mask);
+
         let freq_hz = freq.as_hz();
         let handle = match self.handles.get_mut(&call_id) {
             Some(h) => h,
@@ -308,8 +325,13 @@ impl CallManager {
                 break;
             }
 
-            if ffi::tr_source_start_recording(ctx.as_mut(), source_idx, handle.pin_mut(), is_analog)
-            {
+            if ffi::tr_source_start_recording(
+                ctx.as_mut(),
+                source_idx,
+                handle.pin_mut(),
+                is_analog,
+                &cfg,
+            ) {
                 let rec_num = ffi::call_get_recorder_num(&**handle);
                 result = RecordingResult::Started {
                     rec_num: RecorderNum(rec_num),

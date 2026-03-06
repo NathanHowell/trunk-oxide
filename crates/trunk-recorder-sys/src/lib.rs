@@ -403,7 +403,7 @@ pub mod ffi {
 
         // ── Call — lifecycle ──
         fn call_restart(call: Pin<&mut TrCall>);
-        fn call_start_initial_recording(call: Pin<&mut TrCall>);
+        fn call_start_initial_recording(call: Pin<&mut TrCall>, cfg: &TrRecorderConfig);
         fn call_set_recorder_enabled(call: Pin<&mut TrCall>, enabled: bool);
 
         // ── Conventional call management — context-level ──
@@ -428,6 +428,7 @@ pub mod ffi {
             source_idx: i32,
             call: Pin<&mut TrCall>,
             is_analog: bool,
+            cfg: &TrRecorderConfig,
         ) -> bool;
 
         // ── Phase C: Call Management — call-level recorder accessors ──

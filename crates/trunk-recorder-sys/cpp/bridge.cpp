@@ -635,21 +635,21 @@ uint64_t call_get_rust_call_id(const TrCall &call) {
     return call.ptr->get_rust_call_id();
 }
 
-// ── Call — config builder ──
+// ── Config conversion (Rust TrRecorderConfig → C++ RecorderConfig) ──
 
-static RecorderConfig build_recorder_config(const std::shared_ptr<Call> &call) {
+static RecorderConfig to_cpp_config(const TrRecorderConfig &cfg) {
     return RecorderConfig{
-        .talkgroup = call->get_talkgroup(),
-        .call_num = call->get_call_num(),
-        .freq = call->get_freq(),
-        .short_name = call->get_short_name(),
-        .temp_dir = call->get_temp_dir(),
-        .phase2_tdma = call->get_phase2_tdma(),
-        .tdma_slot = call->get_tdma_slot(),
-        .xor_mask = call->get_xor_mask(),
-        .squelch_db = call->get_squelch_db(),
-        .digital_levels = call->get_system()->get_digital_levels(),
-        .rust_call_id = call->get_rust_call_id(),
+        .talkgroup = cfg.talkgroup,
+        .call_num = cfg.call_num,
+        .freq = cfg.freq,
+        .short_name = std::string(cfg.short_name),
+        .temp_dir = std::string(cfg.temp_dir),
+        .phase2_tdma = cfg.phase2_tdma,
+        .tdma_slot = cfg.tdma_slot,
+        .xor_mask = std::string(cfg.xor_mask),
+        .squelch_db = cfg.squelch_db,
+        .digital_levels = cfg.digital_levels,
+        .rust_call_id = cfg.rust_call_id,
     };
 }
 
@@ -659,11 +659,10 @@ void call_restart(TrCall &call) {
     call.ptr->restart_call();
 }
 
-void call_start_initial_recording(TrCall &call) {
+void call_start_initial_recording(TrCall &call, const TrRecorderConfig &cfg) {
     auto rec = call.ptr->get_recorder();
     if (rec) {
-        auto rc = build_recorder_config(call.ptr);
-        rec->start(rc);
+        rec->start(to_cpp_config(cfg));
     }
 }
 
@@ -731,7 +730,7 @@ int32_t tr_source_available_recorders(const TrContext &ctx, int32_t source_idx, 
         : source->get_num_available_digital_recorders();
 }
 
-bool tr_source_start_recording(TrContext &ctx, int32_t source_idx, TrCall &call, bool is_analog) {
+bool tr_source_start_recording(TrContext &ctx, int32_t source_idx, TrCall &call, bool is_analog, const TrRecorderConfig &cfg) {
     auto &sources = ctx.impl->trunk_ctx.sources;
     if (source_idx < 0 || source_idx >= static_cast<int32_t>(sources.size())) return false;
     auto &source = sources[source_idx];
@@ -741,7 +740,7 @@ bool tr_source_start_recording(TrContext &ctx, int32_t source_idx, TrCall &call,
         ? source->get_analog_recorder()
         : source->get_digital_recorder();
 
-    auto rc = build_recorder_config(call.ptr);
+    auto rc = to_cpp_config(cfg);
 
     if (!recorder || !recorder->start(rc)) {
         return false;

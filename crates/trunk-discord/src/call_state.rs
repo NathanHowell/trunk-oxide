@@ -271,19 +271,29 @@ impl CallState {
             });
         }
 
-        // Attach audio if available
+        // Attach audio if available and non-silent
         if self.config.audio_attachment {
             if let Some(ogg_data) = ogg_data {
-                let filename = format!(
-                    "call_{}_{}.ogg",
-                    self.talkgroup,
-                    self.start_time.format("%Y%m%dT%H%M%SZ"),
-                );
-                effects.push(CallEffect::AttachAudio {
-                    embed: self.build_embed(),
-                    ogg_data,
-                    filename,
-                });
+                let audio_is_silent = self.audio_rms() < SILENCE_RMS_THRESHOLD;
+                if audio_is_silent {
+                    tracing::debug!(
+                        talkgroup = self.talkgroup,
+                        rms = self.audio_rms(),
+                        ogg_bytes = ogg_data.len(),
+                        "skipping audio attachment (silent)"
+                    );
+                } else {
+                    let filename = format!(
+                        "call_{}_{}.ogg",
+                        self.talkgroup,
+                        self.start_time.format("%Y%m%dT%H%M%SZ"),
+                    );
+                    effects.push(CallEffect::AttachAudio {
+                        embed: self.build_embed(),
+                        ogg_data,
+                        filename,
+                    });
+                }
             }
         }
 
@@ -694,6 +704,32 @@ mod tests {
         s.on_event("**Signal**: unit 123".into());
         let effects = s.on_end(None, None);
         assert!(!effects.iter().any(|e| matches!(e, CallEffect::DeleteEmbed)));
+        assert!(effects.iter().any(|e| matches!(e, CallEffect::UpdateDb { .. })));
+    }
+
+    #[test]
+    fn end_with_events_and_silent_audio_skips_attachment() {
+        let mut s = make_state();
+        s.on_start();
+        s.on_event("**Signal**: unit 123".into());
+        // ogg_data present but audio is silent (no energy)
+        let effects = s.on_end(None, Some(vec![0; 127]));
+        assert!(!effects.iter().any(|e| matches!(e, CallEffect::DeleteEmbed)));
+        assert!(!effects.iter().any(|e| matches!(e, CallEffect::AttachAudio { .. })));
+    }
+
+    #[test]
+    fn end_with_tones_and_silent_audio_skips_attachment() {
+        let mut s = make_state();
+        s.on_start();
+        s.on_tones_detected(vec![DetectedTone::TwoTone {
+            tone_a: 500.0,
+            tone_b: 800.0,
+            duration_a: 1.0,
+            duration_b: 3.0,
+        }]);
+        let effects = s.on_end(None, Some(vec![0; 127]));
+        assert!(!effects.iter().any(|e| matches!(e, CallEffect::AttachAudio { .. })));
         assert!(effects.iter().any(|e| matches!(e, CallEffect::UpdateDb { .. })));
     }
 

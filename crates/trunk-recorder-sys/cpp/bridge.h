@@ -137,14 +137,14 @@ void call_set_rust_call_id(TrCall &call, uint64_t id);
 void call_restart(TrCall &call);
 void call_start_initial_recording(TrCall &call, const TrRecorderConfig &cfg);
 void call_set_recorder_enabled(TrCall &call, bool enabled);
-std::unique_ptr<TrCall> tr_context_take_next_conventional_call(TrContext &ctx);
+std::unique_ptr<TrCall> tr_create_conventional_call(
+    TrContext &ctx, int32_t sys_num, int32_t source_idx,
+    const TrChannelConfig &channel);
 
 // ── Call — recorder accessors ──
 
 // ── Call — creation and recording ──
 std::unique_ptr<TrCall> tr_context_create_call(TrContext &ctx, const TrTrunkMessage &msg);
-int32_t tr_context_source_count(const TrContext &ctx);
-bool tr_source_covers_freq(const TrContext &ctx, int32_t source_idx, double freq);
 int32_t tr_source_available_recorders(const TrContext &ctx, int32_t source_idx, bool is_analog);
 bool tr_source_start_recording(TrContext &ctx, int32_t source_idx, TrCall &call, bool is_analog, const TrRecorderConfig &cfg);
 

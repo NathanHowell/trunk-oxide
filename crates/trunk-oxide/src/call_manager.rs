@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::ops::RangeInclusive;
 use std::pin::Pin;
 use std::time::Instant;
 
@@ -41,15 +42,30 @@ pub struct CallManager {
     bridge: Arc<EventBridge>,
     /// C++ call handles, keyed by CallId.
     handles: HashMap<CallId, UniquePtr<TrCall>>,
+    /// Per-source frequency coverage, indexed by source position.
+    source_ranges: Vec<RangeInclusive<f64>>,
 }
 
 impl CallManager {
-    pub fn new(config: CallManagerConfig, bridge: Arc<EventBridge>) -> Self {
+    pub fn new(
+        config: CallManagerConfig,
+        bridge: Arc<EventBridge>,
+        source_ranges: Vec<RangeInclusive<f64>>,
+    ) -> Self {
         Self {
             state: TrunkStateMachine::new(config),
             bridge,
             handles: HashMap::new(),
+            source_ranges,
         }
+    }
+
+    /// Find the first source whose frequency range covers `freq_hz`.
+    fn find_source(&self, freq_hz: f64) -> Option<i32> {
+        self.source_ranges
+            .iter()
+            .position(|r| r.contains(&freq_hz))
+            .map(|i| i as i32)
     }
 
     // ── Message conversion from CXX → pure Rust ──
@@ -296,23 +312,17 @@ impl CallManager {
         let cfg = self.build_recorder_config(entry, &sys_info.xor_mask);
 
         let freq_hz = freq.as_hz();
+        let source_idx = self.find_source(freq_hz);
+
         let handle = match self.handles.get_mut(&call_id) {
             Some(h) => h,
             None => return,
         };
 
-        let source_count = ffi::tr_context_source_count(&**ctx);
-        let mut result = RecordingResult::NoSource;
-
-        for source_idx in 0..source_count {
-            if !ffi::tr_source_covers_freq(&**ctx, source_idx, freq_hz) {
-                continue;
-            }
-
+        let result = if let Some(source_idx) = source_idx {
             let available = ffi::tr_source_available_recorders(&**ctx, source_idx, is_analog);
             if priority > available {
-                let entry = self.state.get_call(call_id);
-                if let Some(entry) = entry {
+                if let Some(entry) = self.state.get_call(call_id) {
                     tracing::error!(
                         talkgroup = entry.talkgroup,
                         sys_num = entry.sys_num,
@@ -321,11 +331,8 @@ impl CallManager {
                         "not recording: priority exceeds available recorders"
                     );
                 }
-                result = RecordingResult::NoRecorder;
-                break;
-            }
-
-            if ffi::tr_source_start_recording(
+                RecordingResult::NoRecorder
+            } else if ffi::tr_source_start_recording(
                 ctx.as_mut(),
                 source_idx,
                 handle.pin_mut(),
@@ -333,14 +340,15 @@ impl CallManager {
                 &cfg,
             ) {
                 let rec_num = ffi::call_get_recorder_num(&**handle);
-                result = RecordingResult::Started {
+                RecordingResult::Started {
                     rec_num: RecorderNum(rec_num),
-                };
+                }
             } else {
-                result = RecordingResult::NoRecorder;
+                RecordingResult::NoRecorder
             }
-            break;
-        }
+        } else {
+            RecordingResult::NoSource
+        };
 
         let followup = self.state.on_recording_result(call_id, result);
         self.process_effects(followup, ctx);

@@ -405,8 +405,13 @@ pub mod ffi {
         fn call_start_initial_recording(call: Pin<&mut TrCall>, cfg: &TrRecorderConfig);
         fn call_set_recorder_enabled(call: Pin<&mut TrCall>, enabled: bool);
 
-        // ── Conventional call management — context-level ──
-        fn tr_context_take_next_conventional_call(ctx: Pin<&mut TrContext>) -> UniquePtr<TrCall>;
+        // ── Conventional call management — Rust selects source, C++ creates objects ──
+        fn tr_create_conventional_call(
+            ctx: Pin<&mut TrContext>,
+            sys_num: i32,
+            source_idx: i32,
+            channel: &TrChannelConfig,
+        ) -> UniquePtr<TrCall>;
 
         // ── Phase C: Call Management — lifecycle operations ──
         fn tr_context_create_call(
@@ -415,8 +420,6 @@ pub mod ffi {
         ) -> UniquePtr<TrCall>;
 
         // ── Phase C: Call Management — recording policy support ──
-        fn tr_context_source_count(ctx: &TrContext) -> i32;
-        fn tr_source_covers_freq(ctx: &TrContext, source_idx: i32, freq: f64) -> bool;
         fn tr_source_available_recorders(ctx: &TrContext, source_idx: i32, is_analog: bool) -> i32;
         fn tr_source_start_recording(
             ctx: Pin<&mut TrContext>,

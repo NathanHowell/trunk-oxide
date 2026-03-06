@@ -11,6 +11,7 @@ mod call_state;
 mod dedup;
 
 use std::hash::{Hash, Hasher};
+use std::ops::RangeInclusive;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -74,6 +75,8 @@ pub struct TrunkRecorderBuilder {
     ctx: cxx::UniquePtr<ffi::TrContext>,
     call_mgr_config: CallManagerConfig,
     bridge: Arc<EventBridge>,
+    /// Per-source frequency coverage, indexed by source position.
+    source_ranges: Vec<RangeInclusive<f64>>,
 }
 
 /// A running trunk-recorder instance. Stops automatically on drop.
@@ -83,6 +86,8 @@ pub struct TrunkRecorder {
     bridge: Arc<EventBridge>,
     event_rx: tokio::sync::mpsc::Receiver<GrEvent>,
     pending: Arc<AtomicUsize>,
+    /// Per-source frequency coverage, indexed by source position.
+    source_ranges: Vec<RangeInclusive<f64>>,
 }
 
 // Safety: TrContext is used exclusively from a single thread (the monitor thread).
@@ -116,6 +121,7 @@ impl TrunkRecorderBuilder {
         }
 
         // ── Sources ──
+        let mut source_ranges = Vec::new();
         for src in &config.source {
             if src.enabled == Some(false) {
                 continue;
@@ -179,6 +185,8 @@ impl TrunkRecorderBuilder {
                     sigmf_recorders: src.sigmf_recorders,
                 },
             )?;
+            let half_rate = src.rate / 2.0;
+            source_ranges.push((src.center - half_rate)..=(src.center + half_rate));
         }
 
         // ── Systems ──
@@ -362,6 +370,7 @@ impl TrunkRecorderBuilder {
             ctx,
             call_mgr_config,
             bridge,
+            source_ranges,
         })
     }
 
@@ -384,11 +393,20 @@ impl TrunkRecorderBuilder {
             bridge: self.bridge,
             event_rx,
             pending,
+            source_ranges: self.source_ranges,
         }
     }
 }
 
 impl TrunkRecorder {
+    /// Find the first source whose frequency range covers `freq_hz`.
+    fn find_source(&self, freq_hz: f64) -> Option<i32> {
+        self.source_ranges
+            .iter()
+            .position(|r| r.contains(&freq_hz))
+            .map(|i| i as i32)
+    }
+
     /// Shared counter of events queued but not yet consumed by the monitor loop.
     pub fn event_channel_depth(&self) -> Arc<AtomicUsize> {
         Arc::clone(&self.pending)
@@ -400,15 +418,45 @@ impl TrunkRecorder {
     /// `Handle::block_on`). All FFI calls are made on the calling thread,
     /// keeping `TrContext` (C++ objects) pinned.
     pub async fn run_monitor(&mut self) -> anyhow::Result<()> {
-        let mut call_mgr = CallManager::new(self.call_mgr_config.clone(), self.bridge.clone());
+        let mut call_mgr = CallManager::new(
+            self.call_mgr_config.clone(),
+            self.bridge.clone(),
+            self.source_ranges.clone(),
+        );
 
-        // Drain conventional calls created by C++ setup_systems during tr_finalize.
-        // C++ creates one Call per channel in config order — match them up.
+        // Create conventional calls: Rust selects source, C++ creates objects.
         for (&sys_num, policy) in &self.call_mgr_config.systems {
             for channel in &policy.channels {
-                let call = ffi::tr_context_take_next_conventional_call(self.ctx.pin_mut());
+                let freq_hz = channel.freq.as_hz();
+                let Some(source_idx) = self.find_source(freq_hz) else {
+                    tracing::error!(
+                        sys_num,
+                        freq = freq_hz,
+                        talkgroup = channel.talkgroup.0,
+                        "no source covers conventional channel frequency"
+                    );
+                    continue;
+                };
+                let ffi_channel = ffi::TrChannelConfig {
+                    id: channel.talkgroup.0,
+                    freq: freq_hz,
+                    tone: channel.tone,
+                    squelch_db: channel.squelch_db,
+                    signal_detection: channel.signal_detection,
+                };
+                let call = ffi::tr_create_conventional_call(
+                    self.ctx.pin_mut(),
+                    sys_num,
+                    source_idx,
+                    &ffi_channel,
+                );
                 if call.is_null() {
-                    break;
+                    tracing::error!(
+                        sys_num,
+                        freq = freq_hz,
+                        "failed to create conventional call"
+                    );
+                    continue;
                 }
                 call_mgr.add_call(call, channel, sys_num);
             }

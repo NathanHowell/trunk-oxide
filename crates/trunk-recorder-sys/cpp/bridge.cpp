@@ -231,13 +231,13 @@ std::unique_ptr<TrContext> tr_create_from_builder(rust::Box<EventHandlerBox> han
 // ── Builder: finalize (setup_systems only — event callbacks moved to Rust) ──
 
 void tr_finalize(TrContext &ctx) {
-    setup_systems(ctx.impl->trunk_ctx.config, ctx.impl->trunk_ctx.tb,
-                  ctx.impl->trunk_ctx.sources, ctx.impl->trunk_ctx.systems,
-                  ctx.impl->trunk_ctx.calls);
-
-    // Conventional calls remain in trunk_ctx.calls for Rust to drain
-    // via tr_context_take_next_conventional_call after finalize.
-    // setup_config, setup_system, and start are now fired from Rust.
+    // Only set up trunking system decoders here.
+    // Conventional channels are set up per-channel from Rust via tr_setup_conventional_channel.
+    for (auto &system : ctx.impl->trunk_ctx.systems) {
+        if (!is_conventional(system->get_system_type())) {
+            system->setup_decoders(ctx.impl->trunk_ctx.tb, ctx.impl->trunk_ctx.sources);
+        }
+    }
 }
 
 // ── Config builder implementations ──
@@ -669,16 +669,47 @@ void call_set_recorder_enabled(TrCall &call, bool enabled) {
     }
 }
 
-// ── Conventional call management — context-level ──
+// ── Conventional channel setup (Rust selects source, C++ creates objects) ──
 
-std::unique_ptr<TrCall> tr_context_take_next_conventional_call(TrContext &ctx) {
-    auto &calls = ctx.impl->trunk_ctx.calls;
-    if (calls.empty()) {
+std::unique_ptr<TrCall> tr_create_conventional_call(
+    TrContext &ctx, int32_t sys_num, int32_t source_idx,
+    const TrChannelConfig &channel) {
+
+    auto system = find_system_by_num(ctx, sys_num);
+    if (!system) return nullptr;
+
+    auto &sources = ctx.impl->trunk_ctx.sources;
+    if (source_idx < 0 || source_idx >= static_cast<int32_t>(sources.size()))
+        return nullptr;
+    auto &source = sources[source_idx];
+    auto &config = ctx.impl->trunk_ctx.config;
+    auto &tb = ctx.impl->trunk_ctx.tb;
+
+    auto call = std::make_shared<Call_conventional>(
+        channel.id, channel.freq, system, config, channel.squelch_db, channel.signal_detection);
+
+    auto sys_type = system->get_system_type();
+    if (sys_type == SYS_CONVENTIONAL) {
+        auto rec = (channel.tone > 0.0)
+            ? source->create_conventional_recorder(tb, static_cast<float>(channel.tone))
+            : source->create_conventional_recorder(tb);
+        rec->set_tau(system->get_tau());
+        call->set_recorder(rec);
+        config.event_sink->setup_recorder(rec);
+    } else if (sys_type == SYS_CONVENTIONAL_DMR) {
+        auto rec = source->create_dmr_conventional_recorder(tb);
+        call->set_recorder(rec);
+    } else if (sys_type == SYS_CONVENTIONAL_P25) {
+        auto rec = source->create_digital_conventional_recorder(tb);
+        call->set_recorder(rec);
+    } else if (sys_type == SYS_CONVENTIONAL_SIGMF) {
+        auto rec = source->create_sigmf_conventional_recorder(tb);
+        call->set_recorder(rec);
+    } else {
         return nullptr;
     }
-    auto call_ptr = std::move(calls.back());
-    calls.pop_back();
-    return std::make_unique<TrCall>(call_ptr);
+
+    return std::make_unique<TrCall>(call);
 }
 
 // ── Call accessors (audio callback now uses rust_call_id round-trip) ──
@@ -695,17 +726,6 @@ std::unique_ptr<TrCall> tr_context_create_call(TrContext &ctx, const TrTrunkMess
     return std::make_unique<TrCall>(call);
 }
 
-
-int32_t tr_context_source_count(const TrContext &ctx) {
-    return static_cast<int32_t>(ctx.impl->trunk_ctx.sources.size());
-}
-
-bool tr_source_covers_freq(const TrContext &ctx, int32_t source_idx, double freq) {
-    auto &sources = ctx.impl->trunk_ctx.sources;
-    if (source_idx < 0 || source_idx >= static_cast<int32_t>(sources.size())) return false;
-    auto &source = sources[source_idx];
-    return source->get_min_hz() <= freq && freq <= source->get_max_hz();
-}
 
 int32_t tr_source_available_recorders(const TrContext &ctx, int32_t source_idx, bool is_analog) {
     auto &sources = ctx.impl->trunk_ctx.sources;

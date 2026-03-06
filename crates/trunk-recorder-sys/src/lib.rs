@@ -445,14 +445,14 @@ pub mod ffi {
         fn drop_event_handler_box(handler: Box<EventHandlerBox>);
 
         fn event_handler_audio_stream(
-            handler: &mut EventHandlerBox,
+            handler: &EventHandlerBox,
             rust_call_id: u64,
             recorder: &TrRecorder,
             samples: &[i16],
         );
-        fn event_handler_setup_recorder(handler: &mut EventHandlerBox, recorder: &TrRecorder);
+        fn event_handler_setup_recorder(handler: &EventHandlerBox, recorder: &TrRecorder);
         fn event_handler_unit_alias_discovered(
-            handler: &mut EventHandlerBox,
+            handler: &EventHandlerBox,
             system: &TrSystem,
             radio_id: i64,
             alias: &str,
@@ -526,6 +526,7 @@ impl EventNotifier {
     }
 }
 
+#[expect(clippy::unnecessary_box_returns, reason = "cxx requires Box<T> for opaque Rust types")]
 fn event_notifier_clone(notifier: &EventNotifier) -> Box<EventNotifier> {
     Box::new(EventNotifier(notifier.0.clone(), Arc::clone(&notifier.1)))
 }
@@ -641,7 +642,7 @@ fn drop_event_handler_box(_handler: Box<EventHandlerBox>) {
 // All other events are fired directly from Rust without FFI.
 
 fn event_handler_audio_stream(
-    handler: &mut EventHandlerBox,
+    handler: &EventHandlerBox,
     rust_call_id: u64,
     recorder: &ffi::TrRecorder,
     samples: &[i16],
@@ -649,12 +650,12 @@ fn event_handler_audio_stream(
     handler.inner.audio_stream(rust_call_id, recorder, samples);
 }
 
-fn event_handler_setup_recorder(handler: &mut EventHandlerBox, recorder: &ffi::TrRecorder) {
+fn event_handler_setup_recorder(handler: &EventHandlerBox, recorder: &ffi::TrRecorder) {
     handler.inner.setup_recorder(recorder);
 }
 
 fn event_handler_unit_alias_discovered(
-    handler: &mut EventHandlerBox,
+    handler: &EventHandlerBox,
     system: &ffi::TrSystem,
     radio_id: i64,
     alias: &str,

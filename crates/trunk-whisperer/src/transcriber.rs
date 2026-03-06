@@ -10,7 +10,7 @@ pub struct Transcriber {
     semaphore: Arc<Semaphore>,
     next_gpu: AtomicUsize,
     language: String,
-    beam_size: usize,
+    beam_size: i32,
 }
 
 impl Transcriber {
@@ -62,7 +62,7 @@ impl Transcriber {
 
             let strategy = if beam_size > 0 {
                 SamplingStrategy::BeamSearch {
-                    beam_size: beam_size as std::ffi::c_int,
+                    beam_size,
                     patience: -1.0,
                 }
             } else {

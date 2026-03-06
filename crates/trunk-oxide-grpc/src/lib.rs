@@ -292,7 +292,7 @@ impl Default for GrpcConfig {
     }
 }
 
-/// Audio metadata registered by Rust for each active call, keyed by CallId.
+/// Audio metadata registered by Rust for each active call, keyed by `CallId`.
 /// This avoids FFI round-trips in the hot audio callback path.
 #[derive(Debug, Clone, Copy)]
 pub struct AudioMeta {

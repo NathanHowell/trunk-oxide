@@ -23,10 +23,10 @@ fn decimation_guard(rate: i64) -> i64 {
             continue;
         }
         let q = rate / if_freq;
-        if q & 1 != 0 {
+        if q.trailing_zeros() == 0 {
             continue;
         }
-        if q >= 40 && (q & 3) == 0 {
+        if q >= 40 && q.trailing_zeros() >= 2 {
             decim = q / 4;
         } else {
             decim = q / 2;

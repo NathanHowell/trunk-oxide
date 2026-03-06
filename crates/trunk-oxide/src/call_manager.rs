@@ -209,6 +209,13 @@ impl CallManager {
                     }
                 }
                 Effect::EnableRecorder { call_id } => {
+                    if let Some(entry) = self.state.get_call(call_id) {
+                        tracing::info!(
+                            freq = %entry.freq,
+                            talkgroup = entry.talkgroup,
+                            "enabling recorder (signal detected)"
+                        );
+                    }
                     if let Some(handle) = self.handles.get_mut(&call_id) {
                         ffi::call_set_recorder_enabled(handle.pin_mut(), true);
                     }
@@ -560,10 +567,19 @@ impl CallManager {
             None
         };
 
-        let call_id = self
+        let (call_id, effects) = self
             .state
             .add_conventional_call(channel, sys_num, &policy, rec_num);
         self.handles.insert(call_id, call);
+
+        // C++ start() no longer enables conventional recorders — Rust decides.
+        for effect in effects {
+            if let Effect::EnableRecorder { call_id } = effect {
+                if let Some(handle) = self.handles.get_mut(&call_id) {
+                    ffi::call_set_recorder_enabled(handle.pin_mut(), true);
+                }
+            }
+        }
     }
 
     pub fn handle_squelch_event(&mut self, recorder_num: i32, muted: bool, pwr_db: f64) {
@@ -577,6 +593,17 @@ impl CallManager {
         source_center_freq: f64,
         signals: &[trunk_recorder_sys::DetectedSignal],
     ) {
+        for signal in signals {
+            let abs_freq = source_center_freq + signal.center_freq;
+            tracing::info!(
+                source_center_mhz = source_center_freq / 1_000_000.0,
+                signal_offset_hz = signal.center_freq,
+                abs_freq_mhz = abs_freq / 1_000_000.0,
+                rssi = signal.max_rssi,
+                threshold = signal.threshold,
+                "signal detected"
+            );
+        }
         let effects = self
             .state
             .on_signals_detected(source_center_freq, signals);

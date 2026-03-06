@@ -550,7 +550,7 @@ pub(crate) fn load_channels_csv(path: &Path) -> Result<HashMap<i64, ChannelConfi
                 tag: get(col_tag),
                 group: get(col_category),
                 squelch_db: default_squelch(),
-                signal_detection: false,
+                signal_detection: true,
             },
         );
     }

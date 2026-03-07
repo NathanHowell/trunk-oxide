@@ -164,12 +164,16 @@ pub enum TalkgroupMode {
     /// Digital voice ("D") — default
     #[default]
     Digital,
+    /// TDMA / P25 Phase II ("T")
+    Tdma,
     /// Encrypted ("E")
     Encrypted,
     /// Trunked encrypted ("TE")
     TrunkedEncrypted,
     /// Digital encrypted ("DE")
     DigitalEncrypted,
+    /// Mixed analog/digital ("M")
+    Mixed,
 }
 
 impl TalkgroupMode {
@@ -184,9 +188,11 @@ impl TalkgroupMode {
         match self {
             Self::Analog => "A",
             Self::Digital => "D",
+            Self::Tdma => "T",
             Self::Encrypted => "E",
             Self::TrunkedEncrypted => "TE",
             Self::DigitalEncrypted => "DE",
+            Self::Mixed => "M",
         }
     }
 }
@@ -212,7 +218,9 @@ impl TalkgroupMode {
         match s {
             "A" => Self::Analog,
             "D" => Self::Digital,
+            "T" => Self::Tdma,
             "E" => Self::Encrypted,
+            "M" => Self::Mixed,
             "TE" => Self::TrunkedEncrypted,
             "DE" => Self::DigitalEncrypted,
             other => {

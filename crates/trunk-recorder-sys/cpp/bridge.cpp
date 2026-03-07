@@ -115,18 +115,7 @@ static TrTransmission convert_transmission(const Transmission &tx) {
 }
 
 
-// ── Call accessor implementations (most removed — Rust owns call state via CallEntry) ──
-
-int32_t call_get_freq_error(const TrCall &call) { return call.ptr->get_freq_error(); }
-
-// ── Recorder accessor implementations ──
-
-int32_t recorder_get_num(const TrRecorder &rec) { return rec.ptr->get_num(); }
-int32_t recorder_get_freq_error(const TrRecorder &rec) { return rec.ptr->get_freq_error(); }
-
-// ── Source accessor implementations ──
-
-// ── CxxEventSink: EventSink subclass for the 3 C++-initiated callbacks ──
+// ── CxxEventSink: EventSink subclass for C++-initiated callbacks ──
 // Calls Rust trampolines directly on the EventHandlerBox.
 
 class CxxEventSink : public EventSink {
@@ -138,11 +127,6 @@ public:
         if (!recorder) return;
         rust::Slice<const int16_t> slice(samples, static_cast<size_t>(sampleCount));
         event_handler_audio_stream(*handler_, recorder->get_rust_call_id(), slice);
-    }
-
-    void setup_recorder(const std::shared_ptr<Recorder> &recorder) override {
-        TrRecorder tr_rec(recorder);
-        event_handler_setup_recorder(*handler_, tr_rec);
     }
 
     void unit_alias_discovered(const std::shared_ptr<System> &system,
@@ -262,12 +246,9 @@ int32_t tr_add_system_from_config(TrContext &ctx, const TrSystemConfig &cfg) {
 
     // DSP settings
     sys->set_qpsk_mod(cfg.qpsk_mod);
-    sys->set_squelch_db(cfg.squelch_db);
     sys->set_analog_levels(cfg.analog_levels);
-    sys->set_digital_levels(cfg.digital_levels);
     sys->set_tau(static_cast<float>(cfg.tau));
     sys->set_max_dev(static_cast<int32_t>(cfg.max_dev));
-    sys->set_filter_width(cfg.filter_width);
 
     // Decoder options
     sys->set_mdc_enabled(cfg.decode_mdc);
@@ -302,7 +283,6 @@ int32_t tr_add_system_from_config(TrContext &ctx, const TrSystemConfig &cfg) {
         auto tg_obj = std::make_shared<Talkgroup>(
             sys->get_sys_num(), ch.id, ch.freq, ch.tone, ch.squelch_db, ch.signal_detection);
         sys->add_talkgroup(tg_obj);
-        sys->add_channel(ch.freq);
     }
 
     // Unit tags
@@ -614,8 +594,8 @@ static RecorderConfig to_cpp_config(const TrRecorderConfig &cfg) {
 
 // ── Call — lifecycle ──
 
-void call_restart(TrCall &call) {
-    call.ptr->restart_call();
+void call_restart(TrCall &call, const TrRecorderConfig &cfg) {
+    call.ptr->restart_call(to_cpp_config(cfg));
 }
 
 void call_start_initial_recording(TrCall &call, const TrRecorderConfig &cfg) {
@@ -645,11 +625,9 @@ std::unique_ptr<TrCall> tr_create_conventional_call(
     if (source_idx < 0 || source_idx >= static_cast<int32_t>(sources.size()))
         return nullptr;
     auto &source = sources[source_idx];
-    auto &config = ctx.impl->trunk_ctx.config;
     auto &tb = ctx.impl->trunk_ctx.tb;
 
-    auto call = std::make_shared<Call_conventional>(
-        channel.id, channel.freq, system, config, channel.squelch_db, channel.signal_detection);
+    auto call = std::make_shared<Call_conventional>(system);
 
     std::shared_ptr<Recorder> rec;
     auto sys_type = system->get_system_type();
@@ -660,7 +638,6 @@ std::unique_ptr<TrCall> tr_create_conventional_call(
         analog_rec->set_tau(system->get_tau());
         rec = analog_rec;
         call->set_recorder(rec);
-        config.event_sink->setup_recorder(rec);
     } else if (sys_type == SYS_CONVENTIONAL_DMR) {
         rec = source->create_dmr_conventional_recorder(tb);
         call->set_recorder(rec);
@@ -694,12 +671,11 @@ std::unique_ptr<TrCall> tr_create_conventional_call(
 // ── Phase C: Call Management — lifecycle operations ──
 
 std::unique_ptr<TrCall> tr_context_create_call(TrContext &ctx, const TrTrunkMessage &msg) {
-    auto cpp_msg = convert_trunk_message_back(msg);
     auto sys = find_system_by_num(ctx, msg.sys_num);
     if (!sys) {
         throw std::runtime_error("System not found for sys_num");
     }
-    auto call = Call::make(cpp_msg, sys, ctx.impl->trunk_ctx.config);
+    auto call = Call::make(sys);
     return std::make_unique<TrCall>(call);
 }
 
@@ -731,7 +707,6 @@ bool tr_source_start_recording(TrContext &ctx, int32_t source_idx, TrCall &call,
 
     call.ptr->set_recorder(recorder);
     recorder->set_system(call.ptr->get_system());
-    config.event_sink->setup_recorder(recorder);
 
     // Debug recorder
     auto debug_recorder = source->get_debug_recorder();
@@ -739,7 +714,6 @@ bool tr_source_start_recording(TrContext &ctx, int32_t source_idx, TrCall &call,
         debug_recorder->start(rc);
         call.ptr->set_debug_recorder(debug_recorder);
         call.ptr->set_debug_recording(true);
-        config.event_sink->setup_recorder(debug_recorder);
     }
 
     // SigMF recorder
@@ -748,7 +722,6 @@ bool tr_source_start_recording(TrContext &ctx, int32_t source_idx, TrCall &call,
         sigmf_recorder->start(rc);
         call.ptr->set_sigmf_recorder(sigmf_recorder);
         call.ptr->set_sigmf_recording(true);
-        config.event_sink->setup_recorder(sigmf_recorder);
     }
 
     return true;
@@ -814,10 +787,6 @@ void call_recorder_set_source(TrCall &call, int64_t src) {
     if (rec) rec->set_source(src);
 }
 
-void call_set_freq(TrCall &call, double freq) {
-    call.ptr->set_freq(freq);
-}
-
 // ── Phase C: Call Management — call-level recorder accessors ──
 
 double call_recorder_since_last_write_secs(const TrCall &call) {
@@ -832,16 +801,6 @@ void call_process_recorder_queue(const TrCall &call) {
     auto recorder = call.ptr->get_recorder();
     if (!recorder) return;
     recorder->process_message_queues();
-}
-
-// ── Recorder setup notification (Rust calls this to fire setup_recorder through event_sink) ──
-// Needed because Rust doesn't have direct access to the C++ recorder shared_ptr.
-
-void call_notify_setup_recorder(TrContext &ctx, const TrCall &call) {
-    auto recorder = call.ptr->get_recorder();
-    if (recorder) {
-        ctx.impl->trunk_ctx.config.event_sink->setup_recorder(recorder);
-    }
 }
 
 } // namespace trunk_oxide

@@ -267,12 +267,9 @@ pub mod ffi {
         pub short_name: String,
         pub system_type: String,
         pub qpsk_mod: bool,
-        pub squelch_db: f64,
         pub analog_levels: f64,
-        pub digital_levels: f64,
         pub tau: f64,
         pub max_dev: i32,
-        pub filter_width: f64,
         pub decode_mdc: bool,
         pub decode_fsync: bool,
         pub decode_star: bool,
@@ -319,13 +316,6 @@ pub mod ffi {
         // Accessor wrappers are free functions defined in bridge.h/bridge.cpp.
         type TrCall;
         type TrSystem;
-        type TrRecorder;
-        // ── Call accessors ──
-        fn call_get_freq_error(call: &TrCall) -> i32;
-
-        // ── Recorder accessors ──
-        fn recorder_get_num(rec: &TrRecorder) -> i32;
-        fn recorder_get_freq_error(rec: &TrRecorder) -> i32;
 
         // ── Opaque lifecycle type ──
         type TrContext;
@@ -375,7 +365,7 @@ pub mod ffi {
         fn call_set_rust_call_id(call: Pin<&mut TrCall>, id: u64);
 
         // ── Call — lifecycle ──
-        fn call_restart(call: Pin<&mut TrCall>);
+        fn call_restart(call: Pin<&mut TrCall>, cfg: &TrRecorderConfig);
         fn call_start_initial_recording(call: Pin<&mut TrCall>, cfg: &TrRecorderConfig);
         fn call_set_recorder_enabled(call: Pin<&mut TrCall>, enabled: bool);
 
@@ -415,10 +405,6 @@ pub mod ffi {
 
         // ── Phase C: Call Management — update source tracking ──
         fn call_recorder_set_source(call: Pin<&mut TrCall>, src: i64);
-        fn call_set_freq(call: Pin<&mut TrCall>, freq: f64);
-
-        // ── Recorder setup notification (extracts recorder from call, fires through event_sink) ──
-        fn call_notify_setup_recorder(ctx: Pin<&mut TrContext>, call: &TrCall);
 
         // ── Event channel wiring ──
         fn tr_context_set_event_notifier(ctx: Pin<&mut TrContext>, notifier: Box<EventNotifier>);
@@ -438,7 +424,6 @@ pub mod ffi {
             rust_call_id: u64,
             samples: &[i16],
         );
-        fn event_handler_setup_recorder(handler: &EventHandlerBox, recorder: &TrRecorder);
         fn event_handler_unit_alias_discovered(
             handler: &EventHandlerBox,
             system: &TrSystem,
@@ -594,11 +579,10 @@ pub struct SystemInfo {
     pub decode_rate: i32,
 }
 
-/// Trait for the 3 C++-initiated callbacks that come through cxx trampolines.
+/// Trait for C++-initiated callbacks that come through cxx trampolines.
 /// All methods take `&self` — no mutex needed.
 pub trait CxxCallbacks: Send + Sync {
     fn audio_stream(&self, rust_call_id: u64, samples: &[i16]);
-    fn setup_recorder(&self, recorder: &ffi::TrRecorder);
     fn unit_alias_discovered(
         &self,
         system: &ffi::TrSystem,
@@ -626,7 +610,7 @@ fn drop_event_handler_box(_handler: Box<EventHandlerBox>) {
 }
 
 // ── Trampoline functions for C++-initiated callbacks ──
-// Only 3 remain: audio_stream, setup_recorder, unit_alias_discovered.
+// Only 2 remain: audio_stream, unit_alias_discovered.
 // All other events are fired directly from Rust without FFI.
 
 fn event_handler_audio_stream(
@@ -635,10 +619,6 @@ fn event_handler_audio_stream(
     samples: &[i16],
 ) {
     handler.inner.audio_stream(rust_call_id, samples);
-}
-
-fn event_handler_setup_recorder(handler: &EventHandlerBox, recorder: &ffi::TrRecorder) {
-    handler.inner.setup_recorder(recorder);
 }
 
 fn event_handler_unit_alias_discovered(

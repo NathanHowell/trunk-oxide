@@ -50,18 +50,6 @@ struct TrSystem final {
     explicit TrSystem(const std::shared_ptr<System> &p) : ptr(p) {}
 };
 
-struct TrRecorder final {
-    std::shared_ptr<Recorder> ptr;
-    explicit TrRecorder(const std::shared_ptr<Recorder> &p) : ptr(p) {}
-};
-
-// ── Call accessor wrappers ──
-int32_t call_get_freq_error(const TrCall &call);
-
-// ── Recorder accessor wrappers ──
-int32_t recorder_get_num(const TrRecorder &rec);
-int32_t recorder_get_freq_error(const TrRecorder &rec);
-
 // ── Opaque lifecycle type (pimpl) ──
 struct TrContextImpl;
 struct TrContext {
@@ -123,14 +111,12 @@ bool call_has_recorder(const TrCall &call);
 void call_set_rust_call_id(TrCall &call, uint64_t id);
 
 // ── Call — lifecycle ──
-void call_restart(TrCall &call);
+void call_restart(TrCall &call, const TrRecorderConfig &cfg);
 void call_start_initial_recording(TrCall &call, const TrRecorderConfig &cfg);
 void call_set_recorder_enabled(TrCall &call, bool enabled);
 std::unique_ptr<TrCall> tr_create_conventional_call(
     TrContext &ctx, int32_t sys_num, int32_t source_idx,
     const TrChannelConfig &channel);
-
-// ── Call — recorder accessors ──
 
 // ── Call — creation and recording ──
 std::unique_ptr<TrCall> tr_context_create_call(TrContext &ctx, const TrTrunkMessage &msg);
@@ -144,15 +130,11 @@ rust::Vec<TrTransmission> call_get_transmission_list(const TrCall &call);
 rust::Vec<TrTransmission> call_get_dmr_transmission_list(const TrCall &call, int32_t slot);
 int32_t call_get_recorder_num(const TrCall &call);
 
-// ── Call — source/freq updates ──
+// ── Call — source updates ──
 void call_recorder_set_source(TrCall &call, int64_t src);
-void call_set_freq(TrCall &call, double freq);
 
 // ── Call — recorder queue processing ──
 double call_recorder_since_last_write_secs(const TrCall &call);
 void call_process_recorder_queue(const TrCall &call);
-
-// ── Recorder setup notification ──
-void call_notify_setup_recorder(TrContext &ctx, const TrCall &call);
 
 } // namespace trunk_oxide

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use opentelemetry::KeyValue;
 use serenity::model::id::ChannelId;
 use tokio::sync::{Mutex, mpsc};
 use tonic::Streaming;
@@ -19,6 +20,7 @@ use crate::channel_manager::ChannelLookup;
 use crate::discord::DiscordClient;
 use crate::dispatcher_state::{CallKey, DispatchEffect, DispatcherState};
 use crate::grpc_whisperer::WhispererConnection;
+use crate::metrics::Metrics;
 
 /// How often to check for stuck calls.
 const REAP_INTERVAL: Duration = Duration::from_secs(60);
@@ -46,6 +48,7 @@ pub struct DispatchContext {
     channel_lookup: ChannelLookup,
     db: Arc<Mutex<Database>>,
     db_path: PathBuf,
+    metrics: Arc<Metrics>,
 }
 
 /// Single-owner pump loop. Owns `DispatcherState` directly — no Mutex.
@@ -74,6 +77,7 @@ impl DispatchPump {
         coalesce_timeout_ms: u64,
         db: Arc<Mutex<Database>>,
         db_path: PathBuf,
+        metrics: Arc<Metrics>,
     ) -> Self {
         let (resolve_tx, resolve_rx) = mpsc::channel(64);
 
@@ -95,6 +99,7 @@ impl DispatchPump {
                 channel_lookup,
                 db,
                 db_path,
+                metrics,
             }),
             resolve_tx,
             resolve_rx,
@@ -164,12 +169,14 @@ impl DispatchPump {
                 .on_channel_resolved(result.call, post_channel);
             self.process_effects(effects).await;
         } else {
+            self.ctx.metrics.channel_resolution_failures.add(1, &[]);
             self.state.on_channel_resolution_failed(&result.key);
             self.calls.remove(&result.key);
             self.pending_rx.remove(&result.key);
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn process_effects(&mut self, effects: Vec<DispatchEffect>) {
         for effect in effects {
             match effect {
@@ -184,6 +191,10 @@ impl DispatchPump {
                             sample_rate,
                         })
                     {
+                        self.ctx.metrics.audio_packets_dropped.add(
+                            1,
+                            &[KeyValue::new("talkgroup", key.talkgroup.0)],
+                        );
                         tracing::warn!(talkgroup = key.talkgroup.0, "audio packet dropped: {e}");
                     }
                 }
@@ -192,6 +203,10 @@ impl DispatchPump {
                     if let Some(active) = self.calls.get(&key)
                         && let Err(e) = active.tx.try_send(CallMessage::Event(text))
                     {
+                        self.ctx.metrics.events_dropped.add(
+                            1,
+                            &[KeyValue::new("talkgroup", key.talkgroup.0)],
+                        );
                         tracing::warn!(talkgroup = key.talkgroup.0, "event dropped: {e}");
                     }
                 }
@@ -203,6 +218,7 @@ impl DispatchPump {
                 }
 
                 DispatchEffect::ReapCall { key } => {
+                    self.ctx.metrics.calls_reaped.add(1, &[]);
                     if let Some(active) = self.calls.remove(&key) {
                         let _ = active.tx.try_send(CallMessage::End(None));
                     }
@@ -271,6 +287,15 @@ impl DispatchPump {
                 }
             }
         }
+
+        self.ctx
+            .metrics
+            .active_calls
+            .record(self.state.active_call_count() as u64, &[]);
+        self.ctx
+            .metrics
+            .coalescing_calls
+            .record(self.state.coalescing_call_count() as u64, &[]);
     }
 
     async fn spawn_call_handler(
@@ -337,6 +362,7 @@ impl DispatchPump {
             post_channel,
             Arc::clone(&self.ctx.db),
             call_row_id,
+            Arc::clone(&self.ctx.metrics),
         ) {
             Ok(h) => h,
             Err(e) => {
@@ -374,6 +400,15 @@ impl DispatchPump {
 
 impl DispatchContext {
     async fn resolve_channel(&self, call: &proto::CallInfo) -> Option<ChannelId> {
+        let start = std::time::Instant::now();
+        let result = self.resolve_channel_inner(call).await;
+        self.metrics
+            .channel_resolution_duration
+            .record(start.elapsed().as_secs_f64(), &[]);
+        result
+    }
+
+    async fn resolve_channel_inner(&self, call: &proto::CallInfo) -> Option<ChannelId> {
         let talkgroup = Talkgroup(call.talkgroup);
         let sys_num = SysNum(call.sys_num);
 

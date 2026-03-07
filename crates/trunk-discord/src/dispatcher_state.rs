@@ -338,6 +338,14 @@ impl DispatcherState {
         effects
     }
 
+    pub fn active_call_count(&self) -> usize {
+        self.active_calls.len()
+    }
+
+    pub fn coalescing_call_count(&self) -> usize {
+        self.coalescing_calls.len()
+    }
+
     #[cfg(test)]
     pub fn is_active(&self, key: &CallKey) -> bool {
         self.active_calls.contains_key(key)

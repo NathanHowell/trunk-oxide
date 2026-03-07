@@ -2,15 +2,21 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
+use opentelemetry::metrics::{Counter, Histogram};
 use tokio::sync::Semaphore;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 pub struct Transcriber {
     contexts: Vec<Arc<WhisperContext>>,
     semaphore: Arc<Semaphore>,
+    max_concurrent: usize,
     next_gpu: AtomicUsize,
     language: String,
     beam_size: i32,
+    transcription_duration: Histogram<f64>,
+    audio_input_duration: Histogram<f64>,
+    transcriptions_completed: Counter<u64>,
+    transcription_errors: Counter<u64>,
 }
 
 impl Transcriber {
@@ -41,22 +47,50 @@ impl Transcriber {
             if config.beam_size > 0 { "beam search" } else { "greedy" }
         );
 
+        let meter = opentelemetry::global::meter(env!("CARGO_PKG_NAME"));
+
         Ok(Self {
             contexts,
             semaphore: Arc::new(Semaphore::new(config.max_concurrent)),
+            max_concurrent: config.max_concurrent,
             next_gpu: AtomicUsize::new(0),
             language: config.language.clone(),
             beam_size: config.beam_size,
+            transcription_duration: meter
+                .f64_histogram("trunk.whisperer.transcription_duration_seconds")
+                .build(),
+            audio_input_duration: meter
+                .f64_histogram("trunk.whisperer.audio_input_duration_seconds")
+                .build(),
+            transcriptions_completed: meter
+                .u64_counter("trunk.whisperer.transcriptions_completed")
+                .build(),
+            transcription_errors: meter
+                .u64_counter("trunk.whisperer.transcription_errors")
+                .build(),
         })
     }
 
+    pub const fn semaphore(&self) -> &Arc<Semaphore> {
+        &self.semaphore
+    }
+
+    pub const fn max_concurrent(&self) -> usize {
+        self.max_concurrent
+    }
+
     pub async fn transcribe(&self, audio: Vec<f32>) -> Result<String> {
+        #[allow(clippy::cast_precision_loss)]
+        self.audio_input_duration
+            .record(audio.len() as f64 / 16000.0, &[]);
+
         let permit = Arc::clone(&self.semaphore).acquire_owned().await?;
         let gpu_idx = self.next_gpu.fetch_add(1, Ordering::Relaxed) % self.contexts.len();
         let ctx = Arc::clone(&self.contexts[gpu_idx]);
         let language = self.language.clone();
 
         let beam_size = self.beam_size;
+        let start = std::time::Instant::now();
         let result = tokio::task::spawn_blocking(move || {
             let mut state = ctx.create_state()?;
 
@@ -88,8 +122,19 @@ impl Transcriber {
             drop(permit);
             Ok::<String, anyhow::Error>(text)
         })
-        .await??;
+        .await?;
+        let elapsed = start.elapsed().as_secs_f64();
+        self.transcription_duration.record(elapsed, &[]);
 
-        Ok(result)
+        match result {
+            Ok(text) => {
+                self.transcriptions_completed.add(1, &[]);
+                Ok(text)
+            }
+            Err(e) => {
+                self.transcription_errors.add(1, &[]);
+                Err(e)
+            }
+        }
     }
 }

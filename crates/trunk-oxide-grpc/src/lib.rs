@@ -286,6 +286,14 @@ impl EventBridge {
         (bridge, tx)
     }
 
+    pub fn broadcast_depth(&self) -> usize {
+        self.tx.len()
+    }
+
+    pub const fn broadcast_capacity(&self) -> usize {
+        4096
+    }
+
     fn call_info_from(&self, info: &TrCallInfo) -> proto::CallInfo {
         let meta = self
             .talkgroups

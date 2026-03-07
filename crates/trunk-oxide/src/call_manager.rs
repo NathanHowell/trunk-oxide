@@ -4,6 +4,8 @@ use std::pin::Pin;
 use std::time::Instant;
 
 use cxx::UniquePtr;
+use opentelemetry::KeyValue;
+use opentelemetry::metrics::{Counter, Gauge};
 use trunk_recorder_sys::SystemInfo;
 use trunk_recorder_sys::ffi::{
     self, TrCall, TrCallData, TrCallDataStatus, TrContext, TrMessageType, TrRecorderConfig,
@@ -57,6 +59,11 @@ pub struct CallManager {
     handles: HashMap<CallId, UniquePtr<TrCall>>,
     /// Per-source frequency coverage, indexed by source position.
     source_ranges: Vec<RangeInclusive<f64>>,
+    calls_started: Counter<u64>,
+    calls_ended: Counter<u64>,
+    recorder_denied: Counter<u64>,
+    decode_rate_gauge: Gauge<i64>,
+    active_calls_gauge: Gauge<u64>,
 }
 
 impl CallManager {
@@ -65,11 +72,32 @@ impl CallManager {
         bridge: Arc<EventBridge>,
         source_ranges: Vec<RangeInclusive<f64>>,
     ) -> Self {
+        let meter = opentelemetry::global::meter("trunk-oxide");
         Self {
             state: TrunkStateMachine::new(config),
             bridge,
             handles: HashMap::new(),
             source_ranges,
+            calls_started: meter
+                .u64_counter("trunk.oxide.calls_started")
+                .with_description("Total calls started")
+                .build(),
+            calls_ended: meter
+                .u64_counter("trunk.oxide.calls_ended")
+                .with_description("Total calls ended")
+                .build(),
+            recorder_denied: meter
+                .u64_counter("trunk.oxide.recorder_denied")
+                .with_description("Calls denied a recorder")
+                .build(),
+            decode_rate_gauge: meter
+                .i64_gauge("trunk.oxide.decode_rate")
+                .with_description("Control channel decode rate (msg/sec)")
+                .build(),
+            active_calls_gauge: meter
+                .u64_gauge("trunk.oxide.active_calls")
+                .with_description("Number of active calls")
+                .build(),
         }
     }
 
@@ -180,11 +208,15 @@ impl CallManager {
                 }
                 Effect::EmitCallStart { call_id } => {
                     if let Some(entry) = self.state.get_call(call_id) {
+                        self.calls_started.add(1, &[KeyValue::new("sys_num", i64::from(entry.sys_num))]);
                         let info = self.build_call_info(entry);
                         self.bridge.call_start(&info);
                     }
                 }
                 Effect::EmitCallEnd { call_id } => {
+                    if let Some(entry) = self.state.get_call(call_id) {
+                        self.calls_ended.add(1, &[KeyValue::new("sys_num", i64::from(entry.sys_num))]);
+                    }
                     self.exec_conclude_call(call_id);
                 }
                 Effect::EmitCallsActive => {
@@ -369,6 +401,12 @@ impl CallManager {
             RecordingResult::NoSource
         };
 
+        if matches!(result, RecordingResult::NoRecorder | RecordingResult::NoSource)
+            && let Some(entry) = self.state.get_call(call_id)
+        {
+            self.recorder_denied.add(1, &[KeyValue::new("sys_num", i64::from(entry.sys_num))]);
+        }
+
         let followup = self.state.on_recording_result(call_id, result);
         self.process_effects(followup, ctx);
     }
@@ -552,6 +590,7 @@ impl CallManager {
         let effects = self.state.tick();
         self.process_effects(effects, &mut ctx);
 
+        self.active_calls_gauge.record(self.state.calls.len() as u64, &[]);
     }
 
     pub fn add_call(
@@ -766,6 +805,7 @@ impl CallManager {
                 let count = self.state.message_counts.remove(&sys_num).unwrap_or(0);
                 let decode_rate = (count as f32 / time_diff).floor() as i32;
                 self.state.decode_rates.insert(sys_num, decode_rate);
+                self.decode_rate_gauge.record(i64::from(decode_rate), &[KeyValue::new("sys_num", i64::from(sys_num))]);
                 info.decode_rate = decode_rate;
                 info.message_count = count;
             }

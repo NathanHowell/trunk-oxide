@@ -8,6 +8,7 @@ mod dispatcher;
 mod dispatcher_state;
 mod grpc_oxide;
 mod grpc_whisperer;
+mod metrics;
 mod ogg_encoder;
 mod resampler;
 mod tone_detect;
@@ -226,6 +227,9 @@ async fn main() -> Result<()> {
         Arc::clone(&db),
     ));
 
+    let meter = opentelemetry::global::meter("trunk-discord");
+    let metrics = Arc::new(metrics::Metrics::new(&meter));
+
     let pump = dispatcher::DispatchPump::new(
         whisperer,
         Arc::clone(&discord_client),
@@ -239,6 +243,7 @@ async fn main() -> Result<()> {
         config.audio.coalesce_timeout_ms,
         Arc::clone(&db),
         args.db_path,
+        metrics,
     );
 
     discord_client

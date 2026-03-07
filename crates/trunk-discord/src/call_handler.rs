@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use opentelemetry::KeyValue;
 use proto::types::CallRowId;
 use serenity::all::{CreateEmbed, CreateEmbedFooter};
 use serenity::model::id::{ChannelId, MessageId};
@@ -12,6 +13,7 @@ use trunk_database::Database;
 use crate::call_state::{CallEffect, CallState, CallStateConfig, EmbedData};
 use crate::discord::DiscordClient;
 use crate::grpc_whisperer::WhispererConnection;
+use crate::metrics::Metrics;
 use crate::ogg_encoder::OggOpusEncoder;
 use crate::resampler::Resampler;
 use crate::tone_detect::{DetectedTone, NotchFilter, ToneDetector};
@@ -47,7 +49,8 @@ pub struct CallHandler {
 
     embed_message_id: Option<MessageId>,
 
-    // Database
+    metrics: Arc<Metrics>,
+
     db: Arc<Mutex<Database>>,
     call_row_id: Option<CallRowId>,
 }
@@ -63,6 +66,7 @@ impl CallHandler {
         post_channel: ChannelId,
         db: Arc<Mutex<Database>>,
         call_row_id: Option<CallRowId>,
+        metrics: Arc<Metrics>,
     ) -> Result<Self> {
         let detect_ctcss = config.tone_detection && call_info.is_conventional;
         let tone_detector = if config.tone_detection {
@@ -104,6 +108,7 @@ impl CallHandler {
             post_channel,
             ogg_encoder,
             embed_message_id: None,
+            metrics,
             db,
             call_row_id,
         })
@@ -154,6 +159,7 @@ impl CallHandler {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn process_effects(&mut self, effects: Vec<CallEffect>) -> Result<()> {
         // Use a queue to avoid async recursion (Transcribe → on_transcription → EditEmbed)
         let mut queue: std::collections::VecDeque<CallEffect> = effects.into();
@@ -161,26 +167,42 @@ impl CallHandler {
             match effect {
                 CallEffect::SendEmbed { embed } => {
                     let serenity_embed = embed_data_to_serenity(&embed);
+                    let start = std::time::Instant::now();
                     let msg_id = self
                         .discord
                         .send_embed(self.post_channel, serenity_embed)
                         .await?;
+                    self.metrics.discord_api_duration.record(
+                        start.elapsed().as_secs_f64(),
+                        &[KeyValue::new("operation", "send_embed")],
+                    );
                     self.embed_message_id = Some(msg_id);
                 }
                 CallEffect::EditEmbed { embed } => {
                     if let Some(msg_id) = self.embed_message_id {
                         let serenity_embed = embed_data_to_serenity(&embed);
+                        let start = std::time::Instant::now();
                         self.discord
                             .edit_embed(self.post_channel, msg_id, serenity_embed)
                             .await?;
+                        self.metrics.discord_api_duration.record(
+                            start.elapsed().as_secs_f64(),
+                            &[KeyValue::new("operation", "edit_embed")],
+                        );
                     }
                 }
                 CallEffect::DeleteEmbed => {
-                    if let Some(msg_id) = self.embed_message_id
-                        && let Err(e) =
+                    if let Some(msg_id) = self.embed_message_id {
+                        let start = std::time::Instant::now();
+                        if let Err(e) =
                             self.discord.delete_message(self.post_channel, msg_id).await
-                    {
-                        tracing::warn!(error = %e, "failed to delete empty call embed");
+                        {
+                            tracing::warn!(error = %e, "failed to delete empty call embed");
+                        }
+                        self.metrics.discord_api_duration.record(
+                            start.elapsed().as_secs_f64(),
+                            &[KeyValue::new("operation", "delete_embed")],
+                        );
                     }
                 }
                 CallEffect::AttachAudio {
@@ -190,6 +212,7 @@ impl CallHandler {
                 } => {
                     if let Some(msg_id) = self.embed_message_id {
                         let serenity_embed = embed_data_to_serenity(&embed);
+                        let start = std::time::Instant::now();
                         if let Err(e) = self
                             .discord
                             .edit_embed_with_attachment(
@@ -203,14 +226,20 @@ impl CallHandler {
                         {
                             tracing::warn!(error = %e, "failed to attach audio to call embed");
                         }
+                        self.metrics.discord_api_duration.record(
+                            start.elapsed().as_secs_f64(),
+                            &[KeyValue::new("operation", "attach_audio")],
+                        );
                     }
                 }
                 CallEffect::Transcribe { audio } => {
                     if !audio.is_empty() {
+                        let start = std::time::Instant::now();
                         let text = self.whisperer.transcribe(audio).await?;
+                        self.metrics
+                            .transcription_duration
+                            .record(start.elapsed().as_secs_f64(), &[]);
                         let followup = self.state.on_transcription(&text);
-                        // on_transcription never emits Transcribe, so this won't loop.
-                        // Insert at front to preserve ordering relative to remaining effects.
                         for (i, e) in followup.into_iter().enumerate() {
                             queue.insert(i, e);
                         }

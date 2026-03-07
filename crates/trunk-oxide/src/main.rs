@@ -124,15 +124,35 @@ fn main() -> Result<()> {
     // Single runtime for gRPC server, timers, and signal handling
     let rt = tokio::runtime::Runtime::new()?;
 
-    // Register observable gauge for event channel depth
     if meter_provider.is_some() {
         let depth = recorder.event_channel_depth();
         let meter = opentelemetry::global::meter(env!("CARGO_PKG_NAME"));
-        let _gauge = meter
-            .u64_observable_gauge("trunk.event_channel.depth")
+        let _depth_gauge = meter
+            .u64_observable_gauge("trunk.oxide.event_channel.depth")
             .with_description("Number of GR events queued but not yet consumed")
+            .with_callback({
+                let depth = Arc::clone(&depth);
+                move |observer| {
+                    observer.observe(depth.load(Ordering::Relaxed) as u64, &[]);
+                }
+            })
+            .build();
+        let _utilization_gauge = meter
+            .f64_observable_gauge("trunk.oxide.event_channel.utilization")
+            .with_description("Event channel utilization (0.0-1.0)")
             .with_callback(move |observer| {
-                observer.observe(depth.load(Ordering::Relaxed) as u64, &[]);
+                observer.observe(depth.load(Ordering::Relaxed) as f64 / 256.0, &[]);
+            })
+            .build();
+
+        let bridge_for_gauge = Arc::clone(&bridge);
+        let _broadcast_util = meter
+            .f64_observable_gauge("trunk.oxide.broadcast.utilization")
+            .with_description("Broadcast channel utilization (0.0-1.0)")
+            .with_callback(move |observer| {
+                let depth = bridge_for_gauge.broadcast_depth();
+                let cap = bridge_for_gauge.broadcast_capacity();
+                observer.observe(depth as f64 / cap as f64, &[]);
             })
             .build();
     }

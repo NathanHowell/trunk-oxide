@@ -20,6 +20,8 @@ pub enum CallMessage {
     Audio { samples: Vec<u8>, sample_rate: i32 },
     Event(String),
     End(Option<Box<proto::CallData>>),
+    PttEnd(Option<Box<proto::CallData>>),
+    PttStart(Box<proto::CallInfo>),
 }
 
 #[derive(Clone, Copy)]
@@ -35,7 +37,7 @@ pub struct CallHandler {
     rx: mpsc::Receiver<CallMessage>,
     whisperer: WhispererConnection,
     discord: Arc<DiscordClient>,
-    buffer_duration_ms: u64,
+    config: CallHandlerConfig,
     audio_buffer: Vec<f32>,
     resampler: Option<Resampler>,
     tone_detector: Option<ToneDetector>,
@@ -79,10 +81,7 @@ impl CallHandler {
             None
         };
 
-        let buffer_duration_ms = config.buffer_duration_ms;
-        let buffer_threshold = usize::try_from(buffer_duration_ms)
-            .unwrap_or(usize::MAX)
-            .saturating_mul(16);
+        let buffer_threshold = buffer_threshold(config.buffer_duration_ms);
 
         let state = CallState::new(
             call_info,
@@ -97,7 +96,7 @@ impl CallHandler {
             rx,
             whisperer,
             discord,
-            buffer_duration_ms,
+            config,
             audio_buffer: Vec::new(),
             resampler: None,
             tone_detector,
@@ -132,6 +131,17 @@ impl CallHandler {
                     let effects = self.state.on_event(text);
                     if let Err(e) = self.process_effects(effects).await {
                         tracing::error!(error = %e, "event posting error");
+                    }
+                }
+                CallMessage::PttEnd(call_data) => {
+                    if let Err(e) = self.handle_ptt_end(call_data).await {
+                        tracing::error!(error = %e, "PTT end handling error");
+                    }
+                }
+                CallMessage::PttStart(call_info) => {
+                    let effects = self.state.on_ptt_start(call_info.as_ref());
+                    if let Err(e) = self.process_effects(effects).await {
+                        tracing::error!(error = %e, "PTT start handling error");
                     }
                 }
                 CallMessage::End(call_data) => {
@@ -280,11 +290,12 @@ impl CallHandler {
         }
 
         let buffer_len = self.audio_buffer.len();
-        let audio_drain: Vec<f32> = if buffer_len >= self.buffer_threshold() {
-            self.audio_buffer.drain(..).collect()
-        } else {
-            Vec::new()
-        };
+        let audio_drain: Vec<f32> =
+            if buffer_len >= buffer_threshold(self.config.buffer_duration_ms) {
+                self.audio_buffer.drain(..).collect()
+            } else {
+                Vec::new()
+            };
 
         let effects = self
             .state
@@ -292,11 +303,6 @@ impl CallHandler {
         self.process_effects(effects).await?;
 
         Ok(())
-    }
-
-    fn buffer_threshold(&self) -> usize {
-        let ms = usize::try_from(self.buffer_duration_ms).unwrap_or(usize::MAX);
-        ms.saturating_mul(16)
     }
 
     async fn finish_tone_detection(&mut self) -> Result<()> {
@@ -334,6 +340,46 @@ impl CallHandler {
             let effects = self.state.on_tones_detected(tones);
             self.process_effects(effects).await?;
         }
+
+        Ok(())
+    }
+
+    /// Handle a PTT boundary within a coalesced call.
+    /// Flushes audio for transcription and marks the boundary, but keeps the handler alive.
+    async fn handle_ptt_end(&mut self, call_data: Option<Box<proto::CallData>>) -> Result<()> {
+        // Flush resampler
+        if let Some(resampler) = &mut self.resampler {
+            let mut flushed = resampler.flush()?;
+            if let Some(filter) = &mut self.notch_filter {
+                filter.process(&mut flushed);
+            }
+            if let Some(enc) = &mut self.ogg_encoder {
+                enc.process(&flushed)?;
+            }
+            self.audio_buffer.extend_from_slice(&flushed);
+        }
+
+        // Force-finish tone detection if still active (short call)
+        if self.tone_detector.is_some() {
+            self.finish_tone_detection().await?;
+        }
+
+        // Transcribe remaining audio
+        if !self.audio_buffer.is_empty() {
+            let audio: Vec<f32> = std::mem::take(&mut self.audio_buffer);
+            if !audio.is_empty() {
+                let text = self.whisperer.transcribe(audio).await?;
+                let effects = self.state.on_transcription(&text);
+                self.process_effects(effects).await?;
+            }
+        }
+
+        // Let state machine record PTT boundary
+        let effects = self.state.on_ptt_end(call_data.as_deref());
+        self.process_effects(effects).await?;
+
+        // Reset resampler for next PTT (may have different sample rate)
+        self.resampler = None;
 
         Ok(())
     }
@@ -383,6 +429,12 @@ impl CallHandler {
 
         Ok(())
     }
+}
+
+fn buffer_threshold(buffer_duration_ms: u64) -> usize {
+    usize::try_from(buffer_duration_ms)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(16)
 }
 
 fn decode_audio(bytes: &[u8]) -> Vec<f32> {

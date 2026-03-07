@@ -22,6 +22,9 @@ use crate::grpc_whisperer::WhispererConnection;
 /// How often to check for stuck calls.
 const REAP_INTERVAL: Duration = Duration::from_secs(60);
 
+/// How often to check for expired coalescing calls.
+const COALESCE_TICK_INTERVAL: Duration = Duration::from_secs(1);
+
 struct ActiveCall {
     tx: mpsc::Sender<CallMessage>,
 }
@@ -32,12 +35,9 @@ pub struct Dispatcher {
     whisperer: WhispererConnection,
     discord: Arc<DiscordClient>,
     aggregator: Arc<Aggregator>,
-    buffer_duration_ms: u64,
+    config: CallHandlerConfig,
     channel_id: ChannelId,
     channel_lookup: ChannelLookup,
-    tone_detection: bool,
-    tone_detection_duration_s: f32,
-    audio_attachment: bool,
     db: Arc<Mutex<Database>>,
     db_path: PathBuf,
 }
@@ -54,21 +54,24 @@ impl Dispatcher {
         tone_detection: bool,
         tone_detection_duration_s: f32,
         audio_attachment: bool,
+        coalesce_timeout_ms: u64,
         db: Arc<Mutex<Database>>,
         db_path: PathBuf,
     ) -> Self {
         Self {
-            state: Mutex::new(DispatcherState::new()),
+            state: Mutex::new(DispatcherState::new(coalesce_timeout_ms)),
             calls: Mutex::new(HashMap::new()),
             whisperer,
             discord,
             aggregator,
-            buffer_duration_ms,
+            config: CallHandlerConfig {
+                buffer_duration_ms,
+                tone_detection,
+                tone_detection_duration_s,
+                audio_attachment,
+            },
             channel_id,
             channel_lookup,
-            tone_detection,
-            tone_detection_duration_s,
-            audio_attachment,
             db,
             db_path,
         }
@@ -100,6 +103,26 @@ impl Dispatcher {
                 let effects = {
                     let mut state = dispatcher.state.lock().await;
                     state.on_reap_tick()
+                };
+                dispatcher.process_effects(effects).await;
+            }
+        });
+    }
+
+    pub fn spawn_coalesce_ticker(self: &Arc<Self>) {
+        // Check if coalescing is enabled by inspecting the state
+        // (if timeout is zero, on_coalesce_tick is a no-op, but skip the task entirely)
+        let dispatcher = Arc::clone(self);
+        tokio::spawn(async move {
+            // Quick check: if first tick returns nothing and we never got configured,
+            // we still run — the overhead of a 1s tick is negligible.
+            let mut interval = tokio::time::interval(COALESCE_TICK_INTERVAL);
+            interval.tick().await; // skip immediate first tick
+            loop {
+                interval.tick().await;
+                let effects = {
+                    let mut state = dispatcher.state.lock().await;
+                    state.on_coalesce_tick()
                 };
                 dispatcher.process_effects(effects).await;
             }
@@ -145,6 +168,30 @@ impl Dispatcher {
                     let active = self.calls.lock().await.remove(&key);
                     if let Some(active) = active {
                         let _ = active.tx.try_send(CallMessage::End(None));
+                    }
+                }
+
+                DispatchEffect::PttEnd { key, call_data } => {
+                    let calls = self.calls.lock().await;
+                    if let Some(active) = calls.get(&key) {
+                        let _ = active.tx.send(CallMessage::PttEnd(call_data)).await;
+                    }
+                }
+
+                DispatchEffect::CoalesceResume { key, call } => {
+                    let calls = self.calls.lock().await;
+                    if let Some(active) = calls.get(&key) {
+                        let _ = active
+                            .tx
+                            .send(CallMessage::PttStart(Box::new(call)))
+                            .await;
+                    }
+                }
+
+                DispatchEffect::CoalesceTimeout { key } => {
+                    let active = self.calls.lock().await.remove(&key);
+                    if let Some(active) = active {
+                        let _ = active.tx.send(CallMessage::End(None)).await;
                     }
                 }
 
@@ -323,12 +370,7 @@ impl Dispatcher {
             rx,
             self.whisperer.clone(),
             Arc::clone(&self.discord),
-            CallHandlerConfig {
-                buffer_duration_ms: self.buffer_duration_ms,
-                tone_detection: self.tone_detection,
-                tone_detection_duration_s: self.tone_detection_duration_s,
-                audio_attachment: self.audio_attachment,
-            },
+            self.config,
             post_channel,
             Arc::clone(&self.db),
             call_row_id,

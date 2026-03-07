@@ -102,10 +102,14 @@ pub struct CallState {
     detected_tones: Vec<DetectedTone>,
     events: Vec<String>,
     call_ended: bool,
-    call_end_duration: Option<Duration>,
-    call_end_signal: Option<SignalDb>,
     audio_energy_sum: f64,
     audio_sample_count: u32,
+
+    // PTT coalescing accumulators
+    ptt_count: u32,
+    accumulated_duration: Duration,
+    accumulated_signal_sum: f64,
+    accumulated_signal_count: u32,
 }
 
 impl CallState {
@@ -142,10 +146,12 @@ impl CallState {
             detected_tones: Vec::new(),
             events: Vec::new(),
             call_ended: false,
-            call_end_duration: None,
-            call_end_signal: None,
             audio_energy_sum: 0.0,
             audio_sample_count: 0,
+            ptt_count: 0,
+            accumulated_duration: Duration::ZERO,
+            accumulated_signal_sum: 0.0,
+            accumulated_signal_count: 0,
         }
     }
 
@@ -191,7 +197,9 @@ impl CallState {
             return vec![];
         }
 
-        if !self.transcription_text.is_empty() {
+        if !self.transcription_text.is_empty()
+            && !self.transcription_text.ends_with("---\n")
+        {
             self.transcription_text.push(' ');
         }
         self.transcription_text.push_str(text);
@@ -232,6 +240,48 @@ impl CallState {
         }
     }
 
+    /// Handle a PTT boundary within a coalesced call.
+    /// Accumulates duration/signal, inserts a separator in the transcription.
+    pub fn on_ptt_end(&mut self, call_data: Option<&proto::CallData>) -> Vec<CallEffect> {
+        self.ptt_count += 1;
+
+        if let Some(data) = call_data {
+            self.accumulated_duration += Duration::from_secs_f64(data.length);
+            if let Some(signal) = data.signal {
+                self.accumulated_signal_sum += signal;
+                self.accumulated_signal_count += 1;
+            }
+        }
+
+        // Insert PTT separator in transcription
+        if !self.transcription_text.is_empty() {
+            self.transcription_text.push_str("\n---\n");
+        }
+
+        if self.has_embed {
+            vec![CallEffect::EditEmbed {
+                embed: self.build_embed(),
+            }]
+        } else {
+            vec![]
+        }
+    }
+
+    /// Handle a new PTT starting on a coalesced call.
+    /// Resets the "ended" appearance and updates freq if it changed.
+    pub fn on_ptt_start(&mut self, call_info: &proto::CallInfo) -> Vec<CallEffect> {
+        self.call_ended = false;
+        self.freq = call_info.freq;
+
+        if self.has_embed {
+            vec![CallEffect::EditEmbed {
+                embed: self.build_embed(),
+            }]
+        } else {
+            vec![]
+        }
+    }
+
     /// Handle call end. Returns effects to finalize or delete the embed.
     ///
     /// `ogg_data` is provided by the executor if audio attachment is enabled and
@@ -242,10 +292,32 @@ impl CallState {
         ogg_data: Option<Vec<u8>>,
     ) -> Vec<CallEffect> {
         self.call_ended = true;
+
+        // Accumulate final PTT's data
         if let Some(data) = call_data {
-            self.call_end_duration = Some(Duration::from_secs_f64(data.length));
-            self.call_end_signal = data.signal.map(SignalDb);
+            self.accumulated_duration += Duration::from_secs_f64(data.length);
+            if let Some(signal) = data.signal {
+                self.accumulated_signal_sum += signal;
+                self.accumulated_signal_count += 1;
+            }
         }
+
+        // Set final duration/signal from accumulators
+        if !self.accumulated_duration.is_zero() {
+            self.call_ended = true;
+        }
+        let final_duration = if self.accumulated_duration.is_zero() {
+            None
+        } else {
+            Some(self.accumulated_duration)
+        };
+        let final_signal = if self.accumulated_signal_count > 0 {
+            Some(SignalDb(
+                self.accumulated_signal_sum / f64::from(self.accumulated_signal_count),
+            ))
+        } else {
+            None
+        };
 
         let mut effects = Vec::new();
 
@@ -267,7 +339,7 @@ impl CallState {
         // Update the embed with final state
         if self.has_embed {
             effects.push(CallEffect::EditEmbed {
-                embed: self.build_embed(),
+                embed: self.build_embed_with(final_duration, final_signal),
             });
         }
 
@@ -290,7 +362,7 @@ impl CallState {
                     self.start_time.format("%Y%m%dT%H%M%SZ"),
                 );
                 effects.push(CallEffect::AttachAudio {
-                    embed: self.build_embed(),
+                    embed: self.build_embed_with(final_duration, final_signal),
                     ogg_data,
                     filename,
                 });
@@ -299,7 +371,7 @@ impl CallState {
 
         // Persist to DB
         effects.push(CallEffect::UpdateDb {
-            update: self.build_db_update(),
+            update: self.build_db_update(final_duration, final_signal),
         });
 
         effects.push(CallEffect::Log {
@@ -333,6 +405,15 @@ impl CallState {
 
     /// Build a pure embed representation from current state.
     fn build_embed(&self) -> EmbedData {
+        self.build_embed_with(None, None)
+    }
+
+    /// Build embed with explicit final duration/signal (used at call end).
+    fn build_embed_with(
+        &self,
+        final_duration: Option<Duration>,
+        final_signal: Option<SignalDb>,
+    ) -> EmbedData {
         let title = if self.call_ended {
             self.tag.clone()
         } else {
@@ -349,7 +430,20 @@ impl CallState {
             0x0095_a5a6_u32 // grey
         };
 
-        let description = if self.transcription_text.is_empty() {
+        let description = self.build_description();
+        let fields = self.build_fields(final_duration, final_signal);
+
+        EmbedData {
+            title,
+            colour,
+            description,
+            fields,
+            footer: self.start_time.format("%H:%M:%S UTC").to_string(),
+        }
+    }
+
+    fn build_description(&self) -> Option<String> {
+        if self.transcription_text.is_empty() {
             None
         } else if self.transcription_text.len() > MAX_DESCRIPTION_LEN {
             let skip = self.transcription_text.len() - MAX_DESCRIPTION_LEN;
@@ -360,11 +454,16 @@ impl CallState {
             Some(format!("...{}", &self.transcription_text[start..]))
         } else {
             Some(self.transcription_text.clone())
-        };
+        }
+    }
 
+    fn build_fields(
+        &self,
+        final_duration: Option<Duration>,
+        final_signal: Option<SignalDb>,
+    ) -> Vec<EmbedField> {
         let mut fields = Vec::new();
 
-        // Always-present fields
         let tg_display = if self.talkgroup_alpha_tag.is_empty() {
             self.talkgroup.to_string()
         } else {
@@ -420,7 +519,22 @@ impl CallState {
             });
         }
 
-        if let Some(duration) = self.call_end_duration
+        if self.ptt_count > 1 {
+            fields.push(EmbedField {
+                name: "PTTs".into(),
+                value: format!("{}", self.ptt_count),
+                inline: true,
+            });
+        }
+
+        let duration = final_duration.or_else(|| {
+            if self.accumulated_duration.is_zero() {
+                None
+            } else {
+                Some(self.accumulated_duration)
+            }
+        });
+        if let Some(duration) = duration
             && !duration.is_zero()
         {
             fields.push(EmbedField {
@@ -430,7 +544,16 @@ impl CallState {
             });
         }
 
-        if let Some(signal) = self.call_end_signal {
+        let signal = final_signal.or_else(|| {
+            if self.accumulated_signal_count > 0 {
+                Some(SignalDb(
+                    self.accumulated_signal_sum / f64::from(self.accumulated_signal_count),
+                ))
+            } else {
+                None
+            }
+        });
+        if let Some(signal) = signal {
             fields.push(EmbedField {
                 name: "Signal".into(),
                 value: signal.to_string(),
@@ -438,20 +561,18 @@ impl CallState {
             });
         }
 
-        EmbedData {
-            title,
-            colour,
-            description,
-            fields,
-            footer: self.start_time.format("%H:%M:%S UTC").to_string(),
-        }
+        fields
     }
 
     /// Build the database update payload.
-    fn build_db_update(&self) -> CallUpdate {
+    fn build_db_update(
+        &self,
+        final_duration: Option<Duration>,
+        final_signal: Option<SignalDb>,
+    ) -> CallUpdate {
         CallUpdate {
-            duration: self.call_end_duration,
-            signal: self.call_end_signal,
+            duration: final_duration,
+            signal: final_signal,
             transcription: if self.transcription_text.is_empty() {
                 None
             } else {
@@ -801,8 +922,9 @@ mod tests {
         let mut s = make_state();
         s.on_start();
         s.call_ended = true;
-        s.call_end_duration = Some(Duration::from_secs_f64(12.3));
-        s.call_end_signal = Some(SignalDb(-18.5));
+        s.accumulated_duration = Duration::from_secs_f64(12.3);
+        s.accumulated_signal_sum = -18.5;
+        s.accumulated_signal_count = 1;
         let embed = s.build_embed();
         let dur_field = embed.fields.iter().find(|f| f.name == "Duration");
         assert_eq!(dur_field.unwrap().value, "12.3s");
@@ -832,5 +954,140 @@ mod tests {
         assert!(!is_blank_audio("hello world"));
         assert!(!is_blank_audio("the silence was deafening"));
         assert!(!is_blank_audio(""));
+    }
+
+    // ── PTT coalescing ──────────────────────────────────────────────────
+
+    #[test]
+    fn ptt_end_inserts_separator() {
+        let mut s = make_state();
+        s.on_start();
+        s.on_transcription("hello");
+        let call_data = proto::CallData {
+            length: 3.0,
+            signal: Some(-15.0),
+            ..Default::default()
+        };
+        let effects = s.on_ptt_end(Some(&call_data));
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(&effects[0], CallEffect::EditEmbed { .. }));
+        assert!(s.transcription_text.ends_with("\n---\n"));
+        assert_eq!(s.ptt_count, 1);
+    }
+
+    #[test]
+    fn ptt_start_clears_ended_state() {
+        let mut s = make_state();
+        s.on_start();
+        s.on_transcription("hello");
+        s.on_ptt_end(None);
+        s.call_ended = false; // simulating the natural state
+
+        let call_info = test_call_info();
+        let effects = s.on_ptt_start(&call_info);
+        assert_eq!(effects.len(), 1);
+        assert!(!s.call_ended);
+    }
+
+    #[test]
+    fn multi_ptt_accumulates_duration() {
+        let mut s = make_state();
+        s.on_start();
+        s.on_ptt_end(Some(&proto::CallData {
+            length: 3.0,
+            ..Default::default()
+        }));
+        let effects = s.on_end(
+            Some(&proto::CallData {
+                length: 5.0,
+                ..Default::default()
+            }),
+            None,
+        );
+        // Duration should be 3.0 + 5.0 = 8.0
+        if let Some(CallEffect::UpdateDb { update }) =
+            effects.iter().find(|e| matches!(e, CallEffect::UpdateDb { .. }))
+        {
+            assert_eq!(
+                update.duration.unwrap().as_secs_f64(),
+                8.0
+            );
+        }
+    }
+
+    #[test]
+    fn multi_ptt_averages_signal() {
+        let mut s = make_state();
+        s.on_start();
+        s.audio_energy_sum = 1.0;
+        s.audio_sample_count = 1000;
+        s.on_transcription("test");
+        s.on_ptt_end(Some(&proto::CallData {
+            length: 3.0,
+            signal: Some(-15.0),
+            ..Default::default()
+        }));
+        let effects = s.on_end(
+            Some(&proto::CallData {
+                length: 5.0,
+                signal: Some(-25.0),
+                ..Default::default()
+            }),
+            None,
+        );
+        if let Some(CallEffect::UpdateDb { update }) =
+            effects.iter().find(|e| matches!(e, CallEffect::UpdateDb { .. }))
+        {
+            let signal = update.signal.unwrap();
+            assert!((signal.0 - -20.0).abs() < f64::EPSILON);
+        }
+    }
+
+    #[test]
+    fn ptt_count_shown_in_embed() {
+        let mut s = make_state();
+        s.on_start();
+        s.on_ptt_end(None);
+        s.on_ptt_start(&test_call_info());
+        s.on_ptt_end(None);
+        s.on_ptt_start(&test_call_info());
+        // ptt_count is 2, current PTT not yet ended
+        let embed = s.build_embed();
+        let ptts_field = embed.fields.iter().find(|f| f.name == "PTTs");
+        assert_eq!(ptts_field.unwrap().value, "2");
+    }
+
+    #[test]
+    fn transcription_after_ptt_separator_no_extra_space() {
+        let mut s = make_state();
+        s.on_start();
+        s.on_transcription("first ptt");
+        s.on_ptt_end(None);
+        s.on_ptt_start(&test_call_info());
+        s.on_transcription("second ptt");
+        assert_eq!(s.transcription_text, "first ptt\n---\nsecond ptt");
+    }
+
+    #[test]
+    fn single_ptt_on_end_same_as_before() {
+        let mut s = make_state();
+        s.on_start();
+        s.on_transcription("hello");
+        s.audio_energy_sum = 1.0;
+        s.audio_sample_count = 1000;
+        let call_data = proto::CallData {
+            length: 5.5,
+            signal: Some(-20.0),
+            ..Default::default()
+        };
+        let effects = s.on_end(Some(&call_data), None);
+        if let Some(CallEffect::UpdateDb { update }) =
+            effects.iter().find(|e| matches!(e, CallEffect::UpdateDb { .. }))
+        {
+            assert_eq!(update.duration.unwrap().as_secs_f64(), 5.5);
+            assert!((update.signal.unwrap().0 - -20.0).abs() < f64::EPSILON);
+        } else {
+            panic!("expected UpdateDb");
+        }
     }
 }

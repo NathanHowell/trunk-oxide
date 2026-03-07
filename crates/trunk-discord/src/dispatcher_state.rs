@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use proto::types::{SysNum, Talkgroup};
@@ -57,6 +57,18 @@ pub enum DispatchEffect {
         call: proto::CallInfo,
         post_channel: ChannelId,
     },
+    /// PTT boundary within a coalesced call — handler stays alive.
+    PttEnd {
+        key: CallKey,
+        call_data: Option<Box<proto::CallData>>,
+    },
+    /// Resume a coalescing handler with a new PTT.
+    CoalesceResume {
+        key: CallKey,
+        call: proto::CallInfo,
+    },
+    /// Coalesce timeout expired — finalize the handler.
+    CoalesceTimeout { key: CallKey },
     /// Log a message.
     Log { message: String },
 }
@@ -64,7 +76,7 @@ pub enum DispatchEffect {
 // ── Config ───────────────────────────────────────────────────────────────────
 
 /// Maximum time a call can be active before being reaped.
-const MAX_CALL_AGE: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+const MAX_CALL_AGE: Duration = Duration::from_secs(10 * 60);
 
 // ── State machine ────────────────────────────────────────────────────────────
 
@@ -74,17 +86,21 @@ const MAX_CALL_AGE: std::time::Duration = std::time::Duration::from_secs(10 * 60
 /// and hourly rotation. Returns [`DispatchEffect`]s for the executor.
 pub struct DispatcherState {
     active_calls: HashMap<CallKey, Instant>,
+    coalescing_calls: HashMap<CallKey, Instant>,
     thread_cache: HashMap<ThreadCacheKey, ChannelId>,
     current_hour: String,
+    coalesce_timeout: Duration,
 }
 
 impl DispatcherState {
-    pub fn new() -> Self {
+    pub fn new(coalesce_timeout_ms: u64) -> Self {
         let current_hour = Utc::now().format("%Y-%m-%dT%H").to_string();
         Self {
             active_calls: HashMap::new(),
+            coalescing_calls: HashMap::new(),
             thread_cache: HashMap::new(),
             current_hour,
+            coalesce_timeout: Duration::from_millis(coalesce_timeout_ms),
         }
     }
 
@@ -175,8 +191,19 @@ impl DispatcherState {
             effects.push(DispatchEffect::RotateDb);
         }
 
-        // Emit channel resolution request — executor resolves async, then
-        // calls on_channel_resolved() which emits SpawnCallHandler.
+        let key = CallKey {
+            sys_num: SysNum(call.sys_num),
+            talkgroup: Talkgroup(call.talkgroup),
+        };
+
+        // Check if this talkgroup is coalescing (between PTTs)
+        if self.coalescing_calls.remove(&key).is_some() {
+            self.active_calls.insert(key.clone(), Instant::now());
+            effects.push(DispatchEffect::CoalesceResume { key, call });
+            return effects;
+        }
+
+        // Normal path: resolve channel and spawn handler
         effects.push(DispatchEffect::ResolveChannel { call });
 
         effects
@@ -212,14 +239,24 @@ impl DispatcherState {
             talkgroup: Talkgroup(call_data.talkgroup),
         };
 
-        if self.active_calls.remove(&key).is_some() {
-            vec![DispatchEffect::EndCall {
+        if self.active_calls.remove(&key).is_none() {
+            return vec![];
+        }
+
+        // Coalescing enabled: transition to coalescing state
+        if !self.coalesce_timeout.is_zero() {
+            self.coalescing_calls.insert(key.clone(), Instant::now());
+            return vec![DispatchEffect::PttEnd {
                 key,
                 call_data: event.call_data.map(Box::new),
-            }]
-        } else {
-            vec![]
+            }];
         }
+
+        // No coalescing: end the call immediately
+        vec![DispatchEffect::EndCall {
+            key,
+            call_data: event.call_data.map(Box::new),
+        }]
     }
 
     fn on_signal(&self, event: proto::SignalEvent) -> Vec<DispatchEffect> {
@@ -285,6 +322,25 @@ impl DispatcherState {
         effects
     }
 
+    /// Check for expired coalescing calls and finalize them.
+    pub fn on_coalesce_tick(&mut self) -> Vec<DispatchEffect> {
+        if self.coalesce_timeout.is_zero() {
+            return vec![];
+        }
+
+        let now = Instant::now();
+        let mut effects = Vec::new();
+        self.coalescing_calls.retain(|key, entered_at| {
+            if now.duration_since(*entered_at) > self.coalesce_timeout {
+                effects.push(DispatchEffect::CoalesceTimeout { key: key.clone() });
+                false
+            } else {
+                true
+            }
+        });
+        effects
+    }
+
     /// Cache a resolved thread ID.
     pub fn cache_thread(&mut self, cache_key: ThreadCacheKey, channel: ChannelId) {
         self.thread_cache.insert(cache_key, channel);
@@ -298,6 +354,11 @@ impl DispatcherState {
     #[cfg(test)]
     pub fn is_active(&self, key: &CallKey) -> bool {
         self.active_calls.contains_key(key)
+    }
+
+    #[cfg(test)]
+    pub fn is_coalescing(&self, key: &CallKey) -> bool {
+        self.coalescing_calls.contains_key(key)
     }
 
 }
@@ -388,7 +449,7 @@ mod tests {
 
     #[test]
     fn audio_for_active_call_routes() {
-        let mut s = DispatcherState::new();
+        let mut s = DispatcherState::new(0);
         let key = CallKey {
             sys_num: SysNum(1),
             talkgroup: Talkgroup(12345),
@@ -409,7 +470,7 @@ mod tests {
 
     #[test]
     fn audio_for_unknown_call_dropped() {
-        let s = DispatcherState::new();
+        let s = DispatcherState::new(0);
         let sample = proto::AudioSample {
             sys_num: 1,
             talkgroup: 12345,
@@ -423,7 +484,7 @@ mod tests {
 
     #[test]
     fn audio_with_zero_sample_rate_logs() {
-        let s = DispatcherState::new();
+        let s = DispatcherState::new(0);
         let sample = proto::AudioSample {
             sys_num: 1,
             talkgroup: 12345,
@@ -440,7 +501,7 @@ mod tests {
 
     #[test]
     fn call_start_emits_resolve_channel() {
-        let mut s = DispatcherState::new();
+        let mut s = DispatcherState::new(0);
         let effects = s.on_event(make_call_start(1, 12345));
         assert!(effects
             .iter()
@@ -455,7 +516,7 @@ mod tests {
 
     #[test]
     fn channel_resolved_registers_active_and_spawns() {
-        let mut s = DispatcherState::new();
+        let mut s = DispatcherState::new(0);
         let call = proto::CallInfo {
             sys_num: 1,
             talkgroup: 12345,
@@ -477,7 +538,7 @@ mod tests {
 
     #[test]
     fn call_end_for_active_call_removes() {
-        let mut s = DispatcherState::new();
+        let mut s = DispatcherState::new(0);
         // Simulate full lifecycle: start → resolve → end
         s.on_event(make_call_start(1, 12345));
         s.on_channel_resolved(
@@ -503,7 +564,7 @@ mod tests {
 
     #[test]
     fn call_end_for_unknown_call_no_effect() {
-        let mut s = DispatcherState::new();
+        let mut s = DispatcherState::new(0);
         let effects = s.on_event(make_call_end(1, 99999));
         assert!(!effects
             .iter()
@@ -514,7 +575,7 @@ mod tests {
 
     #[test]
     fn signal_during_active_call_routes_to_call() {
-        let mut s = DispatcherState::new();
+        let mut s = DispatcherState::new(0);
         s.on_channel_resolved(
             proto::CallInfo {
                 sys_num: 1,
@@ -544,7 +605,7 @@ mod tests {
 
     #[test]
     fn signal_without_active_call_goes_to_aggregator() {
-        let mut s = DispatcherState::new();
+        let mut s = DispatcherState::new(0);
         let event = proto::PluginEvent {
             event: Some(proto::plugin_event::Event::Signal(proto::SignalEvent {
                 call: Some(proto::CallInfo {
@@ -565,7 +626,7 @@ mod tests {
 
     #[test]
     fn unit_during_active_call_routes_to_call() {
-        let mut s = DispatcherState::new();
+        let mut s = DispatcherState::new(0);
         s.on_channel_resolved(
             proto::CallInfo {
                 sys_num: 1,
@@ -594,7 +655,7 @@ mod tests {
 
     #[test]
     fn unit_with_zero_talkgroup_goes_to_aggregator() {
-        let mut s = DispatcherState::new();
+        let mut s = DispatcherState::new(0);
         let event = proto::PluginEvent {
             event: Some(proto::plugin_event::Event::Unit(proto::UnitEvent {
                 talkgroup: 0,
@@ -615,7 +676,7 @@ mod tests {
 
     #[test]
     fn reap_removes_old_calls() {
-        let mut s = DispatcherState::new();
+        let mut s = DispatcherState::new(0);
         let key = CallKey {
             sys_num: SysNum(1),
             talkgroup: Talkgroup(12345),
@@ -632,7 +693,7 @@ mod tests {
 
     #[test]
     fn reap_keeps_fresh_calls() {
-        let mut s = DispatcherState::new();
+        let mut s = DispatcherState::new(0);
         let key = CallKey {
             sys_num: SysNum(1),
             talkgroup: Talkgroup(12345),
@@ -648,7 +709,7 @@ mod tests {
 
     #[test]
     fn calls_active_goes_to_aggregator() {
-        let mut s = DispatcherState::new();
+        let mut s = DispatcherState::new(0);
         let event = proto::PluginEvent {
             event: Some(proto::plugin_event::Event::CallsActive(
                 proto::CallsActiveEvent { calls: vec![] },
@@ -664,7 +725,7 @@ mod tests {
 
     #[test]
     fn thread_cache_round_trip() {
-        let mut s = DispatcherState::new();
+        let mut s = DispatcherState::new(0);
         let cache_key = ThreadCacheKey {
             sys_num: SysNum(1),
             talkgroup: Talkgroup(12345),
@@ -675,5 +736,152 @@ mod tests {
         assert!(s.get_cached_thread(&cache_key).is_none());
         s.cache_thread(cache_key.clone(), channel);
         assert_eq!(s.get_cached_thread(&cache_key), Some(channel));
+    }
+
+    // ── Coalescing ───────────────────────────────────────────────────────
+
+    #[test]
+    fn coalesce_off_call_end_emits_end_call() {
+        let mut s = DispatcherState::new(0);
+        s.on_channel_resolved(
+            proto::CallInfo {
+                sys_num: 1,
+                talkgroup: 12345,
+                ..Default::default()
+            },
+            ChannelId::from(999),
+        );
+        let effects = s.on_event(make_call_end(1, 12345));
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, DispatchEffect::EndCall { .. })));
+        let key = CallKey {
+            sys_num: SysNum(1),
+            talkgroup: Talkgroup(12345),
+        };
+        assert!(!s.is_coalescing(&key));
+    }
+
+    #[test]
+    fn coalesce_on_call_end_emits_ptt_end() {
+        let mut s = DispatcherState::new(10_000);
+        s.on_channel_resolved(
+            proto::CallInfo {
+                sys_num: 1,
+                talkgroup: 12345,
+                ..Default::default()
+            },
+            ChannelId::from(999),
+        );
+        let effects = s.on_event(make_call_end(1, 12345));
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, DispatchEffect::PttEnd { .. })));
+        assert!(!effects
+            .iter()
+            .any(|e| matches!(e, DispatchEffect::EndCall { .. })));
+        let key = CallKey {
+            sys_num: SysNum(1),
+            talkgroup: Talkgroup(12345),
+        };
+        assert!(!s.is_active(&key));
+        assert!(s.is_coalescing(&key));
+    }
+
+    #[test]
+    fn coalesce_call_start_during_gap_emits_resume() {
+        let mut s = DispatcherState::new(10_000);
+        // Start → resolve → end (enters coalescing)
+        s.on_channel_resolved(
+            proto::CallInfo {
+                sys_num: 1,
+                talkgroup: 12345,
+                ..Default::default()
+            },
+            ChannelId::from(999),
+        );
+        s.on_event(make_call_end(1, 12345));
+
+        let key = CallKey {
+            sys_num: SysNum(1),
+            talkgroup: Talkgroup(12345),
+        };
+        assert!(s.is_coalescing(&key));
+
+        // New CallStart while coalescing
+        let effects = s.on_event(make_call_start(1, 12345));
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, DispatchEffect::CoalesceResume { .. })));
+        assert!(!effects
+            .iter()
+            .any(|e| matches!(e, DispatchEffect::ResolveChannel { .. })));
+        assert!(s.is_active(&key));
+        assert!(!s.is_coalescing(&key));
+    }
+
+    #[test]
+    fn coalesce_timeout_fires_on_tick() {
+        let mut s = DispatcherState::new(100); // 100ms timeout
+        let key = CallKey {
+            sys_num: SysNum(1),
+            talkgroup: Talkgroup(12345),
+        };
+        // Simulate an entry that's already expired
+        s.coalescing_calls
+            .insert(key.clone(), Instant::now() - Duration::from_millis(200));
+
+        let effects = s.on_coalesce_tick();
+        assert!(effects
+            .iter()
+            .any(|e| matches!(e, DispatchEffect::CoalesceTimeout { .. })));
+        assert!(!s.is_coalescing(&key));
+    }
+
+    #[test]
+    fn coalesce_fresh_entry_not_timed_out() {
+        let mut s = DispatcherState::new(10_000);
+        let key = CallKey {
+            sys_num: SysNum(1),
+            talkgroup: Talkgroup(12345),
+        };
+        s.coalescing_calls.insert(key.clone(), Instant::now());
+
+        let effects = s.on_coalesce_tick();
+        assert!(effects.is_empty());
+        assert!(s.is_coalescing(&key));
+    }
+
+    #[test]
+    fn coalesce_tick_noop_when_disabled() {
+        let mut s = DispatcherState::new(0);
+        let key = CallKey {
+            sys_num: SysNum(1),
+            talkgroup: Talkgroup(12345),
+        };
+        // This shouldn't happen in practice, but verify it's safe
+        s.coalescing_calls.insert(key.clone(), Instant::now() - Duration::from_secs(100));
+        let effects = s.on_coalesce_tick();
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn audio_during_coalesce_gap_not_routed() {
+        let mut s = DispatcherState::new(10_000);
+        let key = CallKey {
+            sys_num: SysNum(1),
+            talkgroup: Talkgroup(12345),
+        };
+        s.coalescing_calls.insert(key, Instant::now());
+
+        let sample = proto::AudioSample {
+            sys_num: 1,
+            talkgroup: 12345,
+            samples: vec![1, 2],
+            sample_rate: 16000,
+            freq: 851_125_000.0,
+        };
+        let effects = s.on_audio(&sample);
+        assert!(effects.is_empty());
     }
 }

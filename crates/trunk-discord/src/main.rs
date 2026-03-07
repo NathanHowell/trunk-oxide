@@ -236,11 +236,15 @@ async fn main() -> Result<()> {
         config.audio.tone_detection,
         config.audio.tone_detection_duration_s,
         config.audio.audio_attachment,
+        config.audio.coalesce_timeout_ms,
         Arc::clone(&db),
         args.db_path,
     ));
 
     dispatcher.spawn_reaper();
+    if config.audio.coalesce_timeout_ms > 0 {
+        dispatcher.spawn_coalesce_ticker();
+    }
 
     discord_client
         .send_message(fallback_channel_id, "trunk-discord is now online.")

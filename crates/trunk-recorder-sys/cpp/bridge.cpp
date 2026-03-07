@@ -599,7 +599,6 @@ std::unique_ptr<TrCall> tr_create_conventional_call(
         call->set_recorder(rec);
     } else if (sys_type == SYS_CONVENTIONAL_P25) {
         rec = source->create_digital_conventional_recorder(tb);
-        rec->set_system(system);
         call->set_recorder(rec);
     } else if (sys_type == SYS_CONVENTIONAL_SIGMF) {
         rec = source->create_sigmf_conventional_recorder(tb);
@@ -607,6 +606,8 @@ std::unique_ptr<TrCall> tr_create_conventional_call(
     } else {
         return nullptr;
     }
+
+    rec->set_system(system);
 
     // Wire squelch callback — Phase 3 only covers pre-existing recorders,
     // so conventional recorders created here need it wired explicitly.

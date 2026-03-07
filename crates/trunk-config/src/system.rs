@@ -124,11 +124,7 @@ pub struct SystemConfig {
 
     // Duration limits
     #[serde(default)]
-    pub min_duration: f64,
-    #[serde(default)]
     pub max_duration: f64,
-    #[serde(default)]
-    pub min_transmission_duration: f64,
 
     // Multi-site
     #[serde(default)]

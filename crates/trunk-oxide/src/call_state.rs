@@ -470,9 +470,6 @@ pub(crate) enum Effect {
     ConventionalRestart {
         call_id: CallId,
     },
-    ConventionalStartInitial {
-        call_id: CallId,
-    },
     EnableRecorder {
         call_id: CallId,
     },
@@ -1323,27 +1320,6 @@ impl TrunkStateMachine {
         }
     }
 
-    pub(crate) fn on_conventional_start_initial(&mut self, call_id: CallId) -> Vec<Effect> {
-        let entry = match self.calls.iter_mut().find(|e| e.id == call_id) {
-            Some(e) => e,
-            None => return vec![],
-        };
-
-        let mut effects = vec![
-            Effect::ConventionalStartInitial { call_id },
-            Effect::EmitCallStart { call_id },
-        ];
-
-        if entry.signal_detection {
-            entry.state = CallState::Disabled;
-        } else {
-            entry.state = CallState::Recording;
-            effects.push(Effect::EnableRecorder { call_id });
-        }
-
-        effects
-    }
-
     // ── Squelch handling ──
 
     pub(crate) fn on_squelch(&mut self, recorder_num: RecorderNum, muted: bool, pwr_db: f64) {
@@ -1479,7 +1455,7 @@ impl TrunkStateMachine {
 
     // ── Conclude all (shutdown) ──
 
-    pub(crate) fn conclude_all(&mut self) -> Vec<Effect> {
+    pub(crate) fn conclude_all(&self) -> Vec<Effect> {
         let mut effects = Vec::new();
         for entry in &self.calls {
             if matches!(entry.state, CallState::Recording | CallState::Idle | CallState::Disabled) {
@@ -1503,7 +1479,7 @@ impl TrunkStateMachine {
 
     /// Expire a trunked call due to recorder write timeout.
     /// Returns effects to conclude and remove the call.
-    pub(crate) fn expire_call(&mut self, call_id: CallId) -> Vec<Effect> {
+    pub(crate) fn expire_call(&self, call_id: CallId) -> Vec<Effect> {
         let mut effects = Vec::new();
         if let Some(entry) = self.get_call(call_id) {
             if matches!(
@@ -1590,7 +1566,6 @@ mod tests {
             Effect::EmitSetupRecorder { .. } => "EmitSetupRecorder",
             Effect::AddControlChannel { .. } => "AddControlChannel",
             Effect::ConventionalRestart { .. } => "ConventionalRestart",
-            Effect::ConventionalStartInitial { .. } => "ConventionalStartInitial",
             Effect::EnableRecorder { .. } => "EnableRecorder",
             Effect::RemoveCall { .. } => "RemoveCall",
             Effect::Warn { .. } => "Warn",

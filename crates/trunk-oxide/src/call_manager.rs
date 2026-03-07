@@ -251,14 +251,6 @@ impl CallManager {
                         self.state.on_conventional_restarted(call_id, rec_num);
                     }
                 }
-                Effect::ConventionalStartInitial { call_id } => {
-                    if let Some(entry) = self.state.get_call(call_id) {
-                        let cfg = self.build_recorder_config(entry);
-                        if let Some(handle) = self.handles.get_mut(&call_id) {
-                            ffi::call_start_initial_recording(handle.pin_mut(), &cfg);
-                        }
-                    }
-                }
                 Effect::EnableRecorder { call_id } => {
                     if let Some(entry) = self.state.get_call(call_id) {
                         tracing::info!(

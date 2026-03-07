@@ -396,8 +396,6 @@ impl EventBridge {
             signaling_type: String::new(),
             signal_type: proto::SignalType::Normal as i32,
             call: Some(self.call_info_from(info)),
-            system: None,
-            recorder: None,
             unit_alias: self.unit_alias(info.sys_num, unit_id),
         }));
     }
@@ -490,7 +488,6 @@ impl EventBridge {
     pub fn setup_config(&self, infos: &[SystemInfo]) {
         self.send_event(proto::plugin_event::Event::SetupConfig(
             proto::SetupConfigEvent {
-                sources: vec![],
                 systems: infos.iter().map(system_info_from).collect(),
             },
         ));
@@ -558,7 +555,6 @@ impl EventBridge {
             .insert((0, radio_id), alias.to_string());
         self.send_event(proto::plugin_event::Event::UnitAlias(
             proto::UnitAliasEvent {
-                system: None,
                 radio_id,
                 alias: alias.to_string(),
                 source: source.to_string(),

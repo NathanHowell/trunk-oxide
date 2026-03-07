@@ -57,15 +57,6 @@ impl FormatEmbed for proto::SetupConfigEvent {
                 format_system_type(sys.system_type)
             );
         }
-        for src in &self.sources {
-            let _ = writeln!(
-                text,
-                "Source {}: {} @ {:.3} MHz",
-                src.src_num,
-                src.driver,
-                src.center_freq / 1_000_000.0
-            );
-        }
         text
     }
 }
@@ -520,7 +511,6 @@ mod tests {
                 system_type: 0,
                 ..Default::default()
             }],
-            sources: vec![],
         };
 
         let effects = s.on_message(AggMessage::SetupConfig(event.clone()));

@@ -66,8 +66,8 @@ message SignalEvent {
   string signaling_type = 2;
   SignalType signal_type = 3;
   CallInfo call = 4;
-  SystemInfo system = 5;
-  RecorderInfo recorder = 6;
+  reserved 5; // was system, never populated
+  reserved 6; // was recorder, never populated
   string unit_alias = 7; // OTA-discovered friendly name, if known
 }
 
@@ -372,12 +372,12 @@ message SetupSourcesEvent {
 }
 
 message SetupConfigEvent {
-  repeated SourceInfo sources = 1;
+  reserved 1; // was sources, never populated
   repeated SystemInfo systems = 2;
 }
 
 message UnitAliasEvent {
-  SystemInfo system = 1;
+  reserved 1; // was system, never populated
   int64 radio_id = 2;
   string alias = 3;
   string source = 4;

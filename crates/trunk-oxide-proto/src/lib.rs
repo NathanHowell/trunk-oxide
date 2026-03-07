@@ -167,12 +167,6 @@ mod tests {
                             freq: 772_406_250.0,
                             ..Default::default()
                         }),
-                        system: Some(SystemInfo {
-                            sys_num: 1,
-                            short_name: "smco".to_string(),
-                            ..Default::default()
-                        }),
-                        recorder: None,
                         unit_alias: String::new(),
                     })),
                 },

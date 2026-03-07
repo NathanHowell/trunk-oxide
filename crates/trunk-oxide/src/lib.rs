@@ -241,7 +241,7 @@ impl TrunkRecorderBuilder {
                             id: ch.id,
                             freq: ch.freq,
                             tone: ch.tone,
-                            squelch_db: ch.squelch_db,
+                            squelch_db: ch.squelch_db.unwrap_or(sys.squelch),
                             signal_detection: ch.signal_detection,
                         })
                         .collect(),
@@ -303,7 +303,7 @@ impl TrunkRecorderBuilder {
                         is_analog,
                         priority,
                         signal_detection: ch.signal_detection,
-                        squelch_db: ch.squelch_db,
+                        squelch_db: ch.squelch_db.unwrap_or(sys.squelch),
                         tone: ch.tone,
                     }
                 })

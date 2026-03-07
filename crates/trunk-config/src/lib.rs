@@ -535,7 +535,7 @@ alpha_tag = "Custom Ch"
         assert_eq!(sys.channel.len(), 2);
 
         let ch1 = sys.channel.iter().find(|c| c.id == 1).unwrap();
-        assert!((ch1.squelch_db - -40.0).abs() < f64::EPSILON); // overridden
+        assert_eq!(ch1.squelch_db, Some(-40.0)); // overridden
         assert_eq!(ch1.alpha_tag, "Menlo Pk PD"); // from CSV
 
         let ch99 = sys.channel.iter().find(|c| c.id == 99).unwrap();

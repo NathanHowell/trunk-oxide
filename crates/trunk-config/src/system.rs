@@ -272,8 +272,9 @@ pub struct ChannelConfig {
     pub tag: String,
     #[serde(default)]
     pub group: String,
-    #[serde(default = "default_squelch")]
-    pub squelch_db: f64,
+    /// Per-channel squelch override.  `None` inherits the system-level squelch.
+    #[serde(default)]
+    pub squelch_db: Option<f64>,
     #[serde(default)]
     pub signal_detection: bool,
 }
@@ -555,7 +556,7 @@ pub(crate) fn load_channels_csv(path: &Path) -> Result<HashMap<i64, ChannelConfi
                 description: get(col_description),
                 tag: get(col_tag),
                 group: get(col_category),
-                squelch_db: default_squelch(),
+                squelch_db: None,
                 signal_detection: true,
             },
         );
@@ -585,7 +586,7 @@ fn apply_channel_overlay(ch: &mut ChannelConfig, table: &toml::Table) {
         ch.group = v.to_string();
     }
     if let Some(v) = table.get("squelch_db").and_then(toml::Value::as_float) {
-        ch.squelch_db = v;
+        ch.squelch_db = Some(v);
     }
     if let Some(v) = table.get("signal_detection").and_then(toml::Value::as_bool) {
         ch.signal_detection = v;
@@ -624,7 +625,7 @@ pub(crate) fn resolve_channels(
             description: String::new(),
             tag: String::new(),
             group: String::new(),
-            squelch_db: default_squelch(),
+            squelch_db: None,
             signal_detection: false,
         });
 

@@ -167,9 +167,6 @@ impl CallManager {
                     self.exec_stop_recorder(call_id);
                 }
                 Effect::SetFreq { call_id, freq } => {
-                    if let Some(handle) = self.handles.get_mut(&call_id) {
-                        ffi::call_set_freq(handle.pin_mut(), freq.as_hz());
-                    }
                     self.bridge
                         .update_audio_meta_freq(call_id.as_u64(), freq.as_hz());
                 }
@@ -232,23 +229,28 @@ impl CallManager {
                     self.bridge.setup_system(&info);
                 }
                 Effect::EmitSetupRecorder { call_id } => {
-                    if let Some(handle) = self.handles.get(&call_id) {
-                        ffi::call_notify_setup_recorder(ctx.as_mut(), handle);
+                    if let Some(entry) = self.state.get_call(call_id) {
+                        if let Some(rec) = &entry.recorder {
+                            self.bridge.setup_recorder(rec.0);
+                        }
                     }
                 }
                 Effect::AddControlChannel { sys_num, freq } => {
                     ffi::tr_system_add_control_channel_runtime(ctx.as_mut(), sys_num, freq.as_hz());
                 }
                 Effect::ConventionalRestart { call_id } => {
-                    if let Some(handle) = self.handles.get_mut(&call_id) {
-                        ffi::call_restart(handle.pin_mut());
-                        // Update recorder number — C++ may assign a different one
-                        let rec_num = if ffi::call_has_recorder(&**handle) {
-                            Some(RecorderNum(ffi::call_get_recorder_num(&**handle)))
-                        } else {
-                            None
-                        };
-                        self.state.on_conventional_restarted(call_id, rec_num);
+                    if let Some(entry) = self.state.get_call(call_id) {
+                        let cfg = self.build_recorder_config(entry);
+                        if let Some(handle) = self.handles.get_mut(&call_id) {
+                            ffi::call_restart(handle.pin_mut(), &cfg);
+                            // Update recorder number — C++ may assign a different one
+                            let rec_num = if ffi::call_has_recorder(&**handle) {
+                                Some(RecorderNum(ffi::call_get_recorder_num(&**handle)))
+                            } else {
+                                None
+                            };
+                            self.state.on_conventional_restarted(call_id, rec_num);
+                        }
                     }
                 }
                 Effect::EnableRecorder { call_id } => {
@@ -820,7 +822,7 @@ impl CallManager {
             freq: entry.freq.as_hz(),
             signal: entry.signal,
             noise: entry.noise,
-            freq_error: handle.map_or(0, |h| ffi::call_get_freq_error(&**h)),
+            freq_error: 0,
             encrypted: entry.encrypted,
             emergency: entry.emergency,
             is_analog: entry.is_analog,
@@ -870,7 +872,7 @@ impl CallManager {
                 .unwrap_or_default(),
             call_num: entry.call_num,
             freq: entry.freq.as_hz(),
-            freq_error: handle.map_or(0, |h| ffi::call_get_freq_error(&**h)),
+            freq_error: 0,
             source_num: 0,
             recorder_num: entry.recorder.map_or(-1, |r| r.0),
             signal: entry.signal,

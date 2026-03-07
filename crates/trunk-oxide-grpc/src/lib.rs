@@ -5,7 +5,7 @@ use tokio::sync::broadcast;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
 use trunk_recorder_sys::ffi::{
-    TrCallData, TrCallInfo, TrRecorder, TrSystem, TrTrunkMessage, TrUnitEventType,
+    TrCallData, TrCallInfo, TrSystem, TrTrunkMessage, TrUnitEventType,
 };
 use trunk_recorder_sys::{CxxCallbacks, SystemInfo};
 
@@ -44,11 +44,10 @@ fn system_info_from(info: &SystemInfo) -> proto::SystemInfo {
     }
 }
 
-fn recorder_info(rec: &TrRecorder) -> proto::RecorderInfo {
-    use trunk_recorder_sys::ffi::{recorder_get_freq_error, recorder_get_num};
+const fn recorder_info(rec_num: i32) -> proto::RecorderInfo {
     proto::RecorderInfo {
-        id: recorder_get_num(rec),
-        freq_error: recorder_get_freq_error(rec),
+        id: rec_num,
+        freq_error: 0,
     }
 }
 
@@ -469,10 +468,10 @@ impl EventBridge {
         ));
     }
 
-    pub fn setup_recorder(&self, recorder: &TrRecorder) {
+    pub fn setup_recorder(&self, rec_num: i32) {
         self.send_event(proto::plugin_event::Event::SetupRecorder(
             proto::SetupRecorderEvent {
-                recorder: Some(recorder_info(recorder)),
+                recorder: Some(recorder_info(rec_num)),
             },
         ));
     }
@@ -571,10 +570,6 @@ impl CxxCallbacks for EventBridge {
         samples: &[i16],
     ) {
         Self::audio_stream(self, rust_call_id, samples);
-    }
-
-    fn setup_recorder(&self, recorder: &TrRecorder) {
-        Self::setup_recorder(self, recorder);
     }
 
     fn unit_alias_discovered(

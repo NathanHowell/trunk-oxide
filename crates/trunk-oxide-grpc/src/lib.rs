@@ -45,11 +45,10 @@ fn system_info_from(info: &SystemInfo) -> proto::SystemInfo {
 }
 
 fn recorder_info(rec: &TrRecorder) -> proto::RecorderInfo {
-    use trunk_recorder_sys::ffi::{recorder_get_freq_error, recorder_get_num, recorder_get_wav_hz};
+    use trunk_recorder_sys::ffi::{recorder_get_freq_error, recorder_get_num};
     proto::RecorderInfo {
         id: recorder_get_num(rec),
         freq_error: recorder_get_freq_error(rec),
-        wav_hz: recorder_get_wav_hz(rec),
     }
 }
 
@@ -286,6 +285,7 @@ pub struct AudioMeta {
     pub talkgroup: i64,
     pub sys_num: i32,
     pub freq: f64,
+    pub sample_rate: i32,
 }
 
 /// Bridges trunk-recorder events to gRPC subscribers via broadcast channels.
@@ -422,11 +422,8 @@ impl EventBridge {
     pub fn audio_stream(
         &self,
         rust_call_id: u64,
-        recorder: &TrRecorder,
         samples: &[i16],
     ) {
-        use trunk_recorder_sys::ffi::recorder_get_wav_hz;
-
         if rust_call_id == 0 {
             return;
         }
@@ -438,20 +435,12 @@ impl EventBridge {
             }
         };
         let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-        let sample_rate_i64 = recorder_get_wav_hz(recorder);
-        let Ok(sample_rate) = i32::try_from(sample_rate_i64) else {
-            tracing::warn!(
-                sample_rate = sample_rate_i64,
-                "sample rate outside i32 range; dropping audio chunk"
-            );
-            return;
-        };
         let msg = proto::AudioSample {
             talkgroup: meta.talkgroup,
             sys_num: meta.sys_num,
             freq: meta.freq,
             samples: bytes,
-            sample_rate,
+            sample_rate: meta.sample_rate,
         };
         if let Err(_e) = self.audio_tx.send(msg) {
             tracing::trace!("no audio subscribers");
@@ -583,10 +572,9 @@ impl CxxCallbacks for EventBridge {
     fn audio_stream(
         &self,
         rust_call_id: u64,
-        recorder: &TrRecorder,
         samples: &[i16],
     ) {
-        Self::audio_stream(self, rust_call_id, recorder, samples);
+        Self::audio_stream(self, rust_call_id, samples);
     }
 
     fn setup_recorder(&self, recorder: &TrRecorder) {

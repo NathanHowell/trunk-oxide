@@ -61,7 +61,6 @@ int32_t call_get_freq_error(const TrCall &call);
 // ── Recorder accessor wrappers ──
 int32_t recorder_get_num(const TrRecorder &rec);
 int32_t recorder_get_freq_error(const TrRecorder &rec);
-int64_t recorder_get_wav_hz(const TrRecorder &rec);
 
 // ── Opaque lifecycle type (pimpl) ──
 struct TrContextImpl;

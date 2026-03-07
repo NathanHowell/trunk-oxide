@@ -141,6 +141,7 @@ impl CallManager {
                     talkgroup: entry.talkgroup,
                     sys_num: entry.sys_num,
                     freq: entry.freq.as_hz(),
+                    sample_rate: if entry.is_analog { 16_000 } else { 8_000 },
                 },
             );
         }

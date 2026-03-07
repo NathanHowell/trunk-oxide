@@ -123,7 +123,6 @@ int32_t call_get_freq_error(const TrCall &call) { return call.ptr->get_freq_erro
 
 int32_t recorder_get_num(const TrRecorder &rec) { return rec.ptr->get_num(); }
 int32_t recorder_get_freq_error(const TrRecorder &rec) { return rec.ptr->get_freq_error(); }
-int64_t recorder_get_wav_hz(const TrRecorder &rec) { return rec.ptr->get_wav_hz(); }
 
 // ── Source accessor implementations ──
 
@@ -137,9 +136,8 @@ public:
     void audio_callback(const std::shared_ptr<Recorder> &recorder,
                         int16_t *samples, int sampleCount) override {
         if (!recorder) return;
-        TrRecorder tr_rec(recorder);
         rust::Slice<const int16_t> slice(samples, static_cast<size_t>(sampleCount));
-        event_handler_audio_stream(*handler_, recorder->get_rust_call_id(), tr_rec, slice);
+        event_handler_audio_stream(*handler_, recorder->get_rust_call_id(), slice);
     }
 
     void setup_recorder(const std::shared_ptr<Recorder> &recorder) override {

@@ -326,7 +326,6 @@ pub mod ffi {
         // ── Recorder accessors ──
         fn recorder_get_num(rec: &TrRecorder) -> i32;
         fn recorder_get_freq_error(rec: &TrRecorder) -> i32;
-        fn recorder_get_wav_hz(rec: &TrRecorder) -> i64;
 
         // ── Opaque lifecycle type ──
         type TrContext;
@@ -437,7 +436,6 @@ pub mod ffi {
         fn event_handler_audio_stream(
             handler: &EventHandlerBox,
             rust_call_id: u64,
-            recorder: &TrRecorder,
             samples: &[i16],
         );
         fn event_handler_setup_recorder(handler: &EventHandlerBox, recorder: &TrRecorder);
@@ -599,7 +597,7 @@ pub struct SystemInfo {
 /// Trait for the 3 C++-initiated callbacks that come through cxx trampolines.
 /// All methods take `&self` — no mutex needed.
 pub trait CxxCallbacks: Send + Sync {
-    fn audio_stream(&self, rust_call_id: u64, recorder: &ffi::TrRecorder, samples: &[i16]);
+    fn audio_stream(&self, rust_call_id: u64, samples: &[i16]);
     fn setup_recorder(&self, recorder: &ffi::TrRecorder);
     fn unit_alias_discovered(
         &self,
@@ -634,10 +632,9 @@ fn drop_event_handler_box(_handler: Box<EventHandlerBox>) {
 fn event_handler_audio_stream(
     handler: &EventHandlerBox,
     rust_call_id: u64,
-    recorder: &ffi::TrRecorder,
     samples: &[i16],
 ) {
-    handler.inner.audio_stream(rust_call_id, recorder, samples);
+    handler.inner.audio_stream(rust_call_id, samples);
 }
 
 fn event_handler_setup_recorder(handler: &EventHandlerBox, recorder: &ffi::TrRecorder) {

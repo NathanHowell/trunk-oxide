@@ -157,7 +157,7 @@ message RecorderInfo {
   reserved 3;  // was freq, now known in Rust CallEntry
   int32 freq_error = 4;
   reserved 5;  // was talkgroup, now known in Rust CallEntry
-  int64 wav_hz = 6;
+  reserved 6;  // was wav_hz, now cached in Rust AudioMeta
   reserved 7;  // was is_analog, now known in Rust CallEntry
   reserved 8;  // was is_conventional, now known in Rust CallEntry
   reserved 9;  // was is_active, now known in Rust CallEntry

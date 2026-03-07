@@ -162,7 +162,7 @@ message RecorderInfo {
   bool is_conventional = 8;
   bool is_active = 9;
   bool is_idle = 10;
-  double current_length = 11;
+  reserved 11; // was current_length, now computed in Rust
 }
 
 // ── Source info ──

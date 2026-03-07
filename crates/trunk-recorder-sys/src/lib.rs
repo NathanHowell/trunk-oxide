@@ -196,7 +196,6 @@ pub mod ffi {
 
     #[derive(Debug, Clone)]
     struct TrStopRecordingResult {
-        pub final_length: f64,
         pub freq_error: i32,
         pub recorder_pwr: f64,
         pub recorder_idle: bool,
@@ -336,7 +335,6 @@ pub mod ffi {
         fn recorder_is_conventional(rec: &TrRecorder) -> bool;
         fn recorder_is_active(rec: &TrRecorder) -> bool;
         fn recorder_is_idle(rec: &TrRecorder) -> bool;
-        fn recorder_get_current_length(rec: &TrRecorder) -> f64;
 
         // ── Opaque lifecycle type ──
         type TrContext;

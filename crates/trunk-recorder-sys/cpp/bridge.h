@@ -68,7 +68,6 @@ bool recorder_is_analog(const TrRecorder &rec);
 bool recorder_is_conventional(const TrRecorder &rec);
 bool recorder_is_active(const TrRecorder &rec);
 bool recorder_is_idle(const TrRecorder &rec);
-double recorder_get_current_length(const TrRecorder &rec);
 
 // ── Opaque lifecycle type (pimpl) ──
 struct TrContextImpl;

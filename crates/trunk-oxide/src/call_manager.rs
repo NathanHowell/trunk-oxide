@@ -450,6 +450,7 @@ impl CallManager {
                 );
 
                 let segments = self.build_proto_segments_final(call_id, final_freq, rec_num.0);
+                let recording_length = entry.recording_duration().as_secs_f64();
 
                 let elapsed = entry.start_time.elapsed().map_or(0, |d| d.as_secs() as i64);
                 tracing::info!(
@@ -457,7 +458,7 @@ impl CallManager {
                     call_num = entry.call_num,
                     talkgroup = entry.talkgroup,
                     elapsed,
-                    final_length = metrics.final_length,
+                    recording_length,
                     segments = segments.len(),
                     "concluding recorded call"
                 );
@@ -467,7 +468,7 @@ impl CallManager {
                     for slot in 0..2i32 {
                         let mut data = self.build_call_data(call_id);
                         data.tdma_slot = slot;
-                        data.length = metrics.final_length;
+                        data.length = recording_length;
                         data.freq_error = metrics.freq_error;
                         data.transmission_list =
                             ffi::call_get_dmr_transmission_list(&**handle, slot);
@@ -475,7 +476,7 @@ impl CallManager {
                     }
                 } else {
                     let mut data = self.build_call_data(call_id);
-                    data.length = metrics.final_length;
+                    data.length = recording_length;
                     data.freq_error = metrics.freq_error;
                     data.transmission_list = ffi::call_get_transmission_list(&**handle);
                     self.bridge.call_end(&data, &segments);

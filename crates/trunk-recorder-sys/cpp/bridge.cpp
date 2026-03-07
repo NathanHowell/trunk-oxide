@@ -131,7 +131,6 @@ bool recorder_is_analog(const TrRecorder &rec) { return rec.ptr->is_analog(); }
 bool recorder_is_conventional(const TrRecorder &rec) { return rec.ptr->is_conventional(); }
 bool recorder_is_active(const TrRecorder &rec) { return rec.ptr->is_active(); }
 bool recorder_is_idle(const TrRecorder &rec) { return rec.ptr->is_idle(); }
-double recorder_get_current_length(const TrRecorder &rec) { return rec.ptr->get_current_length(); }
 
 // ── Source accessor implementations ──
 
@@ -773,7 +772,6 @@ TrStopRecordingResult call_stop_recording(TrCall &call) {
         return result;  // has_recorder = false
     }
     result.has_recorder = true;
-    result.final_length = rec->get_current_length();
     result.freq_error = rec->get_freq_error();
     result.recorder_pwr = rec->get_pwr();
     result.recorder_idle = rec->is_idle();

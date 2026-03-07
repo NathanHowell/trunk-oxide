@@ -46,9 +46,9 @@ fn system_info_from(info: &SystemInfo) -> proto::SystemInfo {
 
 fn recorder_info(rec: &TrRecorder) -> proto::RecorderInfo {
     use trunk_recorder_sys::ffi::{
-        recorder_get_current_length, recorder_get_freq, recorder_get_freq_error, recorder_get_num,
-        recorder_get_talkgroup, recorder_get_wav_hz, recorder_is_active, recorder_is_analog,
-        recorder_is_conventional, recorder_is_idle,
+        recorder_get_freq, recorder_get_freq_error, recorder_get_num, recorder_get_talkgroup,
+        recorder_get_wav_hz, recorder_is_active, recorder_is_analog, recorder_is_conventional,
+        recorder_is_idle,
     };
     proto::RecorderInfo {
         id: recorder_get_num(rec),
@@ -61,7 +61,6 @@ fn recorder_info(rec: &TrRecorder) -> proto::RecorderInfo {
         is_conventional: recorder_is_conventional(rec),
         is_active: recorder_is_active(rec),
         is_idle: recorder_is_idle(rec),
-        current_length: recorder_get_current_length(rec),
     }
 }
 

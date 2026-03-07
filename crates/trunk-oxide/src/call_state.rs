@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::sync::LazyLock;
-use std::time::{Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use trunk_config::{DefaultMode, SystemType, TalkgroupMode};
 
@@ -143,6 +143,13 @@ pub(crate) struct CallSegment {
     pub(crate) start: Instant,
     pub(crate) rec_num: RecorderNum,
 }
+
+impl CallSegment {
+    pub(crate) fn duration(&self) -> Duration {
+        self.start.elapsed()
+    }
+}
+
 
 // ── Mode ──
 
@@ -373,6 +380,16 @@ impl CallEntry {
         match &self.call_mode {
             CallMode::Trunked(t) => Some(t),
             _ => None,
+        }
+    }
+
+    /// Total time spent in the Recording state: completed segments + current segment.
+    pub(crate) fn recording_duration(&self) -> Duration {
+        let completed: Duration = self.segments.iter().map(|s| s.duration()).sum();
+        if self.state == CallState::Recording {
+            completed + self.segment_start.elapsed()
+        } else {
+            completed
         }
     }
 }

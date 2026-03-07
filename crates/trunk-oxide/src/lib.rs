@@ -89,6 +89,15 @@ pub struct TrunkRecorder {
     pending: Arc<AtomicUsize>,
     /// Per-source frequency coverage, indexed by source position.
     source_ranges: Vec<RangeInclusive<f64>>,
+    /// Conventional calls created before the flowgraph starts, pending
+    /// registration with the [`CallManager`].
+    pending_conventional_calls: Vec<PendingConventionalCall>,
+}
+
+struct PendingConventionalCall {
+    call: cxx::UniquePtr<ffi::TrCall>,
+    sys_num: i32,
+    channel_idx: usize,
 }
 
 // Safety: TrContext is used exclusively from a single thread (the monitor thread).
@@ -404,49 +413,20 @@ impl TrunkRecorderBuilder {
         ffi::tr_context_set_event_notifier(self.ctx.pin_mut(), Box::new(notifier));
         ffi::tr_context_wire_event_notifiers(self.ctx.pin_mut());
 
-        ffi::tr_start_gnuradio(self.ctx.pin_mut());
-        TrunkRecorder {
-            ctx: self.ctx,
-            call_mgr_config: self.call_mgr_config,
-            bridge: self.bridge,
-            event_rx,
-            pending,
-            source_ranges: self.source_ranges,
-        }
-    }
-}
-
-impl TrunkRecorder {
-    /// Find the first source whose frequency range covers `freq_hz`.
-    fn find_source(&self, freq_hz: f64) -> Option<i32> {
-        self.source_ranges
-            .iter()
-            .position(|r| r.contains(&freq_hz))
-            .map(|i| i as i32)
-    }
-
-    /// Shared counter of events queued but not yet consumed by the monitor loop.
-    pub fn event_channel_depth(&self) -> Arc<AtomicUsize> {
-        Arc::clone(&self.pending)
-    }
-
-    /// Run the monitor loop until ctrl_c is received.
-    ///
-    /// Must be called from within a tokio runtime context (e.g. via
-    /// `Handle::block_on`). All FFI calls are made on the calling thread,
-    /// keeping `TrContext` (C++ objects) pinned.
-    pub async fn run_monitor(&mut self) -> anyhow::Result<()> {
-        let mut call_mgr = CallManager::new(
-            self.call_mgr_config.clone(),
-            self.bridge.clone(),
-            self.source_ranges.clone(),
-        );
-
-        // Create conventional calls: Rust selects source, C++ creates objects.
+        // Create conventional recorders BEFORE starting the flowgraph so the
+        // blocks are part of the initial graph topology. Adding hier_block2
+        // blocks to a running GNU Radio graph via lock/unlock crashes in
+        // block_detail::output() during the graph restart.
+        let mut pending_conventional_calls = Vec::new();
         for (&sys_num, policy) in &self.call_mgr_config.systems {
-            for channel in &policy.channels {
+            for (ch_idx, channel) in policy.channels.iter().enumerate() {
                 let freq_hz = channel.freq.as_hz();
-                let Some(source_idx) = self.find_source(freq_hz) else {
+                let Some(source_idx) = self
+                    .source_ranges
+                    .iter()
+                    .position(|r| r.contains(&freq_hz))
+                    .map(|i| i as i32)
+                else {
                     tracing::error!(
                         sys_num,
                         freq = freq_hz,
@@ -476,8 +456,51 @@ impl TrunkRecorder {
                     );
                     continue;
                 }
-                call_mgr.add_call(call, channel, sys_num);
+                pending_conventional_calls.push(PendingConventionalCall {
+                    call,
+                    sys_num,
+                    channel_idx: ch_idx,
+                });
             }
+        }
+
+        ffi::tr_start_gnuradio(self.ctx.pin_mut());
+        TrunkRecorder {
+            ctx: self.ctx,
+            call_mgr_config: self.call_mgr_config,
+            bridge: self.bridge,
+            event_rx,
+            pending,
+            source_ranges: self.source_ranges,
+            pending_conventional_calls,
+        }
+    }
+}
+
+impl TrunkRecorder {
+    /// Shared counter of events queued but not yet consumed by the monitor loop.
+    pub fn event_channel_depth(&self) -> Arc<AtomicUsize> {
+        Arc::clone(&self.pending)
+    }
+
+    /// Run the monitor loop until ctrl_c is received.
+    ///
+    /// Must be called from within a tokio runtime context (e.g. via
+    /// `Handle::block_on`). All FFI calls are made on the calling thread,
+    /// keeping `TrContext` (C++ objects) pinned.
+    pub async fn run_monitor(&mut self) -> anyhow::Result<()> {
+        let mut call_mgr = CallManager::new(
+            self.call_mgr_config.clone(),
+            self.bridge.clone(),
+            self.source_ranges.clone(),
+        );
+
+        // Register conventional calls that were pre-created before the
+        // flowgraph started (see TrunkRecorderBuilder::start).
+        for pending in self.pending_conventional_calls.drain(..) {
+            let channel = &self.call_mgr_config.systems[&pending.sys_num]
+                .channels[pending.channel_idx];
+            call_mgr.add_call(pending.call, channel, pending.sys_num);
         }
 
         let mut trunk_dedup = dedup::WindowedDedup::new(64);

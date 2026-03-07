@@ -588,10 +588,11 @@ std::unique_ptr<TrCall> tr_create_conventional_call(
 
     auto call = std::make_shared<Call_conventional>(system);
 
-    // Lock the flowgraph before modifying the running GNU Radio graph.
-    // create_conventional_recorder calls attach_detector/attach_selector which
-    // add new connections; without lock/unlock the scheduler never picks them up.
-    tb->lock();
+    // NOTE: This function must be called BEFORE tb->start(). Conventional
+    // recorders are hier_block2 subgraphs; adding them to a running GNU Radio
+    // flowgraph via lock/unlock crashes in block_detail::output() during the
+    // graph restart. By creating them before start(), they are part of the
+    // initial graph topology and no restart is needed.
 
     std::shared_ptr<Recorder> rec;
     auto sys_type = system->get_system_type();
@@ -613,11 +614,8 @@ std::unique_ptr<TrCall> tr_create_conventional_call(
         rec = source->create_sigmf_conventional_recorder(tb);
         call->set_recorder(rec);
     } else {
-        tb->unlock();
         return nullptr;
     }
-
-    tb->unlock();
 
     // Wire squelch callback — Phase 3 only covers pre-existing recorders,
     // so conventional recorders created here need it wired explicitly.

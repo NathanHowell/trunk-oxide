@@ -32,8 +32,6 @@ pub struct RecorderConfig {
     pub temp_dir: String,
     #[serde(default = "default_call_timeout")]
     pub call_timeout: f64,
-    #[serde(default = "default_control_warn_rate")]
-    pub control_warn_rate: i32,
     #[serde(default)]
     pub soft_vocoder: bool,
     #[serde(default = "default_true")]
@@ -58,9 +56,6 @@ pub struct DebugRecorderConfig {
 
 const fn default_call_timeout() -> f64 {
     3.0
-}
-const fn default_control_warn_rate() -> i32 {
-    10
 }
 const fn default_true() -> bool {
     true

@@ -16,7 +16,6 @@ pub enum AggregatorMessage {
     Signal(Box<proto::SignalEvent>),
     TrunkMessage(proto::TrunkMessageEvent),
     Unit(proto::UnitEvent),
-    SystemRates(proto::SystemRatesEvent),
     CallsActive(proto::CallsActiveEvent),
     SetupRecorder(proto::SetupRecorderEvent),
     SetupSystem(proto::SetupSystemEvent),
@@ -157,7 +156,6 @@ impl AggregatorExecutor {
                         signal_counts: snapshot.signal_counts,
                         trunk_msg_counts: snapshot.trunk_msg_counts,
                         unit_counts: snapshot.unit_counts,
-                        decode_rates: snapshot.decode_rates,
                         active_calls: snapshot.active_calls,
                     };
                     let db = self.db.lock().await;
@@ -175,7 +173,6 @@ fn convert_message(msg: AggregatorMessage) -> AggMessage {
         AggregatorMessage::Signal(e) => AggMessage::Signal(e),
         AggregatorMessage::TrunkMessage(e) => AggMessage::TrunkMessage(e),
         AggregatorMessage::Unit(e) => AggMessage::Unit(e),
-        AggregatorMessage::SystemRates(e) => AggMessage::SystemRates(e),
         AggregatorMessage::CallsActive(e) => AggMessage::CallsActive(e),
         AggregatorMessage::SetupRecorder(e) => AggMessage::SetupRecorder(e),
         AggregatorMessage::SetupSystem(e) => AggMessage::SetupSystem(e),

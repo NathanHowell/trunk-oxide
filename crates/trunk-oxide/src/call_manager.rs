@@ -62,7 +62,7 @@ pub struct CallManager {
     calls_started: Counter<u64>,
     calls_ended: Counter<u64>,
     recorder_denied: Counter<u64>,
-    decode_rate_gauge: Gauge<i64>,
+    control_channel_messages: Counter<u64>,
     active_calls_gauge: Gauge<u64>,
 }
 
@@ -90,9 +90,9 @@ impl CallManager {
                 .u64_counter("trunk.oxide.recorder_denied")
                 .with_description("Calls denied a recorder")
                 .build(),
-            decode_rate_gauge: meter
-                .i64_gauge("trunk.oxide.decode_rate")
-                .with_description("Control channel decode rate (msg/sec)")
+            control_channel_messages: meter
+                .u64_counter("trunk.oxide.control_channel_messages")
+                .with_description("Total control channel messages decoded")
                 .build(),
             active_calls_gauge: meter
                 .u64_gauge("trunk.oxide.active_calls")
@@ -543,6 +543,10 @@ impl CallManager {
     pub fn handle_message(&mut self, mut ctx: Pin<&mut TrContext>, msg: &TrTrunkMessage) {
         let rust_msg = Self::convert_message(msg);
 
+        if !matches!(rust_msg.message_type, MessageType::InvalidCcMessage) {
+            self.control_channel_messages.add(1, &[KeyValue::new("sys_num", i64::from(msg.sys_num))]);
+        }
+
         // Sysid/Status need FFI call before state machine processes them
         match rust_msg.message_type {
             MessageType::Sysid => {
@@ -697,8 +701,8 @@ impl CallManager {
             digital_levels: policy.digital_levels,
             squelch_db: policy.squelch_db,
             conversation_mode: policy.conversation_mode,
-            message_count: self.state.message_counts.get(&sys_num).copied().unwrap_or(0),
-            decode_rate: self.state.decode_rates.get(&sys_num).copied().unwrap_or(0),
+            message_count: 0,
+            decode_rate: 0,
         }
     }
 
@@ -754,21 +758,6 @@ impl CallManager {
             );
         }
 
-        tracing::info!("Control Channel Decode Rates");
-        for (&sys_num, policy) in &self.state.config.systems {
-            if policy.system_type != trunk_config::SystemType::Conventional
-                && policy.system_type != trunk_config::SystemType::ConventionalP25
-            {
-                let cc_freq = ffi::tr_system_get_current_control_channel(ctx.as_mut(), sys_num);
-                let decode_rate = self.state.decode_rates.get(&sys_num).copied().unwrap_or(0);
-                tracing::info!(
-                    system = %policy.short_name,
-                    freq = %Freq::from_hz(cc_freq),
-                    decode_rate,
-                    "msg/sec"
-                );
-            }
-        }
     }
 
     pub fn print_recorder_status(&self, ctx: &TrContext) {
@@ -791,64 +780,6 @@ impl CallManager {
                 "  recorder"
             );
         }
-    }
-
-    pub fn check_decode_rates(
-        &mut self,
-        mut ctx: Pin<&mut TrContext>,
-        time_diff: f32,
-    ) -> anyhow::Result<()> {
-        let mut infos = Vec::new();
-        for (&sys_num, policy) in &self.state.config.systems {
-            let mut info = self.get_system_info(sys_num);
-            if policy.system_type.is_trunked() {
-                let count = self.state.message_counts.remove(&sys_num).unwrap_or(0);
-                let decode_rate = (count as f32 / time_diff).floor() as i32;
-                self.state.decode_rates.insert(sys_num, decode_rate);
-                self.decode_rate_gauge.record(i64::from(decode_rate), &[KeyValue::new("sys_num", i64::from(sys_num))]);
-                info.decode_rate = decode_rate;
-                info.message_count = count;
-            }
-            infos.push(info);
-        }
-
-        self.bridge.setup_config(&infos);
-        self.bridge.system_rates(&infos, time_diff);
-
-        for info in &infos {
-            let sys_num = info.sys_num;
-            match self.state.config.systems.get(&sys_num) {
-                Some(p) if p.system_type.is_trunked() => {}
-                _ => continue,
-            };
-            let decode_rate = info.decode_rate;
-            let count = info.message_count;
-
-            if decode_rate < self.state.config.control_warn_rate {
-                let freq = ffi::tr_system_get_current_control_channel(ctx.as_mut(), sys_num);
-                let pwr_db = ffi::tr_system_get_control_channel_pwr(ctx.as_mut(), sys_num);
-                tracing::warn!(
-                    sys_num,
-                    freq_mhz = freq / 1e6,
-                    pwr_db,
-                    decode_rate,
-                    count,
-                    "low decode rate",
-                );
-            } else if self.state.config.control_warn_rate == -1 {
-                let freq = ffi::tr_system_get_current_control_channel(ctx.as_mut(), sys_num);
-                let pwr_db = ffi::tr_system_get_control_channel_pwr(ctx.as_mut(), sys_num);
-                tracing::info!(
-                    sys_num,
-                    freq_mhz = freq / 1e6,
-                    pwr_db,
-                    decode_rate,
-                    count,
-                    "decode rate",
-                );
-            }
-        }
-        Ok(())
     }
 
     // ── Helper: build TrCallInfo from pure CallEntry ──

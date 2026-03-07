@@ -479,15 +479,6 @@ impl EventBridge {
         ));
     }
 
-    pub fn system_rates(&self, infos: &[SystemInfo], time_diff: f32) {
-        self.send_event(proto::plugin_event::Event::SystemRates(
-            proto::SystemRatesEvent {
-                systems: infos.iter().map(system_info_from).collect(),
-                time_diff,
-            },
-        ));
-    }
-
     pub fn unit_event(
         &self,
         info: &SystemInfo,

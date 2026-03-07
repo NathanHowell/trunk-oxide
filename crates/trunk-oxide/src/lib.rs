@@ -388,7 +388,6 @@ impl TrunkRecorderBuilder {
             new_call_from_update: rec.map_or(true, |r| r.new_call_from_update),
             record_uu_v_calls: rec.map_or(true, |r| r.record_uu_v_calls),
             default_mode: rec.map_or(DefaultMode::default(), |r| r.default_mode),
-            control_warn_rate: rec.map_or(10, |r| r.control_warn_rate),
             temp_dir,
             systems: system_policies,
         };
@@ -506,7 +505,6 @@ impl TrunkRecorder {
         let mut trunk_dedup = dedup::WindowedDedup::new(64);
 
         let mut tick = delayed_interval(Duration::from_secs(1));
-        let mut decode = delayed_interval(Duration::from_secs(3));
         let mut status = delayed_interval(Duration::from_secs(200));
 
         loop {
@@ -562,10 +560,6 @@ impl TrunkRecorder {
                 },
                 _ = tick.tick() => {
                     call_mgr.tick(self.ctx.pin_mut());
-                },
-                _ = decode.tick() => {
-                    let time_diff = decode.period().as_secs_f32();
-                    call_mgr.check_decode_rates(self.ctx.pin_mut(), time_diff)?;
                     call_mgr.clear_stale_patches();
                 },
                 _ = status.tick() => {

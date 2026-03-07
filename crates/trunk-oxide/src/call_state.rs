@@ -220,7 +220,6 @@ pub struct CallManagerConfig {
     pub new_call_from_update: bool,
     pub record_uu_v_calls: bool,
     pub default_mode: DefaultMode,
-    pub control_warn_rate: i32,
     pub temp_dir: String,
     pub systems: HashMap<i32, SystemPolicy>,
 }
@@ -556,8 +555,6 @@ pub(crate) struct TrunkMessage {
 pub(crate) struct TrunkStateMachine {
     pub(crate) calls: Vec<CallEntry>,
     pub(crate) config: CallManagerConfig,
-    pub(crate) message_counts: HashMap<i32, i32>,
-    pub(crate) decode_rates: HashMap<i32, i32>,
     pub(crate) patch_tables: HashMap<i32, PatchTable>,
     pub(crate) system_identities: HashMap<i32, SystemIdentity>,
 }
@@ -590,8 +587,6 @@ impl TrunkStateMachine {
         Self {
             calls: Vec::new(),
             config,
-            message_counts: HashMap::new(),
-            decode_rates: HashMap::new(),
             patch_tables,
             system_identities,
         }
@@ -600,15 +595,8 @@ impl TrunkStateMachine {
     // ── Top-level message dispatch ──
 
     pub(crate) fn on_message(&mut self, msg: &TrunkMessage) -> Vec<Effect> {
-        *self.message_counts.entry(msg.sys_num).or_insert(0) += 1;
-
         match msg.message_type {
             MessageType::InvalidCcMessage => {
-                if let Some(count) = self.message_counts.get_mut(&msg.sys_num) {
-                    if *count > 1 {
-                        *count -= 1;
-                    }
-                }
                 vec![]
             }
 
@@ -1520,7 +1508,6 @@ mod tests {
             new_call_from_update: false,
             record_uu_v_calls: false,
             default_mode: DefaultMode::Digital,
-            control_warn_rate: 0,
             temp_dir: String::new(),
             systems,
         }

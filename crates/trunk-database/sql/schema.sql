@@ -31,6 +31,5 @@ CREATE TABLE IF NOT EXISTS activity (
     signal_counts TEXT NOT NULL,
     trunk_msg_counts TEXT NOT NULL,
     unit_counts TEXT NOT NULL,
-    decode_rates TEXT,
     active_calls INTEGER
 );

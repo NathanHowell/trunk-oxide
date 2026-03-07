@@ -34,7 +34,6 @@ pub struct ActivitySnapshot {
     pub signal_counts: HashMap<String, u64>,
     pub trunk_msg_counts: HashMap<String, (u64, u64)>,
     pub unit_counts: HashMap<String, u64>,
-    pub decode_rates: Vec<(String, i32)>,
     pub active_calls: Option<usize>,
 }
 
@@ -191,7 +190,6 @@ pub struct AggregatorState {
     signal_counts: HashMap<String, u64>,
     trunk_message_counts: HashMap<String, (u64, u64)>,
     unit_counts: HashMap<String, u64>,
-    latest_rates: Option<proto::SystemRatesEvent>,
     latest_calls_active: Option<usize>,
 
     // Hourly thread tracking
@@ -212,7 +210,6 @@ impl AggregatorState {
             signal_counts: HashMap::new(),
             trunk_message_counts: HashMap::new(),
             unit_counts: HashMap::new(),
-            latest_rates: None,
             latest_calls_active: None,
             current_hour: String::new(),
             has_thread: false,
@@ -297,9 +294,6 @@ impl AggregatorState {
                 let event_type = format_unit_type(e.r#type);
                 *self.unit_counts.entry(event_type).or_insert(0) += 1;
             }
-            AggMessage::SystemRates(e) => {
-                self.latest_rates = Some(e);
-            }
             AggMessage::CallsActive(e) => {
                 self.latest_calls_active = Some(e.calls.len());
             }
@@ -322,16 +316,6 @@ impl AggregatorState {
             signal_counts: self.signal_counts.clone(),
             trunk_msg_counts: self.trunk_message_counts.clone(),
             unit_counts: self.unit_counts.clone(),
-            decode_rates: self
-                .latest_rates
-                .as_ref()
-                .map(|r| {
-                    r.systems
-                        .iter()
-                        .map(|s| (s.short_name.clone(), s.decode_rate))
-                        .collect()
-                })
-                .unwrap_or_default(),
             active_calls: self.latest_calls_active,
         };
         effects.push(AggEffect::InsertActivity { snapshot });
@@ -363,7 +347,6 @@ impl AggregatorState {
         !self.signal_counts.is_empty()
             || !self.trunk_message_counts.is_empty()
             || !self.unit_counts.is_empty()
-            || self.latest_rates.is_some()
             || self.latest_calls_active.is_some()
     }
 
@@ -439,19 +422,6 @@ impl AggregatorState {
             });
         }
 
-        if let Some(rates) = self.latest_rates.take() {
-            let text: Vec<String> = rates
-                .systems
-                .iter()
-                .map(|s| format!("{}: {} msg/s", s.short_name, s.decode_rate))
-                .collect();
-            fields.push(EmbedField {
-                name: "Decode Rates".into(),
-                value: text.join(", "),
-                inline: true,
-            });
-        }
-
         if let Some(count) = self.latest_calls_active.take() {
             fields.push(EmbedField {
                 name: "Active Calls".into(),
@@ -477,7 +447,6 @@ pub enum AggMessage {
     Signal(Box<proto::SignalEvent>),
     TrunkMessage(proto::TrunkMessageEvent),
     Unit(proto::UnitEvent),
-    SystemRates(proto::SystemRatesEvent),
     CallsActive(proto::CallsActiveEvent),
     SetupRecorder(proto::SetupRecorderEvent),
     SetupSystem(proto::SetupSystemEvent),

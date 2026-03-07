@@ -4,6 +4,7 @@
 // cxx-generated header for the Rust bridge
 #include "trunk-recorder-sys/src/lib.rs.h"
 
+#include <cassert>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -660,27 +661,40 @@ std::unique_ptr<TrCall> tr_create_conventional_call(
     auto call = std::make_shared<Call_conventional>(
         channel.id, channel.freq, system, config, channel.squelch_db, channel.signal_detection);
 
+    std::shared_ptr<Recorder> rec;
     auto sys_type = system->get_system_type();
     if (sys_type == SYS_CONVENTIONAL) {
-        auto rec = (channel.tone > 0.0)
+        auto analog_rec = (channel.tone > 0.0)
             ? source->create_conventional_recorder(tb, static_cast<float>(channel.tone))
             : source->create_conventional_recorder(tb);
-        rec->set_tau(system->get_tau());
+        analog_rec->set_tau(system->get_tau());
+        rec = analog_rec;
         call->set_recorder(rec);
         config.event_sink->setup_recorder(rec);
     } else if (sys_type == SYS_CONVENTIONAL_DMR) {
-        auto rec = source->create_dmr_conventional_recorder(tb);
+        rec = source->create_dmr_conventional_recorder(tb);
         call->set_recorder(rec);
     } else if (sys_type == SYS_CONVENTIONAL_P25) {
-        auto rec = source->create_digital_conventional_recorder(tb);
+        rec = source->create_digital_conventional_recorder(tb);
         rec->set_system(system);
         call->set_recorder(rec);
     } else if (sys_type == SYS_CONVENTIONAL_SIGMF) {
-        auto rec = source->create_sigmf_conventional_recorder(tb);
+        rec = source->create_sigmf_conventional_recorder(tb);
         call->set_recorder(rec);
     } else {
         return nullptr;
     }
+
+    // Wire squelch callback — Phase 3 only covers pre-existing recorders,
+    // so conventional recorders created here need it wired explicitly.
+    assert(ctx.impl->event_bridge && "event_bridge must be set before creating conventional calls");
+    auto notifier = ctx.impl->event_bridge->make_notifier();
+    int rec_num = rec->get_num();
+    rec->set_squelch_callback(
+        [notifier = std::make_shared<rust::Box<EventNotifier>>(std::move(notifier)),
+         rec_num](bool muted, double pwr_db) {
+            event_notifier_notify_squelch(**notifier, rec_num, muted, pwr_db);
+        });
 
     return std::make_unique<TrCall>(call);
 }

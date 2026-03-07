@@ -566,7 +566,6 @@ impl TrunkRecorder {
                 _ = decode.tick() => {
                     let time_diff = decode.period().as_secs_f32();
                     call_mgr.check_decode_rates(self.ctx.pin_mut(), time_diff)?;
-                    ffi::tr_context_check_sources(self.ctx.pin_mut())?;
                     call_mgr.clear_stale_patches();
                 },
                 _ = status.tick() => {

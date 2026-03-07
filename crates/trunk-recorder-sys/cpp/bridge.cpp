@@ -494,15 +494,6 @@ void tr_context_wire_event_notifiers(TrContext &ctx) {
     }
 }
 
-void tr_context_check_sources(TrContext &ctx) {
-    for (auto &source : ctx.impl->trunk_ctx.sources) {
-        if (!source->got_samples()) {
-            std::cerr << "Source " << source->get_num() << " has stopped receiving samples - Terminating trunk recorder" << std::endl;
-            throw std::runtime_error("Source stopped receiving samples");
-        }
-    }
-}
-
 rust::Vec<TrRecorderStatus> tr_context_get_recorder_status(const TrContext &ctx) {
     rust::Vec<TrRecorderStatus> result;
     for (auto &source : ctx.impl->trunk_ctx.sources) {

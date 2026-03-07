@@ -90,7 +90,6 @@ TrTrunkMessage convert_trunk_message(const TrunkMessage &msg);
 // ── Loop Control ──
 void tr_start_gnuradio(TrContext &ctx);
 void tr_stop_gnuradio(TrContext &ctx);
-void tr_context_check_sources(TrContext &ctx);
 rust::Vec<TrRecorderStatus> tr_context_get_recorder_status(const TrContext &ctx);
 
 // ── Message Routing ──

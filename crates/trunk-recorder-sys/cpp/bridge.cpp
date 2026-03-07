@@ -754,10 +754,4 @@ double call_recorder_since_last_write_secs(const TrCall &call) {
     return recorder->since_last_write().count();
 }
 
-void call_process_recorder_queue(const TrCall &call) {
-    auto recorder = call.ptr->get_recorder();
-    if (!recorder) return;
-    recorder->process_message_queues();
-}
-
 } // namespace trunk_oxide

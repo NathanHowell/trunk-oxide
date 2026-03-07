@@ -539,12 +539,6 @@ impl CallManager {
 
     }
 
-    pub fn process_recorder_queues(&self) {
-        for handle in self.handles.values() {
-            ffi::call_process_recorder_queue(&**handle);
-        }
-    }
-
     pub fn add_call(
         &mut self,
         mut call: UniquePtr<TrCall>,

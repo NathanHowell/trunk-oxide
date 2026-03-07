@@ -553,8 +553,6 @@ impl TrunkRecorder {
                 },
             }
 
-            // Cheap sync work after every wake
-            call_mgr.process_recorder_queues();
         }
     }
 }

@@ -92,7 +92,6 @@ void tr_start_gnuradio(TrContext &ctx);
 void tr_stop_gnuradio(TrContext &ctx);
 void tr_context_check_sources(TrContext &ctx);
 rust::Vec<TrRecorderStatus> tr_context_get_recorder_status(const TrContext &ctx);
-void tr_context_autotune_control_channels(TrContext &ctx);
 
 // ── Message Routing ──
 enum class TrUnitEventType : uint8_t;

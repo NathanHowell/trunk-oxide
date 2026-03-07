@@ -21,7 +21,6 @@
 #include "trunk-recorder/systems/p25_parser.h"
 #include "trunk-recorder/systems/smartnet_parser.h"
 #include "trunk-recorder/systems/system.h"
-#include "trunk-recorder/autotune.h"
 #include "trunk-recorder/recorders/p25_recorder.h"
 
 #include "trunk-recorder/monitor_systems.h"
@@ -504,16 +503,6 @@ void tr_context_check_sources(TrContext &ctx) {
     }
 }
 
-void tr_context_autotune_control_channels(TrContext &ctx) {
-    for (auto &sys : ctx.impl->trunk_ctx.systems) {
-        if (!is_conventional(sys->get_system_type())) {
-            if ((sys->get_source()->get_autotune_source()) && (sys->get_system_type() == SYS_P25)) {
-                autotune_control_channel(sys);
-            }
-        }
-    }
-}
-
 rust::Vec<TrRecorderStatus> tr_context_get_recorder_status(const TrContext &ctx) {
     rust::Vec<TrRecorderStatus> result;
     for (auto &source : ctx.impl->trunk_ctx.sources) {
@@ -683,7 +672,6 @@ bool tr_source_start_recording(TrContext &ctx, int32_t source_idx, TrCall &call,
     if (debug_recorder) {
         debug_recorder->start(rc);
         call.ptr->set_debug_recorder(debug_recorder);
-        call.ptr->set_debug_recording(true);
     }
 
     // SigMF recorder
@@ -691,7 +679,6 @@ bool tr_source_start_recording(TrContext &ctx, int32_t source_idx, TrCall &call,
     if (sigmf_recorder) {
         sigmf_recorder->start(rc);
         call.ptr->set_sigmf_recorder(sigmf_recorder);
-        call.ptr->set_sigmf_recording(true);
     }
 
     return true;
@@ -713,10 +700,10 @@ TrStopRecordingResult call_stop_recording(TrCall &call) {
     rec->stop();
 
     if (auto sigmf = call.ptr->get_sigmf_recorder()) {
-        if (call.ptr->get_sigmf_recording()) sigmf->stop();
+        sigmf->stop();
     }
     if (auto debug = call.ptr->get_debug_recorder()) {
-        if (call.ptr->get_debug_recording()) debug->stop();
+        debug->stop();
     }
     return result;
 }

@@ -485,7 +485,6 @@ impl TrunkRecorder {
         let mut tick = delayed_interval(Duration::from_secs(1));
         let mut decode = delayed_interval(Duration::from_secs(3));
         let mut status = delayed_interval(Duration::from_secs(200));
-        let mut autotune = delayed_interval(Duration::from_secs(200));
 
         loop {
             tokio::select! {
@@ -551,9 +550,6 @@ impl TrunkRecorder {
                     call_mgr.print_status(self.ctx.pin_mut());
                     call_mgr.print_active_patches();
                     call_mgr.print_recorder_status(&*self.ctx);
-                },
-                _ = autotune.tick() => {
-                    ffi::tr_context_autotune_control_channels(self.ctx.pin_mut());
                 },
             }
 

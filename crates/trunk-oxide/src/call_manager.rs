@@ -769,14 +769,6 @@ impl CallManager {
             let decode_rate = info.decode_rate;
             let count = info.message_count;
 
-            if decode_rate < 2 {
-                tracing::warn!(
-                    sys_num,
-                    decode_rate,
-                    "low decode rate (multi-decoder, no retune)"
-                );
-            }
-
             if decode_rate < self.state.config.control_warn_rate {
                 let freq = ffi::tr_system_get_current_control_channel(ctx.as_mut(), sys_num);
                 let pwr_db = ffi::tr_system_get_control_channel_pwr(ctx.as_mut(), sys_num);

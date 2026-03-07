@@ -45,22 +45,11 @@ fn system_info_from(info: &SystemInfo) -> proto::SystemInfo {
 }
 
 fn recorder_info(rec: &TrRecorder) -> proto::RecorderInfo {
-    use trunk_recorder_sys::ffi::{
-        recorder_get_freq, recorder_get_freq_error, recorder_get_num, recorder_get_talkgroup,
-        recorder_get_wav_hz, recorder_is_active, recorder_is_analog, recorder_is_conventional,
-        recorder_is_idle,
-    };
+    use trunk_recorder_sys::ffi::{recorder_get_freq_error, recorder_get_num, recorder_get_wav_hz};
     proto::RecorderInfo {
         id: recorder_get_num(rec),
-        r#type: String::new(),
-        freq: recorder_get_freq(rec),
         freq_error: recorder_get_freq_error(rec),
-        talkgroup: recorder_get_talkgroup(rec),
         wav_hz: recorder_get_wav_hz(rec),
-        is_analog: recorder_is_analog(rec),
-        is_conventional: recorder_is_conventional(rec),
-        is_active: recorder_is_active(rec),
-        is_idle: recorder_is_idle(rec),
     }
 }
 
@@ -134,7 +123,6 @@ fn convert_call_data(cd: &TrCallData) -> proto::CallData {
                 spike_count: t.spike_count,
                 error_count: t.error_count,
                 freq: t.freq,
-                length: t.length,
             })
             .collect(),
         status: i32::from(cd.status.repr),

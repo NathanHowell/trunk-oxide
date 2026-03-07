@@ -110,7 +110,6 @@ pub mod ffi {
         pub spike_count: i64,
         pub error_count: i64,
         pub freq: f64,
-        pub length: f64,
     }
 
     #[derive(Debug, Clone)]
@@ -198,7 +197,6 @@ pub mod ffi {
     struct TrStopRecordingResult {
         pub freq_error: i32,
         pub recorder_pwr: f64,
-        pub recorder_idle: bool,
         pub has_recorder: bool,
         pub is_dmr: bool,
     }
@@ -327,14 +325,8 @@ pub mod ffi {
 
         // ── Recorder accessors ──
         fn recorder_get_num(rec: &TrRecorder) -> i32;
-        fn recorder_get_freq(rec: &TrRecorder) -> f64;
         fn recorder_get_freq_error(rec: &TrRecorder) -> i32;
-        fn recorder_get_talkgroup(rec: &TrRecorder) -> i64;
         fn recorder_get_wav_hz(rec: &TrRecorder) -> i64;
-        fn recorder_is_analog(rec: &TrRecorder) -> bool;
-        fn recorder_is_conventional(rec: &TrRecorder) -> bool;
-        fn recorder_is_active(rec: &TrRecorder) -> bool;
-        fn recorder_is_idle(rec: &TrRecorder) -> bool;
 
         // ── Opaque lifecycle type ──
         type TrContext;

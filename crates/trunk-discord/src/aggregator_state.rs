@@ -157,34 +157,10 @@ fn build_recorder_table(recorders: &HashMap<i32, proto::RecorderInfo>) -> String
     ids.sort_unstable();
 
     let mut table = String::from("```\n");
-    let _ = writeln!(
-        table,
-        "{:<4} {:<8} {:>12} {:>10} State",
-        "ID", "Type", "Freq (MHz)", "TG"
-    );
+    let _ = writeln!(table, "{:<4} {:>10}", "ID", "Freq Err");
     for id in ids {
         let rec = &recorders[&id];
-        let state = if rec.is_active {
-            "active"
-        } else if rec.is_idle {
-            "idle"
-        } else {
-            "—"
-        };
-        let tg = if rec.talkgroup != 0 {
-            rec.talkgroup.to_string()
-        } else {
-            "—".to_string()
-        };
-        let _ = writeln!(
-            table,
-            "{:<4} {:<8} {:>12.4} {:>10} {}",
-            rec.id,
-            rec.r#type,
-            rec.freq / 1_000_000.0,
-            tg,
-            state,
-        );
+        let _ = writeln!(table, "{:<4} {:>+10}", rec.id, rec.freq_error);
     }
     table.push_str("```");
     table
@@ -594,11 +570,6 @@ mod tests {
         let event1 = proto::SetupRecorderEvent {
             recorder: Some(proto::RecorderInfo {
                 id: 1,
-                r#type: "P25".into(),
-                freq: 851_125_000.0,
-                talkgroup: 12345,
-                is_active: true,
-                is_idle: false,
                 ..Default::default()
             }),
         };
@@ -610,11 +581,6 @@ mod tests {
         let event2 = proto::SetupRecorderEvent {
             recorder: Some(proto::RecorderInfo {
                 id: 2,
-                r#type: "P25".into(),
-                freq: 852_000_000.0,
-                talkgroup: 0,
-                is_active: false,
-                is_idle: true,
                 ..Default::default()
             }),
         };

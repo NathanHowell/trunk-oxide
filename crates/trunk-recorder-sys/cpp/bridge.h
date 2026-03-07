@@ -60,14 +60,8 @@ int32_t call_get_freq_error(const TrCall &call);
 
 // ── Recorder accessor wrappers ──
 int32_t recorder_get_num(const TrRecorder &rec);
-double recorder_get_freq(const TrRecorder &rec);
 int32_t recorder_get_freq_error(const TrRecorder &rec);
-int64_t recorder_get_talkgroup(const TrRecorder &rec);
 int64_t recorder_get_wav_hz(const TrRecorder &rec);
-bool recorder_is_analog(const TrRecorder &rec);
-bool recorder_is_conventional(const TrRecorder &rec);
-bool recorder_is_active(const TrRecorder &rec);
-bool recorder_is_idle(const TrRecorder &rec);
 
 // ── Opaque lifecycle type (pimpl) ──
 struct TrContextImpl;

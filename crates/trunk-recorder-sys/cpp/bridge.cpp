@@ -111,7 +111,6 @@ static TrTransmission convert_transmission(const Transmission &tx) {
     out.spike_count = tx.spike_count;
     out.error_count = tx.error_count;
     out.freq = tx.freq;
-    out.length = tx.length;
     return out;
 }
 
@@ -123,14 +122,8 @@ int32_t call_get_freq_error(const TrCall &call) { return call.ptr->get_freq_erro
 // ── Recorder accessor implementations ──
 
 int32_t recorder_get_num(const TrRecorder &rec) { return rec.ptr->get_num(); }
-double recorder_get_freq(const TrRecorder &rec) { return rec.ptr->get_freq(); }
 int32_t recorder_get_freq_error(const TrRecorder &rec) { return rec.ptr->get_freq_error(); }
-int64_t recorder_get_talkgroup(const TrRecorder &rec) { return rec.ptr->get_talkgroup(); }
 int64_t recorder_get_wav_hz(const TrRecorder &rec) { return rec.ptr->get_wav_hz(); }
-bool recorder_is_analog(const TrRecorder &rec) { return rec.ptr->is_analog(); }
-bool recorder_is_conventional(const TrRecorder &rec) { return rec.ptr->is_conventional(); }
-bool recorder_is_active(const TrRecorder &rec) { return rec.ptr->is_active(); }
-bool recorder_is_idle(const TrRecorder &rec) { return rec.ptr->is_idle(); }
 
 // ── Source accessor implementations ──
 
@@ -774,7 +767,6 @@ TrStopRecordingResult call_stop_recording(TrCall &call) {
     result.has_recorder = true;
     result.freq_error = rec->get_freq_error();
     result.recorder_pwr = rec->get_pwr();
-    result.recorder_idle = rec->is_idle();
     result.is_dmr = (call.ptr->get_system()->get_system_type() == SYS_CONVENTIONAL_DMR);
 
     rec->stop();

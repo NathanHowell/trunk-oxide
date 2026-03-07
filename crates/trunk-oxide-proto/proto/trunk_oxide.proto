@@ -153,15 +153,15 @@ message SystemInfo {
 
 message RecorderInfo {
   int32 id = 1;
-  string type = 2;
-  double freq = 3;
+  reserved 2;  // was type
+  reserved 3;  // was freq, now known in Rust CallEntry
   int32 freq_error = 4;
-  int64 talkgroup = 5;
+  reserved 5;  // was talkgroup, now known in Rust CallEntry
   int64 wav_hz = 6;
-  bool is_analog = 7;
-  bool is_conventional = 8;
-  bool is_active = 9;
-  bool is_idle = 10;
+  reserved 7;  // was is_analog, now known in Rust CallEntry
+  reserved 8;  // was is_conventional, now known in Rust CallEntry
+  reserved 9;  // was is_active, now known in Rust CallEntry
+  reserved 10; // was is_idle, now known in Rust CallEntry
   reserved 11; // was current_length, now computed in Rust
 }
 
@@ -234,7 +234,7 @@ message Transmission {
   int64 spike_count = 8;
   int64 error_count = 9;
   double freq = 10;
-  double length = 11;
+  reserved 11; // was length, now computed in Rust
 }
 
 message CallSource {

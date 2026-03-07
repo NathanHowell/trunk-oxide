@@ -387,8 +387,9 @@ impl CallManager {
 
             // Update signal/noise from conventional recorder metrics
             if entry.is_conventional() {
+                let was_idle = entry.state == CallState::Idle;
                 if let Some(entry) = self.state.get_call_mut(call_id) {
-                    if metrics.recorder_idle {
+                    if was_idle {
                         entry.noise = metrics.recorder_pwr;
                     } else {
                         entry.signal = metrics.recorder_pwr;
@@ -429,7 +430,7 @@ impl CallManager {
                 // Re-read entry after mutable borrow of handle
                 if is_conventional {
                     if let Some(entry_mut) = self.state.get_call_mut(call_id) {
-                        if metrics.recorder_idle {
+                        if state == CallState::Idle {
                             entry_mut.noise = metrics.recorder_pwr;
                         } else {
                             entry_mut.signal = metrics.recorder_pwr;

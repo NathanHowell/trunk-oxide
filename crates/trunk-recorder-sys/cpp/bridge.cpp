@@ -21,8 +21,6 @@
 #include "trunk-recorder/systems/p25_parser.h"
 #include "trunk-recorder/systems/smartnet_parser.h"
 #include "trunk-recorder/systems/system.h"
-#include "trunk-recorder/talkgroup.h"
-#include "trunk-recorder/unit_tags_ota.h"
 #include "trunk-recorder/autotune.h"
 #include "trunk-recorder/recorders/p25_recorder.h"
 
@@ -269,32 +267,6 @@ int32_t tr_add_system_from_config(TrContext &ctx, const TrSystemConfig &cfg) {
         sys->set_xor_mask(cfg.sys_id, cfg.wacn, cfg.nac);
     }
 
-    // Talkgroups
-    for (const auto &tg : cfg.talkgroups) {
-        auto tg_obj = std::make_shared<Talkgroup>(
-            sys->get_sys_num(), tg.id,
-            std::string(tg.mode.data(), tg.mode.size()),
-            tg.priority, tg.preferred_nac);
-        sys->add_talkgroup(tg_obj);
-    }
-
-    // Conventional channels
-    for (const auto &ch : cfg.channels) {
-        auto tg_obj = std::make_shared<Talkgroup>(
-            sys->get_sys_num(), ch.id, ch.freq, ch.tone, ch.squelch_db, ch.signal_detection);
-        sys->add_talkgroup(tg_obj);
-    }
-
-    // Unit tags
-    for (const auto &ut : cfg.unit_tags) {
-        sys->add_unit_tag(
-            std::string(ut.pattern.data(), ut.pattern.size()),
-            std::string(ut.tag.data(), ut.tag.size()));
-    }
-    if (!cfg.unit_tags_mode.empty()) {
-        sys->set_unit_tags_mode(std::string(cfg.unit_tags_mode.data(), cfg.unit_tags_mode.size()));
-    }
-
     ctx.impl->trunk_ctx.systems.push_back(sys);
     return sys_idx;
 }
@@ -464,8 +436,6 @@ void tr_context_wire_event_notifiers(TrContext &ctx) {
                 P25ParserConfig p25_config;
                 p25_config.sys_num = system->get_sys_num();
                 p25_config.short_name = system->get_short_name();
-                p25_config.custom_freq_table_file = system->has_custom_freq_table_file()
-                    ? system->get_custom_freq_table_file() : "";
                 state->p25_config = std::move(p25_config);
             }
 

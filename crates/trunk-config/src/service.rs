@@ -41,7 +41,7 @@ impl Default for AudioConfig {
             tone_detection: default_tone_detection(),
             tone_detection_duration_s: default_tone_detection_duration_s(),
             audio_attachment: default_audio_attachment(),
-            coalesce_timeout_ms: 0,
+            coalesce_timeout_ms: 10_000,
         }
     }
 }

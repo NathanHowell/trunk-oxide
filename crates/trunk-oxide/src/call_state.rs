@@ -473,6 +473,9 @@ pub(crate) enum Effect {
     EnableRecorder {
         call_id: CallId,
     },
+    DisableRecorder {
+        call_id: CallId,
+    },
     // ── Lifecycle ──
     RemoveCall {
         call_id: CallId,
@@ -1279,20 +1282,24 @@ impl TrunkStateMachine {
             None => return vec![],
         };
 
+        if entry.signal_detection {
+            // Signal-detection channels: just disable the recorder and wait for
+            // the next signal detection.  Do NOT end the call — this avoids
+            // rapid CallEnd/CallStart cycling that creates many incomplete
+            // Discord embeds.
+            entry.state = CallState::Disabled;
+            entry.last_update = Instant::now();
+            entry.idle_since = None;
+            return vec![Effect::DisableRecorder { call_id }];
+        }
+
+        // Non-signal-detection: full restart cycle (always-on recorders).
         let mut effects = vec![
             Effect::EmitCallEnd { call_id },
             Effect::ConventionalRestart { call_id },
         ];
 
-        // After restart, executor reads new call_num/start_time from C++ and
-        // calls on_conventional_restarted.
-        // C++ start() no longer enables conventional recorders. Rust emits
-        // EnableRecorder for non-signal-detection, or leaves disabled for signal detection.
-        entry.state = if entry.signal_detection {
-            CallState::Disabled
-        } else {
-            CallState::Recording
-        };
+        entry.state = CallState::Recording;
         entry.last_update = Instant::now();
         entry.idle_since = None;
         entry.segments.clear();
@@ -1300,10 +1307,7 @@ impl TrunkStateMachine {
 
         effects.push(Effect::EmitSetupRecorder { call_id });
         effects.push(Effect::EmitCallStart { call_id });
-
-        if !entry.signal_detection {
-            effects.push(Effect::EnableRecorder { call_id });
-        }
+        effects.push(Effect::EnableRecorder { call_id });
 
         effects
     }
@@ -1567,6 +1571,7 @@ mod tests {
             Effect::AddControlChannel { .. } => "AddControlChannel",
             Effect::ConventionalRestart { .. } => "ConventionalRestart",
             Effect::EnableRecorder { .. } => "EnableRecorder",
+            Effect::DisableRecorder { .. } => "DisableRecorder",
             Effect::RemoveCall { .. } => "RemoveCall",
             Effect::Warn { .. } => "Warn",
         }).collect();
@@ -2012,7 +2017,7 @@ mod tests {
     }
 
     #[test]
-    fn signal_detection_restart_transitions_to_disabled() {
+    fn signal_detection_idle_timeout_disables_without_ending_call() {
         let mut sm = TrunkStateMachine::new(test_config());
         let channel = signal_detection_channel();
         let policy = sm.config.systems.get(&1).unwrap().clone();
@@ -2021,9 +2026,51 @@ mod tests {
 
         let effects = sm.on_conventional_idle_timeout(call_id);
 
-        assert!(effects.iter().any(|e| matches!(e, Effect::ConventionalRestart { .. })));
-        assert!(!effects.iter().any(|e| matches!(e, Effect::EnableRecorder { .. })));
+        // Should only disable the recorder — no CallEnd/Restart/CallStart cycle
+        assert_effects_contain_ordered(&effects, &["DisableRecorder"]);
+        assert!(!effects.iter().any(|e| matches!(e, Effect::EmitCallEnd { .. })));
+        assert!(!effects.iter().any(|e| matches!(e, Effect::ConventionalRestart { .. })));
+        assert!(!effects.iter().any(|e| matches!(e, Effect::EmitCallStart { .. })));
         assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Disabled);
+    }
+
+    #[test]
+    fn signal_detection_idle_timeout_then_redetect_enables_recorder() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let channel = signal_detection_channel();
+        let policy = sm.config.systems.get(&1).unwrap().clone();
+        let (call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
+        sm.calls[0].state = CallState::Recording;
+
+        // Idle timeout → Disabled
+        let effects = sm.on_conventional_idle_timeout(call_id);
+        assert!(effects.iter().any(|e| matches!(e, Effect::DisableRecorder { .. })));
+        assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Disabled);
+
+        // Signal detected again → Idle + EnableRecorder
+        let signals = vec![trunk_recorder_sys::DetectedSignal {
+            center_freq: 1_000_000.0,
+            max_rssi: -20,
+            threshold: -45,
+        }];
+        let effects = sm.on_signals_detected(487_000_000.0, &signals);
+        assert!(effects.iter().any(|e| matches!(e, Effect::EnableRecorder { .. })));
+        assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Idle);
+    }
+
+    #[test]
+    fn signal_detection_idle_timeout_clears_idle_since() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let channel = signal_detection_channel();
+        let policy = sm.config.systems.get(&1).unwrap().clone();
+        let (call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
+        sm.calls[0].state = CallState::Idle;
+        sm.calls[0].idle_since = Some(Instant::now());
+
+        sm.on_conventional_idle_timeout(call_id);
+
+        let entry = sm.get_call(call_id).unwrap();
+        assert!(entry.idle_since.is_none());
     }
 
     #[test]

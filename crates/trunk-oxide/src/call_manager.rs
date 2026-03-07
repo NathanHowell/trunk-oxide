@@ -265,6 +265,18 @@ impl CallManager {
                         ffi::call_set_recorder_enabled(handle.pin_mut(), true);
                     }
                 }
+                Effect::DisableRecorder { call_id } => {
+                    if let Some(entry) = self.state.get_call(call_id) {
+                        tracing::info!(
+                            freq = %entry.freq,
+                            talkgroup = entry.talkgroup,
+                            "disabling recorder (signal lost)"
+                        );
+                    }
+                    if let Some(handle) = self.handles.get_mut(&call_id) {
+                        ffi::call_set_recorder_enabled(handle.pin_mut(), false);
+                    }
+                }
                 Effect::RemoveCall { call_id } => {
                     self.handles.remove(&call_id);
                     self.state.remove_call(call_id);

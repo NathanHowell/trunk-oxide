@@ -114,7 +114,7 @@ fn main() -> Result<()> {
         tg_map
     };
 
-    let (bridge, audio_tx, event_tx) = EventBridge::new(tg_map);
+    let (bridge, stream_tx) = EventBridge::new(tg_map);
     let bridge = Arc::new(bridge);
 
     let mut recorder = TrunkRecorderBuilder::from_config(&config, bridge.clone())
@@ -139,11 +139,7 @@ fn main() -> Result<()> {
 
     // Spawn gRPC server as a background task on the runtime
     let socket_path = trunk_oxide_grpc::GrpcConfig::default().socket_path;
-    rt.spawn(trunk_oxide_grpc::serve_grpc(
-        socket_path,
-        audio_tx,
-        event_tx,
-    ));
+    rt.spawn(trunk_oxide_grpc::serve_grpc(socket_path, stream_tx));
 
     tracing::info!("trunk-recorder engine running, press Ctrl+C to stop");
 

@@ -226,7 +226,7 @@ async fn main() -> Result<()> {
         Arc::clone(&db),
     ));
 
-    let dispatcher = Arc::new(dispatcher::Dispatcher::new(
+    let pump = dispatcher::DispatchPump::new(
         whisperer,
         Arc::clone(&discord_client),
         aggregator,
@@ -239,12 +239,7 @@ async fn main() -> Result<()> {
         config.audio.coalesce_timeout_ms,
         Arc::clone(&db),
         args.db_path,
-    ));
-
-    dispatcher.spawn_reaper();
-    if config.audio.coalesce_timeout_ms > 0 {
-        dispatcher.spawn_coalesce_ticker();
-    }
+    );
 
     discord_client
         .send_message(fallback_channel_id, "trunk-discord is now online.")
@@ -255,7 +250,7 @@ async fn main() -> Result<()> {
         "connecting to trunk-oxide"
     );
 
-    grpc_oxide::run(oxide_config.socket_path.clone(), dispatcher, reporter).await?;
+    grpc_oxide::run(oxide_config.socket_path.clone(), pump, reporter).await?;
 
     if let Some(provider) = otel.meter {
         let _ = provider.shutdown();

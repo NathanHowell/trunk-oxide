@@ -266,9 +266,12 @@ impl CallManager {
                     }
                 }
                 Effect::RemoveCall { call_id } => {
-                    self.bridge.unregister_audio_meta(call_id.as_u64());
                     self.handles.remove(&call_id);
                     self.state.remove_call(call_id);
+                    // Unregister audio meta last: the write lock waits for any
+                    // in-flight audio_stream() read lock, ensuring the final
+                    // audio send completes before we remove the metadata.
+                    self.bridge.unregister_audio_meta(call_id.as_u64());
                 }
                 Effect::Warn { message } => {
                     tracing::debug!(%message, "state machine warning");

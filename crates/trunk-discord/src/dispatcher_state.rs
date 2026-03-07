@@ -16,13 +16,6 @@ pub struct CallKey {
     pub talkgroup: Talkgroup,
 }
 
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
-pub struct ThreadCacheKey {
-    pub sys_num: SysNum,
-    pub talkgroup: Talkgroup,
-    pub date: String,
-}
-
 // ── Effects ──────────────────────────────────────────────────────────────────
 
 /// Side-effect commands returned by [`DispatcherState`].
@@ -50,7 +43,7 @@ pub enum DispatchEffect {
     /// Resolve a channel for a new call. The executor resolves the channel
     /// (mapped lookup, thread cache, DB, or Discord create) then calls
     /// [`DispatcherState::on_channel_resolved`].
-    ResolveChannel { call: proto::CallInfo },
+    ResolveChannel { key: CallKey, call: proto::CallInfo },
     /// Spawn a call handler after channel resolution.
     SpawnCallHandler {
         key: CallKey,
@@ -87,7 +80,6 @@ const MAX_CALL_AGE: Duration = Duration::from_secs(10 * 60);
 pub struct DispatcherState {
     active_calls: HashMap<CallKey, Instant>,
     coalescing_calls: HashMap<CallKey, Instant>,
-    thread_cache: HashMap<ThreadCacheKey, ChannelId>,
     current_hour: String,
     coalesce_timeout: Duration,
 }
@@ -98,7 +90,6 @@ impl DispatcherState {
         Self {
             active_calls: HashMap::new(),
             coalescing_calls: HashMap::new(),
-            thread_cache: HashMap::new(),
             current_hour,
             coalesce_timeout: Duration::from_millis(coalesce_timeout_ms),
         }
@@ -203,16 +194,18 @@ impl DispatcherState {
             return effects;
         }
 
-        // Normal path: resolve channel and spawn handler
-        effects.push(DispatchEffect::ResolveChannel { call });
+        // Normal path: register as active immediately, then resolve channel
+        self.active_calls.insert(key.clone(), Instant::now());
+        effects.push(DispatchEffect::ResolveChannel { key, call });
 
         effects
     }
 
     /// Two-phase callback: executor resolved the post channel for a new call.
-    /// Registers the call as active and emits `SpawnCallHandler`.
+    /// The call is already in `active_calls` (inserted by `on_call_start`).
+    #[allow(clippy::unused_self)]
     pub fn on_channel_resolved(
-        &mut self,
+        &self,
         call: proto::CallInfo,
         post_channel: ChannelId,
     ) -> Vec<DispatchEffect> {
@@ -220,13 +213,17 @@ impl DispatcherState {
             sys_num: SysNum(call.sys_num),
             talkgroup: Talkgroup(call.talkgroup),
         };
-        self.active_calls.insert(key.clone(), Instant::now());
 
         vec![DispatchEffect::SpawnCallHandler {
             key,
             call,
             post_channel,
         }]
+    }
+
+    /// Channel resolution failed — remove from `active_calls`.
+    pub fn on_channel_resolution_failed(&mut self, key: &CallKey) {
+        self.active_calls.remove(key);
     }
 
     fn on_call_end(&mut self, event: proto::CallEndEvent) -> Vec<DispatchEffect> {
@@ -339,16 +336,6 @@ impl DispatcherState {
             }
         });
         effects
-    }
-
-    /// Cache a resolved thread ID.
-    pub fn cache_thread(&mut self, cache_key: ThreadCacheKey, channel: ChannelId) {
-        self.thread_cache.insert(cache_key, channel);
-    }
-
-    /// Look up a cached thread.
-    pub fn get_cached_thread(&self, cache_key: &ThreadCacheKey) -> Option<ChannelId> {
-        self.thread_cache.get(cache_key).copied()
     }
 
     #[cfg(test)]
@@ -506,17 +493,19 @@ mod tests {
         assert!(effects
             .iter()
             .any(|e| matches!(e, DispatchEffect::ResolveChannel { .. })));
-        // Not yet active — only after channel resolution
+        // Active immediately so audio can buffer during resolution
         let key = CallKey {
             sys_num: SysNum(1),
             talkgroup: Talkgroup(12345),
         };
-        assert!(!s.is_active(&key));
+        assert!(s.is_active(&key));
     }
 
     #[test]
-    fn channel_resolved_registers_active_and_spawns() {
+    fn channel_resolved_spawns_handler() {
         let mut s = DispatcherState::new(0);
+        // Simulate call_start first (registers as active)
+        s.on_event(make_call_start(1, 12345));
         let call = proto::CallInfo {
             sys_num: 1,
             talkgroup: 12345,
@@ -534,6 +523,19 @@ mod tests {
             talkgroup: Talkgroup(12345),
         };
         assert!(s.is_active(&key));
+    }
+
+    #[test]
+    fn channel_resolution_failed_removes_active() {
+        let mut s = DispatcherState::new(0);
+        s.on_event(make_call_start(1, 12345));
+        let key = CallKey {
+            sys_num: SysNum(1),
+            talkgroup: Talkgroup(12345),
+        };
+        assert!(s.is_active(&key));
+        s.on_channel_resolution_failed(&key);
+        assert!(!s.is_active(&key));
     }
 
     #[test]
@@ -576,6 +578,7 @@ mod tests {
     #[test]
     fn signal_during_active_call_routes_to_call() {
         let mut s = DispatcherState::new(0);
+        s.on_event(make_call_start(1, 12345));
         s.on_channel_resolved(
             proto::CallInfo {
                 sys_num: 1,
@@ -627,6 +630,7 @@ mod tests {
     #[test]
     fn unit_during_active_call_routes_to_call() {
         let mut s = DispatcherState::new(0);
+        s.on_event(make_call_start(1, 12345));
         s.on_channel_resolved(
             proto::CallInfo {
                 sys_num: 1,
@@ -721,28 +725,12 @@ mod tests {
             .any(|e| matches!(e, DispatchEffect::ForwardToAggregator { .. })));
     }
 
-    // ── Thread cache ─────────────────────────────────────────────────────
-
-    #[test]
-    fn thread_cache_round_trip() {
-        let mut s = DispatcherState::new(0);
-        let cache_key = ThreadCacheKey {
-            sys_num: SysNum(1),
-            talkgroup: Talkgroup(12345),
-            date: "2025-03-05".into(),
-        };
-        let channel = ChannelId::from(999);
-
-        assert!(s.get_cached_thread(&cache_key).is_none());
-        s.cache_thread(cache_key.clone(), channel);
-        assert_eq!(s.get_cached_thread(&cache_key), Some(channel));
-    }
-
     // ── Coalescing ───────────────────────────────────────────────────────
 
     #[test]
     fn coalesce_off_call_end_emits_end_call() {
         let mut s = DispatcherState::new(0);
+        s.on_event(make_call_start(1, 12345));
         s.on_channel_resolved(
             proto::CallInfo {
                 sys_num: 1,
@@ -765,6 +753,7 @@ mod tests {
     #[test]
     fn coalesce_on_call_end_emits_ptt_end() {
         let mut s = DispatcherState::new(10_000);
+        s.on_event(make_call_start(1, 12345));
         s.on_channel_resolved(
             proto::CallInfo {
                 sys_num: 1,
@@ -792,6 +781,7 @@ mod tests {
     fn coalesce_call_start_during_gap_emits_resume() {
         let mut s = DispatcherState::new(10_000);
         // Start → resolve → end (enters coalescing)
+        s.on_event(make_call_start(1, 12345));
         s.on_channel_resolved(
             proto::CallInfo {
                 sys_num: 1,

@@ -657,12 +657,17 @@ bool tr_source_start_recording(TrContext &ctx, int32_t source_idx, TrCall &call,
 
     auto rc = to_cpp_config(cfg);
 
-    if (!recorder || !recorder->start(rc)) {
+    if (!recorder) {
+        return false;
+    }
+
+    recorder->set_system(call.ptr->get_system());
+
+    if (!recorder->start(rc)) {
         return false;
     }
 
     call.ptr->set_recorder(recorder);
-    recorder->set_system(call.ptr->get_system());
 
     // Debug recorder
     auto debug_recorder = source->get_debug_recorder();
@@ -695,6 +700,7 @@ TrStopRecordingResult call_stop_recording(TrCall &call) {
     result.is_dmr = (call.ptr->get_system()->get_system_type() == SYS_CONVENTIONAL_DMR);
 
     rec->stop();
+    rec->flush_audio();
 
     if (auto sigmf = call.ptr->get_sigmf_recorder()) {
         sigmf->stop();

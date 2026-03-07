@@ -189,68 +189,35 @@ fn convert_trunk_messages(messages: &[TrTrunkMessage]) -> Vec<proto::TrunkMessag
 // ── gRPC service implementation ──
 
 struct TrunkOxideService {
-    audio_tx: broadcast::Sender<proto::AudioSample>,
-    event_tx: broadcast::Sender<proto::PluginEvent>,
+    tx: broadcast::Sender<proto::StreamMessage>,
 }
 
 #[tonic::async_trait]
 impl TrunkOxide for TrunkOxideService {
-    type SubscribeEventsStream = ReceiverStream<std::result::Result<proto::PluginEvent, Status>>;
-    type SubscribeAudioStream = ReceiverStream<std::result::Result<proto::AudioSample, Status>>;
+    type SubscribeStream = ReceiverStream<std::result::Result<proto::StreamMessage, Status>>;
 
-    async fn subscribe_events(
+    async fn subscribe(
         &self,
         _request: Request<()>,
-    ) -> std::result::Result<Response<Self::SubscribeEventsStream>, Status> {
-        tracing::info!("client subscribed to events");
-        let mut broadcast_rx = self.event_tx.subscribe();
+    ) -> std::result::Result<Response<Self::SubscribeStream>, Status> {
+        tracing::info!("client subscribed to unified stream");
+        let mut broadcast_rx = self.tx.subscribe();
         let (tx, rx) = tokio::sync::mpsc::channel(4096);
 
         tokio::spawn(async move {
             loop {
                 match broadcast_rx.recv().await {
-                    Ok(event) => {
-                        if tx.send(Ok(event)).await.is_err() {
-                            tracing::info!("event subscriber disconnected");
+                    Ok(msg) => {
+                        if tx.send(Ok(msg)).await.is_err() {
+                            tracing::info!("subscriber disconnected");
                             break;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(skipped = n, "event subscriber lagged");
+                        tracing::warn!(skipped = n, "subscriber lagged");
                     }
                     Err(broadcast::error::RecvError::Closed) => {
-                        tracing::info!("event broadcast channel closed");
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(Response::new(ReceiverStream::new(rx)))
-    }
-
-    async fn subscribe_audio(
-        &self,
-        _request: Request<()>,
-    ) -> std::result::Result<Response<Self::SubscribeAudioStream>, Status> {
-        tracing::info!("client subscribed to audio");
-        let mut broadcast_rx = self.audio_tx.subscribe();
-        let (tx, rx) = tokio::sync::mpsc::channel(4096);
-
-        tokio::spawn(async move {
-            loop {
-                match broadcast_rx.recv().await {
-                    Ok(sample) => {
-                        if tx.send(Ok(sample)).await.is_err() {
-                            tracing::info!("audio subscriber disconnected");
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(skipped = n, "audio subscriber lagged");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        tracing::info!("audio broadcast channel closed");
+                        tracing::info!("broadcast channel closed");
                         break;
                     }
                 }
@@ -287,14 +254,13 @@ pub struct AudioMeta {
     pub sample_rate: i32,
 }
 
-/// Bridges trunk-recorder events to gRPC subscribers via broadcast channels.
+/// Bridges trunk-recorder events to gRPC subscribers via a single broadcast channel.
 ///
-/// All methods take `&self` — no mutex needed. The broadcast senders are
+/// All methods take `&self` — no mutex needed. The broadcast sender is
 /// inherently `Sync`, talkgroups are read-only after construction, and
 /// `unit_aliases`/`audio_meta` use `RwLock` for rare writes.
 pub struct EventBridge {
-    audio_tx: broadcast::Sender<proto::AudioSample>,
-    event_tx: broadcast::Sender<proto::PluginEvent>,
+    tx: broadcast::Sender<proto::StreamMessage>,
     /// (`short_name`, `talkgroup_id`) → metadata from config CSVs
     talkgroups: HashMap<(String, i64), TalkgroupMeta>,
     /// (`sys_num`, `radio_id`) → OTA-discovered alias
@@ -308,19 +274,16 @@ impl EventBridge {
         talkgroups: HashMap<(String, i64), TalkgroupMeta>,
     ) -> (
         Self,
-        broadcast::Sender<proto::AudioSample>,
-        broadcast::Sender<proto::PluginEvent>,
+        broadcast::Sender<proto::StreamMessage>,
     ) {
-        let (audio_tx, _) = broadcast::channel::<proto::AudioSample>(4096);
-        let (event_tx, _) = broadcast::channel::<proto::PluginEvent>(4096);
+        let (tx, _) = broadcast::channel::<proto::StreamMessage>(4096);
         let bridge = Self {
-            audio_tx: audio_tx.clone(),
-            event_tx: event_tx.clone(),
+            tx: tx.clone(),
             talkgroups,
             unit_aliases: RwLock::new(HashMap::new()),
             audio_meta: RwLock::new(HashMap::new()),
         };
-        (bridge, audio_tx, event_tx)
+        (bridge, tx)
     }
 
     fn call_info_from(&self, info: &TrCallInfo) -> proto::CallInfo {
@@ -383,9 +346,13 @@ impl EventBridge {
     }
 
     fn send_event(&self, event: proto::plugin_event::Event) {
-        let msg = proto::PluginEvent { event: Some(event) };
-        if let Err(e) = self.event_tx.send(msg) {
-            tracing::trace!(event = %e.0.event.as_ref().map_or("none", |_| "some"), "no event subscribers");
+        let msg = proto::StreamMessage {
+            message: Some(proto::stream_message::Message::Event(proto::PluginEvent {
+                event: Some(event),
+            })),
+        };
+        if let Err(_e) = self.tx.send(msg) {
+            tracing::trace!("no subscribers");
         }
     }
 
@@ -439,7 +406,10 @@ impl EventBridge {
             samples: bytes,
             sample_rate: meta.sample_rate,
         };
-        if let Err(_e) = self.audio_tx.send(msg) {
+        let stream_msg = proto::StreamMessage {
+            message: Some(proto::stream_message::Message::Audio(msg)),
+        };
+        if let Err(_e) = self.tx.send(stream_msg) {
             tracing::trace!("no audio subscribers");
         }
     }
@@ -587,10 +557,9 @@ impl CxxCallbacks for EventBridge {
 /// Spawn the gRPC server as an async task.
 pub async fn serve_grpc(
     socket_path: String,
-    audio_tx: broadcast::Sender<proto::AudioSample>,
-    event_tx: broadcast::Sender<proto::PluginEvent>,
+    tx: broadcast::Sender<proto::StreamMessage>,
 ) {
-    let service = TrunkOxideService { audio_tx, event_tx };
+    let service = TrunkOxideService { tx };
 
     let _ = std::fs::remove_file(&socket_path);
     let listener = match tokio::net::UnixListener::bind(&socket_path) {

@@ -6,13 +6,21 @@ import "google/protobuf/empty.proto";
 import "google/protobuf/timestamp.proto";
 
 // ── Service ──
-// trunk-oxide acts as a gRPC SERVER; clients subscribe to streams.
+// trunk-oxide acts as a gRPC SERVER; clients subscribe to a unified stream.
 
 service TrunkOxide {
-  // Server-streaming: clients subscribe to receive events
-  rpc SubscribeEvents(google.protobuf.Empty) returns (stream PluginEvent);
-  // Server-streaming: clients subscribe to receive audio samples
-  rpc SubscribeAudio(google.protobuf.Empty) returns (stream AudioSample);
+  // Server-streaming: unified stream of audio samples and events.
+  // Ordering guarantee: CallEnd always follows the last AudioSample for a call.
+  rpc Subscribe(google.protobuf.Empty) returns (stream StreamMessage);
+}
+
+// ── Stream ──
+
+message StreamMessage {
+  oneof message {
+    AudioSample audio = 1;
+    PluginEvent event = 2;
+  }
 }
 
 // ── Audio ──

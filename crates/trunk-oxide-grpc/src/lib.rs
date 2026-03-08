@@ -4,9 +4,7 @@ use std::sync::RwLock;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use trunk_recorder_sys::ffi::{
-    TrCallData, TrCallInfo, TrSystem, TrTrunkMessage, TrUnitEventType,
-};
+use trunk_recorder_sys::ffi::{TrCallData, TrCallInfo, TrSystem, TrTrunkMessage, TrUnitEventType};
 use trunk_recorder_sys::{CxxCallbacks, SystemInfo};
 
 pub use trunk_oxide_proto as proto;
@@ -272,10 +270,7 @@ pub struct EventBridge {
 impl EventBridge {
     pub fn new(
         talkgroups: HashMap<(String, i64), TalkgroupMeta>,
-    ) -> (
-        Self,
-        broadcast::Sender<proto::StreamMessage>,
-    ) {
+    ) -> (Self, broadcast::Sender<proto::StreamMessage>) {
         let (tx, _) = broadcast::channel::<proto::StreamMessage>(4096);
         let bridge = Self {
             tx: tx.clone(),
@@ -391,11 +386,7 @@ impl EventBridge {
         }
     }
 
-    pub fn audio_stream(
-        &self,
-        rust_call_id: u64,
-        samples: &[i16],
-    ) {
+    pub fn audio_stream(&self, rust_call_id: u64, samples: &[i16]) {
         if rust_call_id == 0 {
             return;
         }
@@ -533,11 +524,7 @@ impl EventBridge {
 }
 
 impl CxxCallbacks for EventBridge {
-    fn audio_stream(
-        &self,
-        rust_call_id: u64,
-        samples: &[i16],
-    ) {
+    fn audio_stream(&self, rust_call_id: u64, samples: &[i16]) {
         Self::audio_stream(self, rust_call_id, samples);
     }
 
@@ -554,10 +541,7 @@ impl CxxCallbacks for EventBridge {
 }
 
 /// Spawn the gRPC server as an async task.
-pub async fn serve_grpc(
-    socket_path: String,
-    tx: broadcast::Sender<proto::StreamMessage>,
-) {
+pub async fn serve_grpc(socket_path: String, tx: broadcast::Sender<proto::StreamMessage>) {
     let service = TrunkOxideService { tx };
 
     let _ = std::fs::remove_file(&socket_path);

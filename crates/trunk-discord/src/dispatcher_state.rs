@@ -56,10 +56,7 @@ pub enum DispatchEffect {
         call_data: Option<Box<proto::CallData>>,
     },
     /// Resume a coalescing handler with a new PTT.
-    CoalesceResume {
-        key: CallKey,
-        call: proto::CallInfo,
-    },
+    CoalesceResume { key: CallKey, call: proto::CallInfo },
     /// Coalesce timeout expired — finalize the handler.
     CoalesceTimeout { key: CallKey },
     /// Log a message.
@@ -353,7 +350,6 @@ impl DispatcherState {
     pub fn is_coalescing(&self, key: &CallKey) -> bool {
         self.coalescing_calls.contains_key(key)
     }
-
 }
 
 // ── Formatting ───────────────────────────────────────────────────────────────
@@ -425,16 +421,14 @@ mod tests {
 
     fn make_call_end(sys_num: i32, talkgroup: i64) -> proto::PluginEvent {
         proto::PluginEvent {
-            event: Some(proto::plugin_event::Event::CallEnd(
-                proto::CallEndEvent {
-                    call_data: Some(proto::CallData {
-                        sys_num,
-                        talkgroup,
-                        length: 5.0,
-                        ..Default::default()
-                    }),
-                },
-            )),
+            event: Some(proto::plugin_event::Event::CallEnd(proto::CallEndEvent {
+                call_data: Some(proto::CallData {
+                    sys_num,
+                    talkgroup,
+                    length: 5.0,
+                    ..Default::default()
+                }),
+            })),
         }
     }
 
@@ -496,9 +490,11 @@ mod tests {
     fn call_start_emits_resolve_channel() {
         let mut s = DispatcherState::new(0);
         let effects = s.on_event(make_call_start(1, 12345));
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, DispatchEffect::ResolveChannel { .. })));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, DispatchEffect::ResolveChannel { .. }))
+        );
         // Active immediately so audio can buffer during resolution
         let key = CallKey {
             sys_num: SysNum(1),
@@ -520,9 +516,11 @@ mod tests {
         let channel = ChannelId::from(999);
 
         let effects = s.on_channel_resolved(call, channel);
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, DispatchEffect::SpawnCallHandler { .. })));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, DispatchEffect::SpawnCallHandler { .. }))
+        );
 
         let key = CallKey {
             sys_num: SysNum(1),
@@ -565,18 +563,22 @@ mod tests {
             talkgroup: Talkgroup(12345),
         };
         assert!(!s.is_active(&key));
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, DispatchEffect::EndCall { .. })));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, DispatchEffect::EndCall { .. }))
+        );
     }
 
     #[test]
     fn call_end_for_unknown_call_no_effect() {
         let mut s = DispatcherState::new(0);
         let effects = s.on_event(make_call_end(1, 99999));
-        assert!(!effects
-            .iter()
-            .any(|e| matches!(e, DispatchEffect::EndCall { .. })));
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, DispatchEffect::EndCall { .. }))
+        );
     }
 
     // ── Signal routing ───────────────────────────────────────────────────
@@ -607,9 +609,11 @@ mod tests {
             })),
         };
         let effects = s.on_event(event);
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, DispatchEffect::SendEvent { .. })));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, DispatchEffect::SendEvent { .. }))
+        );
     }
 
     #[test]
@@ -626,9 +630,11 @@ mod tests {
             })),
         };
         let effects = s.on_event(event);
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, DispatchEffect::ForwardToAggregator { .. })));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, DispatchEffect::ForwardToAggregator { .. }))
+        );
     }
 
     // ── Unit routing ─────────────────────────────────────────────────────
@@ -658,9 +664,11 @@ mod tests {
             })),
         };
         let effects = s.on_event(event);
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, DispatchEffect::SendEvent { .. })));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, DispatchEffect::SendEvent { .. }))
+        );
     }
 
     #[test]
@@ -677,9 +685,11 @@ mod tests {
             })),
         };
         let effects = s.on_event(event);
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, DispatchEffect::ForwardToAggregator { .. })));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, DispatchEffect::ForwardToAggregator { .. }))
+        );
     }
 
     // ── Reaping ──────────────────────────────────────────────────────────
@@ -691,13 +701,17 @@ mod tests {
             sys_num: SysNum(1),
             talkgroup: Talkgroup(12345),
         };
-        s.active_calls
-            .insert(key.clone(), Instant::now() - std::time::Duration::from_secs(700));
+        s.active_calls.insert(
+            key.clone(),
+            Instant::now() - std::time::Duration::from_secs(700),
+        );
 
         let effects = s.on_reap_tick();
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, DispatchEffect::ReapCall { .. })));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, DispatchEffect::ReapCall { .. }))
+        );
         assert!(!s.is_active(&key));
     }
 
@@ -726,9 +740,11 @@ mod tests {
             )),
         };
         let effects = s.on_event(event);
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, DispatchEffect::ForwardToAggregator { .. })));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, DispatchEffect::ForwardToAggregator { .. }))
+        );
     }
 
     // ── Coalescing ───────────────────────────────────────────────────────
@@ -746,9 +762,11 @@ mod tests {
             ChannelId::from(999),
         );
         let effects = s.on_event(make_call_end(1, 12345));
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, DispatchEffect::EndCall { .. })));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, DispatchEffect::EndCall { .. }))
+        );
         let key = CallKey {
             sys_num: SysNum(1),
             talkgroup: Talkgroup(12345),
@@ -769,12 +787,16 @@ mod tests {
             ChannelId::from(999),
         );
         let effects = s.on_event(make_call_end(1, 12345));
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, DispatchEffect::PttEnd { .. })));
-        assert!(!effects
-            .iter()
-            .any(|e| matches!(e, DispatchEffect::EndCall { .. })));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, DispatchEffect::PttEnd { .. }))
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, DispatchEffect::EndCall { .. }))
+        );
         let key = CallKey {
             sys_num: SysNum(1),
             talkgroup: Talkgroup(12345),
@@ -806,12 +828,16 @@ mod tests {
 
         // New CallStart while coalescing
         let effects = s.on_event(make_call_start(1, 12345));
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, DispatchEffect::CoalesceResume { .. })));
-        assert!(!effects
-            .iter()
-            .any(|e| matches!(e, DispatchEffect::ResolveChannel { .. })));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, DispatchEffect::CoalesceResume { .. }))
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, DispatchEffect::ResolveChannel { .. }))
+        );
         assert!(s.is_active(&key));
         assert!(!s.is_coalescing(&key));
     }
@@ -828,9 +854,11 @@ mod tests {
             .insert(key.clone(), Instant::now() - Duration::from_millis(200));
 
         let effects = s.on_coalesce_tick();
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, DispatchEffect::CoalesceTimeout { .. })));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, DispatchEffect::CoalesceTimeout { .. }))
+        );
         assert!(!s.is_coalescing(&key));
     }
 
@@ -856,7 +884,8 @@ mod tests {
             talkgroup: Talkgroup(12345),
         };
         // This shouldn't happen in practice, but verify it's safe
-        s.coalescing_calls.insert(key.clone(), Instant::now() - Duration::from_secs(100));
+        s.coalescing_calls
+            .insert(key.clone(), Instant::now() - Duration::from_secs(100));
         let effects = s.on_coalesce_tick();
         assert!(effects.is_empty());
     }

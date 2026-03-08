@@ -44,7 +44,11 @@ impl Transcriber {
         tracing::info!(
             beam_size = config.beam_size,
             "whisper decoding strategy: {}",
-            if config.beam_size > 0 { "beam search" } else { "greedy" }
+            if config.beam_size > 0 {
+                "beam search"
+            } else {
+                "greedy"
+            }
         );
 
         let meter = opentelemetry::global::meter(env!("CARGO_PKG_NAME"));

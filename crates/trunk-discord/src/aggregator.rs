@@ -97,8 +97,7 @@ impl AggregatorExecutor {
                         .await
                     {
                         Ok(thread_id) => {
-                            let hour_key =
-                                Utc::now().format("%Y-%m-%d %H:00").to_string();
+                            let hour_key = Utc::now().format("%Y-%m-%d %H:00").to_string();
                             self.current_thread_id = Some(thread_id);
                             self.recorder_embed_id = None;
                             self.activity_embed_id = None;
@@ -134,12 +133,8 @@ impl AggregatorExecutor {
                 }
                 AggEffect::EditEmbed { target, embed } => {
                     let (thread_id, msg_id) = match target {
-                        EmbedTarget::Recorder => {
-                            (self.current_thread_id, self.recorder_embed_id)
-                        }
-                        EmbedTarget::Activity => {
-                            (self.current_thread_id, self.activity_embed_id)
-                        }
+                        EmbedTarget::Recorder => (self.current_thread_id, self.recorder_embed_id),
+                        EmbedTarget::Activity => (self.current_thread_id, self.activity_embed_id),
                     };
                     if let (Some(tid), Some(mid)) = (thread_id, msg_id)
                         && let Err(e) = self
@@ -185,9 +180,7 @@ fn convert_message(msg: AggregatorMessage) -> AggMessage {
 fn embed_data_to_serenity(data: &EmbedData) -> serenity::all::CreateEmbed {
     use serenity::all::{CreateEmbed, CreateEmbedFooter};
 
-    let mut embed = CreateEmbed::new()
-        .title(&data.title)
-        .colour(data.colour);
+    let mut embed = CreateEmbed::new().title(&data.title).colour(data.colour);
 
     if let Some(desc) = &data.description {
         embed = embed.description(desc);

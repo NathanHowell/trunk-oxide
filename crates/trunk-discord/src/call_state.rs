@@ -197,9 +197,7 @@ impl CallState {
             return vec![];
         }
 
-        if !self.transcription_text.is_empty()
-            && !self.transcription_text.ends_with("---\n")
-        {
+        if !self.transcription_text.is_empty() && !self.transcription_text.ends_with("---\n") {
             self.transcription_text.push(' ');
         }
         self.transcription_text.push_str(text);
@@ -785,7 +783,11 @@ mod tests {
         s.on_start();
         let effects = s.on_end(None, None);
         assert!(effects.iter().any(|e| matches!(e, CallEffect::DeleteEmbed)));
-        assert!(!effects.iter().any(|e| matches!(e, CallEffect::UpdateDb { .. })));
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, CallEffect::UpdateDb { .. }))
+        );
     }
 
     #[test]
@@ -812,9 +814,21 @@ mod tests {
             ..Default::default()
         };
         let effects = s.on_end(Some(&call_data), Some(vec![1, 2, 3]));
-        assert!(effects.iter().any(|e| matches!(e, CallEffect::EditEmbed { .. })));
-        assert!(effects.iter().any(|e| matches!(e, CallEffect::AttachAudio { .. })));
-        assert!(effects.iter().any(|e| matches!(e, CallEffect::UpdateDb { .. })));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, CallEffect::EditEmbed { .. }))
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, CallEffect::AttachAudio { .. }))
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, CallEffect::UpdateDb { .. }))
+        );
         assert!(!effects.iter().any(|e| matches!(e, CallEffect::DeleteEmbed)));
     }
 
@@ -825,7 +839,11 @@ mod tests {
         s.on_event("**Signal**: unit 123".into());
         let effects = s.on_end(None, None);
         assert!(!effects.iter().any(|e| matches!(e, CallEffect::DeleteEmbed)));
-        assert!(effects.iter().any(|e| matches!(e, CallEffect::UpdateDb { .. })));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, CallEffect::UpdateDb { .. }))
+        );
     }
 
     #[test]
@@ -836,7 +854,11 @@ mod tests {
         // ogg_data present but audio is silent (no energy)
         let effects = s.on_end(None, Some(vec![0; 127]));
         assert!(!effects.iter().any(|e| matches!(e, CallEffect::DeleteEmbed)));
-        assert!(!effects.iter().any(|e| matches!(e, CallEffect::AttachAudio { .. })));
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, CallEffect::AttachAudio { .. }))
+        );
     }
 
     #[test]
@@ -850,8 +872,16 @@ mod tests {
             duration_b: 3.0,
         }]);
         let effects = s.on_end(None, Some(vec![0; 127]));
-        assert!(!effects.iter().any(|e| matches!(e, CallEffect::AttachAudio { .. })));
-        assert!(effects.iter().any(|e| matches!(e, CallEffect::UpdateDb { .. })));
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, CallEffect::AttachAudio { .. }))
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, CallEffect::UpdateDb { .. }))
+        );
     }
 
     #[test]
@@ -891,7 +921,11 @@ mod tests {
         s.audio_energy_sum = 1.0;
         s.audio_sample_count = 1000;
         let effects = s.on_end(None, Some(vec![1, 2, 3]));
-        assert!(!effects.iter().any(|e| matches!(e, CallEffect::AttachAudio { .. })));
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, CallEffect::AttachAudio { .. }))
+        );
     }
 
     // ── build_embed fields ───────────────────────────────────────────────
@@ -1005,13 +1039,11 @@ mod tests {
             None,
         );
         // Duration should be 3.0 + 5.0 = 8.0
-        if let Some(CallEffect::UpdateDb { update }) =
-            effects.iter().find(|e| matches!(e, CallEffect::UpdateDb { .. }))
+        if let Some(CallEffect::UpdateDb { update }) = effects
+            .iter()
+            .find(|e| matches!(e, CallEffect::UpdateDb { .. }))
         {
-            assert_eq!(
-                update.duration.unwrap().as_secs_f64(),
-                8.0
-            );
+            assert_eq!(update.duration.unwrap().as_secs_f64(), 8.0);
         }
     }
 
@@ -1035,8 +1067,9 @@ mod tests {
             }),
             None,
         );
-        if let Some(CallEffect::UpdateDb { update }) =
-            effects.iter().find(|e| matches!(e, CallEffect::UpdateDb { .. }))
+        if let Some(CallEffect::UpdateDb { update }) = effects
+            .iter()
+            .find(|e| matches!(e, CallEffect::UpdateDb { .. }))
         {
             let signal = update.signal.unwrap();
             assert!((signal.0 - -20.0).abs() < f64::EPSILON);
@@ -1081,8 +1114,9 @@ mod tests {
             ..Default::default()
         };
         let effects = s.on_end(Some(&call_data), None);
-        if let Some(CallEffect::UpdateDb { update }) =
-            effects.iter().find(|e| matches!(e, CallEffect::UpdateDb { .. }))
+        if let Some(CallEffect::UpdateDb { update }) = effects
+            .iter()
+            .find(|e| matches!(e, CallEffect::UpdateDb { .. }))
         {
             assert_eq!(update.duration.unwrap().as_secs_f64(), 5.5);
             assert!((update.signal.unwrap().0 - -20.0).abs() < f64::EPSILON);

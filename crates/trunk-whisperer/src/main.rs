@@ -92,8 +92,7 @@ async fn main() -> Result<()> {
             .with_callback(move |observer| {
                 let available = semaphore.available_permits();
                 #[allow(clippy::cast_precision_loss)]
-                let utilization =
-                    (max_concurrent - available) as f64 / max_concurrent as f64;
+                let utilization = (max_concurrent - available) as f64 / max_concurrent as f64;
                 observer.observe(utilization, &[]);
             })
             .build();

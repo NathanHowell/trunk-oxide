@@ -51,8 +51,7 @@ impl SolverConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
-        let file: ConfigFile =
-            toml::from_str(&content).context("Failed to parse TOML config")?;
+        let file: ConfigFile = toml::from_str(&content).context("Failed to parse TOML config")?;
         Ok(Self {
             sources: file.source,
             systems: file.system,

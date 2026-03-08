@@ -14,7 +14,10 @@ pub enum AggEffect {
     /// Post a new embed into the current hourly thread.
     PostEmbed { embed: EmbedData },
     /// Edit an existing pinned embed (recorder table or activity summary).
-    EditEmbed { target: EmbedTarget, embed: EmbedData },
+    EditEmbed {
+        target: EmbedTarget,
+        embed: EmbedData,
+    },
     /// Create a new hourly thread with the given name.
     CreateThread { name: String },
     /// Persist an activity snapshot to the database.
@@ -283,10 +286,7 @@ impl AggregatorState {
                     .as_ref()
                     .map_or_else(|| "unknown".to_string(), |s| s.short_name.clone());
                 let msg_count = e.messages.len() as u64;
-                let entry = self
-                    .trunk_message_counts
-                    .entry(sys_name)
-                    .or_insert((0, 0));
+                let entry = self.trunk_message_counts.entry(sys_name).or_insert((0, 0));
                 entry.0 += msg_count;
                 entry.1 += 1;
             }
@@ -606,12 +606,16 @@ mod tests {
         })));
 
         let effects = s.on_flush(1000);
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, AggEffect::InsertActivity { .. })));
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, AggEffect::PostEmbed { .. })));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, AggEffect::InsertActivity { .. }))
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, AggEffect::PostEmbed { .. }))
+        );
     }
 
     #[test]

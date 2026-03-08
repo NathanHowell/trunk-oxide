@@ -194,8 +194,7 @@ impl CallHandler {
                 CallEffect::DeleteEmbed => {
                     if let Some(msg_id) = self.embed_message_id {
                         let start = std::time::Instant::now();
-                        if let Err(e) =
-                            self.discord.delete_message(self.post_channel, msg_id).await
+                        if let Err(e) = self.discord.delete_message(self.post_channel, msg_id).await
                         {
                             tracing::warn!(error = %e, "failed to delete empty call embed");
                         }
@@ -442,15 +441,16 @@ impl CallHandler {
         }
 
         // Finalize OGG encoder
-        let ogg_data = self.ogg_encoder.take().and_then(|encoder| {
-            match encoder.finish() {
+        let ogg_data = self
+            .ogg_encoder
+            .take()
+            .and_then(|encoder| match encoder.finish() {
                 Ok(data) => Some(data),
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to encode OGG audio");
                     None
                 }
-            }
-        });
+            });
 
         // Let the state machine decide what to do
         let effects = self.state.on_end(call_data.as_deref(), ogg_data);

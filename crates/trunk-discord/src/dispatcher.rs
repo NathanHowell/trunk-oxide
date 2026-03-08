@@ -164,9 +164,7 @@ impl DispatchPump {
 
     async fn handle_resolve_result(&mut self, result: ResolveResult) {
         if let Some(post_channel) = result.post_channel {
-            let effects = self
-                .state
-                .on_channel_resolved(result.call, post_channel);
+            let effects = self.state.on_channel_resolved(result.call, post_channel);
             self.process_effects(effects).await;
         } else {
             self.ctx.metrics.channel_resolution_failures.add(1, &[]);
@@ -191,10 +189,10 @@ impl DispatchPump {
                             sample_rate,
                         })
                     {
-                        self.ctx.metrics.audio_packets_dropped.add(
-                            1,
-                            &[KeyValue::new("talkgroup", key.talkgroup.0)],
-                        );
+                        self.ctx
+                            .metrics
+                            .audio_packets_dropped
+                            .add(1, &[KeyValue::new("talkgroup", key.talkgroup.0)]);
                         tracing::warn!(talkgroup = key.talkgroup.0, "audio packet dropped: {e}");
                     }
                 }
@@ -203,10 +201,10 @@ impl DispatchPump {
                     if let Some(active) = self.calls.get(&key)
                         && let Err(e) = active.tx.try_send(CallMessage::Event(text))
                     {
-                        self.ctx.metrics.events_dropped.add(
-                            1,
-                            &[KeyValue::new("talkgroup", key.talkgroup.0)],
-                        );
+                        self.ctx
+                            .metrics
+                            .events_dropped
+                            .add(1, &[KeyValue::new("talkgroup", key.talkgroup.0)]);
                         tracing::warn!(talkgroup = key.talkgroup.0, "event dropped: {e}");
                     }
                 }
@@ -232,10 +230,7 @@ impl DispatchPump {
 
                 DispatchEffect::CoalesceResume { key, call } => {
                     if let Some(active) = self.calls.get(&key) {
-                        let _ = active
-                            .tx
-                            .send(CallMessage::PttStart(Box::new(call)))
-                            .await;
+                        let _ = active.tx.send(CallMessage::PttStart(Box::new(call))).await;
                     }
                 }
 

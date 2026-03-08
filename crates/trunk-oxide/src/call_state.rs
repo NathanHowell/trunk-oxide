@@ -4,6 +4,11 @@ use std::time::{Duration, Instant, SystemTime};
 
 use trunk_config::{DefaultMode, SystemType, TalkgroupMode};
 
+/// Minimum time squelch must stay closed before we transition from Recording
+/// to Idle. Filters out rapid open/close chatter near the noise floor without
+/// losing any audio (the C++ recorder captures independently).
+const SQUELCH_DEBOUNCE: Duration = Duration::from_millis(250);
+
 // ── Newtypes ──
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -334,6 +339,9 @@ pub(crate) struct CallEntry {
     pub(crate) call_mode: CallMode,
     pub(crate) signal_detection: bool,
     pub(crate) squelch_db: f64,
+    /// When the squelch last closed (pending debounce). `None` means squelch
+    /// is open or the close has been finalized.
+    pub(crate) squelch_closed_at: Option<Instant>,
 }
 
 impl Default for CallEntry {
@@ -367,6 +375,7 @@ impl Default for CallEntry {
             call_mode: CallMode::Conventional,
             signal_detection: false,
             squelch_db: 0.0,
+            squelch_closed_at: None,
         }
     }
 }
@@ -1291,12 +1300,22 @@ impl TrunkStateMachine {
 
     fn tick_conventional(&mut self) -> Effects {
         let timeout = self.config.call_timeout;
+        let mut debounce_ready = Vec::new();
         let mut timed_out = Vec::new();
 
         for entry in &self.calls {
             if !entry.is_conventional() || entry.recorder.is_none() {
                 continue;
             }
+
+            // Collect entries whose squelch close debounce has expired.
+            if entry
+                .squelch_closed_at
+                .is_some_and(|t| t.elapsed() >= SQUELCH_DEBOUNCE)
+            {
+                debounce_ready.push(entry.id);
+            }
+
             if entry.state == CallState::Disabled {
                 continue;
             }
@@ -1310,6 +1329,24 @@ impl TrunkStateMachine {
 
             if idle_timed_out || max_duration_exceeded {
                 timed_out.push(entry.id);
+            }
+        }
+
+        // Finalize debounced squelch closes: push segment, transition to Idle.
+        for call_id in debounce_ready {
+            if let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) {
+                entry.squelch_closed_at = None;
+                if entry.state == CallState::Recording {
+                    if let Some(rec_num) = entry.recorder {
+                        entry.segments.push(CallSegment {
+                            freq: entry.freq,
+                            start: entry.segment_start,
+                            rec_num,
+                        });
+                    }
+                    entry.state = CallState::Idle;
+                    entry.idle_since = Some(Instant::now());
+                }
             }
         }
 
@@ -1327,6 +1364,18 @@ impl TrunkStateMachine {
             Some(e) => e,
             None => return Effects::new(),
         };
+
+        // Finalize any pending debounced squelch close so the segment is captured.
+        if entry.squelch_closed_at.take().is_some()
+            && entry.state == CallState::Recording
+            && let Some(rec_num) = entry.recorder
+        {
+            entry.segments.push(CallSegment {
+                freq: entry.freq,
+                start: entry.segment_start,
+                rec_num,
+            });
+        }
 
         if entry.signal_detection {
             let mut effects = Effects::new();
@@ -1397,33 +1446,35 @@ impl TrunkStateMachine {
                 continue;
             }
             if muted {
-                // Squelch closed — close current segment, transition to Idle
+                // Squelch closed — debounce: don't transition immediately.
+                // tick_conventional() finalizes if squelch stays closed past
+                // SQUELCH_DEBOUNCE.
                 entry.noise = pwr_db;
                 if entry.state == CallState::Recording {
-                    entry.segments.push(CallSegment {
-                        freq: entry.freq,
-                        start: entry.segment_start,
-                        rec_num: recorder_num,
-                    });
-                    entry.state = CallState::Idle;
-                    entry.idle_since = Some(Instant::now());
+                    entry.squelch_closed_at.get_or_insert_with(Instant::now);
                 } else if entry.idle_since.is_none() {
                     entry.idle_since = Some(Instant::now());
                 }
             } else {
-                // Squelch open — start new segment, transition to Recording
+                // Squelch open
                 entry.signal = pwr_db;
-                entry.idle_since = None;
-                if entry.state == CallState::Idle {
-                    let first_open = entry.segments.is_empty();
-                    entry.state = CallState::Recording;
-                    entry.segment_start = Instant::now();
-                    if first_open {
-                        let call_id = entry.id;
-                        let mut effects = Effects::new();
-                        effects.push(Effect::EmitCallStart { call_id });
-                        effects.push(Effect::EmitCallsActive);
-                        return effects;
+                if entry.squelch_closed_at.take().is_some() {
+                    // Reopened before debounce expired — cancel pending close,
+                    // stay in Recording. No audio lost.
+                } else {
+                    // Normal open from Idle (debounce already finalized)
+                    entry.idle_since = None;
+                    if entry.state == CallState::Idle {
+                        let first_open = entry.segments.is_empty();
+                        entry.state = CallState::Recording;
+                        entry.segment_start = Instant::now();
+                        if first_open {
+                            let call_id = entry.id;
+                            let mut effects = Effects::new();
+                            effects.push(Effect::EmitCallStart { call_id });
+                            effects.push(Effect::EmitCallsActive);
+                            return effects;
+                        }
                     }
                 }
             }

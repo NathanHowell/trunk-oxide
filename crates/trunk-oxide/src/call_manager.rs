@@ -281,10 +281,10 @@ impl CallManager {
                     self.bridge.setup_system(&info);
                 }
                 Effect::EmitSetupRecorder { call_id } => {
-                    if let Some(entry) = self.state.get_call(call_id) {
-                        if let Some(rec) = &entry.recorder {
-                            self.bridge.setup_recorder(rec.0);
-                        }
+                    if let Some(entry) = self.state.get_call(call_id)
+                        && let Some(rec) = &entry.recorder
+                    {
+                        self.bridge.setup_recorder(rec.0);
                     }
                 }
                 Effect::AddControlChannel { sys_num, freq } => {
@@ -296,8 +296,8 @@ impl CallManager {
                         if let Some(handle) = self.handles.get_mut(&call_id) {
                             ffi::call_restart(handle.pin_mut(), &cfg);
                             // Update recorder number — C++ may assign a different one
-                            let rec_num = if ffi::call_has_recorder(&**handle) {
-                                Some(RecorderNum(ffi::call_get_recorder_num(&**handle)))
+                            let rec_num = if ffi::call_has_recorder(handle) {
+                                Some(RecorderNum(ffi::call_get_recorder_num(handle)))
                             } else {
                                 None
                             };
@@ -401,7 +401,7 @@ impl CallManager {
         };
 
         let result = if let Some(source_idx) = source_idx {
-            let available = ffi::tr_source_available_recorders(&**ctx, source_idx, is_analog);
+            let available = ffi::tr_source_available_recorders(ctx, source_idx, is_analog);
             if priority > available {
                 if let Some(entry) = self.state.get_call(call_id) {
                     tracing::error!(
@@ -420,7 +420,7 @@ impl CallManager {
                 is_analog,
                 &cfg,
             ) {
-                let rec_num = ffi::call_get_recorder_num(&**handle);
+                let rec_num = ffi::call_get_recorder_num(handle);
                 RecordingResult::Started {
                     rec_num: RecorderNum(rec_num),
                 }
@@ -448,7 +448,7 @@ impl CallManager {
         };
 
         let entry = self.state.get_call(call_id);
-        if entry.map_or(false, |e| e.recorder.is_some()) {
+        if entry.is_some_and(|e| e.recorder.is_some()) {
             let rec_num = entry.unwrap().recorder.unwrap();
             let metrics = ffi::call_stop_recording(handle.pin_mut());
             let entry = self.state.get_call(call_id).unwrap();
@@ -506,13 +506,13 @@ impl CallManager {
                 let metrics = ffi::call_stop_recording(handle.pin_mut());
 
                 // Re-read entry after mutable borrow of handle
-                if is_conventional {
-                    if let Some(entry_mut) = self.state.get_call_mut(call_id) {
-                        if state == CallState::Idle {
-                            entry_mut.noise = metrics.recorder_pwr;
-                        } else {
-                            entry_mut.signal = metrics.recorder_pwr;
-                        }
+                if is_conventional
+                    && let Some(entry_mut) = self.state.get_call_mut(call_id)
+                {
+                    if state == CallState::Idle {
+                        entry_mut.noise = metrics.recorder_pwr;
+                    } else {
+                        entry_mut.signal = metrics.recorder_pwr;
                     }
                 }
 
@@ -550,14 +550,14 @@ impl CallManager {
                         data.length = recording_length;
                         data.freq_error = metrics.freq_error;
                         data.transmission_list =
-                            ffi::call_get_dmr_transmission_list(&**handle, slot);
+                            ffi::call_get_dmr_transmission_list(handle, slot);
                         self.bridge.call_end(&data, &segments);
                     }
                 } else {
                     let mut data = self.build_call_data(call_id);
                     data.length = recording_length;
                     data.freq_error = metrics.freq_error;
-                    data.transmission_list = ffi::call_get_transmission_list(&**handle);
+                    data.transmission_list = ffi::call_get_transmission_list(handle);
                     self.bridge.call_end(&data, &segments);
                 }
             }
@@ -607,7 +607,7 @@ impl CallManager {
                 continue;
             }
             if let Some(handle) = self.handles.get(&entry.id) {
-                let since_write = ffi::call_recorder_since_last_write_secs(&**handle);
+                let since_write = ffi::call_recorder_since_last_write_secs(handle);
                 if since_write > timeout {
                     timed_out_ids.push(entry.id);
                 }
@@ -641,8 +641,8 @@ impl CallManager {
             .cloned()
             .unwrap_or_else(|| crate::call_state::DEFAULT_POLICY.clone());
 
-        let rec_num = if ffi::call_has_recorder(&*call) {
-            Some(RecorderNum(ffi::call_get_recorder_num(&*call)))
+        let rec_num = if ffi::call_has_recorder(&call) {
+            Some(RecorderNum(ffi::call_get_recorder_num(&call)))
         } else {
             None
         };
@@ -659,10 +659,10 @@ impl CallManager {
         // Process effects inline — add_conventional_call only emits EnableRecorder.
         // Cannot use process_effects() here because we don't have TrContext yet.
         for effect in effects {
-            if let Effect::EnableRecorder { call_id } = effect {
-                if let Some(handle) = self.handles.get_mut(&call_id) {
-                    ffi::call_set_recorder_enabled(handle.pin_mut(), true);
-                }
+            if let Effect::EnableRecorder { call_id } = effect
+                && let Some(handle) = self.handles.get_mut(&call_id)
+            {
+                ffi::call_set_recorder_enabled(handle.pin_mut(), true);
             }
         }
     }
@@ -872,7 +872,7 @@ impl CallManager {
             duplex: entry.duplex,
             conversation_mode: entry
                 .trunked_fields()
-                .map_or(false, |t| t.conversation_mode),
+                .is_some_and(|t| t.conversation_mode),
             current_source_id: entry.current_source_id,
             start_time: crate::call_state::system_time_to_unix(entry.start_time),
             elapsed: elapsed.as_secs_f64(),

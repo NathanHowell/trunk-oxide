@@ -900,14 +900,14 @@ impl TrunkStateMachine {
                     .any(|e| matches!(e, Effect::RequestRecording { .. }));
             effects.extend(policy_effects);
 
-            if recording_started {
-                if let Some(orig_idx) = multisite.original_idx {
-                    let orig = &mut self.calls[orig_idx];
-                    orig.state = CallState::Rejected(RejectReason::Superseded);
-                    let orig_id = orig.id;
-                    effects.push(Effect::EmitCallEnd { call_id: orig_id });
-                    effects.push(Effect::RemoveCall { call_id: orig_id });
-                }
+            if recording_started
+                && let Some(orig_idx) = multisite.original_idx
+            {
+                let orig = &mut self.calls[orig_idx];
+                orig.state = CallState::Rejected(RejectReason::Superseded);
+                let orig_id = orig.id;
+                effects.push(Effect::EmitCallEnd { call_id: orig_id });
+                effects.push(Effect::RemoveCall { call_id: orig_id });
             }
         } else if multisite.is_duplicate {
             self.calls[new_idx].state = CallState::Rejected(RejectReason::Duplicate);
@@ -1068,7 +1068,7 @@ impl TrunkStateMachine {
         }
 
         // 2. Encryption check
-        let is_encrypted = msg.encrypted || tg_policy.map_or(false, |tg| tg.mode.is_encrypted());
+        let is_encrypted = msg.encrypted || tg_policy.is_some_and(|tg| tg.mode.is_encrypted());
         if is_encrypted {
             entry.encrypted = true;
             if !sys_policy.monitor_encrypted {
@@ -1093,10 +1093,11 @@ impl TrunkStateMachine {
         let priority = if let Some(tgp) = tg_policy {
             let mut p = tgp.priority;
             for ptg in &patch_tgs {
-                if let Some(ptgp) = sys_policy.talkgroups.get(ptg) {
-                    if ptgp.priority >= 0 && ptgp.priority < p {
-                        p = ptgp.priority;
-                    }
+                if let Some(ptgp) = sys_policy.talkgroups.get(ptg)
+                    && ptgp.priority >= 0
+                    && ptgp.priority < p
+                {
+                    p = ptgp.priority;
                 }
             }
             p
@@ -1546,13 +1547,10 @@ impl TrunkStateMachine {
     /// Returns effects to conclude and remove the call.
     pub(crate) fn expire_call(&self, call_id: CallId) -> Effects {
         let mut effects = Effects::new();
-        if let Some(entry) = self.get_call(call_id) {
-            if matches!(
-                entry.state,
-                CallState::Recording | CallState::Idle
-            ) {
-                effects.push(Effect::EmitCallEnd { call_id });
-            }
+        if let Some(entry) = self.get_call(call_id)
+            && matches!(entry.state, CallState::Recording | CallState::Idle)
+        {
+            effects.push(Effect::EmitCallEnd { call_id });
         }
         effects.push(Effect::EmitSetupRecorder { call_id });
         effects.push(Effect::RemoveCall { call_id });

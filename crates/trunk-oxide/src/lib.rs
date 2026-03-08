@@ -13,7 +13,7 @@ mod p25_lfsr;
 
 use std::hash::{Hash, Hasher};
 use std::ops::RangeInclusive;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
@@ -21,6 +21,14 @@ use trunk_recorder_sys::{EventNotifier, GrEvent};
 
 pub use call_manager::{CallManagerConfig, ConventionalChannel, SystemPolicy, TalkgroupPolicy};
 pub use call_state::{Freq, Talkgroup};
+
+/// Snapshot of GNU Radio block-level performance counters, collected
+/// periodically on the monitor thread and read by OTel observable callbacks.
+#[derive(Default)]
+pub struct GrMetricsSnapshot {
+    pub recorders: Vec<ffi::TrRecorderMetrics>,
+    pub sources: Vec<ffi::TrSourceMetrics>,
+}
 
 /// Dedup key derived from a trunk message. Two identical TSBKs parsed by
 /// different decoders on the same system produce the same key.
@@ -92,6 +100,9 @@ pub struct TrunkRecorder {
     /// Conventional calls created before the flowgraph starts, pending
     /// registration with the [`CallManager`].
     pending_conventional_calls: Vec<PendingConventionalCall>,
+    /// Shared snapshot of GR block metrics, updated periodically on the
+    /// monitor thread and read by OTel observable callbacks.
+    gr_metrics: Arc<Mutex<GrMetricsSnapshot>>,
 }
 
 struct PendingConventionalCall {
@@ -385,8 +396,8 @@ impl TrunkRecorderBuilder {
         );
         let call_mgr_config = CallManagerConfig {
             call_timeout: rec.map_or(3.0, |r| r.call_timeout),
-            new_call_from_update: rec.map_or(true, |r| r.new_call_from_update),
-            record_uu_v_calls: rec.map_or(true, |r| r.record_uu_v_calls),
+            new_call_from_update: rec.is_none_or(|r| r.new_call_from_update),
+            record_uu_v_calls: rec.is_none_or(|r| r.record_uu_v_calls),
             default_mode: rec.map_or(DefaultMode::default(), |r| r.default_mode),
             temp_dir,
             systems: system_policies,
@@ -472,6 +483,7 @@ impl TrunkRecorderBuilder {
             pending,
             source_ranges: self.source_ranges,
             pending_conventional_calls,
+            gr_metrics: Arc::new(Mutex::new(GrMetricsSnapshot::default())),
         }
     }
 }
@@ -480,6 +492,11 @@ impl TrunkRecorder {
     /// Shared counter of events queued but not yet consumed by the monitor loop.
     pub fn event_channel_depth(&self) -> Arc<AtomicUsize> {
         Arc::clone(&self.pending)
+    }
+
+    /// Shared GR block metrics snapshot, updated every 15s on the monitor thread.
+    pub fn gr_metrics(&self) -> Arc<Mutex<GrMetricsSnapshot>> {
+        Arc::clone(&self.gr_metrics)
     }
 
     /// Run the monitor loop until ctrl_c is received.
@@ -506,6 +523,7 @@ impl TrunkRecorder {
 
         let mut tick = delayed_interval(Duration::from_secs(1));
         let mut status = delayed_interval(Duration::from_secs(200));
+        let mut metrics_tick = delayed_interval(Duration::from_secs(1));
 
         loop {
             tokio::select! {
@@ -520,7 +538,7 @@ impl TrunkRecorder {
                         GrEvent::TrunkMessages(messages) => {
                             let messages: Vec<_> = messages
                                 .into_iter()
-                                .filter(|m| trunk_dedup.admit(&TrunkMsgKey::from(&*m)))
+                                .filter(|m| trunk_dedup.admit(&TrunkMsgKey::from(m)))
                                 .collect();
                             if !messages.is_empty() {
                                 let mut by_system: HashMap<i32, Vec<usize>> = HashMap::new();
@@ -574,7 +592,15 @@ impl TrunkRecorder {
                 _ = status.tick() => {
                     call_mgr.print_status(self.ctx.pin_mut());
                     call_mgr.print_active_patches();
-                    call_mgr.print_recorder_status(&*self.ctx);
+                    call_mgr.print_recorder_status(&self.ctx);
+                },
+                _ = metrics_tick.tick() => {
+                    let recorders = ffi::tr_collect_recorder_metrics(&self.ctx);
+                    let sources = ffi::tr_collect_source_metrics(&self.ctx);
+                    if let Ok(mut snap) = self.gr_metrics.lock() {
+                        snap.recorders = recorders;
+                        snap.sources = sources;
+                    }
                 },
             }
 

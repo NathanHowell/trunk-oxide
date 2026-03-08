@@ -80,7 +80,8 @@ fn mk_array(mut n: u64, len: usize) -> Vec<u8> {
 }
 
 fn mk_int(a: &[u8]) -> u64 {
-    a.iter().fold(0u64, |res, &bit| res * 2 + u64::from(bit & 1))
+    a.iter()
+        .fold(0u64, |res, &bit| res * 2 + u64::from(bit & 1))
 }
 
 const fn disasm_reg(r: u64) -> [u64; 6] {
@@ -172,6 +173,10 @@ mod tests {
             0,3,2,2,3,1,3,0,2,0,2,3,3,0,2,3,0,2,0,1,1,2,2,0,1,0,3,3,0,2,2,1,
         ];
         let mask = compute_xor_mask(0x293, 0x001, 0xBEE00);
-        assert_eq!(&mask[..128], expected, "first 128 dibits must match C++ reference");
+        assert_eq!(
+            &mask[..128],
+            expected,
+            "first 128 dibits must match C++ reference"
+        );
     }
 }

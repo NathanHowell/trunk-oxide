@@ -13,8 +13,8 @@ mod p25_lfsr;
 
 use std::hash::{Hash, Hasher};
 use std::ops::RangeInclusive;
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use trunk_recorder_sys::{EventNotifier, GrEvent};
@@ -333,7 +333,11 @@ impl TrunkRecorderBuilder {
                     multi_site_name: sys.multi_site_system_name.clone(),
                     conversation_mode: sys.conversation_mode,
                     max_duration: sys.max_duration,
-                    control_channels: sys.control_channels.iter().map(|&f| Freq::from_hz(f)).collect(),
+                    control_channels: sys
+                        .control_channels
+                        .iter()
+                        .map(|&f| Freq::from_hz(f))
+                        .collect(),
                     talkgroups,
                     channels,
                     squelch_db: sys.squelch,
@@ -513,10 +517,11 @@ impl TrunkRecorder {
 
         // Register conventional calls that were pre-created before the
         // flowgraph started (see TrunkRecorderBuilder::start).
-        for pending in self.pending_conventional_calls.drain(..) {
-            let channel = &self.call_mgr_config.systems[&pending.sys_num]
-                .channels[pending.channel_idx];
-            call_mgr.add_call(pending.call, channel, pending.sys_num);
+        let pending_calls: Vec<_> = self.pending_conventional_calls.drain(..).collect();
+        for pending in pending_calls {
+            let channel =
+                &self.call_mgr_config.systems[&pending.sys_num].channels[pending.channel_idx];
+            call_mgr.add_call(self.ctx.pin_mut(), pending.call, channel, pending.sys_num);
         }
 
         let mut trunk_dedup = dedup::WindowedDedup::new(64);
@@ -603,7 +608,6 @@ impl TrunkRecorder {
                     }
                 },
             }
-
         }
     }
 }

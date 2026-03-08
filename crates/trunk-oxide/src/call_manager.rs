@@ -19,8 +19,8 @@ use trunk_oxide_grpc::EventBridge;
 use trunk_oxide_grpc::proto::SystemType as ProtoSystemType;
 
 use crate::call_state::{
-    CallId, CallState, Effect, Freq, MessageType, RecorderNum, RecordingResult, RejectReason,
-    Talkgroup, TrunkMessage, TrunkStateMachine, UnitEventType,
+    CallId, CallState, Effect, Effects, Freq, MessageType, RecorderNum, RecordingResult,
+    RejectReason, Talkgroup, TrunkMessage, TrunkStateMachine, UnitEventType,
 };
 
 pub use crate::call_state::{CallManagerConfig, ConventionalChannel, SystemPolicy, TalkgroupPolicy};
@@ -177,7 +177,7 @@ impl CallManager {
 
     // ── Effect processing ──
 
-    fn process_effects(&mut self, effects: Vec<Effect>, ctx: &mut Pin<&mut TrContext>) {
+    fn process_effects(&mut self, effects: Effects, ctx: &mut Pin<&mut TrContext>) {
         for effect in effects {
             match effect {
                 Effect::CreateCall { call_id } => {

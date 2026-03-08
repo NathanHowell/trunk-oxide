@@ -486,6 +486,66 @@ pub(crate) enum Effect {
     },
 }
 
+/// Newtype wrapper for a list of effects returned by state machine methods.
+///
+/// The `#[must_use]` attribute ensures callers cannot silently discard effects —
+/// doing so is a compile error under the workspace's `unused_must_use = "deny"`.
+#[must_use = "effects must be processed via process_effects()"]
+#[derive(Debug)]
+pub(crate) struct Effects(Vec<Effect>);
+
+impl Effects {
+    pub(crate) const fn new() -> Self {
+        Self(Vec::new())
+    }
+
+    pub(crate) fn push(&mut self, effect: Effect) {
+        self.0.push(effect);
+    }
+
+    pub(crate) const fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl From<Effect> for Effects {
+    fn from(effect: Effect) -> Self {
+        Self(vec![effect])
+    }
+}
+
+impl Extend<Effect> for Effects {
+    fn extend<T: IntoIterator<Item = Effect>>(&mut self, iter: T) {
+        self.0.extend(iter);
+    }
+}
+
+impl IntoIterator for Effects {
+    type Item = Effect;
+    type IntoIter = std::vec::IntoIter<Effect>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.into_iter()
+    }
+}
+
+impl<'a> IntoIterator for &'a Effects {
+    type Item = &'a Effect;
+    type IntoIter = std::slice::Iter<'a, Effect>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.0.iter()
+    }
+}
+
+impl std::ops::Deref for Effects {
+    type Target = [Effect];
+
+    fn deref(&self) -> &[Effect] {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum UnitEventType {
     Registration,
@@ -594,30 +654,30 @@ impl TrunkStateMachine {
 
     // ── Top-level message dispatch ──
 
-    pub(crate) fn on_message(&mut self, msg: &TrunkMessage) -> Vec<Effect> {
+    pub(crate) fn on_message(&mut self, msg: &TrunkMessage) -> Effects {
         match msg.message_type {
             MessageType::InvalidCcMessage => {
-                vec![]
+                Effects::new()
             }
 
             MessageType::ControlChannel => {
-                vec![Effect::AddControlChannel {
+                Effect::AddControlChannel {
                     sys_num: msg.sys_num,
                     freq: msg.freq,
-                }]
+                }.into()
             }
 
             MessageType::PatchAdd => {
                 if let Some(pt) = self.patch_tables.get_mut(&msg.sys_num) {
                     pt.update(msg.patch_sg, msg.patch_ga1, msg.patch_ga2, msg.patch_ga3);
                 }
-                vec![]
+                Effects::new()
             }
             MessageType::PatchDelete => {
                 if let Some(pt) = self.patch_tables.get_mut(&msg.sys_num) {
                     pt.delete(msg.patch_sg, msg.patch_ga1, msg.patch_ga2, msg.patch_ga3);
                 }
-                vec![]
+                Effects::new()
             }
 
             MessageType::Tdulc => self.on_tdulc(msg.sys_num, msg.talkgroup),
@@ -627,9 +687,9 @@ impl TrunkStateMachine {
                     id.rfss = msg.sys_rfss;
                     id.site_id = msg.sys_site_id;
                 }
-                vec![Effect::EmitSetupSystem {
+                Effect::EmitSetupSystem {
                     sys_num: msg.sys_num,
-                }]
+                }.into()
             }
             MessageType::Status => {
                 if let Some(id) = self.system_identities.get_mut(&msg.sys_num) {
@@ -639,54 +699,54 @@ impl TrunkStateMachine {
                     id.xor_mask =
                         crate::p25_lfsr::compute_xor_mask(msg.nac, msg.sys_id, msg.wacn);
                 }
-                vec![Effect::EmitSetupSystem {
+                Effect::EmitSetupSystem {
                     sys_num: msg.sys_num,
-                }]
+                }.into()
             }
 
             // Unit events (stateless)
-            MessageType::Registration => vec![Effect::EmitUnitEvent {
+            MessageType::Registration => Effect::EmitUnitEvent {
                 sys_num: msg.sys_num,
                 type_: UnitEventType::Registration,
                 source_id: msg.source,
                 talkgroup: 0,
-            }],
-            MessageType::Deregistration => vec![Effect::EmitUnitEvent {
+            }.into(),
+            MessageType::Deregistration => Effect::EmitUnitEvent {
                 sys_num: msg.sys_num,
                 type_: UnitEventType::Deregistration,
                 source_id: msg.source,
                 talkgroup: 0,
-            }],
-            MessageType::Affiliation => vec![Effect::EmitUnitEvent {
+            }.into(),
+            MessageType::Affiliation => Effect::EmitUnitEvent {
                 sys_num: msg.sys_num,
                 type_: UnitEventType::Affiliation,
                 source_id: msg.source,
                 talkgroup: msg.talkgroup,
-            }],
-            MessageType::Acknowledge => vec![Effect::EmitUnitEvent {
+            }.into(),
+            MessageType::Acknowledge => Effect::EmitUnitEvent {
                 sys_num: msg.sys_num,
                 type_: UnitEventType::Acknowledge,
                 source_id: msg.source,
                 talkgroup: 0,
-            }],
-            MessageType::Location => vec![Effect::EmitUnitEvent {
+            }.into(),
+            MessageType::Location => Effect::EmitUnitEvent {
                 sys_num: msg.sys_num,
                 type_: UnitEventType::Location,
                 source_id: msg.source,
                 talkgroup: msg.talkgroup,
-            }],
-            MessageType::DataGrant => vec![Effect::EmitUnitEvent {
+            }.into(),
+            MessageType::DataGrant => Effect::EmitUnitEvent {
                 sys_num: msg.sys_num,
                 type_: UnitEventType::DataGrant,
                 source_id: msg.source,
                 talkgroup: 0,
-            }],
-            MessageType::UuAnsReq => vec![Effect::EmitUnitEvent {
+            }.into(),
+            MessageType::UuAnsReq => Effect::EmitUnitEvent {
                 sys_num: msg.sys_num,
                 type_: UnitEventType::AnswerRequest,
                 source_id: msg.source,
                 talkgroup: msg.talkgroup,
-            }],
+            }.into(),
 
             // Call lifecycle
             MessageType::Grant => self.on_grant(msg, true),
@@ -701,27 +761,27 @@ impl TrunkStateMachine {
                 if self.config.record_uu_v_calls {
                     self.on_grant(msg, true)
                 } else {
-                    vec![]
+                    Effects::new()
                 }
             }
             MessageType::UuVUpdate => {
                 if self.config.record_uu_v_calls {
                     self.on_update(msg)
                 } else {
-                    vec![]
+                    Effects::new()
                 }
             }
 
-            MessageType::Unknown(t) => vec![Effect::Warn {
+            MessageType::Unknown(t) => Effect::Warn {
                 message: format!("unhandled message type: {t}"),
-            }],
+            }.into(),
         }
     }
 
     // ── Grant handling ──
 
-    fn on_grant(&mut self, msg: &TrunkMessage, is_grant_message: bool) -> Vec<Effect> {
-        let mut effects = Vec::new();
+    fn on_grant(&mut self, msg: &TrunkMessage, is_grant_message: bool) -> Effects {
+        let mut effects = Effects::new();
 
         let existing_idx = self.calls.iter().position(|entry| {
             entry.talkgroup == msg.talkgroup
@@ -871,8 +931,8 @@ impl TrunkStateMachine {
 
     // ── Update handling ──
 
-    fn on_update(&mut self, msg: &TrunkMessage) -> Vec<Effect> {
-        let mut effects = Vec::new();
+    fn on_update(&mut self, msg: &TrunkMessage) -> Effects {
+        let mut effects = Effects::new();
 
         for entry in self.calls.iter_mut() {
             if entry.talkgroup == msg.talkgroup
@@ -898,7 +958,7 @@ impl TrunkStateMachine {
 
     // ── TDULC handling (P25 Terminator Data Unit) ──
 
-    fn on_tdulc(&mut self, sys_num: i32, talkgroup: i64) -> Vec<Effect> {
+    fn on_tdulc(&mut self, sys_num: i32, talkgroup: i64) -> Effects {
         for entry in &mut self.calls {
             if entry.sys_num != sys_num || entry.talkgroup != talkgroup {
                 continue;
@@ -928,14 +988,14 @@ impl TrunkStateMachine {
                 segments = entry.segments.len(),
                 "TDULC: PTT end, Recording → Idle"
             );
-            return vec![];
+            return Effects::new();
         }
-        vec![]
+        Effects::new()
     }
 
     // ── Source tracking ──
 
-    fn update_call_source(&mut self, idx: usize, source: i64, effects: &mut Vec<Effect>) -> bool {
+    fn update_call_source(&mut self, idx: usize, source: i64, effects: &mut Effects) -> bool {
         let entry = &mut self.calls[idx];
         Self::update_call_source_entry(entry, source, effects)
     }
@@ -943,7 +1003,7 @@ impl TrunkStateMachine {
     fn update_call_source_entry(
         entry: &mut CallEntry,
         source: i64,
-        effects: &mut Vec<Effect>,
+        effects: &mut Effects,
     ) -> bool {
         entry.last_update = Instant::now();
 
@@ -969,13 +1029,13 @@ impl TrunkStateMachine {
         &mut self,
         entry_idx: usize,
         msg: &TrunkMessage,
-    ) -> Vec<Effect> {
+    ) -> Effects {
         let sys_num = msg.sys_num;
         let tg = Talkgroup(msg.talkgroup);
 
         let sys_policy = match self.config.systems.get(&sys_num) {
             Some(sp) => sp,
-            None => return vec![],
+            None => return Effects::new(),
         };
 
         let tg_policy = sys_policy.talkgroups.get(&tg);
@@ -1003,7 +1063,7 @@ impl TrunkStateMachine {
                         "not recording: TG not in talkgroup file"
                     );
                 }
-                return vec![];
+                return Effects::new();
             }
         }
 
@@ -1016,7 +1076,7 @@ impl TrunkStateMachine {
                 if !sys_policy.hide_encrypted {
                     tracing::info!(talkgroup = tg.0, sys_num, "not recording: encrypted");
                 }
-                return vec![];
+                return Effects::new();
             }
         }
 
@@ -1052,16 +1112,16 @@ impl TrunkStateMachine {
                 sys_num,
                 "not recording: priority disabled (-1)"
             );
-            return vec![];
+            return Effects::new();
         }
 
         // 6. Emit RequestRecording — executor handles FFI source/recorder allocation
-        vec![Effect::RequestRecording {
+        Effect::RequestRecording {
             call_id: entry.id,
             freq: entry.freq,
             is_analog,
             priority,
-        }]
+        }.into()
     }
 
     // ── Recording result callback (from executor after FFI) ──
@@ -1070,10 +1130,10 @@ impl TrunkStateMachine {
         &mut self,
         call_id: CallId,
         result: RecordingResult,
-    ) -> Vec<Effect> {
+    ) -> Effects {
         let entry = match self.calls.iter_mut().find(|e| e.id == call_id) {
             Some(e) => e,
-            None => return vec![],
+            None => return Effects::new(),
         };
 
         match result {
@@ -1090,11 +1150,11 @@ impl TrunkStateMachine {
                     analog = entry.is_analog,
                     "starting recorder"
                 );
-                vec![Effect::EmitSetupRecorder { call_id }]
+                Effect::EmitSetupRecorder { call_id }.into()
             }
             RecordingResult::NoRecorder => {
                 entry.state = CallState::Rejected(RejectReason::NoRecorder);
-                vec![]
+                Effects::new()
             }
             RecordingResult::NoSource => {
                 entry.state = CallState::Rejected(RejectReason::NoSource);
@@ -1103,7 +1163,7 @@ impl TrunkStateMachine {
                     sys_num = entry.sys_num,
                     "not recording: no source covering freq"
                 );
-                vec![]
+                Effects::new()
             }
         }
     }
@@ -1190,8 +1250,8 @@ impl TrunkStateMachine {
 
     // ── Periodic tick ──
 
-    pub(crate) fn tick(&mut self) -> Vec<Effect> {
-        let mut effects = Vec::new();
+    pub(crate) fn tick(&mut self) -> Effects {
+        let mut effects = Effects::new();
         let timeout = self.config.call_timeout;
         let mut ended_call = false;
 
@@ -1230,7 +1290,7 @@ impl TrunkStateMachine {
         effects
     }
 
-    fn tick_conventional(&mut self) -> Vec<Effect> {
+    fn tick_conventional(&mut self) -> Effects {
         let timeout = self.config.call_timeout;
         let mut timed_out = Vec::new();
 
@@ -1255,7 +1315,7 @@ impl TrunkStateMachine {
             }
         }
 
-        let mut effects = Vec::new();
+        let mut effects = Effects::new();
         for call_id in timed_out {
             effects.extend(self.on_conventional_idle_timeout(call_id));
         }
@@ -1264,10 +1324,10 @@ impl TrunkStateMachine {
 
     // ── Conventional callbacks from executor ──
 
-    pub(crate) fn on_conventional_idle_timeout(&mut self, call_id: CallId) -> Vec<Effect> {
+    pub(crate) fn on_conventional_idle_timeout(&mut self, call_id: CallId) -> Effects {
         let entry = match self.calls.iter_mut().find(|e| e.id == call_id) {
             Some(e) => e,
-            None => return vec![],
+            None => return Effects::new(),
         };
 
         if entry.signal_detection {
@@ -1278,14 +1338,13 @@ impl TrunkStateMachine {
             entry.state = CallState::Disabled;
             entry.last_update = Instant::now();
             entry.idle_since = None;
-            return vec![Effect::DisableRecorder { call_id }];
+            return Effect::DisableRecorder { call_id }.into();
         }
 
         // Non-signal-detection: full restart cycle (always-on recorders).
-        let mut effects = vec![
-            Effect::EmitCallEnd { call_id },
-            Effect::ConventionalRestart { call_id },
-        ];
+        let mut effects = Effects::new();
+        effects.push(Effect::EmitCallEnd { call_id });
+        effects.push(Effect::ConventionalRestart { call_id });
 
         entry.state = CallState::Recording;
         entry.last_update = Instant::now();
@@ -1355,8 +1414,8 @@ impl TrunkStateMachine {
         &mut self,
         source_center_freq: f64,
         signals: &[trunk_recorder_sys::DetectedSignal],
-    ) -> Vec<Effect> {
-        let mut effects = Vec::new();
+    ) -> Effects {
+        let mut effects = Effects::new();
         for signal in signals {
             let abs_freq = source_center_freq + signal.center_freq;
             for entry in &mut self.calls {
@@ -1386,7 +1445,7 @@ impl TrunkStateMachine {
         sys_num: i32,
         policy: &SystemPolicy,
         recorder: Option<RecorderNum>,
-    ) -> (CallId, Vec<Effect>) {
+    ) -> (CallId, Effects) {
         let state = if channel.signal_detection {
             CallState::Disabled
         } else {
@@ -1408,9 +1467,9 @@ impl TrunkStateMachine {
         };
         let call_id = entry.id;
         let effects = if channel.signal_detection {
-            vec![]
+            Effects::new()
         } else {
-            vec![Effect::EnableRecorder { call_id }]
+            Effect::EnableRecorder { call_id }.into()
         };
         self.calls.push(entry);
         (call_id, effects)
@@ -1447,8 +1506,8 @@ impl TrunkStateMachine {
 
     // ── Conclude all (shutdown) ──
 
-    pub(crate) fn conclude_all(&self) -> Vec<Effect> {
-        let mut effects = Vec::new();
+    pub(crate) fn conclude_all(&self) -> Effects {
+        let mut effects = Effects::new();
         for entry in &self.calls {
             if matches!(entry.state, CallState::Recording | CallState::Idle | CallState::Disabled) {
                 effects.push(Effect::EmitCallEnd { call_id: entry.id });
@@ -1471,8 +1530,8 @@ impl TrunkStateMachine {
 
     /// Expire a trunked call due to recorder write timeout.
     /// Returns effects to conclude and remove the call.
-    pub(crate) fn expire_call(&self, call_id: CallId) -> Vec<Effect> {
-        let mut effects = Vec::new();
+    pub(crate) fn expire_call(&self, call_id: CallId) -> Effects {
+        let mut effects = Effects::new();
         if let Some(entry) = self.get_call(call_id) {
             if matches!(
                 entry.state,
@@ -1602,7 +1661,7 @@ mod tests {
     fn grant_same_freq_updates_source() {
         let mut sm = TrunkStateMachine::new(test_config());
         let msg = grant_msg(100, 851_000_000.0);
-        sm.on_message(&msg);
+        let _effects = sm.on_message(&msg);
 
         let mut msg2 = grant_msg(100, 851_000_000.0);
         msg2.source = 200;
@@ -1622,7 +1681,7 @@ mod tests {
         let call_id = extract_create_call_id(&effects);
 
         // Simulate recording started
-        sm.on_recording_result(call_id, RecordingResult::Started {
+        let _effects = sm.on_recording_result(call_id, RecordingResult::Started {
             rec_num: RecorderNum(0),
         });
 
@@ -1661,7 +1720,7 @@ mod tests {
         let effects = sm.on_message(&msg);
         let call_id = extract_create_call_id(&effects);
 
-        sm.on_recording_result(call_id, RecordingResult::NoSource);
+        let _effects = sm.on_recording_result(call_id, RecordingResult::NoSource);
 
         assert_eq!(sm.calls[0].state, CallState::Rejected(RejectReason::NoSource));
     }
@@ -1674,7 +1733,7 @@ mod tests {
         let msg = grant_msg(100, 851_000_000.0);
         let effects = sm.on_message(&msg);
         let call_id = extract_create_call_id(&effects);
-        sm.on_recording_result(call_id, RecordingResult::Started {
+        let _effects = sm.on_recording_result(call_id, RecordingResult::Started {
             rec_num: RecorderNum(0),
         });
 
@@ -1684,7 +1743,7 @@ mod tests {
             sys_num: 1,
             ..grant_msg(100, 0.0)
         };
-        sm.on_message(&tdulc);
+        let _effects = sm.on_message(&tdulc);
 
         assert_eq!(sm.calls[0].state, CallState::Idle);
         assert_eq!(sm.calls[0].segments.len(), 1);
@@ -1698,7 +1757,7 @@ mod tests {
         let msg = grant_msg(100, 851_000_000.0);
         let effects = sm.on_message(&msg);
         let call_id = extract_create_call_id(&effects);
-        sm.on_recording_result(call_id, RecordingResult::Started {
+        let _effects = sm.on_recording_result(call_id, RecordingResult::Started {
             rec_num: RecorderNum(0),
         });
 
@@ -1709,11 +1768,11 @@ mod tests {
             sys_num: 1,
             ..grant_msg(100, 0.0)
         };
-        sm.on_message(&tdulc);
+        let _effects = sm.on_message(&tdulc);
         assert_eq!(sm.calls[0].state, CallState::Idle);
 
         // Grant again → Recording
-        sm.on_message(&msg);
+        let _effects = sm.on_message(&msg);
         assert_eq!(sm.calls[0].state, CallState::Recording);
     }
 
@@ -1725,7 +1784,7 @@ mod tests {
         let msg = grant_msg(100, 851_000_000.0);
         let effects = sm.on_message(&msg);
         let call_id = extract_create_call_id(&effects);
-        sm.on_recording_result(call_id, RecordingResult::Started {
+        let _effects = sm.on_recording_result(call_id, RecordingResult::Started {
             rec_num: RecorderNum(0),
         });
 
@@ -1757,7 +1816,7 @@ mod tests {
         let msg = grant_msg(100, 851_000_000.0);
         let effects = sm.on_message(&msg);
         let call_id = extract_create_call_id(&effects);
-        sm.on_recording_result(call_id, RecordingResult::NoSource);
+        let _effects = sm.on_recording_result(call_id, RecordingResult::NoSource);
 
         sm.calls[0].last_update = Instant::now() - std::time::Duration::from_secs(10);
 
@@ -1779,7 +1838,7 @@ mod tests {
         let msg = grant_msg(100, 851_000_000.0);
         let effects = sm.on_message(&msg);
         let call_id = extract_create_call_id(&effects);
-        sm.on_recording_result(call_id, RecordingResult::Started {
+        let _effects = sm.on_recording_result(call_id, RecordingResult::Started {
             rec_num: RecorderNum(0),
         });
 
@@ -1797,7 +1856,7 @@ mod tests {
         let msg = grant_msg(100, 851_000_000.0);
         let effects = sm.on_message(&msg);
         let call_id = extract_create_call_id(&effects);
-        sm.on_recording_result(call_id, RecordingResult::Started {
+        let _effects = sm.on_recording_result(call_id, RecordingResult::Started {
             rec_num: RecorderNum(0),
         });
 
@@ -2054,7 +2113,7 @@ mod tests {
         sm.calls[0].state = CallState::Idle;
         sm.calls[0].idle_since = Some(Instant::now());
 
-        sm.on_conventional_idle_timeout(call_id);
+        let _effects = sm.on_conventional_idle_timeout(call_id);
 
         let entry = sm.get_call(call_id).unwrap();
         assert!(entry.idle_since.is_none());

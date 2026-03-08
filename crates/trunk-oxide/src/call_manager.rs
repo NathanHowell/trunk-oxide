@@ -64,6 +64,10 @@ pub struct CallManager {
     recorder_denied: Counter<u64>,
     control_channel_messages: Counter<u64>,
     active_calls_gauge: Gauge<u64>,
+    conv_signal_power: Gauge<f64>,
+    conv_noise_floor: Gauge<f64>,
+    conv_detection_rssi: Gauge<f64>,
+    conv_detection_cycles: Counter<u64>,
 }
 
 impl CallManager {
@@ -97,6 +101,22 @@ impl CallManager {
             active_calls_gauge: meter
                 .u64_gauge("trunk.oxide.active_calls")
                 .with_description("Number of active calls")
+                .build(),
+            conv_signal_power: meter
+                .f64_gauge("trunk.oxide.conventional.signal_power_db")
+                .with_description("Signal power (dBFS) when squelch opens on conventional channel")
+                .build(),
+            conv_noise_floor: meter
+                .f64_gauge("trunk.oxide.conventional.noise_floor_db")
+                .with_description("Noise floor (dBFS) when squelch closes on conventional channel")
+                .build(),
+            conv_detection_rssi: meter
+                .f64_gauge("trunk.oxide.conventional.signal_detection_rssi_db")
+                .with_description("FFT signal detection RSSI near conventional channel")
+                .build(),
+            conv_detection_cycles: meter
+                .u64_counter("trunk.oxide.conventional.signal_detection_cycles")
+                .with_description("Signal detection enable/disable cycles on conventional channels")
                 .build(),
         }
     }
@@ -292,6 +312,11 @@ impl CallManager {
                             talkgroup = entry.talkgroup,
                             "enabling recorder (signal detected)"
                         );
+                        self.conv_detection_cycles.add(1, &[
+                            KeyValue::new("system", entry.short_name.clone()),
+                            KeyValue::new("talkgroup", entry.talkgroup),
+                            KeyValue::new("direction", "enable"),
+                        ]);
                     }
                     if let Some(handle) = self.handles.get_mut(&call_id) {
                         ffi::call_set_recorder_enabled(handle.pin_mut(), true);
@@ -304,6 +329,11 @@ impl CallManager {
                             talkgroup = entry.talkgroup,
                             "disabling recorder (signal lost)"
                         );
+                        self.conv_detection_cycles.add(1, &[
+                            KeyValue::new("system", entry.short_name.clone()),
+                            KeyValue::new("talkgroup", entry.talkgroup),
+                            KeyValue::new("direction", "disable"),
+                        ]);
                     }
                     if let Some(handle) = self.handles.get_mut(&call_id) {
                         ffi::call_set_recorder_enabled(handle.pin_mut(), false);
@@ -644,6 +674,21 @@ impl CallManager {
         muted: bool,
         pwr_db: f64,
     ) {
+        // Record signal quality metrics before mutating state
+        if let Some(entry) = self.state.calls.iter().find(|e| {
+            e.is_conventional() && e.recorder == Some(RecorderNum(recorder_num))
+        }) {
+            let attrs = [
+                KeyValue::new("system", entry.short_name.clone()),
+                KeyValue::new("talkgroup", entry.talkgroup),
+            ];
+            if muted {
+                self.conv_noise_floor.record(pwr_db, &attrs);
+            } else {
+                self.conv_signal_power.record(pwr_db, &attrs);
+            }
+        }
+
         let effects = self
             .state
             .on_squelch(RecorderNum(recorder_num), muted, pwr_db);
@@ -666,6 +711,18 @@ impl CallManager {
                 threshold = signal.threshold,
                 "signal detected"
             );
+
+            for entry in &self.state.calls {
+                if entry.is_conventional()
+                    && entry.signal_detection
+                    && (entry.freq.as_hz() - abs_freq).abs() < 30_000.0
+                {
+                    self.conv_detection_rssi.record(f64::from(signal.max_rssi), &[
+                        KeyValue::new("system", entry.short_name.clone()),
+                        KeyValue::new("talkgroup", entry.talkgroup),
+                    ]);
+                }
+            }
         }
         let effects = self
             .state

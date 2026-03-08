@@ -504,10 +504,13 @@ impl CallManager {
         let final_freq = entry.freq;
         let is_conventional = entry.is_conventional();
 
+        // Signal-detection conventional channels transition to Disabled
+        // inside on_conventional_idle_timeout() *before* effects are
+        // processed, so we must also accept Disabled for conventional calls.
         let should_stop_recording = matches!(
             state,
             CallState::Recording | CallState::Idle | CallState::Rejected(RejectReason::Superseded)
-        );
+        ) || (is_conventional && state == CallState::Disabled);
 
         if should_stop_recording {
             // Stop recorder and collect metrics

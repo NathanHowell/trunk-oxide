@@ -543,7 +543,12 @@ impl TrunkRecorder {
                             muted,
                             pwr_db,
                         } => {
-                            call_mgr.handle_squelch_event(recorder_num, muted, pwr_db);
+                            call_mgr.handle_squelch_event(
+                                self.ctx.pin_mut(),
+                                recorder_num,
+                                muted,
+                                pwr_db,
+                            );
                         }
                         GrEvent::SignalsDetected {
                             source_center_freq,

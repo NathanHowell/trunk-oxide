@@ -1373,7 +1373,12 @@ impl TrunkStateMachine {
 
     // ── Squelch handling ──
 
-    pub(crate) fn on_squelch(&mut self, recorder_num: RecorderNum, muted: bool, pwr_db: f64) {
+    pub(crate) fn on_squelch(
+        &mut self,
+        recorder_num: RecorderNum,
+        muted: bool,
+        pwr_db: f64,
+    ) -> Effects {
         for entry in &mut self.calls {
             if !entry.is_conventional() {
                 continue;
@@ -1400,12 +1405,21 @@ impl TrunkStateMachine {
                 entry.signal = pwr_db;
                 entry.idle_since = None;
                 if entry.state == CallState::Idle {
+                    let first_open = entry.segments.is_empty();
                     entry.state = CallState::Recording;
                     entry.segment_start = Instant::now();
+                    if first_open {
+                        let call_id = entry.id;
+                        let mut effects = Effects::new();
+                        effects.push(Effect::EmitCallStart { call_id });
+                        effects.push(Effect::EmitCallsActive);
+                        return effects;
+                    }
                 }
             }
-            return;
+            return Effects::new();
         }
+        Effects::new()
     }
 
     // ── Signal detection ──
@@ -1650,6 +1664,7 @@ mod tests {
             "CreateCall",
             "RequestRecording",
             "EmitCallStart",
+            "EmitCallsActive",
         ]);
         assert_eq!(sm.calls.len(), 1);
         assert_eq!(sm.calls[0].talkgroup, 100);
@@ -1720,9 +1735,23 @@ mod tests {
         let effects = sm.on_message(&msg);
         let call_id = extract_create_call_id(&effects);
 
-        let _effects = sm.on_recording_result(call_id, RecordingResult::NoSource);
+        let result_effects = sm.on_recording_result(call_id, RecordingResult::NoSource);
 
         assert_eq!(sm.calls[0].state, CallState::Rejected(RejectReason::NoSource));
+        assert!(result_effects.is_empty());
+    }
+
+    #[test]
+    fn recording_result_no_recorder_rejects() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let msg = grant_msg(100, 851_000_000.0);
+        let effects = sm.on_message(&msg);
+        let call_id = extract_create_call_id(&effects);
+
+        let effects = sm.on_recording_result(call_id, RecordingResult::NoRecorder);
+
+        assert_eq!(sm.calls[0].state, CallState::Rejected(RejectReason::NoRecorder));
+        assert!(effects.is_empty());
     }
 
     // ── TDULC transitions Recording → Idle ──
@@ -1743,8 +1772,10 @@ mod tests {
             sys_num: 1,
             ..grant_msg(100, 0.0)
         };
-        let _effects = sm.on_message(&tdulc);
+        let effects = sm.on_message(&tdulc);
 
+        // TDULC only transitions state — no effects emitted
+        assert!(effects.is_empty());
         assert_eq!(sm.calls[0].state, CallState::Idle);
         assert_eq!(sm.calls[0].segments.len(), 1);
     }
@@ -1806,6 +1837,9 @@ mod tests {
             remove_pos.unwrap()
         );
 
+        assert!(effects.iter().any(|e| matches!(e, Effect::EmitCallsActive)),
+            "tick must emit EmitCallsActive when a call is removed");
+
         // Call entry must still exist until RemoveCall is processed
         assert!(sm.get_call(call_id).is_some(), "entry must exist until RemoveCall is executed");
     }
@@ -1828,6 +1862,7 @@ mod tests {
         assert!(end_pos.is_some());
         assert!(remove_pos.is_some());
         assert!(end_pos.unwrap() < remove_pos.unwrap());
+        assert!(effects.iter().any(|e| matches!(e, Effect::EmitCallsActive)));
     }
 
     // ── Tick: call within timeout is NOT removed ──
@@ -1871,6 +1906,7 @@ mod tests {
             end_pos.unwrap() < remove_pos.unwrap(),
             "EmitCallEnd must come before RemoveCall"
         );
+        assert!(effects.iter().any(|e| matches!(e, Effect::EmitCallsActive)));
 
         // Entries still exist until executor processes RemoveCall
         assert!(sm.get_call(call_id).is_some());
@@ -1929,9 +1965,14 @@ mod tests {
 
         let effects = sm.on_conventional_idle_timeout(call_id);
 
-        // Must emit EmitCallEnd followed by ConventionalRestart
-        assert!(effects.iter().any(|e| matches!(e, Effect::EmitCallEnd { .. })));
-        assert!(effects.iter().any(|e| matches!(e, Effect::ConventionalRestart { .. })));
+        // Full restart cycle: end → restart C++ → setup → start → enable
+        assert_effects_contain_ordered(&effects, &[
+            "EmitCallEnd",
+            "ConventionalRestart",
+            "EmitSetupRecorder",
+            "EmitCallStart",
+            "EnableRecorder",
+        ]);
 
         // Recorder must still be set after timeout — the executor conclude path
         // must NOT clear it, or tick_conventional will skip this call forever.
@@ -1962,11 +2003,11 @@ mod tests {
         assert_eq!(entry.recorder, Some(RecorderNum(13)));
 
         // Squelch on the NEW recorder must match this call
-        sm.on_squelch(RecorderNum(13), true, -30.0);
+        let _effects = sm.on_squelch(RecorderNum(13), true, -30.0);
         assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Idle);
 
         // Squelch on the OLD recorder must NOT match
-        sm.on_squelch(RecorderNum(12), false, -20.0);
+        let _effects = sm.on_squelch(RecorderNum(12), false, -20.0);
         assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Idle);
     }
 
@@ -1985,8 +2026,9 @@ mod tests {
         let _ = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(5)));
         sm.calls[0].state = CallState::Recording;
 
-        sm.on_squelch(RecorderNum(5), true, -30.0);
+        let effects = sm.on_squelch(RecorderNum(5), true, -30.0);
 
+        assert!(effects.is_empty());
         assert_eq!(sm.calls[0].state, CallState::Idle);
         assert_eq!(sm.calls[0].segments.len(), 1);
     }
@@ -2004,9 +2046,163 @@ mod tests {
         let _ = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(5)));
         sm.calls[0].state = CallState::Idle;
 
-        sm.on_squelch(RecorderNum(5), false, -20.0);
+        let effects = sm.on_squelch(RecorderNum(5), false, -20.0);
 
+        assert_effects_contain_ordered(&effects, &["EmitCallStart", "EmitCallsActive"]);
         assert_eq!(sm.calls[0].state, CallState::Recording);
+    }
+
+    #[test]
+    fn squelch_reopen_does_not_emit_call_start() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let channel = ConventionalChannel {
+            talkgroup: Talkgroup(1),
+            freq: Freq::from_hz(488_000_000.0),
+            is_analog: true,
+            ..Default::default()
+        };
+        let policy = sm.config.systems.get(&1).unwrap().clone();
+        let _ = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(5)));
+        sm.calls[0].state = CallState::Idle;
+
+        // First open — emits CallStart
+        let effects = sm.on_squelch(RecorderNum(5), false, -20.0);
+        assert!(effects.iter().any(|e| matches!(e, Effect::EmitCallStart { .. })));
+
+        // Close
+        let _effects = sm.on_squelch(RecorderNum(5), true, -30.0);
+
+        // Re-open — should NOT emit CallStart again (same call lifecycle)
+        let effects = sm.on_squelch(RecorderNum(5), false, -20.0);
+        assert!(effects.is_empty());
+        assert_eq!(sm.calls[0].state, CallState::Recording);
+    }
+
+    // ── expire_call ──
+
+    #[test]
+    fn expire_call_recording_emits_call_end() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let msg = grant_msg(100, 851_000_000.0);
+        let _effects = sm.on_message(&msg);
+        let call_id = sm.calls[0].id;
+        sm.calls[0].state = CallState::Recording;
+
+        let effects = sm.expire_call(call_id);
+
+        assert_effects_contain_ordered(&effects, &[
+            "EmitCallEnd",
+            "EmitSetupRecorder",
+            "RemoveCall",
+            "EmitCallsActive",
+        ]);
+    }
+
+    #[test]
+    fn expire_call_rejected_skips_call_end() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let msg = grant_msg(100, 851_000_000.0);
+        let _effects = sm.on_message(&msg);
+        let call_id = sm.calls[0].id;
+        sm.calls[0].state = CallState::Rejected(RejectReason::Encrypted);
+
+        let effects = sm.expire_call(call_id);
+
+        assert!(!effects.iter().any(|e| matches!(e, Effect::EmitCallEnd { .. })));
+        assert!(effects.iter().any(|e| matches!(e, Effect::RemoveCall { .. })));
+        assert!(effects.iter().any(|e| matches!(e, Effect::EmitCallsActive)));
+    }
+
+    // ── Update message handling ──
+
+    #[test]
+    fn update_with_source_change_emits_signal_and_call_start() {
+        let mut sm = TrunkStateMachine::new(test_config());
+
+        // Create an existing call via grant
+        let msg = grant_msg(100, 851_000_000.0);
+        let _effects = sm.on_message(&msg);
+        assert_eq!(sm.calls.len(), 1);
+
+        // Send Update with a different source unit
+        let mut update = grant_msg(100, 851_000_000.0);
+        update.message_type = MessageType::Update;
+        update.source = 200; // different from grant's source=100
+
+        let effects = sm.on_message(&update);
+
+        assert!(effects.iter().any(|e| matches!(e, Effect::SetSource { source_id: 200, .. })));
+        assert!(effects.iter().any(|e| matches!(e, Effect::EmitSignal { source_id: 200, .. })));
+        assert!(effects.iter().any(|e| matches!(e, Effect::EmitCallStart { .. })));
+    }
+
+    #[test]
+    fn update_same_source_produces_no_effects() {
+        let mut sm = TrunkStateMachine::new(test_config());
+
+        let msg = grant_msg(100, 851_000_000.0);
+        let _effects = sm.on_message(&msg);
+
+        // Update with same source
+        let mut update = grant_msg(100, 851_000_000.0);
+        update.message_type = MessageType::Update;
+        // source=100, same as grant
+
+        let effects = sm.on_message(&update);
+
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn update_sets_encrypted_flag() {
+        let mut sm = TrunkStateMachine::new(test_config());
+
+        let msg = grant_msg(100, 851_000_000.0);
+        let _effects = sm.on_message(&msg);
+        assert!(!sm.calls[0].encrypted);
+
+        let mut update = grant_msg(100, 851_000_000.0);
+        update.message_type = MessageType::Update;
+        update.encrypted = true;
+
+        let _effects = sm.on_message(&update);
+
+        assert!(sm.calls[0].encrypted);
+    }
+
+    #[test]
+    fn uuv_update_ignored_when_disabled() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        // record_uu_v_calls defaults to false in test_config
+
+        let msg = grant_msg(100, 851_000_000.0);
+        let _effects = sm.on_message(&msg);
+
+        let mut update = grant_msg(100, 851_000_000.0);
+        update.message_type = MessageType::UuVUpdate;
+        update.source = 200;
+
+        let effects = sm.on_message(&update);
+
+        assert!(effects.is_empty());
+    }
+
+    #[test]
+    fn uuv_update_processed_when_enabled() {
+        let mut config = test_config();
+        config.record_uu_v_calls = true;
+        let mut sm = TrunkStateMachine::new(config);
+
+        let msg = grant_msg(100, 851_000_000.0);
+        let _effects = sm.on_message(&msg);
+
+        let mut update = grant_msg(100, 851_000_000.0);
+        update.message_type = MessageType::UuVUpdate;
+        update.source = 200;
+
+        let effects = sm.on_message(&update);
+
+        assert!(effects.iter().any(|e| matches!(e, Effect::SetSource { source_id: 200, .. })));
     }
 
     // ── Unknown message type produces Warn ──
@@ -2057,8 +2253,10 @@ mod tests {
         let mut sm = TrunkStateMachine::new(test_config());
         let channel = signal_detection_channel();
         let policy = sm.config.systems.get(&1).unwrap().clone();
-        let (call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
+        let (call_id, effects) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
 
+        // Signal-detection channels start Disabled with no effects (no EnableRecorder)
+        assert!(effects.is_empty());
         assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Disabled);
     }
 
@@ -2187,8 +2385,10 @@ mod tests {
             ..Default::default()
         };
         let policy = sm.config.systems.get(&1).unwrap().clone();
-        let (call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
+        let (call_id, effects) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
 
+        // Non-signal-detection channels start Idle with EnableRecorder
+        assert_effects_contain_ordered(&effects, &["EnableRecorder"]);
         assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Idle);
     }
 
@@ -2229,5 +2429,102 @@ mod tests {
 
         assert!(effects.iter().any(|e| matches!(e, Effect::EnableRecorder { .. })));
         assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Idle);
+    }
+
+    // ── ControlChannel / Sysid / Status / UnitEvent messages ──
+
+    #[test]
+    fn control_channel_message_emits_add_control_channel() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let mut msg = grant_msg(0, 851_000_000.0);
+        msg.message_type = MessageType::ControlChannel;
+
+        let effects = sm.on_message(&msg);
+
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(&effects[0], Effect::AddControlChannel { sys_num: 1, .. }));
+    }
+
+    #[test]
+    fn sysid_message_emits_setup_system() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let mut msg = grant_msg(0, 0.0);
+        msg.message_type = MessageType::Sysid;
+        msg.sys_rfss = 42;
+        msg.sys_site_id = 7;
+
+        let effects = sm.on_message(&msg);
+
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(&effects[0], Effect::EmitSetupSystem { sys_num: 1 }));
+    }
+
+    #[test]
+    fn status_message_updates_identity_and_emits_setup() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let mut msg = grant_msg(0, 0.0);
+        msg.message_type = MessageType::Status;
+        msg.sys_id = 123;
+        msg.wacn = 456;
+        msg.nac = 789;
+
+        let effects = sm.on_message(&msg);
+
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(&effects[0], Effect::EmitSetupSystem { sys_num: 1 }));
+
+        let id = sm.system_identities.get(&1).unwrap();
+        assert_eq!(id.sys_id, 123);
+        assert_eq!(id.wacn, 456);
+        assert_eq!(id.nac, 789);
+    }
+
+    #[test]
+    fn registration_message_emits_unit_event() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let mut msg = grant_msg(0, 0.0);
+        msg.message_type = MessageType::Registration;
+        msg.source = 42;
+
+        let effects = sm.on_message(&msg);
+
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(
+            &effects[0],
+            Effect::EmitUnitEvent { type_: UnitEventType::Registration, source_id: 42, .. }
+        ));
+    }
+
+    #[test]
+    fn affiliation_message_includes_talkgroup() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let mut msg = grant_msg(0, 0.0);
+        msg.message_type = MessageType::Affiliation;
+        msg.source = 10;
+        msg.talkgroup = 200;
+
+        let effects = sm.on_message(&msg);
+
+        assert_eq!(effects.len(), 1);
+        assert!(matches!(
+            &effects[0],
+            Effect::EmitUnitEvent {
+                type_: UnitEventType::Affiliation,
+                source_id: 10,
+                talkgroup: 200,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn invalid_cc_message_produces_no_effects() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let mut msg = grant_msg(0, 0.0);
+        msg.message_type = MessageType::InvalidCcMessage;
+
+        let effects = sm.on_message(&msg);
+
+        assert!(effects.is_empty());
     }
 }

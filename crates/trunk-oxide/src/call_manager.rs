@@ -626,7 +626,8 @@ impl CallManager {
         self.register_audio_meta(call_id);
         self.handles.insert(call_id, call);
 
-        // C++ start() no longer enables conventional recorders — Rust decides.
+        // Process effects inline — add_conventional_call only emits EnableRecorder.
+        // Cannot use process_effects() here because we don't have TrContext yet.
         for effect in effects {
             if let Effect::EnableRecorder { call_id } = effect {
                 if let Some(handle) = self.handles.get_mut(&call_id) {
@@ -636,9 +637,17 @@ impl CallManager {
         }
     }
 
-    pub fn handle_squelch_event(&mut self, recorder_num: i32, muted: bool, pwr_db: f64) {
-        self.state
+    pub fn handle_squelch_event(
+        &mut self,
+        mut ctx: Pin<&mut TrContext>,
+        recorder_num: i32,
+        muted: bool,
+        pwr_db: f64,
+    ) {
+        let effects = self
+            .state
             .on_squelch(RecorderNum(recorder_num), muted, pwr_db);
+        self.process_effects(effects, &mut ctx);
     }
 
     pub fn handle_signals_detected(

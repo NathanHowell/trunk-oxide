@@ -9,6 +9,7 @@ use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result};
 use clap::Parser;
+use opentelemetry::KeyValue;
 use opentelemetry::trace::TracerProvider;
 use tracing_subscriber::prelude::*;
 use trunk_oxide::TrunkRecorderBuilder;
@@ -19,6 +20,88 @@ struct Args {
     /// Path to TOML config file
     #[arg(default_value = "/app/config.toml")]
     config: String,
+}
+
+/// Observe a u64 block metric across all sources and recorders in the snapshot.
+fn observe_block_u64(
+    snap: &std::sync::Mutex<trunk_oxide::GrMetricsSnapshot>,
+    observer: &dyn opentelemetry::metrics::AsyncInstrument<u64>,
+    extract: fn(&trunk_recorder_sys::ffi::TrGrBlockMetrics) -> u64,
+) {
+    let Ok(snap) = snap.lock() else { return };
+    for src in &snap.sources {
+        let src_attr = KeyValue::new("source.id", i64::from(src.source_id));
+        for blk in &src.blocks {
+            observer.observe(
+                extract(blk),
+                &[
+                    src_attr.clone(),
+                    KeyValue::new("gr.block.name", blk.block_name.to_string()),
+                    KeyValue::new("gr.block.alias", blk.block_alias.to_string()),
+                ],
+            );
+        }
+    }
+    for rec in &snap.recorders {
+        let attrs = [
+            KeyValue::new("recorder.id", i64::from(rec.recorder_id)),
+            KeyValue::new("recorder.type", rec.recorder_type.to_string()),
+            KeyValue::new("source.id", i64::from(rec.source_id)),
+        ];
+        for blk in &rec.blocks {
+            observer.observe(
+                extract(blk),
+                &[
+                    attrs[0].clone(),
+                    attrs[1].clone(),
+                    attrs[2].clone(),
+                    KeyValue::new("gr.block.name", blk.block_name.to_string()),
+                    KeyValue::new("gr.block.alias", blk.block_alias.to_string()),
+                ],
+            );
+        }
+    }
+}
+
+/// Observe an f64 block metric across all sources and recorders in the snapshot.
+fn observe_block_f64(
+    snap: &std::sync::Mutex<trunk_oxide::GrMetricsSnapshot>,
+    observer: &dyn opentelemetry::metrics::AsyncInstrument<f64>,
+    extract: fn(&trunk_recorder_sys::ffi::TrGrBlockMetrics) -> f64,
+) {
+    let Ok(snap) = snap.lock() else { return };
+    for src in &snap.sources {
+        let src_attr = KeyValue::new("source.id", i64::from(src.source_id));
+        for blk in &src.blocks {
+            observer.observe(
+                extract(blk),
+                &[
+                    src_attr.clone(),
+                    KeyValue::new("gr.block.name", blk.block_name.to_string()),
+                    KeyValue::new("gr.block.alias", blk.block_alias.to_string()),
+                ],
+            );
+        }
+    }
+    for rec in &snap.recorders {
+        let attrs = [
+            KeyValue::new("recorder.id", i64::from(rec.recorder_id)),
+            KeyValue::new("recorder.type", rec.recorder_type.to_string()),
+            KeyValue::new("source.id", i64::from(rec.source_id)),
+        ];
+        for blk in &rec.blocks {
+            observer.observe(
+                extract(blk),
+                &[
+                    attrs[0].clone(),
+                    attrs[1].clone(),
+                    attrs[2].clone(),
+                    KeyValue::new("gr.block.name", blk.block_name.to_string()),
+                    KeyValue::new("gr.block.alias", blk.block_alias.to_string()),
+                ],
+            );
+        }
+    }
 }
 
 fn main() -> Result<()> {
@@ -156,6 +239,53 @@ fn main() -> Result<()> {
             })
             .build();
 
+        // ── GR block performance counters ──
+        let gr_metrics = recorder.gr_metrics();
+
+        let _gr_items_read = meter
+            .u64_observable_counter("gr.block.items_read")
+            .with_description("Total items consumed on input port 0")
+            .with_callback({
+                let snap = Arc::clone(&gr_metrics);
+                move |observer| observe_block_u64(&snap, observer, |b| b.items_read)
+            })
+            .build();
+
+        let _gr_items_written = meter
+            .u64_observable_counter("gr.block.items_written")
+            .with_description("Total items produced on output port 0")
+            .with_callback({
+                let snap = Arc::clone(&gr_metrics);
+                move |observer| observe_block_u64(&snap, observer, |b| b.items_written)
+            })
+            .build();
+
+        let _gr_work_time = meter
+            .f64_observable_counter("gr.block.work_time_total")
+            .with_description("Cumulative time spent in work()")
+            .with_callback({
+                let snap = Arc::clone(&gr_metrics);
+                move |observer| observe_block_f64(&snap, observer, |b| f64::from(b.work_time_total))
+            })
+            .build();
+
+        let _gr_input_buf = meter
+            .f64_observable_gauge("gr.block.input_buffer_full")
+            .with_description("Input buffer saturation (0.0-1.0)")
+            .with_callback({
+                let snap = Arc::clone(&gr_metrics);
+                move |observer| observe_block_f64(&snap, observer, |b| f64::from(b.input_buf_full))
+            })
+            .build();
+
+        let _gr_output_buf = meter
+            .f64_observable_gauge("gr.block.output_buffer_full")
+            .with_description("Output buffer saturation (0.0-1.0)")
+            .with_callback({
+                let snap = Arc::clone(&gr_metrics);
+                move |observer| observe_block_f64(&snap, observer, |b| f64::from(b.output_buf_full))
+            })
+            .build();
     }
 
     // Spawn gRPC server as a background task on the runtime

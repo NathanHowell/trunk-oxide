@@ -211,6 +211,35 @@ pub mod ffi {
         pub rec_state: i32,
     }
 
+    // ── GR block performance metrics ──
+
+    #[derive(Debug, Clone)]
+    struct TrGrBlockMetrics {
+        pub block_name: String,
+        pub block_alias: String,
+        pub items_read: u64,
+        pub items_written: u64,
+        pub work_time_total: f32,
+        pub input_buf_full: f32,
+        pub output_buf_full: f32,
+    }
+
+    #[derive(Debug, Clone)]
+    struct TrRecorderMetrics {
+        pub recorder_id: i32,
+        pub recorder_type: String,
+        pub source_id: i32,
+        pub blocks: Vec<TrGrBlockMetrics>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct TrSourceMetrics {
+        pub source_id: i32,
+        pub center_freq: f64,
+        pub sample_rate: f64,
+        pub blocks: Vec<TrGrBlockMetrics>,
+    }
+
     // ── Bulk config structs for source/system setup ──
 
     struct TrGainStage {
@@ -407,6 +436,10 @@ pub mod ffi {
         // ── Event channel wiring ──
         fn tr_context_set_event_notifier(ctx: Pin<&mut TrContext>, notifier: Box<EventNotifier>);
         fn tr_context_wire_event_notifiers(ctx: Pin<&mut TrContext>);
+
+        // ── GR block performance metrics ──
+        fn tr_collect_recorder_metrics(ctx: &TrContext) -> Vec<TrRecorderMetrics>;
+        fn tr_collect_source_metrics(ctx: &TrContext) -> Vec<TrSourceMetrics>;
     }
 
     // ── Rust functions callable from C++ (event handler callbacks) ──
@@ -497,7 +530,10 @@ impl EventNotifier {
     }
 }
 
-#[expect(clippy::unnecessary_box_returns, reason = "cxx requires Box<T> for opaque Rust types")]
+#[expect(
+    clippy::unnecessary_box_returns,
+    reason = "cxx requires Box<T> for opaque Rust types"
+)]
 fn event_notifier_clone(notifier: &EventNotifier) -> Box<EventNotifier> {
     Box::new(EventNotifier(notifier.0.clone(), Arc::clone(&notifier.1)))
 }
@@ -611,11 +647,7 @@ fn drop_event_handler_box(_handler: Box<EventHandlerBox>) {
 // Only 2 remain: audio_stream, unit_alias_discovered.
 // All other events are fired directly from Rust without FFI.
 
-fn event_handler_audio_stream(
-    handler: &EventHandlerBox,
-    rust_call_id: u64,
-    samples: &[i16],
-) {
+fn event_handler_audio_stream(handler: &EventHandlerBox, rust_call_id: u64, samples: &[i16]) {
     handler.inner.audio_stream(rust_call_id, samples);
 }
 

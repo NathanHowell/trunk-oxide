@@ -84,6 +84,13 @@ int32_t tr_add_system_from_config(TrContext &ctx, const TrSystemConfig &cfg);
 void tr_context_set_event_notifier(TrContext &ctx, rust::Box<EventNotifier> notifier);
 void tr_context_wire_event_notifiers(TrContext &ctx);
 
+// ── GR block performance metrics ──
+struct TrGrBlockMetrics;
+struct TrRecorderMetrics;
+struct TrSourceMetrics;
+rust::Vec<TrRecorderMetrics> tr_collect_recorder_metrics(const TrContext &ctx);
+rust::Vec<TrSourceMetrics> tr_collect_source_metrics(const TrContext &ctx);
+
 // ── Trunk message conversion (used by GR callbacks) ──
 TrTrunkMessage convert_trunk_message(const TrunkMessage &msg);
 

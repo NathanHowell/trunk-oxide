@@ -11,6 +11,9 @@
 #include <limits>
 #include <map>
 
+#include <gnuradio/block.h>
+#include <gnuradio/block_detail.h>
+
 #include "trunk-recorder/trunk_context.h"
 #include "trunk-recorder/call_conventional.h"
 #include "trunk-recorder/recorder_config.h"
@@ -771,6 +774,70 @@ double call_recorder_since_last_write_secs(const TrCall &call) {
         return 1e9; // no recorder → effectively infinite (never triggers timeout alone)
     }
     return recorder->since_last_write().count();
+}
+
+// ── GR block performance metrics ──
+
+static TrGrBlockMetrics collect_block_metrics(const gr::block_sptr &blk) {
+    TrGrBlockMetrics m;
+    m.block_name = rust::String(blk->name());
+    m.block_alias = rust::String(blk->alias());
+    m.items_read = 0;
+    m.items_written = 0;
+    m.work_time_total = 0.0f;
+    m.input_buf_full = 0.0f;
+    m.output_buf_full = 0.0f;
+
+    auto d = blk->detail();
+    if (!d) return m;
+
+    if (d->ninputs() > 0) {
+        m.items_read = blk->nitems_read(0);
+        m.input_buf_full = blk->pc_input_buffers_full(0);
+    }
+    if (d->noutputs() > 0) {
+        m.items_written = blk->nitems_written(0);
+        m.output_buf_full = blk->pc_output_buffers_full(0);
+    }
+    m.work_time_total = blk->pc_work_time_total();
+    return m;
+}
+
+rust::Vec<TrRecorderMetrics> tr_collect_recorder_metrics(const TrContext &ctx) {
+    rust::Vec<TrRecorderMetrics> result;
+    for (auto &source : ctx.impl->trunk_ctx.sources) {
+        int src_num = source->get_num();
+        auto recorders = source->get_recorders();
+        for (auto &rec : recorders) {
+            TrRecorderMetrics rm;
+            rm.recorder_id = rec->get_num();
+            rm.recorder_type = rust::String(rec->get_type_string());
+            rm.source_id = src_num;
+
+            for (auto &blk : rec->get_metric_blocks()) {
+                rm.blocks.push_back(collect_block_metrics(blk));
+            }
+            result.push_back(std::move(rm));
+        }
+    }
+    return result;
+}
+
+rust::Vec<TrSourceMetrics> tr_collect_source_metrics(const TrContext &ctx) {
+    rust::Vec<TrSourceMetrics> result;
+    for (auto &source : ctx.impl->trunk_ctx.sources) {
+        TrSourceMetrics sm;
+        sm.source_id = source->get_num();
+        sm.center_freq = source->get_center();
+        sm.sample_rate = source->get_rate();
+
+        auto src_block = std::dynamic_pointer_cast<gr::block>(source->get_src_block());
+        if (src_block) {
+            sm.blocks.push_back(collect_block_metrics(src_block));
+        }
+        result.push_back(std::move(sm));
+    }
+    return result;
 }
 
 } // namespace trunk_oxide

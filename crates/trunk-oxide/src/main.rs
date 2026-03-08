@@ -104,6 +104,44 @@ fn observe_block_f64(
     }
 }
 
+/// Observe an f64 conventional-channel metric across all channels in the snapshot.
+fn observe_conv_f64(
+    snap: &std::sync::Mutex<trunk_oxide::ConventionalMetricsSnapshot>,
+    observer: &dyn opentelemetry::metrics::AsyncInstrument<f64>,
+    extract: fn(&trunk_oxide::ConventionalChannelMetrics) -> f64,
+) {
+    let Ok(snap) = snap.lock() else { return };
+    for ch in &snap.channels {
+        observer.observe(
+            extract(ch),
+            &[
+                KeyValue::new("system", ch.system.clone()),
+                KeyValue::new("talkgroup", ch.talkgroup),
+                KeyValue::new("freq_mhz", ch.freq_hz / 1_000_000.0),
+            ],
+        );
+    }
+}
+
+/// Observe a u64 conventional-channel metric across all channels in the snapshot.
+fn observe_conv_u64(
+    snap: &std::sync::Mutex<trunk_oxide::ConventionalMetricsSnapshot>,
+    observer: &dyn opentelemetry::metrics::AsyncInstrument<u64>,
+    extract: fn(&trunk_oxide::ConventionalChannelMetrics) -> u64,
+) {
+    let Ok(snap) = snap.lock() else { return };
+    for ch in &snap.channels {
+        observer.observe(
+            extract(ch),
+            &[
+                KeyValue::new("system", ch.system.clone()),
+                KeyValue::new("talkgroup", ch.talkgroup),
+                KeyValue::new("freq_mhz", ch.freq_hz / 1_000_000.0),
+            ],
+        );
+    }
+}
+
 fn main() -> Result<()> {
     pid1::Pid1Settings::new().launch()?;
 
@@ -284,6 +322,112 @@ fn main() -> Result<()> {
             .with_callback({
                 let snap = Arc::clone(&gr_metrics);
                 move |observer| observe_block_f64(&snap, observer, |b| f64::from(b.output_buf_full))
+            })
+            .build();
+
+        // ── Conventional channel metrics ──
+        let conv_metrics = recorder.conv_metrics();
+
+        let _conv_state = meter
+            .f64_observable_gauge("trunk.oxide.conventional.state")
+            .with_description("Conventional channel state (1.0 = active, state in attributes)")
+            .with_callback({
+                let snap = Arc::clone(&conv_metrics);
+                move |observer| {
+                    let Ok(snap) = snap.lock() else { return };
+                    for ch in &snap.channels {
+                        observer.observe(
+                            1.0,
+                            &[
+                                KeyValue::new("system", ch.system.clone()),
+                                KeyValue::new("talkgroup", ch.talkgroup),
+                                KeyValue::new("freq_mhz", ch.freq_hz / 1_000_000.0),
+                                KeyValue::new("state", ch.state),
+                            ],
+                        );
+                    }
+                }
+            })
+            .build();
+
+        let _conv_signal_power = meter
+            .f64_observable_gauge("trunk.oxide.conventional.signal_power_db")
+            .with_description("Last squelch-open signal power (dBFS)")
+            .with_callback({
+                let snap = Arc::clone(&conv_metrics);
+                move |observer| observe_conv_f64(&snap, observer, |ch| ch.signal_power_db)
+            })
+            .build();
+
+        let _conv_noise_floor = meter
+            .f64_observable_gauge("trunk.oxide.conventional.noise_floor_db")
+            .with_description("Last squelch-close noise floor (dBFS)")
+            .with_callback({
+                let snap = Arc::clone(&conv_metrics);
+                move |observer| observe_conv_f64(&snap, observer, |ch| ch.noise_floor_db)
+            })
+            .build();
+
+        let _conv_detection_rssi = meter
+            .f64_observable_gauge("trunk.oxide.conventional.signal_detection_rssi_db")
+            .with_description("Last FFT signal detection RSSI")
+            .with_callback({
+                let snap = Arc::clone(&conv_metrics);
+                move |observer| observe_conv_f64(&snap, observer, |ch| ch.detection_rssi_db)
+            })
+            .build();
+
+        let _conv_squelch_open = meter
+            .u64_observable_counter("trunk.oxide.conventional.squelch_open")
+            .with_description("Total squelch open events")
+            .with_callback({
+                let snap = Arc::clone(&conv_metrics);
+                move |observer| observe_conv_u64(&snap, observer, |ch| ch.squelch_open_count)
+            })
+            .build();
+
+        let _conv_squelch_close = meter
+            .u64_observable_counter("trunk.oxide.conventional.squelch_close")
+            .with_description("Total squelch close events")
+            .with_callback({
+                let snap = Arc::clone(&conv_metrics);
+                move |observer| observe_conv_u64(&snap, observer, |ch| ch.squelch_close_count)
+            })
+            .build();
+
+        let _conv_enable = meter
+            .u64_observable_counter("trunk.oxide.conventional.signal_detection_enable")
+            .with_description("Total signal detection enable cycles")
+            .with_callback({
+                let snap = Arc::clone(&conv_metrics);
+                move |observer| observe_conv_u64(&snap, observer, |ch| ch.enable_count)
+            })
+            .build();
+
+        let _conv_disable = meter
+            .u64_observable_counter("trunk.oxide.conventional.signal_detection_disable")
+            .with_description("Total signal detection disable cycles")
+            .with_callback({
+                let snap = Arc::clone(&conv_metrics);
+                move |observer| observe_conv_u64(&snap, observer, |ch| ch.disable_count)
+            })
+            .build();
+
+        let _conv_idle_timeout = meter
+            .u64_observable_counter("trunk.oxide.conventional.idle_timeouts")
+            .with_description("Total idle timeout restarts")
+            .with_callback({
+                let snap = Arc::clone(&conv_metrics);
+                move |observer| observe_conv_u64(&snap, observer, |ch| ch.idle_timeout_count)
+            })
+            .build();
+
+        let _conv_recordings = meter
+            .u64_observable_counter("trunk.oxide.conventional.recordings_completed")
+            .with_description("Total recordings concluded with audio")
+            .with_callback({
+                let snap = Arc::clone(&conv_metrics);
+                move |observer| observe_conv_u64(&snap, observer, |ch| ch.recordings_completed)
             })
             .build();
     }

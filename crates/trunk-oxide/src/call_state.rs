@@ -81,6 +81,15 @@ pub(crate) enum RejectReason {
 }
 
 impl CallState {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            CallState::Recording => "Recording",
+            CallState::Idle => "Idle",
+            CallState::Disabled => "Disabled",
+            CallState::Rejected(_) => "Rejected",
+        }
+    }
+
     pub(crate) fn to_proto(self) -> i32 {
         use trunk_oxide_grpc::proto::CallState as ProtoCallState;
         match self {

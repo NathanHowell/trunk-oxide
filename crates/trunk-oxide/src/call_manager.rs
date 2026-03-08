@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
 use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use cxx::UniquePtr;
@@ -12,11 +13,11 @@ use trunk_recorder_sys::ffi::{
     TrTrunkMessage, TrUnitEventType,
 };
 
-use std::sync::Arc;
-
 use trunk_config::SystemType;
 use trunk_oxide_grpc::EventBridge;
 use trunk_oxide_grpc::proto::SystemType as ProtoSystemType;
+
+use crate::ConventionalMetricsSnapshot;
 
 use crate::call_state::{
     CallId, CallState, Effect, Effects, Freq, MessageType, RecorderNum, RecordingResult,
@@ -66,10 +67,7 @@ pub struct CallManager {
     recorder_denied: Counter<u64>,
     control_channel_messages: Counter<u64>,
     active_calls_gauge: Gauge<u64>,
-    conv_signal_power: Gauge<f64>,
-    conv_noise_floor: Gauge<f64>,
-    conv_detection_rssi: Gauge<f64>,
-    conv_detection_cycles: Counter<u64>,
+    conv_metrics: Arc<Mutex<ConventionalMetricsSnapshot>>,
 }
 
 impl CallManager {
@@ -77,7 +75,31 @@ impl CallManager {
         config: CallManagerConfig,
         bridge: Arc<EventBridge>,
         source_ranges: Vec<RangeInclusive<f64>>,
+        conv_metrics: Arc<Mutex<ConventionalMetricsSnapshot>>,
     ) -> Self {
+        // Pre-populate conventional channel metrics entries.
+        if let Ok(mut snap) = conv_metrics.lock() {
+            for policy in config.systems.values() {
+                for ch in &policy.channels {
+                    snap.channels.push(crate::ConventionalChannelMetrics {
+                        system: policy.short_name.clone(),
+                        talkgroup: ch.talkgroup.0,
+                        freq_hz: ch.freq.as_hz(),
+                        state: "Disabled",
+                        signal_power_db: 0.0,
+                        noise_floor_db: 0.0,
+                        detection_rssi_db: 0.0,
+                        squelch_open_count: 0,
+                        squelch_close_count: 0,
+                        enable_count: 0,
+                        disable_count: 0,
+                        idle_timeout_count: 0,
+                        recordings_completed: 0,
+                    });
+                }
+            }
+        }
+
         let meter = opentelemetry::global::meter("trunk-oxide");
         Self {
             state: TrunkStateMachine::new(config),
@@ -104,22 +126,7 @@ impl CallManager {
                 .u64_gauge("trunk.oxide.active_calls")
                 .with_description("Number of active calls")
                 .build(),
-            conv_signal_power: meter
-                .f64_gauge("trunk.oxide.conventional.signal_power_db")
-                .with_description("Signal power (dBFS) when squelch opens on conventional channel")
-                .build(),
-            conv_noise_floor: meter
-                .f64_gauge("trunk.oxide.conventional.noise_floor_db")
-                .with_description("Noise floor (dBFS) when squelch closes on conventional channel")
-                .build(),
-            conv_detection_rssi: meter
-                .f64_gauge("trunk.oxide.conventional.signal_detection_rssi_db")
-                .with_description("FFT signal detection RSSI near conventional channel")
-                .build(),
-            conv_detection_cycles: meter
-                .u64_counter("trunk.oxide.conventional.signal_detection_cycles")
-                .with_description("Signal detection enable/disable cycles on conventional channels")
-                .build(),
+            conv_metrics,
         }
     }
 
@@ -129,6 +136,40 @@ impl CallManager {
             .iter()
             .position(|r| r.contains(&freq_hz))
             .map(|i| i as i32)
+    }
+
+    /// Update a conventional channel's metrics entry by talkgroup + freq.
+    fn update_conv_metric(
+        &self,
+        talkgroup: i64,
+        freq: Freq,
+        f: impl FnOnce(&mut crate::ConventionalChannelMetrics),
+    ) {
+        if let Ok(mut snap) = self.conv_metrics.lock() {
+            if let Some(ch) = snap
+                .channels
+                .iter_mut()
+                .find(|c| c.talkgroup == talkgroup && (c.freq_hz - freq.as_hz()).abs() < 1.0)
+            {
+                f(ch);
+            }
+        }
+    }
+
+    /// Sync conventional channel states from call entries into the metrics snapshot.
+    fn sync_conv_states(&self) {
+        if let Ok(mut snap) = self.conv_metrics.lock() {
+            for entry in &self.state.calls {
+                if !entry.is_conventional() {
+                    continue;
+                }
+                if let Some(ch) = snap.channels.iter_mut().find(|c| {
+                    c.talkgroup == entry.talkgroup && (c.freq_hz - entry.freq.as_hz()).abs() < 1.0
+                }) {
+                    ch.state = entry.state.as_str();
+                }
+            }
+        }
     }
 
     // ── Message conversion from CXX → pure Rust ──
@@ -290,6 +331,9 @@ impl CallManager {
                 }
                 Effect::ConventionalRestart { call_id } => {
                     if let Some(entry) = self.state.get_call(call_id) {
+                        self.update_conv_metric(entry.talkgroup, entry.freq, |m| {
+                            m.idle_timeout_count += 1;
+                        });
                         let cfg = self.build_recorder_config(entry);
                         if let Some(handle) = self.handles.get_mut(&call_id) {
                             ffi::call_restart(handle.pin_mut(), &cfg);
@@ -318,14 +362,9 @@ impl CallManager {
                             talkgroup = entry.talkgroup,
                             "enabling recorder (signal detected)"
                         );
-                        self.conv_detection_cycles.add(
-                            1,
-                            &[
-                                KeyValue::new("system", entry.short_name.clone()),
-                                KeyValue::new("talkgroup", entry.talkgroup),
-                                KeyValue::new("direction", "enable"),
-                            ],
-                        );
+                        self.update_conv_metric(entry.talkgroup, entry.freq, |m| {
+                            m.enable_count += 1;
+                        });
                     }
                     if let Some(handle) = self.handles.get_mut(&call_id) {
                         ffi::call_set_recorder_enabled(handle.pin_mut(), true);
@@ -338,14 +377,9 @@ impl CallManager {
                             talkgroup = entry.talkgroup,
                             "disabling recorder (signal lost)"
                         );
-                        self.conv_detection_cycles.add(
-                            1,
-                            &[
-                                KeyValue::new("system", entry.short_name.clone()),
-                                KeyValue::new("talkgroup", entry.talkgroup),
-                                KeyValue::new("direction", "disable"),
-                            ],
-                        );
+                        self.update_conv_metric(entry.talkgroup, entry.freq, |m| {
+                            m.disable_count += 1;
+                        });
                     }
                     if let Some(handle) = self.handles.get_mut(&call_id) {
                         ffi::call_set_recorder_enabled(handle.pin_mut(), false);
@@ -558,6 +592,12 @@ impl CallManager {
                     "concluding recorded call"
                 );
 
+                if is_conventional {
+                    self.update_conv_metric(entry.talkgroup, entry.freq, |m| {
+                        m.recordings_completed += 1;
+                    });
+                }
+
                 let handle = self.handles.get(&call_id).unwrap();
                 if metrics.is_dmr {
                     for slot in 0..2i32 {
@@ -642,6 +682,7 @@ impl CallManager {
 
         self.active_calls_gauge
             .record(self.state.calls.len() as u64, &[]);
+        self.sync_conv_states();
     }
 
     pub fn add_call(
@@ -691,14 +732,18 @@ impl CallManager {
             .iter()
             .find(|e| e.is_conventional() && e.recorder == Some(RecorderNum(recorder_num)))
         {
-            let attrs = [
-                KeyValue::new("system", entry.short_name.clone()),
-                KeyValue::new("talkgroup", entry.talkgroup),
-            ];
+            let tg = entry.talkgroup;
+            let freq = entry.freq;
             if muted {
-                self.conv_noise_floor.record(pwr_db, &attrs);
+                self.update_conv_metric(tg, freq, |m| {
+                    m.noise_floor_db = pwr_db;
+                    m.squelch_close_count += 1;
+                });
             } else {
-                self.conv_signal_power.record(pwr_db, &attrs);
+                self.update_conv_metric(tg, freq, |m| {
+                    m.signal_power_db = pwr_db;
+                    m.squelch_open_count += 1;
+                });
             }
         }
 
@@ -730,13 +775,9 @@ impl CallManager {
                     && entry.signal_detection
                     && (entry.freq.as_hz() - abs_freq).abs() < 30_000.0
                 {
-                    self.conv_detection_rssi.record(
-                        f64::from(signal.max_rssi),
-                        &[
-                            KeyValue::new("system", entry.short_name.clone()),
-                            KeyValue::new("talkgroup", entry.talkgroup),
-                        ],
-                    );
+                    self.update_conv_metric(entry.talkgroup, entry.freq, |m| {
+                        m.detection_rssi_db = f64::from(signal.max_rssi);
+                    });
                 }
             }
         }

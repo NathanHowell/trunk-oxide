@@ -30,6 +30,30 @@ pub struct GrMetricsSnapshot {
     pub sources: Vec<ffi::TrSourceMetrics>,
 }
 
+/// Per-channel metrics for a single conventional channel.
+pub struct ConventionalChannelMetrics {
+    pub system: String,
+    pub talkgroup: i64,
+    pub freq_hz: f64,
+    pub state: &'static str,
+    pub signal_power_db: f64,
+    pub noise_floor_db: f64,
+    pub detection_rssi_db: f64,
+    pub squelch_open_count: u64,
+    pub squelch_close_count: u64,
+    pub enable_count: u64,
+    pub disable_count: u64,
+    pub idle_timeout_count: u64,
+    pub recordings_completed: u64,
+}
+
+/// Snapshot of conventional-channel metrics, updated on the monitor thread
+/// and read by OTel observable callbacks.
+#[derive(Default)]
+pub struct ConventionalMetricsSnapshot {
+    pub channels: Vec<ConventionalChannelMetrics>,
+}
+
 /// Dedup key derived from a trunk message. Two identical TSBKs parsed by
 /// different decoders on the same system produce the same key.
 struct TrunkMsgKey {
@@ -103,6 +127,9 @@ pub struct TrunkRecorder {
     /// Shared snapshot of GR block metrics, updated periodically on the
     /// monitor thread and read by OTel observable callbacks.
     gr_metrics: Arc<Mutex<GrMetricsSnapshot>>,
+    /// Shared snapshot of conventional-channel metrics, updated on the
+    /// monitor thread and read by OTel observable callbacks.
+    conv_metrics: Arc<Mutex<ConventionalMetricsSnapshot>>,
 }
 
 struct PendingConventionalCall {
@@ -488,6 +515,7 @@ impl TrunkRecorderBuilder {
             source_ranges: self.source_ranges,
             pending_conventional_calls,
             gr_metrics: Arc::new(Mutex::new(GrMetricsSnapshot::default())),
+            conv_metrics: Arc::new(Mutex::new(ConventionalMetricsSnapshot::default())),
         }
     }
 }
@@ -503,6 +531,11 @@ impl TrunkRecorder {
         Arc::clone(&self.gr_metrics)
     }
 
+    /// Shared conventional-channel metrics snapshot.
+    pub fn conv_metrics(&self) -> Arc<Mutex<ConventionalMetricsSnapshot>> {
+        Arc::clone(&self.conv_metrics)
+    }
+
     /// Run the monitor loop until ctrl_c is received.
     ///
     /// Must be called from within a tokio runtime context (e.g. via
@@ -513,6 +546,7 @@ impl TrunkRecorder {
             self.call_mgr_config.clone(),
             self.bridge.clone(),
             self.source_ranges.clone(),
+            Arc::clone(&self.conv_metrics),
         );
 
         // Register conventional calls that were pre-created before the

@@ -51,7 +51,7 @@ cargo fmt
 
 ## Key Conventions
 
-- Rust edition 2024, MSRV 1.93, resolver = "3"
+- Rust edition 2024, MSRV 1.94, resolver = "3"
 - `unsafe_code = "deny"` and `unused_must_use = "deny"` workspace-wide
 - clippy::all is denied; pedantic and nursery are warnings
 - C++ integration uses cxx (not bindgen) with C++17

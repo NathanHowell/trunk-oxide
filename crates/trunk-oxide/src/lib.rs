@@ -561,6 +561,10 @@ impl TrunkRecorder {
                 _ = tick.tick() => {
                     call_mgr.tick(self.ctx.pin_mut());
                     call_mgr.clear_stale_patches();
+                    if let Err(e) = ffi::tr_context_check_sources(self.ctx.pin_mut()) {
+                        tracing::error!(%e, "source health check failed, exiting");
+                        std::process::exit(1);
+                    }
                 },
                 _ = status.tick() => {
                     call_mgr.print_status(self.ctx.pin_mut());

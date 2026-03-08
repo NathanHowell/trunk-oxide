@@ -494,6 +494,21 @@ void tr_context_wire_event_notifiers(TrContext &ctx) {
     }
 }
 
+void tr_context_check_sources(TrContext &ctx) {
+    for (auto &source : ctx.impl->trunk_ctx.sources) {
+        bool samples = source->got_samples();
+        if (!samples) {
+            std::cerr << "FATAL: Source " << source->get_num()
+                      << " (" << source->get_device()
+                      << ") stopped receiving samples - will exit" << std::endl;
+            throw std::runtime_error(
+                "Source " + std::to_string(source->get_num()) +
+                " (" + source->get_device() +
+                ") stopped receiving samples");
+        }
+    }
+}
+
 rust::Vec<TrRecorderStatus> tr_context_get_recorder_status(const TrContext &ctx) {
     rust::Vec<TrRecorderStatus> result;
     for (auto &source : ctx.impl->trunk_ctx.sources) {

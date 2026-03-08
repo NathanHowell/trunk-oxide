@@ -22,7 +22,6 @@ impl SystemType {
     pub const fn is_trunked(self) -> bool {
         matches!(self, Self::P25 | Self::Smartnet)
     }
-
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]

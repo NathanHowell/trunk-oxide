@@ -155,6 +155,7 @@ fn main() -> Result<()> {
                 observer.observe(depth as f64 / cap as f64, &[]);
             })
             .build();
+
     }
 
     // Spawn gRPC server as a background task on the runtime

@@ -345,6 +345,7 @@ pub mod ffi {
         fn tr_stop_gnuradio(ctx: Pin<&mut TrContext>);
 
         // ── Phase B: Message Draining ──
+        fn tr_context_check_sources(ctx: Pin<&mut TrContext>) -> Result<()>;
         fn tr_context_get_recorder_status(ctx: &TrContext) -> Vec<TrRecorderStatus>;
 
         // ── Phase B: Message Routing (called from Rust handle_message) ──

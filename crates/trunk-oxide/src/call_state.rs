@@ -1616,6 +1616,26 @@ impl TrunkStateMachine {
         Effects::new()
     }
 
+    // ── Adaptive squelch ──
+
+    /// Feed a polled power sample to the adaptive squelch tracker for a
+    /// conventional call. Unlike `on_squelch`, this does not change call state.
+    pub(crate) fn feed_power_sample(&mut self, call_id: CallId, power_db: f32) -> Effects {
+        let mut effects = Effects::new();
+        if let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) {
+            #[allow(clippy::cast_possible_truncation)]
+            if let Some(ref mut tracker) = entry.adaptive_squelch
+                && let Some(new_threshold) = tracker.feed(power_db)
+            {
+                effects.push(Effect::UpdateSquelch {
+                    call_id,
+                    threshold_db: new_threshold,
+                });
+            }
+        }
+        effects
+    }
+
     // ── Signal detection ──
 
     pub(crate) fn on_signals_detected(

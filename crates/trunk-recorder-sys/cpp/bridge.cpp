@@ -772,6 +772,12 @@ void call_set_squelch_db(TrCall &call, double db) {
     if (rec) rec->set_squelch_db(db);
 }
 
+double call_get_pwr_db(const TrCall &call) {
+    auto rec = call.ptr->get_recorder();
+    if (rec) return rec->get_pwr();
+    return 0.0;
+}
+
 // ── Phase C: Call Management — call-level recorder accessors ──
 
 double call_recorder_since_last_write_secs(const TrCall &call) {

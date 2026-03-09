@@ -705,6 +705,27 @@ impl CallManager {
             self.process_effects(effects, &mut ctx);
         }
 
+        // Poll instantaneous power from the squelch block for each conventional
+        // analog call and feed it to the adaptive squelch tracker.
+        let conv_analog: Vec<_> = self
+            .state
+            .iter_calls()
+            .filter(|v| v.is_conventional() && v.is_analog())
+            .map(|v| (v.id(), v.talkgroup(), v.freq()))
+            .collect();
+
+        for (call_id, tg, freq) in conv_analog {
+            if let Some(handle) = self.handles.get(&call_id) {
+                let pwr_db = ffi::call_get_pwr_db(handle);
+                self.update_conv_metric(tg, freq, |m| {
+                    m.last_power_reading_db = Some(pwr_db);
+                });
+                #[allow(clippy::cast_possible_truncation)]
+                let effects = self.state.feed_power_sample(call_id, pwr_db as f32);
+                self.process_effects(effects, &mut ctx);
+            }
+        }
+
         // Now run the state machine tick (handles update timeouts + conventional)
         let effects = self.state.tick();
         self.process_effects(effects, &mut ctx);

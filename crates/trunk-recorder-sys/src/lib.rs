@@ -435,6 +435,7 @@ pub mod ffi {
 
         // ── Adaptive squelch ──
         fn call_set_squelch_db(call: Pin<&mut TrCall>, db: f64);
+        fn call_get_pwr_db(call: &TrCall) -> f64;
 
         // ── Event channel wiring ──
         fn tr_context_set_event_notifier(ctx: Pin<&mut TrContext>, notifier: Box<EventNotifier>);

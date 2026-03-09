@@ -50,6 +50,8 @@ pub struct ConventionalChannelMetrics {
     pub squelch_db: f64,
     /// Current adaptive squelch threshold, if active.
     pub adaptive_squelch_db: Option<f64>,
+    /// Latest FFT power reading fed to the adaptive squelch tracker (dB).
+    pub last_power_reading_db: Option<f64>,
 }
 
 /// Snapshot of conventional-channel metrics, updated on the monitor thread

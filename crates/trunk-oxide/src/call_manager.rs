@@ -97,6 +97,7 @@ impl CallManager {
                         recordings_completed: 0,
                         squelch_db: ch.squelch_db,
                         adaptive_squelch_db: None,
+                        last_power_reading_db: None,
                     });
                 }
             }
@@ -818,10 +819,18 @@ impl CallManager {
         readings: &[trunk_recorder_sys::PowerReading],
     ) {
         for reading in readings {
-            let effects = self.state.feed_power_reading(
-                Freq::from_hz(reading.freq),
-                reading.power_db,
-            );
+            let freq = Freq::from_hz(reading.freq);
+            // Update last_power_reading_db metric for this channel.
+            if let Ok(mut snap) = self.conv_metrics.lock() {
+                if let Some(ch) = snap
+                    .channels
+                    .iter_mut()
+                    .find(|c| (c.freq_hz - reading.freq).abs() < 1.0)
+                {
+                    ch.last_power_reading_db = Some(f64::from(reading.power_db));
+                }
+            }
+            let effects = self.state.feed_power_reading(freq, reading.power_db);
             self.process_effects(effects, &mut ctx);
         }
     }

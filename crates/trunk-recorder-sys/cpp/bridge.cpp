@@ -410,23 +410,38 @@ static void tr_context_wire_power_callbacks(TrContext &ctx) {
         }
         if (src_freqs.empty()) continue;
 
+        // Compute the number of FFT bins spanning an analog channel (12.5 kHz).
+        double bin_hz = rate / fft_len;
+        int half_span = static_cast<int>(std::round(6250.0 / bin_hz));
+        if (half_span < 1) half_span = 1;
+
         auto notifier = bridge->make_notifier();
         source->set_power_callback(
             [notifier = std::make_shared<rust::Box<EventNotifier>>(std::move(notifier)),
-             src_num, src_freqs, center, rate, fft_len](
+             src_num, src_freqs, center, rate, fft_len, half_span](
                 const float* pxx_out, unsigned actual_fft_len, double actual_rate) {
                 unsigned len = actual_fft_len > 0 ? actual_fft_len : static_cast<unsigned>(fft_len);
                 double sr = actual_rate > 0 ? actual_rate : rate;
                 rust::Vec<TrPowerReading> readings;
                 for (double freq : src_freqs) {
                     double offset = freq - center;
-                    // FFT bins: DC at center, negative freqs in upper half.
-                    int bin = static_cast<int>((offset / sr + 0.5) * len);
-                    if (bin < 0) bin = 0;
-                    if (bin >= static_cast<int>(len)) bin = static_cast<int>(len) - 1;
+                    int center_bin = static_cast<int>((offset / sr + 0.5) * len);
+
+                    // Average power across channel bandwidth (dB→linear→mean→dB).
+                    int lo = std::max(0, center_bin - half_span);
+                    int hi = std::min(static_cast<int>(len) - 1, center_bin + half_span);
+                    double linear_sum = 0.0;
+                    int count = 0;
+                    for (int b = lo; b <= hi; b++) {
+                        linear_sum += std::pow(10.0, pxx_out[b] / 10.0);
+                        count++;
+                    }
+                    float avg_db = static_cast<float>(
+                        10.0 * std::log10(linear_sum / count));
+
                     TrPowerReading r;
                     r.freq = freq;
-                    r.power_db = pxx_out[bin];
+                    r.power_db = avg_db;
                     readings.push_back(r);
                 }
                 event_notifier_notify_power_readings(

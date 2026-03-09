@@ -98,6 +98,7 @@ impl<'a> CallView<'a> {
     pub(crate) fn segment_start(&self) -> Instant {
         self.0.segment_start
     }
+    #[allow(dead_code)]
     pub(crate) fn adaptive_squelch_threshold(&self) -> Option<f64> {
         self.0.adaptive_squelch.as_ref().map(AdaptiveSquelch::current_threshold)
     }

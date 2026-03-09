@@ -384,11 +384,67 @@ double tr_system_get_control_channel_pwr(TrContext &ctx, int32_t sys_num) {
     return pwr;
 }
 
+// Wire power callbacks for adaptive squelch. Called from tr_start_gnuradio()
+// after all conventional calls have been created and their channel frequencies
+// registered in conv_channel_freqs.
+static void tr_context_wire_power_callbacks(TrContext &ctx) {
+    auto bridge = ctx.impl->event_bridge;
+    assert(bridge && "event_bridge must be set before wiring power callbacks");
+
+    auto &conv_freqs = ctx.impl->conv_channel_freqs;
+    if (conv_freqs.empty()) return;
+
+    for (auto &source : ctx.impl->trunk_ctx.sources) {
+        double center = source->get_center();
+        double rate = source->get_rate();
+        double half_bw = rate / 2.0;
+        int fft_len = 1024;  // matches signal_detector default
+        int src_num = source->get_num();
+
+        // Filter to channels within this source's bandwidth.
+        std::vector<double> src_freqs;
+        for (double f : conv_freqs) {
+            if (f >= center - half_bw && f <= center + half_bw) {
+                src_freqs.push_back(f);
+            }
+        }
+        if (src_freqs.empty()) continue;
+
+        auto notifier = bridge->make_notifier();
+        source->set_power_callback(
+            [notifier = std::make_shared<rust::Box<EventNotifier>>(std::move(notifier)),
+             src_num, src_freqs, center, rate, fft_len](
+                const float* pxx_out, unsigned actual_fft_len, double actual_rate) {
+                unsigned len = actual_fft_len > 0 ? actual_fft_len : static_cast<unsigned>(fft_len);
+                double sr = actual_rate > 0 ? actual_rate : rate;
+                rust::Vec<TrPowerReading> readings;
+                for (double freq : src_freqs) {
+                    double offset = freq - center;
+                    // FFT bins: DC at center, negative freqs in upper half.
+                    int bin = static_cast<int>((offset / sr + 0.5) * len);
+                    if (bin < 0) bin = 0;
+                    if (bin >= static_cast<int>(len)) bin = static_cast<int>(len) - 1;
+                    TrPowerReading r;
+                    r.freq = freq;
+                    r.power_db = pxx_out[bin];
+                    readings.push_back(r);
+                }
+                event_notifier_notify_power_readings(
+                    **notifier, src_num, std::move(readings));
+            });
+    }
+}
+
 // ── Phase A: Loop Control ──
 
 void tr_start_gnuradio(TrContext &ctx) {
     const char *env = std::getenv("RUST_LOG");
     set_logging_level(env ? std::string(env) : "info");
+
+    // Wire power callbacks for adaptive squelch now that all conventional
+    // calls (and their channel frequencies) have been registered.
+    tr_context_wire_power_callbacks(ctx);
+
     ctx.impl->trunk_ctx.tb->start();
 }
 
@@ -500,50 +556,6 @@ void tr_context_wire_event_notifiers(TrContext &ctx) {
             });
     }
 
-    // Phase 5: wire power callbacks for adaptive squelch.
-    // Use conventional channel frequencies recorded during tr_create_conventional_call().
-    auto &conv_freqs = ctx.impl->conv_channel_freqs;
-    if (!conv_freqs.empty()) {
-        for (auto &source : ctx.impl->trunk_ctx.sources) {
-            double center = source->get_center();
-            double rate = source->get_rate();
-            double half_bw = rate / 2.0;
-            int fft_len = 1024;  // matches signal_detector default
-            int src_num = source->get_num();
-
-            // Filter to channels within this source's bandwidth.
-            std::vector<double> src_freqs;
-            for (double f : conv_freqs) {
-                if (f >= center - half_bw && f <= center + half_bw) {
-                    src_freqs.push_back(f);
-                }
-            }
-            if (src_freqs.empty()) continue;
-
-            auto notifier = bridge->make_notifier();
-            source->set_power_callback(
-                [notifier = std::make_shared<rust::Box<EventNotifier>>(std::move(notifier)),
-                 src_num, src_freqs, center, rate, fft_len](
-                    const float* pxx_out, unsigned actual_fft_len, double actual_rate) {
-                    unsigned len = actual_fft_len > 0 ? actual_fft_len : static_cast<unsigned>(fft_len);
-                    double sr = actual_rate > 0 ? actual_rate : rate;
-                    rust::Vec<TrPowerReading> readings;
-                    for (double freq : src_freqs) {
-                        double offset = freq - center;
-                        // FFT bins: DC at center, negative freqs in upper half.
-                        int bin = static_cast<int>((offset / sr + 0.5) * len);
-                        if (bin < 0) bin = 0;
-                        if (bin >= static_cast<int>(len)) bin = static_cast<int>(len) - 1;
-                        TrPowerReading r;
-                        r.freq = freq;
-                        r.power_db = pxx_out[bin];
-                        readings.push_back(r);
-                    }
-                    event_notifier_notify_power_readings(
-                        **notifier, src_num, std::move(readings));
-                });
-        }
-    }
 }
 
 void tr_context_check_sources(TrContext &ctx) {

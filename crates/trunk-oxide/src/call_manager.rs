@@ -762,6 +762,9 @@ impl CallManager {
         {
             let tg = view.talkgroup();
             let freq = view.freq();
+            self.update_conv_metric(tg, freq, |m| {
+                m.last_power_reading_db = Some(pwr_db);
+            });
             if muted {
                 self.update_conv_metric(tg, freq, |m| {
                     m.noise_floor_db = pwr_db;
@@ -811,28 +814,6 @@ impl CallManager {
         }
         let effects = self.state.on_signals_detected(source_center_freq, signals);
         self.process_effects(effects, &mut ctx);
-    }
-
-    pub fn handle_power_readings(
-        &mut self,
-        mut ctx: Pin<&mut TrContext>,
-        readings: &[trunk_recorder_sys::PowerReading],
-    ) {
-        for reading in readings {
-            let freq = Freq::from_hz(reading.freq);
-            // Update last_power_reading_db metric for this channel.
-            if let Ok(mut snap) = self.conv_metrics.lock() {
-                if let Some(ch) = snap
-                    .channels
-                    .iter_mut()
-                    .find(|c| (c.freq_hz - reading.freq).abs() < 1.0)
-                {
-                    ch.last_power_reading_db = Some(f64::from(reading.power_db));
-                }
-            }
-            let effects = self.state.feed_power_reading(freq, reading.power_db);
-            self.process_effects(effects, &mut ctx);
-        }
     }
 
     pub fn clear_stale_patches(&mut self) {

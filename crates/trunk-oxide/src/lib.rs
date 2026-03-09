@@ -625,12 +625,7 @@ impl TrunkRecorder {
                                 &signals,
                             );
                         }
-                        GrEvent::PowerReadings { readings, .. } => {
-                            call_mgr.handle_power_readings(
-                                self.ctx.pin_mut(),
-                                &readings,
-                            );
-                        }
+
                     }
                 },
                 _ = tick.tick() => {

@@ -1565,6 +1565,22 @@ impl TrunkStateMachine {
             if entry.recorder != Some(recorder_num) {
                 continue;
             }
+
+            let mut effects = Effects::new();
+
+            // Feed every squelch power reading to the adaptive squelch
+            // tracker. The squelch block reports power in its own units,
+            // which is exactly the scale we need for threshold updates.
+            #[allow(clippy::cast_possible_truncation)]
+            if let Some(ref mut tracker) = entry.adaptive_squelch
+                && let Some(new_threshold) = tracker.feed(pwr_db as f32)
+            {
+                effects.push(Effect::UpdateSquelch {
+                    call_id: entry.id,
+                    threshold_db: new_threshold,
+                });
+            }
+
             if muted {
                 // Squelch closed — debounce: don't transition immediately.
                 // tick_conventional() finalizes if squelch stays closed past
@@ -1589,42 +1605,15 @@ impl TrunkStateMachine {
                         entry.state = CallState::Recording;
                         entry.segment_start = Instant::now();
                         if first_open {
-                            let call_id = entry.id;
-                            let mut effects = Effects::new();
-                            effects.push(Effect::EmitCallStart { call_id });
+                            effects.push(Effect::EmitCallStart { call_id: entry.id });
                             effects.push(Effect::EmitCallsActive);
-                            return effects;
                         }
                     }
                 }
             }
-            return Effects::new();
+            return effects;
         }
         Effects::new()
-    }
-
-    // ── Adaptive squelch ──
-
-    /// Feed an FFT power reading for a conventional channel. If the adaptive
-    /// squelch tracker determines a new threshold, returns an `UpdateSquelch`
-    /// effect.
-    pub(crate) fn feed_power_reading(&mut self, freq: Freq, power_db: f32) -> Effects {
-        let mut effects = Effects::new();
-        for entry in &mut self.calls {
-            if !entry.is_conventional() || entry.freq != freq {
-                continue;
-            }
-            if let Some(ref mut tracker) = entry.adaptive_squelch
-                && let Some(new_threshold) = tracker.feed(power_db)
-            {
-                effects.push(Effect::UpdateSquelch {
-                    call_id: entry.id,
-                    threshold_db: new_threshold,
-                });
-            }
-            break;
-        }
-        effects
     }
 
     // ── Signal detection ──
@@ -3179,7 +3168,7 @@ mod tests {
     // ── Adaptive squelch integration ──
 
     #[test]
-    fn feed_power_reading_matching_freq_feeds_tracker() {
+    fn squelch_events_feed_adaptive_tracker() {
         let mut sm = TrunkStateMachine::new(test_config());
         let channel = ConventionalChannel {
             talkgroup: Talkgroup(1),
@@ -3191,12 +3180,16 @@ mod tests {
         let policy = sm.config.systems.get(&1).unwrap().clone();
         let (_call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(5)));
 
-        // Feed bimodal readings to trigger an adaptive threshold update.
-        // Noise mode around -55, signal mode around -35.
+        // Feed bimodal squelch events to trigger an adaptive threshold update.
+        // Noise mode around -55 (squelch close), signal mode around -35 (squelch open).
         let mut got_update = false;
         for i in 0..400 {
-            let power = if i % 3 == 0 { -35.0 } else { -55.0 };
-            let effects = sm.feed_power_reading(Freq::from_hz(488_000_000.0), power);
+            let (muted, power) = if i % 3 == 0 {
+                (false, -35.0)
+            } else {
+                (true, -55.0)
+            };
+            let effects = sm.on_squelch(RecorderNum(5), muted, power);
             if effects.iter().any(|e| matches!(e, Effect::UpdateSquelch { .. })) {
                 got_update = true;
             }
@@ -3205,28 +3198,7 @@ mod tests {
     }
 
     #[test]
-    fn feed_power_reading_non_matching_freq_ignored() {
-        let mut sm = TrunkStateMachine::new(test_config());
-        let channel = ConventionalChannel {
-            talkgroup: Talkgroup(1),
-            freq: Freq::from_hz(488_000_000.0),
-            is_analog: true,
-            squelch_db: -50.0,
-            ..Default::default()
-        };
-        let policy = sm.config.systems.get(&1).unwrap().clone();
-        let (_call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(5)));
-
-        // Wrong frequency — should produce no effects.
-        for i in 0..400 {
-            let power = if i % 3 == 0 { -35.0 } else { -55.0 };
-            let effects = sm.feed_power_reading(Freq::from_hz(999_000_000.0), power);
-            assert!(effects.is_empty(), "wrong freq should produce no effects");
-        }
-    }
-
-    #[test]
-    fn feed_power_reading_digital_channel_has_no_tracker() {
+    fn digital_channel_has_no_adaptive_tracker() {
         let mut sm = TrunkStateMachine::new(test_config());
         let channel = ConventionalChannel {
             talkgroup: Talkgroup(1),
@@ -3238,13 +3210,19 @@ mod tests {
         let policy = sm.config.systems.get(&1).unwrap().clone();
         let (_call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(5)));
 
-        // Digital channel — no adaptive squelch tracker.
         assert!(sm.calls[0].adaptive_squelch.is_none());
 
         for i in 0..400 {
-            let power = if i % 3 == 0 { -35.0 } else { -55.0 };
-            let effects = sm.feed_power_reading(Freq::from_hz(488_000_000.0), power);
-            assert!(effects.is_empty(), "digital channel should have no tracker");
+            let (muted, power) = if i % 3 == 0 {
+                (false, -35.0)
+            } else {
+                (true, -55.0)
+            };
+            let effects = sm.on_squelch(RecorderNum(5), muted, power);
+            assert!(
+                !effects.iter().any(|e| matches!(e, Effect::UpdateSquelch { .. })),
+                "digital channel should never emit UpdateSquelch"
+            );
         }
     }
 
@@ -3261,9 +3239,9 @@ mod tests {
         let policy = sm.config.systems.get(&1).unwrap().clone();
         let (call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(5)));
 
-        // Feed some readings to warm up the tracker.
+        // Feed some readings to warm up the tracker via squelch events.
         for _ in 0..100 {
-            let _ = sm.feed_power_reading(Freq::from_hz(488_000_000.0), -55.0);
+            let _ = sm.on_squelch(RecorderNum(5), true, -55.0);
         }
 
         // Restart should preserve the tracker (not reset it).

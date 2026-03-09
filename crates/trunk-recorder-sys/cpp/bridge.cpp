@@ -152,10 +152,6 @@ struct TrContextImpl {
     // Event bridge for GR thread → Rust channel notifications
     std::shared_ptr<EventBridge> event_bridge;
 
-    // Conventional channel frequencies for adaptive squelch power callbacks.
-    // Populated by tr_create_conventional_call().
-    std::vector<double> conv_channel_freqs;
-
     explicit TrContextImpl(rust::Box<EventHandlerBox> h)
         : handler(std::move(h)) {}
 };
@@ -384,82 +380,11 @@ double tr_system_get_control_channel_pwr(TrContext &ctx, int32_t sys_num) {
     return pwr;
 }
 
-// Wire power callbacks for adaptive squelch. Called from tr_start_gnuradio()
-// after all conventional calls have been created and their channel frequencies
-// registered in conv_channel_freqs.
-static void tr_context_wire_power_callbacks(TrContext &ctx) {
-    auto bridge = ctx.impl->event_bridge;
-    assert(bridge && "event_bridge must be set before wiring power callbacks");
-
-    auto &conv_freqs = ctx.impl->conv_channel_freqs;
-    if (conv_freqs.empty()) return;
-
-    for (auto &source : ctx.impl->trunk_ctx.sources) {
-        double center = source->get_center();
-        double rate = source->get_rate();
-        double half_bw = rate / 2.0;
-        int fft_len = 1024;  // matches signal_detector default
-        int src_num = source->get_num();
-
-        // Filter to channels within this source's bandwidth.
-        std::vector<double> src_freqs;
-        for (double f : conv_freqs) {
-            if (f >= center - half_bw && f <= center + half_bw) {
-                src_freqs.push_back(f);
-            }
-        }
-        if (src_freqs.empty()) continue;
-
-        // Compute the number of FFT bins spanning an analog channel (12.5 kHz).
-        double bin_hz = rate / fft_len;
-        int half_span = static_cast<int>(std::round(6250.0 / bin_hz));
-        if (half_span < 1) half_span = 1;
-
-        auto notifier = bridge->make_notifier();
-        source->set_power_callback(
-            [notifier = std::make_shared<rust::Box<EventNotifier>>(std::move(notifier)),
-             src_num, src_freqs, center, rate, fft_len, half_span](
-                const float* pxx_out, unsigned actual_fft_len, double actual_rate) {
-                unsigned len = actual_fft_len > 0 ? actual_fft_len : static_cast<unsigned>(fft_len);
-                double sr = actual_rate > 0 ? actual_rate : rate;
-                rust::Vec<TrPowerReading> readings;
-                for (double freq : src_freqs) {
-                    double offset = freq - center;
-                    int center_bin = static_cast<int>((offset / sr + 0.5) * len);
-
-                    // Average power across channel bandwidth (dB→linear→mean→dB).
-                    int lo = std::max(0, center_bin - half_span);
-                    int hi = std::min(static_cast<int>(len) - 1, center_bin + half_span);
-                    double linear_sum = 0.0;
-                    int count = 0;
-                    for (int b = lo; b <= hi; b++) {
-                        linear_sum += std::pow(10.0, pxx_out[b] / 10.0);
-                        count++;
-                    }
-                    float avg_db = static_cast<float>(
-                        10.0 * std::log10(linear_sum / count));
-
-                    TrPowerReading r;
-                    r.freq = freq;
-                    r.power_db = avg_db;
-                    readings.push_back(r);
-                }
-                event_notifier_notify_power_readings(
-                    **notifier, src_num, std::move(readings));
-            });
-    }
-}
-
 // ── Phase A: Loop Control ──
 
 void tr_start_gnuradio(TrContext &ctx) {
     const char *env = std::getenv("RUST_LOG");
     set_logging_level(env ? std::string(env) : "info");
-
-    // Wire power callbacks for adaptive squelch now that all conventional
-    // calls (and their channel frequencies) have been registered.
-    tr_context_wire_power_callbacks(ctx);
-
     ctx.impl->trunk_ctx.tb->start();
 }
 
@@ -702,9 +627,6 @@ std::unique_ptr<TrCall> tr_create_conventional_call(
     }
 
     rec->set_system(system);
-
-    // Record conventional channel frequency for adaptive squelch power callbacks.
-    ctx.impl->conv_channel_freqs.push_back(channel.freq);
 
     // Wire squelch callback — Phase 3 only covers pre-existing recorders,
     // so conventional recorders created here need it wired explicitly.

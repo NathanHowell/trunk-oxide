@@ -430,6 +430,38 @@ fn main() -> Result<()> {
                 move |observer| observe_conv_u64(&snap, observer, |ch| ch.recordings_completed)
             })
             .build();
+
+        let _conv_squelch_db = meter
+            .f64_observable_gauge("trunk.oxide.conventional.squelch_db")
+            .with_description("Configured (static) squelch threshold (dBFS)")
+            .with_callback({
+                let snap = Arc::clone(&conv_metrics);
+                move |observer| observe_conv_f64(&snap, observer, |ch| ch.squelch_db)
+            })
+            .build();
+
+        let _conv_adaptive_squelch_db = meter
+            .f64_observable_gauge("trunk.oxide.conventional.adaptive_squelch_db")
+            .with_description("Current adaptive squelch threshold (dBFS), only emitted when active")
+            .with_callback({
+                let snap = Arc::clone(&conv_metrics);
+                move |observer| {
+                    let Ok(snap) = snap.lock() else { return };
+                    for ch in &snap.channels {
+                        if let Some(db) = ch.adaptive_squelch_db {
+                            observer.observe(
+                                db,
+                                &[
+                                    KeyValue::new("system", ch.system.clone()),
+                                    KeyValue::new("talkgroup", ch.talkgroup),
+                                    KeyValue::new("freq_mhz", ch.freq_hz / 1_000_000.0),
+                                ],
+                            );
+                        }
+                    }
+                }
+            })
+            .build();
     }
 
     // Spawn gRPC server as a background task on the runtime

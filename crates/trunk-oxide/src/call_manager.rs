@@ -95,6 +95,7 @@ impl CallManager {
                         disable_count: 0,
                         idle_timeout_count: 0,
                         recordings_completed: 0,
+                        squelch_db: ch.squelch_db,
                         adaptive_squelch_db: None,
                     });
                 }

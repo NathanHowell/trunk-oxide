@@ -46,6 +46,8 @@ pub struct ConventionalChannelMetrics {
     pub disable_count: u64,
     pub idle_timeout_count: u64,
     pub recordings_completed: u64,
+    /// Configured (static) squelch threshold in dB.
+    pub squelch_db: f64,
     /// Current adaptive squelch threshold, if active.
     pub adaptive_squelch_db: Option<f64>,
 }

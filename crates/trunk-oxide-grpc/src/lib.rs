@@ -123,6 +123,7 @@ fn convert_call_data(cd: &TrCallData) -> proto::CallData {
             .collect(),
         status: i32::from(cd.status.repr),
         segments: Vec::new(), // populated by caller if applicable
+        is_conventional: false, // set by caller
     }
 }
 
@@ -421,9 +422,15 @@ impl EventBridge {
         ));
     }
 
-    pub fn call_end(&self, call_data: &TrCallData, segments: &[proto::CallSegment]) {
+    pub fn call_end(
+        &self,
+        call_data: &TrCallData,
+        segments: &[proto::CallSegment],
+        is_conventional: bool,
+    ) {
         let mut data = convert_call_data(call_data);
         data.segments = segments.to_vec();
+        data.is_conventional = is_conventional;
         self.send_event(proto::plugin_event::Event::CallEnd(proto::CallEndEvent {
             call_data: Some(data),
         }));

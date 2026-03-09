@@ -235,8 +235,12 @@ impl DispatcherState {
             return vec![];
         }
 
-        // Coalescing enabled: transition to coalescing state
-        if !self.coalesce_timeout.is_zero() {
+        // Coalescing enabled: transition to coalescing state.
+        // Skip coalescing for conventional calls — trunk-oxide's state machine
+        // handles the full lifecycle (squelch open/close cycles as segments
+        // within one logical call). Discord-side coalescing would prevent
+        // conventional calls from ever ending.
+        if !self.coalesce_timeout.is_zero() && !call_data.is_conventional {
             self.coalescing_calls.insert(key.clone(), Instant::now());
             return vec![DispatchEffect::PttEnd {
                 key,
@@ -908,5 +912,85 @@ mod tests {
         };
         let effects = s.on_audio(&sample);
         assert!(effects.is_empty());
+    }
+
+    // ── Conventional calls skip coalescing ───────────────────────────
+
+    fn make_conventional_call_end(sys_num: i32, talkgroup: i64) -> proto::PluginEvent {
+        proto::PluginEvent {
+            event: Some(proto::plugin_event::Event::CallEnd(proto::CallEndEvent {
+                call_data: Some(proto::CallData {
+                    sys_num,
+                    talkgroup,
+                    length: 5.0,
+                    is_conventional: true,
+                    ..Default::default()
+                }),
+            })),
+        }
+    }
+
+    #[test]
+    fn conventional_call_skips_coalescing() {
+        let mut s = DispatcherState::new(10_000); // coalescing enabled
+        s.on_event(make_call_start(1, 12345));
+        s.on_channel_resolved(
+            proto::CallInfo {
+                sys_num: 1,
+                talkgroup: 12345,
+                is_conventional: true,
+                ..Default::default()
+            },
+            ChannelId::from(999),
+        );
+
+        // CallEnd for a conventional call should produce EndCall, not PttEnd
+        let effects = s.on_event(make_conventional_call_end(1, 12345));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, DispatchEffect::EndCall { .. })),
+            "conventional call should end immediately"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, DispatchEffect::PttEnd { .. })),
+            "conventional call should not coalesce"
+        );
+        let key = CallKey {
+            sys_num: SysNum(1),
+            talkgroup: Talkgroup(12345),
+        };
+        assert!(!s.is_coalescing(&key));
+        assert!(!s.is_active(&key));
+    }
+
+    #[test]
+    fn trunked_call_still_coalesces() {
+        let mut s = DispatcherState::new(10_000); // coalescing enabled
+        s.on_event(make_call_start(1, 12345));
+        s.on_channel_resolved(
+            proto::CallInfo {
+                sys_num: 1,
+                talkgroup: 12345,
+                ..Default::default()
+            },
+            ChannelId::from(999),
+        );
+
+        // CallEnd for a trunked call should still coalesce
+        let effects = s.on_event(make_call_end(1, 12345));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, DispatchEffect::PttEnd { .. })),
+            "trunked call should coalesce"
+        );
+        let key = CallKey {
+            sys_num: SysNum(1),
+            talkgroup: Talkgroup(12345),
+        };
+        assert!(s.is_coalescing(&key));
     }
 }

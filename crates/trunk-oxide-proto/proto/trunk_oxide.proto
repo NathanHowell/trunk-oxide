@@ -229,6 +229,7 @@ message CallData {
   repeated Transmission transmissions = 33;
   int32 status = 34;
   repeated CallSegment segments = 35;
+  bool is_conventional = 36;
 }
 
 message Transmission {

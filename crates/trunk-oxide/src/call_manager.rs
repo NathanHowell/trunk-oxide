@@ -634,21 +634,21 @@ impl CallManager {
                             data.freq_error = metrics.freq_error;
                             data.transmission_list =
                                 ffi::call_get_dmr_transmission_list(handle, slot);
-                            self.bridge.call_end(&data, &segments);
+                            self.bridge.call_end(&data, &segments, is_conventional);
                         }
                     } else {
                         let mut data = self.build_call_data(call_id);
                         data.length = recording_length;
                         data.freq_error = metrics.freq_error;
                         data.transmission_list = ffi::call_get_transmission_list(handle);
-                        self.bridge.call_end(&data, &segments);
+                        self.bridge.call_end(&data, &segments, is_conventional);
                     }
                 }
             }
         } else if matches!(state, CallState::Rejected(_)) {
             let segments = self.build_proto_segments_final(call_id, final_freq, -1);
             let data = self.build_call_data(call_id);
-            self.bridge.call_end(&data, &segments);
+            self.bridge.call_end(&data, &segments, is_conventional);
         }
     }
 

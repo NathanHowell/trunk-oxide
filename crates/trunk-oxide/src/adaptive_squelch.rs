@@ -38,11 +38,13 @@ const BIMODALITY_MIN: f64 = 0.75;
 /// Maximum deviation from the configured threshold in dB.
 const CLAMP_DB: f64 = 10.0;
 
-/// Default circular buffer capacity (60 seconds at ~10 readings/s).
-const DEFAULT_CAPACITY: usize = 600;
+/// Default circular buffer capacity (10 minutes at ~10 readings/s).
+/// Large enough that signal data from calls persists across quiet gaps,
+/// keeping the distribution bimodal for much longer.
+const DEFAULT_CAPACITY: usize = 6000;
 
-/// Default minimum samples before adaptive mode activates (~5 seconds).
-const DEFAULT_MIN_SAMPLES: usize = 50;
+/// Default minimum samples before adaptive mode activates (~10 seconds).
+const DEFAULT_MIN_SAMPLES: usize = 100;
 
 /// Default hysteresis in dB.
 const DEFAULT_HYSTERESIS_DB: f64 = 2.0;
@@ -62,20 +64,47 @@ impl AdaptiveSquelch {
     /// Feed a power reading in dB. Returns `Some(new_threshold)` if the
     /// optimal threshold changed by more than `hysteresis_db`.
     pub(crate) fn feed(&mut self, power_db: f32) -> Option<f64> {
-        // Push into circular buffer.
-        if self.buffer.len() >= self.capacity {
-            self.buffer.pop_front();
-        }
+        let adaptive_engaged = (self.current_threshold_db - self.configured_threshold_db).abs()
+            > f64::EPSILON;
+
+        // Push into circular buffer, saving the evicted sample for undo.
+        let evicted = if self.buffer.len() >= self.capacity {
+            self.buffer.pop_front()
+        } else {
+            None
+        };
         self.buffer.push_back(power_db);
 
         if self.buffer.len() < self.min_samples {
             return None;
         }
 
-        let (threshold, bimodality) = otsu_threshold(self.buffer.make_contiguous())?;
+        // When adaptive is engaged and the distribution is not clearly
+        // bimodal, freeze noise-level samples to preserve the buffer shape
+        // that established the current threshold. Signal-level samples
+        // (above the current threshold) are always kept so a new call can
+        // gradually rebuild the bimodal distribution.
+        let is_noise = f64::from(power_db) < self.current_threshold_db;
+
+        let Some((threshold, bimodality)) =
+            otsu_threshold(self.buffer.make_contiguous())
+        else {
+            if adaptive_engaged && is_noise {
+                self.buffer.pop_back();
+                if let Some(old) = evicted {
+                    self.buffer.push_front(old);
+                }
+            }
+            return None;
+        };
 
         if bimodality < BIMODALITY_MIN {
-            // Unimodal — keep configured threshold.
+            if adaptive_engaged && is_noise {
+                self.buffer.pop_back();
+                if let Some(old) = evicted {
+                    self.buffer.push_front(old);
+                }
+            }
             return None;
         }
 
@@ -428,6 +457,69 @@ mod tests {
         assert!(
             idx >= DEFAULT_MIN_SAMPLES - 1,
             "first update at {idx} should be >= min_samples"
+        );
+    }
+
+    #[test]
+    fn buffer_freeze_holds_threshold_across_quiet_gap() {
+        let mut tracker = AdaptiveSquelch::new(-55.0);
+
+        // Fill the buffer with bimodal data to establish a threshold.
+        let bimodal = make_bimodal(-50.0, 1.5, 4000, -35.0, 1.5, 2000);
+        for &s in &bimodal {
+            tracker.feed(s);
+        }
+        let engaged = tracker.current_threshold();
+        assert!(
+            engaged > -55.0,
+            "should have tightened above configured: {engaged}"
+        );
+
+        // Feed a long run of noise-only readings (simulating quiet gap).
+        // More than buffer capacity to ensure full replacement without freeze.
+        let noise_only = pseudo_normal(-50.0, 1.5, 10_000, 77);
+        for &s in &noise_only {
+            tracker.feed(s);
+        }
+
+        assert!(
+            (tracker.current_threshold() - engaged).abs() < f64::EPSILON,
+            "threshold should hold during quiet gap: was {engaged}, now {}",
+            tracker.current_threshold()
+        );
+    }
+
+    #[test]
+    fn buffer_freeze_allows_update_on_new_call() {
+        let mut tracker = AdaptiveSquelch::new(-55.0);
+
+        // Phase 1: fill buffer with bimodal data.
+        let phase1 = make_bimodal(-54.0, 0.5, 4000, -48.0, 0.5, 2000);
+        for &s in &phase1 {
+            tracker.feed(s);
+        }
+        let thresh1 = tracker.current_threshold();
+        assert!(thresh1 > -55.0, "should engage: {thresh1}");
+
+        // Quiet gap — noise frozen out, threshold holds.
+        for &s in &pseudo_normal(-54.0, 0.5, 10_000, 88) {
+            tracker.feed(s);
+        }
+        assert!(
+            (tracker.current_threshold() - thresh1).abs() < f64::EPSILON,
+            "should hold during gap"
+        );
+
+        // Phase 2: new call with higher noise floor. Signal samples
+        // (above threshold) enter the buffer, then bimodal data updates it.
+        let phase2 = make_bimodal(-48.0, 0.5, 5000, -42.0, 0.5, 2000);
+        for &s in &phase2 {
+            tracker.feed(s);
+        }
+        let thresh2 = tracker.current_threshold();
+        assert!(
+            thresh2 > thresh1,
+            "threshold should track new noise floor: {thresh1} → {thresh2}"
         );
     }
 }

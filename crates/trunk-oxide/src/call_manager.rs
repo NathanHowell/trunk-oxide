@@ -95,6 +95,7 @@ impl CallManager {
                         disable_count: 0,
                         idle_timeout_count: 0,
                         recordings_completed: 0,
+                        adaptive_squelch_db: None,
                     });
                 }
             }
@@ -382,6 +383,25 @@ impl CallManager {
                     }
                     if let Some(handle) = self.handles.get_mut(&call_id) {
                         ffi::call_set_recorder_enabled(handle.pin_mut(), false);
+                    }
+                }
+                Effect::UpdateSquelch {
+                    call_id,
+                    threshold_db,
+                } => {
+                    if let Some(view) = self.state.get_call_view(call_id) {
+                        tracing::info!(
+                            freq = %view.freq(),
+                            talkgroup = view.talkgroup(),
+                            threshold_db,
+                            "adaptive squelch update"
+                        );
+                        self.update_conv_metric(view.talkgroup(), view.freq(), |m| {
+                            m.adaptive_squelch_db = Some(threshold_db);
+                        });
+                    }
+                    if let Some(handle) = self.handles.get_mut(&call_id) {
+                        ffi::call_set_squelch_db(handle.pin_mut(), threshold_db);
                     }
                 }
                 Effect::RemoveCall { call_id } => {
@@ -791,6 +811,20 @@ impl CallManager {
         self.process_effects(effects, &mut ctx);
     }
 
+    pub fn handle_power_readings(
+        &mut self,
+        mut ctx: Pin<&mut TrContext>,
+        readings: &[trunk_recorder_sys::PowerReading],
+    ) {
+        for reading in readings {
+            let effects = self.state.feed_power_reading(
+                Freq::from_hz(reading.freq),
+                reading.power_db,
+            );
+            self.process_effects(effects, &mut ctx);
+        }
+    }
+
     pub fn clear_stale_patches(&mut self) {
         self.state.clear_stale_patches();
     }
@@ -863,7 +897,7 @@ impl CallManager {
         }
     }
 
-    pub fn print_status(&self, mut ctx: Pin<&mut TrContext>) {
+    pub fn print_status(&self, _ctx: Pin<&mut TrContext>) {
         tracing::info!(count = self.state.call_count(), "Active Calls");
         for view in self.state.iter_calls() {
             let elapsed = view

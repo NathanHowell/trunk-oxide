@@ -6,6 +6,7 @@
 //!
 //! Events flow: SDR → C++ gnuradio graph → cxx callbacks → EventBridge
 
+mod adaptive_squelch;
 mod call_manager;
 mod call_state;
 mod dedup;
@@ -45,6 +46,8 @@ pub struct ConventionalChannelMetrics {
     pub disable_count: u64,
     pub idle_timeout_count: u64,
     pub recordings_completed: u64,
+    /// Current adaptive squelch threshold, if active.
+    pub adaptive_squelch_db: Option<f64>,
 }
 
 /// Snapshot of conventional-channel metrics, updated on the monitor thread
@@ -616,6 +619,12 @@ impl TrunkRecorder {
                                 self.ctx.pin_mut(),
                                 source_center_freq,
                                 &signals,
+                            );
+                        }
+                        GrEvent::PowerReadings { readings, .. } => {
+                            call_mgr.handle_power_readings(
+                                self.ctx.pin_mut(),
+                                &readings,
                             );
                         }
                     }

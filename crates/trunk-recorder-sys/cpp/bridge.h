@@ -139,6 +139,9 @@ int32_t call_get_recorder_num(const TrCall &call);
 // ── Call — source updates ──
 void call_recorder_set_source(TrCall &call, int64_t src);
 
+// ── Call — adaptive squelch ──
+void call_set_squelch_db(TrCall &call, double db);
+
 // ── Call — recorder timing ──
 double call_recorder_since_last_write_secs(const TrCall &call);
 

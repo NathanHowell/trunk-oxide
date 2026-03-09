@@ -287,6 +287,11 @@ pub mod ffi {
         pub threshold: i32,
     }
 
+    struct TrPowerReading {
+        pub freq: f64,
+        pub power_db: f32,
+    }
+
     struct TrUnitTagConfig {
         pub pattern: String,
         pub tag: String,
@@ -433,6 +438,9 @@ pub mod ffi {
         // ── Phase C: Call Management — update source tracking ──
         fn call_recorder_set_source(call: Pin<&mut TrCall>, src: i64);
 
+        // ── Adaptive squelch ──
+        fn call_set_squelch_db(call: Pin<&mut TrCall>, db: f64);
+
         // ── Event channel wiring ──
         fn tr_context_set_event_notifier(ctx: Pin<&mut TrContext>, notifier: Box<EventNotifier>);
         fn tr_context_wire_event_notifiers(ctx: Pin<&mut TrContext>);
@@ -483,6 +491,11 @@ pub mod ffi {
             source_center_freq: f64,
             signals: Vec<TrDetectedSignal>,
         );
+        fn event_notifier_notify_power_readings(
+            notifier: &EventNotifier,
+            source_num: i32,
+            readings: Vec<TrPowerReading>,
+        );
     }
 }
 
@@ -515,6 +528,18 @@ pub enum GrEvent {
         source_center_freq: f64,
         signals: Vec<DetectedSignal>,
     },
+    /// FFT power readings for conventional channel frequencies.
+    PowerReadings {
+        source_num: i32,
+        readings: Vec<PowerReading>,
+    },
+}
+
+/// Power reading at a specific frequency, extracted from the FFT PSD.
+#[derive(Debug, Clone)]
+pub struct PowerReading {
+    pub freq: f64,
+    pub power_db: f32,
 }
 
 /// Opaque notifier that wraps a cloned `tokio::sync::mpsc::Sender<GrEvent>`.
@@ -586,6 +611,30 @@ fn event_notifier_notify_signals_detected(
             source_num,
             source_center_freq,
             signals,
+        })
+        .is_ok()
+    {
+        notifier.1.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn event_notifier_notify_power_readings(
+    notifier: &EventNotifier,
+    source_num: i32,
+    readings: Vec<ffi::TrPowerReading>,
+) {
+    let readings: Vec<PowerReading> = readings
+        .into_iter()
+        .map(|r| PowerReading {
+            freq: r.freq,
+            power_db: r.power_db,
+        })
+        .collect();
+    if notifier
+        .0
+        .try_send(GrEvent::PowerReadings {
+            source_num,
+            readings,
         })
         .is_ok()
     {

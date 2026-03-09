@@ -4,6 +4,8 @@ use std::time::{Duration, Instant, SystemTime};
 
 use trunk_config::{DefaultMode, SystemType, TalkgroupMode};
 
+use crate::adaptive_squelch::AdaptiveSquelch;
+
 // ── Read-only view ──
 
 /// Read-only view of a [`CallEntry`], exposed to the executor during effect
@@ -96,12 +98,21 @@ impl<'a> CallView<'a> {
     pub(crate) fn segment_start(&self) -> Instant {
         self.0.segment_start
     }
+    pub(crate) fn adaptive_squelch_threshold(&self) -> Option<f64> {
+        self.0.adaptive_squelch.as_ref().map(AdaptiveSquelch::current_threshold)
+    }
 }
 
 /// Minimum time squelch must stay closed before we transition from Recording
 /// to Idle. Filters out rapid open/close chatter near the noise floor without
 /// losing any audio (the C++ recorder captures independently).
 const SQUELCH_DEBOUNCE: Duration = Duration::from_millis(250);
+
+/// Maximum time a conventional channel can record continuously without any
+/// squelch close event before forcing an idle timeout. Catches stuck
+/// recordings where the noise floor sits at or above the squelch threshold,
+/// preventing indefinite garbage recordings.
+const STUCK_RECORDING_BACKSTOP: Duration = Duration::from_secs(30);
 
 // ── Newtypes ──
 
@@ -436,6 +447,9 @@ pub(crate) struct CallEntry {
     /// When the squelch last closed (pending debounce). `None` means squelch
     /// is open or the close has been finalized.
     pub(crate) squelch_closed_at: Option<Instant>,
+    /// Per-channel adaptive squelch tracker. Present only for analog
+    /// conventional channels.
+    pub(crate) adaptive_squelch: Option<AdaptiveSquelch>,
 }
 
 impl Default for CallEntry {
@@ -470,6 +484,7 @@ impl Default for CallEntry {
             signal_detection: false,
             squelch_db: 0.0,
             squelch_closed_at: None,
+            adaptive_squelch: None,
         }
     }
 }
@@ -604,6 +619,11 @@ pub(crate) enum Effect {
     },
     DisableRecorder {
         call_id: CallId,
+    },
+    /// Push a new squelch threshold to the C++ recorder at runtime.
+    UpdateSquelch {
+        call_id: CallId,
+        threshold_db: f64,
     },
     // ── Lifecycle ──
     RemoveCall {
@@ -1438,7 +1458,14 @@ impl TrunkStateMachine {
             let elapsed = entry.start_time.elapsed().map_or(0.0, |d| d.as_secs_f64());
             let max_duration_exceeded = entry.max_duration > 0.0 && elapsed > entry.max_duration;
 
-            if idle_timed_out || max_duration_exceeded {
+            // Safety backstop: if recording continuously without any squelch
+            // close event, the noise floor is likely above the threshold.
+            let stuck_recording = entry.state == CallState::Recording
+                && entry.segments.is_empty()
+                && entry.squelch_closed_at.is_none()
+                && entry.segment_start.elapsed() > STUCK_RECORDING_BACKSTOP;
+
+            if idle_timed_out || max_duration_exceeded || stuck_recording {
                 timed_out.push(entry.id);
             }
         }
@@ -1575,6 +1602,30 @@ impl TrunkStateMachine {
         Effects::new()
     }
 
+    // ── Adaptive squelch ──
+
+    /// Feed an FFT power reading for a conventional channel. If the adaptive
+    /// squelch tracker determines a new threshold, returns an `UpdateSquelch`
+    /// effect.
+    pub(crate) fn feed_power_reading(&mut self, freq: Freq, power_db: f32) -> Effects {
+        let mut effects = Effects::new();
+        for entry in &mut self.calls {
+            if !entry.is_conventional() || entry.freq != freq {
+                continue;
+            }
+            if let Some(ref mut tracker) = entry.adaptive_squelch
+                && let Some(new_threshold) = tracker.feed(power_db)
+            {
+                effects.push(Effect::UpdateSquelch {
+                    call_id: entry.id,
+                    threshold_db: new_threshold,
+                });
+            }
+            break;
+        }
+        effects
+    }
+
     // ── Signal detection ──
 
     pub(crate) fn on_signals_detected(
@@ -1618,6 +1669,11 @@ impl TrunkStateMachine {
         } else {
             CallState::Idle
         };
+        let adaptive_squelch = if channel.is_analog {
+            Some(AdaptiveSquelch::new(channel.squelch_db))
+        } else {
+            None
+        };
         let entry = CallEntry {
             talkgroup: channel.talkgroup.0,
             sys_num,
@@ -1630,6 +1686,7 @@ impl TrunkStateMachine {
             state,
             signal_detection: channel.signal_detection,
             squelch_db: channel.squelch_db,
+            adaptive_squelch,
             ..Default::default()
         };
         let call_id = entry.id;
@@ -1811,6 +1868,7 @@ mod tests {
                 Effect::EnableRecorder { .. } => "EnableRecorder",
                 Effect::DisableRecorder { .. } => "DisableRecorder",
                 Effect::RemoveCall { .. } => "RemoveCall",
+                Effect::UpdateSquelch { .. } => "UpdateSquelch",
                 Effect::Warn { .. } => "Warn",
             })
             .collect();
@@ -3004,5 +3062,215 @@ mod tests {
         let effects = sm.on_message(&msg);
 
         assert!(effects.is_empty());
+    }
+
+    // ── Stuck-recording backstop ──
+
+    #[test]
+    fn stuck_recording_backstop_forces_idle_timeout() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let channel = ConventionalChannel {
+            talkgroup: Talkgroup(1),
+            freq: Freq::from_hz(488_000_000.0),
+            is_analog: true,
+            ..Default::default()
+        };
+        let policy = sm.config.systems.get(&1).unwrap().clone();
+        let (_call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(5)));
+
+        // Simulate squelch opening → Recording, then time passing with no close.
+        sm.calls[0].state = CallState::Recording;
+        sm.calls[0].segment_start = Instant::now() - STUCK_RECORDING_BACKSTOP - Duration::from_secs(1);
+
+        let effects = sm.tick();
+
+        // Should force an idle timeout (restart cycle).
+        assert!(
+            effects.iter().any(|e| matches!(e, Effect::ConventionalRestart { .. })),
+            "backstop should trigger restart: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn stuck_recording_backstop_does_not_fire_with_squelch_activity() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let channel = ConventionalChannel {
+            talkgroup: Talkgroup(1),
+            freq: Freq::from_hz(488_000_000.0),
+            is_analog: true,
+            ..Default::default()
+        };
+        let policy = sm.config.systems.get(&1).unwrap().clone();
+        let (_call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(5)));
+
+        // Recording for longer than backstop, BUT squelch has closed (pending debounce).
+        sm.calls[0].state = CallState::Recording;
+        sm.calls[0].segment_start = Instant::now() - STUCK_RECORDING_BACKSTOP - Duration::from_secs(1);
+        sm.calls[0].squelch_closed_at = Some(Instant::now());
+
+        let effects = sm.tick();
+
+        // Backstop should NOT fire — squelch is active (pending close).
+        // The debounce finalization may push a segment and transition to Idle,
+        // but it should not be from the backstop.
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::ConventionalRestart { .. })),
+            "backstop should not fire when squelch has recent activity: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn stuck_recording_backstop_does_not_fire_with_segments() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let channel = ConventionalChannel {
+            talkgroup: Talkgroup(1),
+            freq: Freq::from_hz(488_000_000.0),
+            is_analog: true,
+            ..Default::default()
+        };
+        let policy = sm.config.systems.get(&1).unwrap().clone();
+        let (_call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(5)));
+
+        // Recording for longer than backstop, BUT has completed segments
+        // (meaning squelch has been cycling normally).
+        sm.calls[0].state = CallState::Recording;
+        sm.calls[0].segment_start = Instant::now() - STUCK_RECORDING_BACKSTOP - Duration::from_secs(1);
+        sm.calls[0].segments.push(CallSegment {
+            start: Instant::now() - Duration::from_secs(60),
+            freq: Freq::from_hz(488_000_000.0),
+            rec_num: RecorderNum(5),
+        });
+
+        let effects = sm.tick();
+
+        // Backstop should NOT fire — there are completed segments, so squelch
+        // has been closing normally. This is just a long call.
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::ConventionalRestart { .. })),
+            "backstop should not fire when segments exist: {effects:?}"
+        );
+    }
+
+    #[test]
+    fn stuck_recording_backstop_does_not_fire_before_timeout() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let channel = ConventionalChannel {
+            talkgroup: Talkgroup(1),
+            freq: Freq::from_hz(488_000_000.0),
+            is_analog: true,
+            ..Default::default()
+        };
+        let policy = sm.config.systems.get(&1).unwrap().clone();
+        let (_call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(5)));
+
+        // Recording but not yet past backstop duration.
+        sm.calls[0].state = CallState::Recording;
+        // segment_start is fresh (just created) — well within 30 seconds.
+
+        let effects = sm.tick();
+
+        assert!(
+            !effects.iter().any(|e| matches!(e, Effect::ConventionalRestart { .. })),
+            "backstop should not fire before timeout: {effects:?}"
+        );
+    }
+
+    // ── Adaptive squelch integration ──
+
+    #[test]
+    fn feed_power_reading_matching_freq_feeds_tracker() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let channel = ConventionalChannel {
+            talkgroup: Talkgroup(1),
+            freq: Freq::from_hz(488_000_000.0),
+            is_analog: true,
+            squelch_db: -50.0,
+            ..Default::default()
+        };
+        let policy = sm.config.systems.get(&1).unwrap().clone();
+        let (_call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(5)));
+
+        // Feed bimodal readings to trigger an adaptive threshold update.
+        // Noise mode around -55, signal mode around -35.
+        let mut got_update = false;
+        for i in 0..400 {
+            let power = if i % 3 == 0 { -35.0 } else { -55.0 };
+            let effects = sm.feed_power_reading(Freq::from_hz(488_000_000.0), power);
+            if effects.iter().any(|e| matches!(e, Effect::UpdateSquelch { .. })) {
+                got_update = true;
+            }
+        }
+        assert!(got_update, "should have emitted UpdateSquelch");
+    }
+
+    #[test]
+    fn feed_power_reading_non_matching_freq_ignored() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let channel = ConventionalChannel {
+            talkgroup: Talkgroup(1),
+            freq: Freq::from_hz(488_000_000.0),
+            is_analog: true,
+            squelch_db: -50.0,
+            ..Default::default()
+        };
+        let policy = sm.config.systems.get(&1).unwrap().clone();
+        let (_call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(5)));
+
+        // Wrong frequency — should produce no effects.
+        for i in 0..400 {
+            let power = if i % 3 == 0 { -35.0 } else { -55.0 };
+            let effects = sm.feed_power_reading(Freq::from_hz(999_000_000.0), power);
+            assert!(effects.is_empty(), "wrong freq should produce no effects");
+        }
+    }
+
+    #[test]
+    fn feed_power_reading_digital_channel_has_no_tracker() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let channel = ConventionalChannel {
+            talkgroup: Talkgroup(1),
+            freq: Freq::from_hz(488_000_000.0),
+            is_analog: false,
+            squelch_db: -50.0,
+            ..Default::default()
+        };
+        let policy = sm.config.systems.get(&1).unwrap().clone();
+        let (_call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(5)));
+
+        // Digital channel — no adaptive squelch tracker.
+        assert!(sm.calls[0].adaptive_squelch.is_none());
+
+        for i in 0..400 {
+            let power = if i % 3 == 0 { -35.0 } else { -55.0 };
+            let effects = sm.feed_power_reading(Freq::from_hz(488_000_000.0), power);
+            assert!(effects.is_empty(), "digital channel should have no tracker");
+        }
+    }
+
+    #[test]
+    fn adaptive_squelch_preserved_across_restart() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let channel = ConventionalChannel {
+            talkgroup: Talkgroup(1),
+            freq: Freq::from_hz(488_000_000.0),
+            is_analog: true,
+            squelch_db: -50.0,
+            ..Default::default()
+        };
+        let policy = sm.config.systems.get(&1).unwrap().clone();
+        let (call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(5)));
+
+        // Feed some readings to warm up the tracker.
+        for _ in 0..100 {
+            let _ = sm.feed_power_reading(Freq::from_hz(488_000_000.0), -55.0);
+        }
+
+        // Restart should preserve the tracker (not reset it).
+        sm.on_conventional_restarted(call_id, Some(RecorderNum(6)));
+
+        assert!(
+            sm.calls[0].adaptive_squelch.is_some(),
+            "tracker should survive restart"
+        );
     }
 }

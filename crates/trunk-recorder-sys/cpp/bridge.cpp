@@ -152,6 +152,10 @@ struct TrContextImpl {
     // Event bridge for GR thread → Rust channel notifications
     std::shared_ptr<EventBridge> event_bridge;
 
+    // Conventional channel frequencies for adaptive squelch power callbacks.
+    // Populated by tr_create_conventional_call().
+    std::vector<double> conv_channel_freqs;
+
     explicit TrContextImpl(rust::Box<EventHandlerBox> h)
         : handler(std::move(h)) {}
 };
@@ -495,6 +499,51 @@ void tr_context_wire_event_notifiers(TrContext &ctx) {
                     **notifier, src_num, center, std::move(rust_signals));
             });
     }
+
+    // Phase 5: wire power callbacks for adaptive squelch.
+    // Use conventional channel frequencies recorded during tr_create_conventional_call().
+    auto &conv_freqs = ctx.impl->conv_channel_freqs;
+    if (!conv_freqs.empty()) {
+        for (auto &source : ctx.impl->trunk_ctx.sources) {
+            double center = source->get_center();
+            double rate = source->get_rate();
+            double half_bw = rate / 2.0;
+            int fft_len = 1024;  // matches signal_detector default
+            int src_num = source->get_num();
+
+            // Filter to channels within this source's bandwidth.
+            std::vector<double> src_freqs;
+            for (double f : conv_freqs) {
+                if (f >= center - half_bw && f <= center + half_bw) {
+                    src_freqs.push_back(f);
+                }
+            }
+            if (src_freqs.empty()) continue;
+
+            auto notifier = bridge->make_notifier();
+            source->set_power_callback(
+                [notifier = std::make_shared<rust::Box<EventNotifier>>(std::move(notifier)),
+                 src_num, src_freqs, center, rate, fft_len](
+                    const float* pxx_out, unsigned actual_fft_len, double actual_rate) {
+                    unsigned len = actual_fft_len > 0 ? actual_fft_len : static_cast<unsigned>(fft_len);
+                    double sr = actual_rate > 0 ? actual_rate : rate;
+                    rust::Vec<TrPowerReading> readings;
+                    for (double freq : src_freqs) {
+                        double offset = freq - center;
+                        // FFT bins: DC at center, negative freqs in upper half.
+                        int bin = static_cast<int>((offset / sr + 0.5) * len);
+                        if (bin < 0) bin = 0;
+                        if (bin >= static_cast<int>(len)) bin = static_cast<int>(len) - 1;
+                        TrPowerReading r;
+                        r.freq = freq;
+                        r.power_db = pxx_out[bin];
+                        readings.push_back(r);
+                    }
+                    event_notifier_notify_power_readings(
+                        **notifier, src_num, std::move(readings));
+                });
+        }
+    }
 }
 
 void tr_context_check_sources(TrContext &ctx) {
@@ -626,6 +675,9 @@ std::unique_ptr<TrCall> tr_create_conventional_call(
     }
 
     rec->set_system(system);
+
+    // Record conventional channel frequency for adaptive squelch power callbacks.
+    ctx.impl->conv_channel_freqs.push_back(channel.freq);
 
     // Wire squelch callback — Phase 3 only covers pre-existing recorders,
     // so conventional recorders created here need it wired explicitly.
@@ -764,6 +816,11 @@ void call_recorder_set_source(TrCall &call, int64_t src) {
     // Rust only calls this when entry.state == Recording
     auto rec = call.ptr->get_recorder();
     if (rec) rec->set_source(src);
+}
+
+void call_set_squelch_db(TrCall &call, double db) {
+    auto rec = call.ptr->get_recorder();
+    if (rec) rec->set_squelch_db(db);
 }
 
 // ── Phase C: Call Management — call-level recorder accessors ──

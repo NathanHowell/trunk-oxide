@@ -396,6 +396,23 @@ impl CallEntry {
         }
     }
 
+    /// If a squelch close is pending debounce, finalize it now: push the
+    /// in-progress segment and transition to Idle.
+    pub(crate) fn finalize_squelch_debounce(&mut self) {
+        if self.squelch_closed_at.take().is_some()
+            && self.state == CallState::Recording
+            && let Some(rec_num) = self.recorder
+        {
+            self.segments.push(CallSegment {
+                freq: self.freq,
+                start: self.segment_start,
+                rec_num,
+            });
+            self.state = CallState::Idle;
+            self.idle_since = Some(Instant::now());
+        }
+    }
+
     /// Total time spent in the Recording state: completed segments + current segment.
     pub(crate) fn recording_duration(&self) -> Duration {
         let completed: Duration = self.segments.iter().map(|s| s.duration()).sum();
@@ -1335,18 +1352,7 @@ impl TrunkStateMachine {
         // Finalize debounced squelch closes: push segment, transition to Idle.
         for call_id in debounce_ready {
             if let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) {
-                entry.squelch_closed_at = None;
-                if entry.state == CallState::Recording {
-                    if let Some(rec_num) = entry.recorder {
-                        entry.segments.push(CallSegment {
-                            freq: entry.freq,
-                            start: entry.segment_start,
-                            rec_num,
-                        });
-                    }
-                    entry.state = CallState::Idle;
-                    entry.idle_since = Some(Instant::now());
-                }
+                entry.finalize_squelch_debounce();
             }
         }
 
@@ -1365,17 +1371,12 @@ impl TrunkStateMachine {
             None => return Effects::new(),
         };
 
-        // Finalize any pending debounced squelch close so the segment is captured.
-        if entry.squelch_closed_at.take().is_some()
-            && entry.state == CallState::Recording
-            && let Some(rec_num) = entry.recorder
-        {
-            entry.segments.push(CallSegment {
-                freq: entry.freq,
-                start: entry.segment_start,
-                rec_num,
-            });
-        }
+        entry.finalize_squelch_debounce();
+
+        // Don't clear segments or change state here — EmitCallEnd is processed
+        // later as an effect and needs the current segments/state intact.
+        // State reset happens in on_conventional_restarted() during the
+        // ConventionalRestart effect, which runs after EmitCallEnd.
 
         if entry.signal_detection {
             let mut effects = Effects::new();
@@ -1388,12 +1389,6 @@ impl TrunkStateMachine {
             // Restart opens a fresh WAV file for the next detection cycle.
             effects.push(Effect::ConventionalRestart { call_id });
 
-            entry.state = CallState::Disabled;
-            entry.last_update = Instant::now();
-            entry.idle_since = None;
-            entry.segments.clear();
-            entry.segment_start = Instant::now();
-
             // Disable after restart — recorder is configured but not flowing data.
             effects.push(Effect::DisableRecorder { call_id });
 
@@ -1404,13 +1399,6 @@ impl TrunkStateMachine {
         let mut effects = Effects::new();
         effects.push(Effect::EmitCallEnd { call_id });
         effects.push(Effect::ConventionalRestart { call_id });
-
-        entry.state = CallState::Recording;
-        entry.last_update = Instant::now();
-        entry.idle_since = None;
-        entry.segments.clear();
-        entry.segment_start = Instant::now();
-
         effects.push(Effect::EmitSetupRecorder { call_id });
         effects.push(Effect::EmitCallStart { call_id });
         effects.push(Effect::EnableRecorder { call_id });
@@ -1427,6 +1415,16 @@ impl TrunkStateMachine {
             entry.call_num = next_call_num();
             entry.start_time = SystemTime::now();
             entry.recorder = recorder;
+            entry.segments.clear();
+            entry.segment_start = Instant::now();
+            entry.last_update = Instant::now();
+            entry.idle_since = None;
+            entry.squelch_closed_at = None;
+            entry.state = if entry.signal_detection {
+                CallState::Disabled
+            } else {
+                CallState::Recording
+            };
         }
     }
 

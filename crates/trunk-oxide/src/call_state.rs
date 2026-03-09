@@ -4,6 +4,100 @@ use std::time::{Duration, Instant, SystemTime};
 
 use trunk_config::{DefaultMode, SystemType, TalkgroupMode};
 
+// ── Read-only view ──
+
+/// Read-only view of a [`CallEntry`], exposed to the executor during effect
+/// processing.  All field access goes through getters — no direct mutation
+/// is possible.
+pub(crate) struct CallView<'a>(&'a CallEntry);
+
+impl<'a> CallView<'a> {
+    pub(crate) fn id(&self) -> CallId {
+        self.0.id
+    }
+    pub(crate) fn call_num(&self) -> i64 {
+        self.0.call_num
+    }
+    pub(crate) fn talkgroup(&self) -> i64 {
+        self.0.talkgroup
+    }
+    pub(crate) fn sys_num(&self) -> i32 {
+        self.0.sys_num
+    }
+    pub(crate) fn short_name(&self) -> &str {
+        &self.0.short_name
+    }
+    pub(crate) fn tdma_slot(&self) -> i32 {
+        self.0.tdma_slot
+    }
+    pub(crate) fn phase2_tdma(&self) -> bool {
+        self.0.phase2_tdma
+    }
+    pub(crate) fn mode(&self) -> bool {
+        self.0.mode
+    }
+    pub(crate) fn duplex(&self) -> bool {
+        self.0.duplex
+    }
+    pub(crate) fn emergency(&self) -> bool {
+        self.0.emergency
+    }
+    pub(crate) fn start_time(&self) -> SystemTime {
+        self.0.start_time
+    }
+    pub(crate) fn freq(&self) -> Freq {
+        self.0.freq
+    }
+    pub(crate) fn state(&self) -> CallState {
+        self.0.state
+    }
+    pub(crate) fn encrypted(&self) -> bool {
+        self.0.encrypted
+    }
+    pub(crate) fn is_analog(&self) -> bool {
+        self.0.is_analog
+    }
+    pub(crate) fn current_source_id(&self) -> i64 {
+        self.0.current_source_id
+    }
+    pub(crate) fn signal(&self) -> f64 {
+        self.0.signal
+    }
+    pub(crate) fn noise(&self) -> f64 {
+        self.0.noise
+    }
+    pub(crate) fn priority(&self) -> i32 {
+        self.0.priority
+    }
+    pub(crate) fn recorder(&self) -> Option<RecorderNum> {
+        self.0.recorder
+    }
+    pub(crate) fn squelch_db(&self) -> f64 {
+        self.0.squelch_db
+    }
+    pub(crate) fn signal_detection(&self) -> bool {
+        self.0.signal_detection
+    }
+    pub(crate) fn is_conventional(&self) -> bool {
+        self.0.is_conventional()
+    }
+    pub(crate) fn is_trunked(&self) -> bool {
+        self.0.is_trunked()
+    }
+    pub(crate) fn trunked_fields(&self) -> Option<&TrunkedFields> {
+        self.0.trunked_fields()
+    }
+    pub(crate) fn recording_duration(&self) -> Duration {
+        self.0.recording_duration()
+    }
+    pub(crate) fn segments(&self) -> &[CallSegment] {
+        &self.0.segments
+    }
+    pub(crate) fn segment_start(&self) -> Instant {
+        self.0.segment_start
+    }
+}
+
 /// Minimum time squelch must stay closed before we transition from Recording
 /// to Idle. Filters out rapid open/close chatter near the noise floor without
 /// losing any audio (the C++ recorder captures independently).
@@ -649,7 +743,7 @@ pub(crate) struct TrunkMessage {
 // ══════════════════════════════════════════════════════════════════════
 
 pub(crate) struct TrunkStateMachine {
-    pub(crate) calls: Vec<CallEntry>,
+    calls: Vec<CallEntry>,
     pub(crate) config: CallManagerConfig,
     pub(crate) patch_tables: HashMap<i32, PatchTable>,
     pub(crate) system_identities: HashMap<i32, SystemIdentity>,
@@ -1599,8 +1693,28 @@ impl TrunkStateMachine {
         self.calls.iter().find(|e| e.id == call_id)
     }
 
-    pub(crate) fn get_call_mut(&mut self, call_id: CallId) -> Option<&mut CallEntry> {
-        self.calls.iter_mut().find(|e| e.id == call_id)
+    pub(crate) fn get_call_view(&self, call_id: CallId) -> Option<CallView<'_>> {
+        self.calls.iter().find(|e| e.id == call_id).map(CallView)
+    }
+
+    pub(crate) fn iter_calls(&self) -> impl Iterator<Item = CallView<'_>> {
+        self.calls.iter().map(CallView)
+    }
+
+    pub(crate) fn call_count(&self) -> usize {
+        self.calls.len()
+    }
+
+    /// Feed recorder power reading from C++ into the call entry.
+    /// Used after stopping a recorder to update signal/noise metrics.
+    pub(crate) fn feed_recorder_power(&mut self, call_id: CallId, pwr: f64, was_idle: bool) {
+        if let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) {
+            if was_idle {
+                entry.noise = pwr;
+            } else {
+                entry.signal = pwr;
+            }
+        }
     }
 
     /// Expire a trunked call due to recorder write timeout.
@@ -2126,6 +2240,9 @@ mod tests {
 
         // Squelch on the NEW recorder must match this call
         let _effects = sm.on_squelch(RecorderNum(13), true, -30.0);
+        // Debounce: stays Recording until finalized
+        assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Recording);
+        sm.calls[0].finalize_squelch_debounce();
         assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Idle);
 
         // Squelch on the OLD recorder must NOT match
@@ -2150,7 +2267,13 @@ mod tests {
 
         let effects = sm.on_squelch(RecorderNum(5), true, -30.0);
 
+        // Debounce: squelch close is deferred, state stays Recording
         assert!(effects.is_empty());
+        assert_eq!(sm.calls[0].state, CallState::Recording);
+        assert!(sm.calls[0].squelch_closed_at.is_some());
+
+        // Finalize debounce → transitions to Idle with segment pushed
+        sm.calls[0].finalize_squelch_debounce();
         assert_eq!(sm.calls[0].state, CallState::Idle);
         assert_eq!(sm.calls[0].segments.len(), 1);
     }
@@ -2446,6 +2569,10 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Effect::EmitCallStart { .. }))
         );
+
+        // State hasn't changed yet — the executor processes ConventionalRestart
+        // and calls on_conventional_restarted() which resets state to Disabled.
+        sm.on_conventional_restarted(call_id, Some(RecorderNum(12)));
         assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Disabled);
         assert!(sm.get_call(call_id).unwrap().segments.is_empty());
     }
@@ -2458,9 +2585,12 @@ mod tests {
         let (call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
         sm.calls[0].state = CallState::Recording;
 
-        // Idle timeout → Disabled (with full conclude + restart cycle)
+        // Idle timeout → effects include restart + disable
         let effects = sm.on_conventional_idle_timeout(call_id);
         assert_effects_contain_ordered(&effects, &["ConventionalRestart", "DisableRecorder"]);
+
+        // Simulate executor processing ConventionalRestart → state becomes Disabled
+        sm.on_conventional_restarted(call_id, Some(RecorderNum(12)));
         assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Disabled);
 
         // Signal detected again → Idle + EnableRecorder
@@ -2489,6 +2619,9 @@ mod tests {
 
         let _effects = sm.on_conventional_idle_timeout(call_id);
 
+        // idle_since is cleared by on_conventional_restarted(), which the
+        // executor calls during ConventionalRestart effect processing.
+        sm.on_conventional_restarted(call_id, Some(RecorderNum(12)));
         let entry = sm.get_call(call_id).unwrap();
         assert!(entry.idle_since.is_none());
     }
@@ -2644,6 +2777,9 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Effect::EmitCallEnd { .. }))
         );
+
+        // State transitions to Disabled after on_conventional_restarted()
+        sm.on_conventional_restarted(call_id, Some(RecorderNum(12)));
         assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Disabled);
     }
 
@@ -2663,6 +2799,9 @@ mod tests {
             &effects,
             &["EmitCallEnd", "ConventionalRestart", "DisableRecorder"],
         );
+
+        // State transitions to Disabled after on_conventional_restarted()
+        sm.on_conventional_restarted(call_id, Some(RecorderNum(12)));
         assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Disabled);
     }
 
@@ -2694,9 +2833,17 @@ mod tests {
         assert_effects_contain_ordered(&effects, &["EmitCallStart", "EmitCallsActive"]);
         assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Recording);
 
-        // 4. Squelch closes → Idle, idle timer starts
+        // 4. Squelch closes → debounce pending, still Recording
         let effects = sm.on_squelch(RecorderNum(12), true, -80.0);
         assert!(effects.is_empty());
+        assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Recording);
+
+        // Finalize debounce → Idle, idle timer starts
+        sm.calls
+            .iter_mut()
+            .find(|e| e.id == call_id)
+            .unwrap()
+            .finalize_squelch_debounce();
         assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Idle);
         assert!(sm.get_call(call_id).unwrap().idle_since.is_some());
 
@@ -2706,6 +2853,8 @@ mod tests {
             &effects,
             &["EmitCallEnd", "ConventionalRestart", "DisableRecorder"],
         );
+        // Simulate executor processing ConventionalRestart
+        sm.on_conventional_restarted(call_id, Some(RecorderNum(12)));
         assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Disabled);
         assert!(sm.get_call(call_id).unwrap().segments.is_empty());
 

@@ -45,7 +45,7 @@ const DEFAULT_CAPACITY: usize = 600;
 const DEFAULT_MIN_SAMPLES: usize = 50;
 
 /// Default hysteresis in dB.
-const DEFAULT_HYSTERESIS_DB: f64 = 1.0;
+const DEFAULT_HYSTERESIS_DB: f64 = 2.0;
 
 impl AdaptiveSquelch {
     pub(crate) fn new(configured_threshold_db: f64) -> Self {
@@ -82,9 +82,10 @@ impl AdaptiveSquelch {
         // Apply margin: bias toward rejecting noise.
         let candidate = threshold + MARGIN_DB;
 
-        // Clamp within ±CLAMP_DB of configured value.
+        // Never go below (more open than) the configured threshold — adaptive
+        // squelch should only tighten, not loosen. Also clamp above.
         let clamped = candidate.clamp(
-            self.configured_threshold_db - CLAMP_DB,
+            self.configured_threshold_db,
             self.configured_threshold_db + CLAMP_DB,
         );
 
@@ -331,10 +332,7 @@ mod tests {
     fn safety_clamp_limits_deviation() {
         let mut tracker = AdaptiveSquelch::new(-50.0);
 
-        // Feed a distribution where Otsu would want the threshold very far
-        // from configured (noise at -80, signal at -30 → split ~-55, +margin = -52,
-        // but if noise were at -80 → split at ~-55 + 3 = -52, within clamp).
-        // Use extreme values to test clamping.
+        // Feed extreme values — adaptive should never go below configured.
         let samples = make_bimodal(-90.0, 1.0, 400, -30.0, 1.0, 200);
         let mut last_update = None;
         for &s in &samples {
@@ -345,8 +343,8 @@ mod tests {
 
         if let Some(t) = last_update {
             assert!(
-                t >= -50.0 - CLAMP_DB,
-                "threshold {t} should be >= configured - clamp"
+                t >= -50.0,
+                "threshold {t} should be >= configured (never loosen)"
             );
             assert!(
                 t <= -50.0 + CLAMP_DB,

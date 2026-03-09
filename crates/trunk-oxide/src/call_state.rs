@@ -3194,20 +3194,21 @@ mod tests {
             talkgroup: Talkgroup(1),
             freq: Freq::from_hz(488_000_000.0),
             is_analog: true,
-            squelch_db: -50.0,
+            squelch_db: -55.0,
             ..Default::default()
         };
         let policy = sm.config.systems.get(&1).unwrap().clone();
         let (_call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(5)));
 
-        // Feed bimodal squelch events to trigger an adaptive threshold update.
-        // Noise mode around -55 (squelch close), signal mode around -35 (squelch open).
+        // Feed bimodal power readings: noise at -50 (just above configured),
+        // signal at -35. Otsu should place the threshold above configured,
+        // triggering an UpdateSquelch effect.
         let mut got_update = false;
         for i in 0..400 {
             let (muted, power) = if i % 3 == 0 {
                 (false, -35.0)
             } else {
-                (true, -55.0)
+                (true, -50.0)
             };
             let effects = sm.on_squelch(RecorderNum(5), muted, power);
             if effects.iter().any(|e| matches!(e, Effect::UpdateSquelch { .. })) {

@@ -96,6 +96,9 @@ fn main() {
     }
 
     // Boost log (used by trunk-recorder for logging)
+    if let Some(boost_lib_dir) = find_boost_lib() {
+        println!("cargo:rustc-link-search=native={}", boost_lib_dir.display());
+    }
     for lib in ["boost_log", "boost_log_setup"] {
         println!("cargo:rustc-link-lib={lib}");
     }
@@ -166,6 +169,39 @@ fn compute_gnuradio_version(version: &str) -> u32 {
         | (minor % 10) << 8
         | (patch / 10) << 4
         | (patch % 10)
+}
+
+/// Find boost library directory
+fn find_boost_lib() -> Option<PathBuf> {
+    // Try pkg-config first
+    if let Ok(boost) = pkg_config::Config::new().probe("boost")
+        && let Some(path) = boost.link_paths.first()
+    {
+        return Some(path.clone());
+    }
+
+    // Try brew
+    if let Ok(output) = std::process::Command::new("brew")
+        .args(["--prefix", "boost"])
+        .output()
+        && output.status.success()
+    {
+        let prefix = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let lib = PathBuf::from(format!("{prefix}/lib"));
+        if lib.exists() {
+            return Some(lib);
+        }
+    }
+
+    // System paths
+    for p in ["/usr/lib", "/usr/local/lib"] {
+        let path = PathBuf::from(p);
+        if path.join("libboost_log.so").exists() || path.join("libboost_log.dylib").exists() {
+            return Some(path);
+        }
+    }
+
+    None
 }
 
 /// Find boost include directory

@@ -1,0 +1,25 @@
+[Unit]
+Description=Trunk Recorder
+
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Restart=always
+User=trunk
+ExecStart=/usr/local/bin/trunk-recorder
+WorkingDirectory=/home/trunk/trunk-recorder
+StandardOutput=inherit
+StandardError=inherit
+
+# Uncomment below if troubleshooting core dumps
+# LimitCORE=infinity
+
+[Install]
+WantedBy=multi-user.target
+
+
+# copy to /etc/systemd/system
+# systemctl daemon-reload
+# systemctl enable trunk-recorder.service
+# systemctl start trunk-recorder.service

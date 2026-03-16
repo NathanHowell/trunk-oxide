@@ -1,0 +1,85 @@
+#ifndef SMARTNET_PARSER_H
+#define SMARTNET_PARSER_H
+
+#include "parser.h"
+#include "parser_config.h"
+#include <gnuradio/message.h>
+#include <deque>
+#include <string>
+#include <vector>
+#include <tuple>
+
+// Constants matching Python implementation and protocol definitions
+#define OSW_QUEUE_SIZE 5 + 1 // Some messages can be 3 OSWs long, plus up to two IDLEs can be inserted in between
+                                // useful messages. Additionally, keep one slot for a QUEUE RESET message.
+#define OSW_QUEUE_RESET_CMD 0xFFE
+#define M_SMARTNET_TIMEOUT -1
+#define M_SMARTNET_OSW 0
+#define M_SMARTNET_BAD_OSW -2 // Assumed value for Bad OSW
+#define M_SMARTNET_END_PTT 15
+
+struct OSW {
+    int addr;
+    bool grp;
+    int cmd;
+    bool ch_rx;
+    bool ch_tx;
+    double f_rx;
+    double f_tx;
+    double ts;
+};
+
+class SmartnetParser {
+public:
+    SmartnetParser(SmartnetParserConfig config);
+    ~SmartnetParser();
+
+    std::vector<TrunkMessage> parse_message(gr::message::sptr msg);
+    std::vector<TrunkMessage> process_osws(time_t curr_time);
+
+    void set_debug(int level) { debug_level = level; }
+    void set_msgq_id(int id) { msgq_id = id; }
+
+private:
+    SmartnetParserConfig config_;
+    int debug_level;
+    int sysnum;
+    int msgq_id;
+
+    std::deque<OSW> osw_q;
+
+    // Stats
+    long osw_count;
+    double last_osw;
+    double rx_cc_freq;
+    long rx_sys_id;
+    int rx_site_id;
+
+    // Helpers
+    void enqueue(int addr, int grp, int cmd, double ts);
+    void log_bandplan();
+
+    // Bandplan
+    std::tuple<std::string, bool, bool, bool, bool> get_bandplan_details();
+    bool is_obt_system();
+    double get_expected_obt_tx_freq(double rx_freq);
+    bool is_chan(int chan, bool is_tx = false);
+    double get_freq(int chan, bool is_tx = false);
+
+    // Formatting / Decoding Helpers
+    std::string get_group_str(bool is_group);
+    std::string get_band_str(int band);
+    double get_connect_tone(int index);
+    std::string get_features_str(int feat);
+    std::string get_call_options_str(int tgid, bool include_clear = true);
+    std::string get_call_options_flags_str(int tgid, int mode = -1);
+    std::string get_call_options_flags_web_str(int tgid, int mode);
+
+    bool is_patch_group(int tgid);
+    bool is_multiselect_group(int tgid);
+
+    TrunkMessage create_trunk_message(MessageType type, double freq, long talkgroup, int source = 0, bool encrypted = false, bool emergency = false);
+};
+
+#endif
+

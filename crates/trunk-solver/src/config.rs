@@ -27,9 +27,9 @@ struct ConfigSource {
     #[serde(default)]
     device: String,
     #[serde(default)]
-    gain: f64,
+    gain: i64,
     #[serde(default)]
-    ppm: f64,
+    ppm: i64,
 }
 
 /// Typed view of a system entry — only the fields the solver needs.
@@ -38,11 +38,11 @@ struct ConfigSystem {
     #[serde(rename = "type")]
     system_type: String,
     #[serde(default)]
-    control_channels: Vec<f64>,
+    control_channels: Vec<i64>,
     #[serde(default)]
-    preferred_control_channel: Option<f64>,
+    preferred_control_channel: Option<i64>,
     #[serde(default)]
-    voice_channels: Vec<f64>,
+    voice_channels: Vec<i64>,
     #[serde(default)]
     channel_file: Option<PathBuf>,
 }
@@ -51,8 +51,7 @@ impl SolverConfig {
     pub fn load(path: &Path) -> Result<Self> {
         let content = std::fs::read_to_string(path)
             .with_context(|| format!("Failed to read config file: {}", path.display()))?;
-        let file: ConfigFile =
-            toml::from_str(&content).context("Failed to parse TOML config")?;
+        let file: ConfigFile = toml::from_str(&content).context("Failed to parse TOML config")?;
         Ok(Self {
             sources: file.source,
             systems: file.system,
@@ -64,7 +63,7 @@ impl SolverConfig {
         self.sources
             .iter()
             .map(|s| {
-                Device::from_source_config(&s.device, s.gain as i64, s.ppm as i64)
+                Device::from_source_config(&s.device, s.gain, s.ppm)
                     .ok_or_else(|| anyhow::anyhow!("Unknown device type: {}", s.device))
             })
             .collect()
@@ -78,14 +77,13 @@ impl SolverConfig {
             match system.system_type.as_str() {
                 "p25" => {
                     for &freq in &system.control_channels {
-                        let freq_hz = freq as i64;
                         let tag = match system.preferred_control_channel {
-                            Some(pref) if pref as i64 == freq_hz => Tag::Primary,
+                            Some(pref) if pref == freq => Tag::Primary,
                             Some(_) => Tag::Alternate,
                             None => Tag::Primary,
                         };
                         channels.push(Channel {
-                            frequency: freq_hz,
+                            frequency: freq,
                             signal: Signal::Digital,
                             tag: Some(tag),
                             system: Some(i),
@@ -93,7 +91,7 @@ impl SolverConfig {
                     }
                     for &freq in &system.voice_channels {
                         channels.push(Channel {
-                            frequency: freq as i64,
+                            frequency: freq,
                             signal: Signal::Digital,
                             tag: None,
                             system: Some(i),

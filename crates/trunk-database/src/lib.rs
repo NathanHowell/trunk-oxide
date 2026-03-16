@@ -160,17 +160,15 @@ impl Database {
         let signal_counts = serde_json::to_string(&snapshot.signal_counts)?;
         let trunk_msg_counts = serde_json::to_string(&snapshot.trunk_msg_counts)?;
         let unit_counts = serde_json::to_string(&snapshot.unit_counts)?;
-        let decode_rates = serde_json::to_string(&snapshot.decode_rates)?;
 
         self.conn.execute(
-            "INSERT INTO activity (timestamp, signal_counts, trunk_msg_counts, unit_counts, decode_rates, active_calls)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            "INSERT INTO activity (timestamp, signal_counts, trunk_msg_counts, unit_counts, active_calls)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             rusqlite::params![
                 snapshot.timestamp,
                 signal_counts,
                 trunk_msg_counts,
                 unit_counts,
-                decode_rates,
                 snapshot.active_calls,
             ],
         ).context("inserting activity")?;
@@ -205,7 +203,6 @@ pub struct ActivitySnapshot {
     pub signal_counts: HashMap<String, u64>,
     pub trunk_msg_counts: HashMap<String, (u64, u64)>,
     pub unit_counts: HashMap<String, u64>,
-    pub decode_rates: Vec<(String, i32)>,
     pub active_calls: Option<usize>,
 }
 
@@ -334,7 +331,6 @@ mod tests {
             signal_counts: [("NORMAL".to_string(), 12)].into_iter().collect(),
             trunk_msg_counts: [("smco".to_string(), (1364, 1280))].into_iter().collect(),
             unit_counts: HashMap::new(),
-            decode_rates: vec![("smco".to_string(), 23)],
             active_calls: Some(3),
         };
 

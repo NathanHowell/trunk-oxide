@@ -6,19 +6,60 @@
 //!
 //! Events flow: SDR → C++ gnuradio graph → cxx callbacks → EventBridge
 
+mod adaptive_squelch;
 mod call_manager;
 mod call_state;
 mod dedup;
+mod p25_lfsr;
 
 use std::hash::{Hash, Hasher};
-use std::sync::Arc;
+use std::ops::RangeInclusive;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use trunk_recorder_sys::{EventNotifier, GrEvent};
 
 pub use call_manager::{CallManagerConfig, ConventionalChannel, SystemPolicy, TalkgroupPolicy};
 pub use call_state::{Freq, Talkgroup};
+
+/// Snapshot of GNU Radio block-level performance counters, collected
+/// periodically on the monitor thread and read by OTel observable callbacks.
+#[derive(Default)]
+pub struct GrMetricsSnapshot {
+    pub recorders: Vec<ffi::TrRecorderMetrics>,
+    pub sources: Vec<ffi::TrSourceMetrics>,
+}
+
+/// Per-channel metrics for a single conventional channel.
+pub struct ConventionalChannelMetrics {
+    pub system: String,
+    pub talkgroup: i64,
+    pub freq_hz: f64,
+    pub state: &'static str,
+    pub signal_power_db: f64,
+    pub noise_floor_db: f64,
+    pub detection_rssi_db: f64,
+    pub squelch_open_count: u64,
+    pub squelch_close_count: u64,
+    pub enable_count: u64,
+    pub disable_count: u64,
+    pub idle_timeout_count: u64,
+    pub recordings_completed: u64,
+    /// Configured (static) squelch threshold in dB.
+    pub squelch_db: f64,
+    /// Current adaptive squelch threshold, if active.
+    pub adaptive_squelch_db: Option<f64>,
+    /// Latest FFT power reading fed to the adaptive squelch tracker (dB).
+    pub last_power_reading_db: Option<f64>,
+}
+
+/// Snapshot of conventional-channel metrics, updated on the monitor thread
+/// and read by OTel observable callbacks.
+#[derive(Default)]
+pub struct ConventionalMetricsSnapshot {
+    pub channels: Vec<ConventionalChannelMetrics>,
+}
 
 /// Dedup key derived from a trunk message. Two identical TSBKs parsed by
 /// different decoders on the same system produce the same key.
@@ -74,6 +115,8 @@ pub struct TrunkRecorderBuilder {
     ctx: cxx::UniquePtr<ffi::TrContext>,
     call_mgr_config: CallManagerConfig,
     bridge: Arc<EventBridge>,
+    /// Per-source frequency coverage, indexed by source position.
+    source_ranges: Vec<RangeInclusive<f64>>,
 }
 
 /// A running trunk-recorder instance. Stops automatically on drop.
@@ -83,6 +126,23 @@ pub struct TrunkRecorder {
     bridge: Arc<EventBridge>,
     event_rx: tokio::sync::mpsc::Receiver<GrEvent>,
     pending: Arc<AtomicUsize>,
+    /// Per-source frequency coverage, indexed by source position.
+    source_ranges: Vec<RangeInclusive<f64>>,
+    /// Conventional calls created before the flowgraph starts, pending
+    /// registration with the [`CallManager`].
+    pending_conventional_calls: Vec<PendingConventionalCall>,
+    /// Shared snapshot of GR block metrics, updated periodically on the
+    /// monitor thread and read by OTel observable callbacks.
+    gr_metrics: Arc<Mutex<GrMetricsSnapshot>>,
+    /// Shared snapshot of conventional-channel metrics, updated on the
+    /// monitor thread and read by OTel observable callbacks.
+    conv_metrics: Arc<Mutex<ConventionalMetricsSnapshot>>,
+}
+
+struct PendingConventionalCall {
+    call: cxx::UniquePtr<ffi::TrCall>,
+    sys_num: i32,
+    channel_idx: usize,
 }
 
 // Safety: TrContext is used exclusively from a single thread (the monitor thread).
@@ -116,6 +176,7 @@ impl TrunkRecorderBuilder {
         }
 
         // ── Sources ──
+        let mut source_ranges = Vec::new();
         for src in &config.source {
             if src.enabled == Some(false) {
                 continue;
@@ -179,6 +240,8 @@ impl TrunkRecorderBuilder {
                     sigmf_recorders: src.sigmf_recorders,
                 },
             )?;
+            let half_rate = src.rate / 2.0;
+            source_ranges.push((src.center - half_rate)..=(src.center + half_rate));
         }
 
         // ── Systems ──
@@ -199,12 +262,9 @@ impl TrunkRecorderBuilder {
                     short_name: short_name.clone(),
                     system_type: type_str.into(),
                     qpsk_mod: sys.modulation == Modulation::Qpsk,
-                    squelch_db: sys.squelch,
                     analog_levels: sys.analog_levels,
-                    digital_levels: sys.digital_levels,
                     tau: sys.deemphasis_tau.into(),
                     max_dev: sys.max_dev,
-                    filter_width: sys.filter_width,
                     decode_mdc: sys.decode_mdc,
                     decode_fsync: sys.decode_fsync,
                     decode_star: sys.decode_star,
@@ -226,7 +286,7 @@ impl TrunkRecorderBuilder {
                             id: ch.id,
                             freq: ch.freq,
                             tone: ch.tone,
-                            squelch_db: ch.squelch_db,
+                            squelch_db: ch.squelch_db.unwrap_or(sys.squelch),
                             signal_detection: ch.signal_detection,
                         })
                         .collect(),
@@ -288,6 +348,8 @@ impl TrunkRecorderBuilder {
                         is_analog,
                         priority,
                         signal_detection: ch.signal_detection,
+                        squelch_db: ch.squelch_db.unwrap_or(sys.squelch),
+                        tone: ch.tone,
                     }
                 })
                 .collect();
@@ -305,9 +367,17 @@ impl TrunkRecorderBuilder {
                     multi_site_name: sys.multi_site_system_name.clone(),
                     conversation_mode: sys.conversation_mode,
                     max_duration: sys.max_duration,
-                    control_channels: sys.control_channels.iter().map(|&f| Freq::from_hz(f)).collect(),
+                    control_channels: sys
+                        .control_channels
+                        .iter()
+                        .map(|&f| Freq::from_hz(f))
+                        .collect(),
                     talkgroups,
                     channels,
+                    squelch_db: sys.squelch,
+                    analog_levels: sys.analog_levels,
+                    digital_levels: sys.digital_levels,
+                    bandplan: sys.bandplan.clone().unwrap_or_default(),
                     sys_id: sys.sys_id,
                     wacn: sys.wacn,
                     nac: sys.nac,
@@ -323,14 +393,32 @@ impl TrunkRecorderBuilder {
             let infos: Vec<trunk_recorder_sys::SystemInfo> = system_policies
                 .iter()
                 .map(|(&sys_idx, policy)| {
-                    let ffi_info = ffi::tr_context_get_system_info(ctx.pin_mut(), sys_idx);
-                    let mut info = trunk_recorder_sys::SystemInfo::from_ffi(&ffi_info);
-                    info.short_name = policy.short_name.clone();
-                    info.conversation_mode = policy.conversation_mode;
-                    info.sys_id = policy.sys_id;
-                    info.wacn = policy.wacn;
-                    info.nac = policy.nac;
-                    info
+                    use trunk_oxide_grpc::proto::SystemType as P;
+                    let system_type = match policy.system_type {
+                        trunk_config::SystemType::Conventional => P::Conventional as i32,
+                        trunk_config::SystemType::ConventionalP25 => P::ConventionalP25 as i32,
+                        trunk_config::SystemType::ConventionalDMR => P::ConventionalDmr as i32,
+                        trunk_config::SystemType::ConventionalSigmf => P::ConventionalSigmf as i32,
+                        trunk_config::SystemType::Smartnet => P::Smartnet as i32,
+                        trunk_config::SystemType::P25 => P::P25 as i32,
+                    };
+                    trunk_recorder_sys::SystemInfo {
+                        sys_num: sys_idx,
+                        system_type,
+                        short_name: policy.short_name.clone(),
+                        sys_id: policy.sys_id,
+                        wacn: policy.wacn,
+                        nac: policy.nac,
+                        rfss: 0,
+                        site_id: 0,
+                        bandplan: policy.bandplan.clone(),
+                        analog_levels: policy.analog_levels,
+                        digital_levels: policy.digital_levels,
+                        squelch_db: policy.squelch_db,
+                        conversation_mode: policy.conversation_mode,
+                        message_count: 0,
+                        decode_rate: 0,
+                    }
                 })
                 .collect();
             bridge.setup_config(&infos);
@@ -340,12 +428,16 @@ impl TrunkRecorderBuilder {
         }
 
         let rec = config.recorder.as_ref();
+        let temp_dir = rec.map_or_else(
+            || std::env::temp_dir().display().to_string(),
+            |r| r.temp_dir.clone(),
+        );
         let call_mgr_config = CallManagerConfig {
             call_timeout: rec.map_or(3.0, |r| r.call_timeout),
-            new_call_from_update: rec.map_or(true, |r| r.new_call_from_update),
-            record_uu_v_calls: rec.map_or(true, |r| r.record_uu_v_calls),
+            new_call_from_update: rec.is_none_or(|r| r.new_call_from_update),
+            record_uu_v_calls: rec.is_none_or(|r| r.record_uu_v_calls),
             default_mode: rec.map_or(DefaultMode::default(), |r| r.default_mode),
-            control_warn_rate: rec.map_or(10, |r| r.control_warn_rate),
+            temp_dir,
             systems: system_policies,
         };
 
@@ -353,6 +445,7 @@ impl TrunkRecorderBuilder {
             ctx,
             call_mgr_config,
             bridge,
+            source_ranges,
         })
     }
 
@@ -368,6 +461,57 @@ impl TrunkRecorderBuilder {
         ffi::tr_context_set_event_notifier(self.ctx.pin_mut(), Box::new(notifier));
         ffi::tr_context_wire_event_notifiers(self.ctx.pin_mut());
 
+        // Create conventional recorders BEFORE starting the flowgraph so the
+        // blocks are part of the initial graph topology. Adding hier_block2
+        // blocks to a running GNU Radio graph via lock/unlock crashes in
+        // block_detail::output() during the graph restart.
+        let mut pending_conventional_calls = Vec::new();
+        for (&sys_num, policy) in &self.call_mgr_config.systems {
+            for (ch_idx, channel) in policy.channels.iter().enumerate() {
+                let freq_hz = channel.freq.as_hz();
+                let Some(source_idx) = self
+                    .source_ranges
+                    .iter()
+                    .position(|r| r.contains(&freq_hz))
+                    .map(|i| i as i32)
+                else {
+                    tracing::error!(
+                        sys_num,
+                        freq = freq_hz,
+                        talkgroup = channel.talkgroup.0,
+                        "no source covers conventional channel frequency"
+                    );
+                    continue;
+                };
+                let ffi_channel = ffi::TrChannelConfig {
+                    id: channel.talkgroup.0,
+                    freq: freq_hz,
+                    tone: channel.tone,
+                    squelch_db: channel.squelch_db,
+                    signal_detection: channel.signal_detection,
+                };
+                let call = ffi::tr_create_conventional_call(
+                    self.ctx.pin_mut(),
+                    sys_num,
+                    source_idx,
+                    &ffi_channel,
+                );
+                if call.is_null() {
+                    tracing::error!(
+                        sys_num,
+                        freq = freq_hz,
+                        "failed to create conventional call"
+                    );
+                    continue;
+                }
+                pending_conventional_calls.push(PendingConventionalCall {
+                    call,
+                    sys_num,
+                    channel_idx: ch_idx,
+                });
+            }
+        }
+
         ffi::tr_start_gnuradio(self.ctx.pin_mut());
         TrunkRecorder {
             ctx: self.ctx,
@@ -375,6 +519,10 @@ impl TrunkRecorderBuilder {
             bridge: self.bridge,
             event_rx,
             pending,
+            source_ranges: self.source_ranges,
+            pending_conventional_calls,
+            gr_metrics: Arc::new(Mutex::new(GrMetricsSnapshot::default())),
+            conv_metrics: Arc::new(Mutex::new(ConventionalMetricsSnapshot::default())),
         }
     }
 }
@@ -385,32 +533,43 @@ impl TrunkRecorder {
         Arc::clone(&self.pending)
     }
 
+    /// Shared GR block metrics snapshot, updated every 15s on the monitor thread.
+    pub fn gr_metrics(&self) -> Arc<Mutex<GrMetricsSnapshot>> {
+        Arc::clone(&self.gr_metrics)
+    }
+
+    /// Shared conventional-channel metrics snapshot.
+    pub fn conv_metrics(&self) -> Arc<Mutex<ConventionalMetricsSnapshot>> {
+        Arc::clone(&self.conv_metrics)
+    }
+
     /// Run the monitor loop until ctrl_c is received.
     ///
     /// Must be called from within a tokio runtime context (e.g. via
     /// `Handle::block_on`). All FFI calls are made on the calling thread,
     /// keeping `TrContext` (C++ objects) pinned.
     pub async fn run_monitor(&mut self) -> anyhow::Result<()> {
-        let mut call_mgr = CallManager::new(self.call_mgr_config.clone(), self.bridge.clone());
+        let mut call_mgr = CallManager::new(
+            self.call_mgr_config.clone(),
+            self.bridge.clone(),
+            self.source_ranges.clone(),
+            Arc::clone(&self.conv_metrics),
+        );
 
-        // Drain conventional calls created by C++ setup_systems during tr_finalize.
-        // C++ creates one Call per channel in config order — match them up.
-        for (&sys_num, policy) in &self.call_mgr_config.systems {
-            for channel in &policy.channels {
-                let call = ffi::tr_context_take_next_conventional_call(self.ctx.pin_mut());
-                if call.is_null() {
-                    break;
-                }
-                call_mgr.add_call(call, channel, sys_num);
-            }
+        // Register conventional calls that were pre-created before the
+        // flowgraph started (see TrunkRecorderBuilder::start).
+        let pending_calls: Vec<_> = self.pending_conventional_calls.drain(..).collect();
+        for pending in pending_calls {
+            let channel =
+                &self.call_mgr_config.systems[&pending.sys_num].channels[pending.channel_idx];
+            call_mgr.add_call(self.ctx.pin_mut(), pending.call, channel, pending.sys_num);
         }
 
         let mut trunk_dedup = dedup::WindowedDedup::new(64);
 
         let mut tick = delayed_interval(Duration::from_secs(1));
-        let mut decode = delayed_interval(Duration::from_secs(3));
         let mut status = delayed_interval(Duration::from_secs(200));
-        let mut autotune = delayed_interval(Duration::from_secs(200));
+        let mut metrics_tick = delayed_interval(Duration::from_secs(1));
 
         loop {
             tokio::select! {
@@ -425,7 +584,7 @@ impl TrunkRecorder {
                         GrEvent::TrunkMessages(messages) => {
                             let messages: Vec<_> = messages
                                 .into_iter()
-                                .filter(|m| trunk_dedup.admit(&TrunkMsgKey::from(&*m)))
+                                .filter(|m| trunk_dedup.admit(&TrunkMsgKey::from(m)))
                                 .collect();
                             if !messages.is_empty() {
                                 let mut by_system: HashMap<i32, Vec<usize>> = HashMap::new();
@@ -435,8 +594,7 @@ impl TrunkRecorder {
                                 for (&sys_num, indices) in &by_system {
                                     let sys_msgs: Vec<ffi::TrTrunkMessage> =
                                         indices.iter().map(|&i| messages[i].clone()).collect();
-                                    let info =
-                                        call_mgr.get_system_info(self.ctx.pin_mut(), sys_num);
+                                    let info = call_mgr.get_system_info(sys_num);
                                     self.bridge.trunk_message(&sys_msgs, &info);
                                 }
                             }
@@ -449,7 +607,12 @@ impl TrunkRecorder {
                             muted,
                             pwr_db,
                         } => {
-                            call_mgr.handle_squelch_event(recorder_num, muted, pwr_db);
+                            call_mgr.handle_squelch_event(
+                                self.ctx.pin_mut(),
+                                recorder_num,
+                                muted,
+                                pwr_db,
+                            );
                         }
                         GrEvent::SignalsDetected {
                             source_center_freq,
@@ -462,29 +625,31 @@ impl TrunkRecorder {
                                 &signals,
                             );
                         }
+
                     }
                 },
                 _ = tick.tick() => {
                     call_mgr.tick(self.ctx.pin_mut());
-                },
-                _ = decode.tick() => {
-                    let time_diff = decode.period().as_secs_f32();
-                    call_mgr.check_decode_rates(self.ctx.pin_mut(), time_diff)?;
-                    ffi::tr_context_check_sources(self.ctx.pin_mut())?;
                     call_mgr.clear_stale_patches();
+                    if let Err(e) = ffi::tr_context_check_sources(self.ctx.pin_mut()) {
+                        tracing::error!(%e, "source health check failed, exiting");
+                        std::process::exit(1);
+                    }
                 },
                 _ = status.tick() => {
                     call_mgr.print_status(self.ctx.pin_mut());
                     call_mgr.print_active_patches();
-                    call_mgr.print_recorder_status(&*self.ctx);
+                    call_mgr.print_recorder_status(&self.ctx);
                 },
-                _ = autotune.tick() => {
-                    ffi::tr_context_autotune_control_channels(self.ctx.pin_mut());
+                _ = metrics_tick.tick() => {
+                    let recorders = ffi::tr_collect_recorder_metrics(&self.ctx);
+                    let sources = ffi::tr_collect_source_metrics(&self.ctx);
+                    if let Ok(mut snap) = self.gr_metrics.lock() {
+                        snap.recorders = recorders;
+                        snap.sources = sources;
+                    }
                 },
             }
-
-            // Cheap sync work after every wake
-            call_mgr.process_recorder_queues();
         }
     }
 }

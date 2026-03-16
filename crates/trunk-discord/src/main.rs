@@ -8,6 +8,7 @@ mod dispatcher;
 mod dispatcher_state;
 mod grpc_oxide;
 mod grpc_whisperer;
+mod metrics;
 mod ogg_encoder;
 mod resampler;
 mod tone_detect;
@@ -226,7 +227,10 @@ async fn main() -> Result<()> {
         Arc::clone(&db),
     ));
 
-    let dispatcher = Arc::new(dispatcher::Dispatcher::new(
+    let meter = opentelemetry::global::meter("trunk-discord");
+    let metrics = Arc::new(metrics::Metrics::new(&meter));
+
+    let pump = dispatcher::DispatchPump::new(
         whisperer,
         Arc::clone(&discord_client),
         aggregator,
@@ -236,11 +240,11 @@ async fn main() -> Result<()> {
         config.audio.tone_detection,
         config.audio.tone_detection_duration_s,
         config.audio.audio_attachment,
+        config.audio.coalesce_timeout_ms,
         Arc::clone(&db),
         args.db_path,
-    ));
-
-    dispatcher.spawn_reaper();
+        metrics,
+    );
 
     discord_client
         .send_message(fallback_channel_id, "trunk-discord is now online.")
@@ -251,7 +255,7 @@ async fn main() -> Result<()> {
         "connecting to trunk-oxide"
     );
 
-    grpc_oxide::run(oxide_config.socket_path.clone(), dispatcher, reporter).await?;
+    grpc_oxide::run(oxide_config.socket_path.clone(), pump, reporter).await?;
 
     if let Some(provider) = otel.meter {
         let _ = provider.shutdown();

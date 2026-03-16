@@ -64,8 +64,9 @@ fn main() -> Result<()> {
 
     for source in &sources {
         println!(
-            "center={:.6} MHz  rate={}  gain={}  device={}",
-            source.center as f64 / 1e6,
+            "center={}.{:06} MHz  rate={}  gain={}  device={}",
+            source.center / 1_000_000,
+            source.center % 1_000_000,
             source.rate,
             source.gain,
             source.device,

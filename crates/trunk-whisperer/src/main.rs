@@ -82,6 +82,22 @@ async fn main() -> Result<()> {
 
     let transcriber = Arc::new(transcriber::Transcriber::new(&config.whisper)?);
 
+    if meter_provider.is_some() {
+        let semaphore = Arc::clone(transcriber.semaphore());
+        let max_concurrent = transcriber.max_concurrent();
+        let meter = opentelemetry::global::meter(env!("CARGO_PKG_NAME"));
+        let _gauge = meter
+            .f64_observable_gauge("trunk.whisperer.semaphore.utilization")
+            .with_description("Fraction of transcription semaphore permits in use")
+            .with_callback(move |observer| {
+                let available = semaphore.available_permits();
+                #[allow(clippy::cast_precision_loss)]
+                let utilization = (max_concurrent - available) as f64 / max_concurrent as f64;
+                observer.observe(utilization, &[]);
+            })
+            .build();
+    }
+
     let listen_path = &config.grpc.listen_path;
     let _ = std::fs::remove_file(listen_path);
     let listener = tokio::net::UnixListener::bind(listen_path)?;

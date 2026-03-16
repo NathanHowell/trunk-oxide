@@ -32,18 +32,12 @@ pub struct RecorderConfig {
     pub temp_dir: String,
     #[serde(default = "default_call_timeout")]
     pub call_timeout: f64,
-    #[serde(default = "default_control_warn_rate")]
-    pub control_warn_rate: i32,
-    #[serde(default)]
-    pub broadcast_signals: bool,
     #[serde(default)]
     pub soft_vocoder: bool,
     #[serde(default = "default_true")]
     pub record_uu_v_calls: bool,
     #[serde(default = "default_true")]
     pub new_call_from_update: bool,
-    #[serde(default = "default_frequency_format")]
-    pub frequency_format: FrequencyFormat,
     #[serde(default)]
     pub default_mode: DefaultMode,
     #[serde(default)]
@@ -60,25 +54,11 @@ pub struct DebugRecorderConfig {
     pub port: i32,
 }
 
-#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum FrequencyFormat {
-    #[default]
-    Mhz,
-    Hz,
-}
-
 const fn default_call_timeout() -> f64 {
     3.0
 }
-const fn default_control_warn_rate() -> i32 {
-    10
-}
 const fn default_true() -> bool {
     true
-}
-const fn default_frequency_format() -> FrequencyFormat {
-    FrequencyFormat::Mhz
 }
 fn default_debug_address() -> String {
     "127.0.0.1".to_string()

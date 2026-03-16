@@ -110,7 +110,6 @@ pub mod ffi {
         pub spike_count: i64,
         pub error_count: i64,
         pub freq: f64,
-        pub length: f64,
     }
 
     #[derive(Debug, Clone)]
@@ -185,7 +184,6 @@ pub mod ffi {
         pub duplex: bool,
         pub conversation_mode: bool,
         pub current_source_id: i64,
-        pub current_length: f64,
         pub start_time: i64,
         pub elapsed: f64,
         pub short_name: String,
@@ -195,23 +193,10 @@ pub mod ffi {
         pub call_state: i32,
     }
 
-    /// C++-provided fields only. Rust-owned fields live in [`SystemInfo`].
-    #[derive(Debug, Clone)]
-    struct TrSystemInfo {
-        pub sys_num: i32,
-        pub system_type: i32,
-        pub bandplan: String,
-        pub analog_levels: f64,
-        pub digital_levels: f64,
-        pub squelch_db: f64,
-    }
-
     #[derive(Debug, Clone)]
     struct TrStopRecordingResult {
-        pub final_length: f64,
         pub freq_error: i32,
         pub recorder_pwr: f64,
-        pub recorder_idle: bool,
         pub has_recorder: bool,
         pub is_dmr: bool,
     }
@@ -224,6 +209,35 @@ pub mod ffi {
         pub rec_num: i32,
         pub rec_type: String,
         pub rec_state: i32,
+    }
+
+    // ── GR block performance metrics ──
+
+    #[derive(Debug, Clone)]
+    struct TrGrBlockMetrics {
+        pub block_name: String,
+        pub block_alias: String,
+        pub items_read: u64,
+        pub items_written: u64,
+        pub work_time_total: f32,
+        pub input_buf_full: f32,
+        pub output_buf_full: f32,
+    }
+
+    #[derive(Debug, Clone)]
+    struct TrRecorderMetrics {
+        pub recorder_id: i32,
+        pub recorder_type: String,
+        pub source_id: i32,
+        pub blocks: Vec<TrGrBlockMetrics>,
+    }
+
+    #[derive(Debug, Clone)]
+    struct TrSourceMetrics {
+        pub source_id: i32,
+        pub center_freq: f64,
+        pub sample_rate: f64,
+        pub blocks: Vec<TrGrBlockMetrics>,
     }
 
     // ── Bulk config structs for source/system setup ──
@@ -282,12 +296,9 @@ pub mod ffi {
         pub short_name: String,
         pub system_type: String,
         pub qpsk_mod: bool,
-        pub squelch_db: f64,
         pub analog_levels: f64,
-        pub digital_levels: f64,
         pub tau: f64,
         pub max_dev: i32,
-        pub filter_width: f64,
         pub decode_mdc: bool,
         pub decode_fsync: bool,
         pub decode_star: bool,
@@ -308,6 +319,23 @@ pub mod ffi {
         pub unit_tags_mode: String,
     }
 
+    /// Recorder start configuration, built by Rust and passed to C++.
+    /// Maps 1:1 to the C++ RecorderConfig POD struct.
+    #[derive(Debug, Clone)]
+    struct TrRecorderConfig {
+        pub talkgroup: i64,
+        pub call_num: i64,
+        pub freq: f64,
+        pub short_name: String,
+        pub temp_dir: String,
+        pub phase2_tdma: bool,
+        pub tdma_slot: i32,
+        pub xor_mask: Vec<u8>,
+        pub squelch_db: f64,
+        pub digital_levels: f64,
+        pub rust_call_id: u64,
+    }
+
     // ── Opaque C++ types ──
 
     unsafe extern "C++" {
@@ -317,28 +345,6 @@ pub mod ffi {
         // Accessor wrappers are free functions defined in bridge.h/bridge.cpp.
         type TrCall;
         type TrSystem;
-        type TrRecorder;
-        // ── Call accessors ──
-        fn call_get_freq_error(call: &TrCall) -> i32;
-        fn call_get_current_length(call: &TrCall) -> f64;
-        fn call_get_talkgroup(call: &TrCall) -> i64;
-        fn call_get_sys_num(call: &TrCall) -> i32;
-        fn call_get_freq(call: &TrCall) -> f64;
-
-        // ── System info bulk read (replaces 15 individual system_get_* functions) ──
-        fn tr_context_get_system_info(ctx: Pin<&mut TrContext>, sys_num: i32) -> TrSystemInfo;
-
-        // ── Recorder accessors ──
-        fn recorder_get_num(rec: &TrRecorder) -> i32;
-        fn recorder_get_freq(rec: &TrRecorder) -> f64;
-        fn recorder_get_freq_error(rec: &TrRecorder) -> i32;
-        fn recorder_get_talkgroup(rec: &TrRecorder) -> i64;
-        fn recorder_get_wav_hz(rec: &TrRecorder) -> i64;
-        fn recorder_is_analog(rec: &TrRecorder) -> bool;
-        fn recorder_is_conventional(rec: &TrRecorder) -> bool;
-        fn recorder_is_active(rec: &TrRecorder) -> bool;
-        fn recorder_is_idle(rec: &TrRecorder) -> bool;
-        fn recorder_get_current_length(rec: &TrRecorder) -> f64;
 
         // ── Opaque lifecycle type ──
         type TrContext;
@@ -370,7 +376,6 @@ pub mod ffi {
         // ── Phase B: Message Draining ──
         fn tr_context_check_sources(ctx: Pin<&mut TrContext>) -> Result<()>;
         fn tr_context_get_recorder_status(ctx: &TrContext) -> Vec<TrRecorderStatus>;
-        fn tr_context_autotune_control_channels(ctx: Pin<&mut TrContext>);
 
         // ── Phase B: Message Routing (called from Rust handle_message) ──
         fn tr_system_add_control_channel_runtime(ctx: Pin<&mut TrContext>, sys_num: i32, freq: f64);
@@ -381,23 +386,24 @@ pub mod ffi {
         fn tr_system_get_current_control_channel(ctx: Pin<&mut TrContext>, sys_num: i32) -> f64;
         fn tr_system_get_control_channel_pwr(ctx: Pin<&mut TrContext>, sys_num: i32) -> f64;
 
-        // ── Conventional call management — recorder status (null-guarded) ──
+        // ── Call — recorder status (null-guarded) ──
         fn call_has_recorder(call: &TrCall) -> bool;
-        fn call_get_recorder_is_active(call: &TrCall) -> bool;
-        fn call_get_recorder_is_enabled(call: &TrCall) -> bool;
-        fn call_get_recorder_state(call: &TrCall) -> i32;
 
-        // ── Conventional call management — lifecycle ──
-        fn call_restart(call: Pin<&mut TrCall>);
-        fn call_start_initial_recording(call: Pin<&mut TrCall>);
+        // ── Call — Rust call ID ──
+        fn call_set_rust_call_id(call: Pin<&mut TrCall>, id: u64);
+
+        // ── Call — lifecycle ──
+        fn call_restart(call: Pin<&mut TrCall>, cfg: &TrRecorderConfig);
+        fn call_start_initial_recording(call: Pin<&mut TrCall>, cfg: &TrRecorderConfig);
         fn call_set_recorder_enabled(call: Pin<&mut TrCall>, enabled: bool);
 
-        // ── Conventional call management — context-level ──
-        fn tr_context_take_next_conventional_call(ctx: Pin<&mut TrContext>) -> UniquePtr<TrCall>;
-
-        // ── Phase C: Call Management — additional recorder accessors ──
-        fn recorder_since_last_write_secs(rec: &TrRecorder) -> f64;
-        fn recorder_get_type(rec: &TrRecorder) -> i32;
+        // ── Conventional call management — Rust selects source, C++ creates objects ──
+        fn tr_create_conventional_call(
+            ctx: Pin<&mut TrContext>,
+            sys_num: i32,
+            source_idx: i32,
+            channel: &TrChannelConfig,
+        ) -> UniquePtr<TrCall>;
 
         // ── Phase C: Call Management — lifecycle operations ──
         fn tr_context_create_call(
@@ -406,19 +412,17 @@ pub mod ffi {
         ) -> UniquePtr<TrCall>;
 
         // ── Phase C: Call Management — recording policy support ──
-        fn tr_context_source_count(ctx: &TrContext) -> i32;
-        fn tr_source_covers_freq(ctx: &TrContext, source_idx: i32, freq: f64) -> bool;
         fn tr_source_available_recorders(ctx: &TrContext, source_idx: i32, is_analog: bool) -> i32;
         fn tr_source_start_recording(
             ctx: Pin<&mut TrContext>,
             source_idx: i32,
             call: Pin<&mut TrCall>,
             is_analog: bool,
+            cfg: &TrRecorderConfig,
         ) -> bool;
 
         // ── Phase C: Call Management — call-level recorder accessors ──
         fn call_recorder_since_last_write_secs(call: &TrCall) -> f64;
-        fn call_process_recorder_queue(call: &TrCall);
 
         // ── Phase C: Call Management — conclude recording (recorder mechanics) ──
         fn call_stop_recording(call: Pin<&mut TrCall>) -> TrStopRecordingResult;
@@ -428,16 +432,18 @@ pub mod ffi {
 
         // ── Phase C: Call Management — update source tracking ──
         fn call_recorder_set_source(call: Pin<&mut TrCall>, src: i64);
-        fn call_set_freq(call: Pin<&mut TrCall>, freq: f64);
 
-        // ── Recorder setup notification (extracts recorder from call, fires through event_sink) ──
-        fn call_notify_setup_recorder(ctx: Pin<&mut TrContext>, call: &TrCall);
-
-        fn tr_recorder_process_queue(rec: &TrRecorder);
+        // ── Adaptive squelch ──
+        fn call_set_squelch_db(call: Pin<&mut TrCall>, db: f64);
+        fn call_get_pwr_db(call: &TrCall) -> f64;
 
         // ── Event channel wiring ──
         fn tr_context_set_event_notifier(ctx: Pin<&mut TrContext>, notifier: Box<EventNotifier>);
         fn tr_context_wire_event_notifiers(ctx: Pin<&mut TrContext>);
+
+        // ── GR block performance metrics ──
+        fn tr_collect_recorder_metrics(ctx: &TrContext) -> Vec<TrRecorderMetrics>;
+        fn tr_collect_source_metrics(ctx: &TrContext) -> Vec<TrSourceMetrics>;
     }
 
     // ── Rust functions callable from C++ (event handler callbacks) ──
@@ -448,15 +454,13 @@ pub mod ffi {
         // Forces cxx to generate the Box<EventHandlerBox> C++ template instantiation.
         fn drop_event_handler_box(handler: Box<EventHandlerBox>);
 
-        unsafe fn event_handler_audio_stream(
-            handler: &mut EventHandlerBox,
-            call: *const TrCall,
-            recorder: &TrRecorder,
+        fn event_handler_audio_stream(
+            handler: &EventHandlerBox,
+            rust_call_id: u64,
             samples: &[i16],
         );
-        fn event_handler_setup_recorder(handler: &mut EventHandlerBox, recorder: &TrRecorder);
         fn event_handler_unit_alias_discovered(
-            handler: &mut EventHandlerBox,
+            handler: &EventHandlerBox,
             system: &TrSystem,
             radio_id: i64,
             alias: &str,
@@ -530,6 +534,10 @@ impl EventNotifier {
     }
 }
 
+#[expect(
+    clippy::unnecessary_box_returns,
+    reason = "cxx requires Box<T> for opaque Rust types"
+)]
 fn event_notifier_clone(notifier: &EventNotifier) -> Box<EventNotifier> {
     Box::new(EventNotifier(notifier.0.clone(), Arc::clone(&notifier.1)))
 }
@@ -589,7 +597,7 @@ fn event_notifier_notify_signals_detected(
     }
 }
 
-/// Full system info combining C++-provided DSP fields with Rust-owned metadata.
+/// Full system info built entirely from Rust-side caches (config + identity).
 #[derive(Debug, Clone)]
 pub struct SystemInfo {
     pub sys_num: i32,
@@ -609,34 +617,10 @@ pub struct SystemInfo {
     pub decode_rate: i32,
 }
 
-impl SystemInfo {
-    /// Build from the C++ FFI struct, filling Rust-owned fields with defaults.
-    pub fn from_ffi(info: &ffi::TrSystemInfo) -> Self {
-        Self {
-            sys_num: info.sys_num,
-            system_type: info.system_type,
-            short_name: String::new(),
-            sys_id: 0,
-            wacn: 0,
-            nac: 0,
-            rfss: 0,
-            site_id: 0,
-            bandplan: info.bandplan.clone(),
-            analog_levels: info.analog_levels,
-            digital_levels: info.digital_levels,
-            squelch_db: info.squelch_db,
-            conversation_mode: false,
-            message_count: 0,
-            decode_rate: 0,
-        }
-    }
-}
-
-/// Trait for the 3 C++-initiated callbacks that come through cxx trampolines.
+/// Trait for C++-initiated callbacks that come through cxx trampolines.
 /// All methods take `&self` — no mutex needed.
 pub trait CxxCallbacks: Send + Sync {
-    fn audio_stream(&self, call: Option<&ffi::TrCall>, recorder: &ffi::TrRecorder, samples: &[i16]);
-    fn setup_recorder(&self, recorder: &ffi::TrRecorder);
+    fn audio_stream(&self, rust_call_id: u64, samples: &[i16]);
     fn unit_alias_discovered(
         &self,
         system: &ffi::TrSystem,
@@ -664,38 +648,15 @@ fn drop_event_handler_box(_handler: Box<EventHandlerBox>) {
 }
 
 // ── Trampoline functions for C++-initiated callbacks ──
-// Only 3 remain: audio_stream, setup_recorder, unit_alias_discovered.
+// Only 2 remain: audio_stream, unit_alias_discovered.
 // All other events are fired directly from Rust without FFI.
 
-/// Convert a nullable opaque pointer to `Option<&T>`.
-///
-/// # Safety
-/// The pointer must be valid for the lifetime of the returned reference,
-/// or null.
-const unsafe fn nullable<T>(ptr: *const T) -> Option<&'static T> {
-    if ptr.is_null() {
-        None
-    } else {
-        Some(unsafe { &*ptr })
-    }
-}
-
-unsafe fn event_handler_audio_stream(
-    handler: &mut EventHandlerBox,
-    call: *const ffi::TrCall,
-    recorder: &ffi::TrRecorder,
-    samples: &[i16],
-) {
-    let call = unsafe { nullable(call) };
-    handler.inner.audio_stream(call, recorder, samples);
-}
-
-fn event_handler_setup_recorder(handler: &mut EventHandlerBox, recorder: &ffi::TrRecorder) {
-    handler.inner.setup_recorder(recorder);
+fn event_handler_audio_stream(handler: &EventHandlerBox, rust_call_id: u64, samples: &[i16]) {
+    handler.inner.audio_stream(rust_call_id, samples);
 }
 
 fn event_handler_unit_alias_discovered(
-    handler: &mut EventHandlerBox,
+    handler: &EventHandlerBox,
     system: &ffi::TrSystem,
     radio_id: i64,
     alias: &str,

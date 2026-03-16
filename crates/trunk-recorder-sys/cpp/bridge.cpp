@@ -4,14 +4,19 @@
 // cxx-generated header for the Rust bridge
 #include "trunk-recorder-sys/src/lib.rs.h"
 
+#include <cassert>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
 #include <limits>
 #include <map>
 
+#include <gnuradio/block.h>
+#include <gnuradio/block_detail.h>
+
 #include "trunk-recorder/trunk_context.h"
 #include "trunk-recorder/call_conventional.h"
+#include "trunk-recorder/recorder_config.h"
 #include "trunk-recorder/event_sink.h"
 #include "trunk-recorder/formatter.h"
 #include "trunk-recorder/recorders/dmr_recorder.h"
@@ -19,9 +24,6 @@
 #include "trunk-recorder/systems/p25_parser.h"
 #include "trunk-recorder/systems/smartnet_parser.h"
 #include "trunk-recorder/systems/system.h"
-#include "trunk-recorder/talkgroup.h"
-#include "trunk-recorder/unit_tags_ota.h"
-#include "trunk-recorder/autotune.h"
 #include "trunk-recorder/recorders/p25_recorder.h"
 
 #include "trunk-recorder/monitor_systems.h"
@@ -109,70 +111,22 @@ static TrTransmission convert_transmission(const Transmission &tx) {
     out.spike_count = tx.spike_count;
     out.error_count = tx.error_count;
     out.freq = tx.freq;
-    out.length = tx.length;
     return out;
 }
 
-// ── System info bulk read (replaces 15 individual system_get_* functions) ──
 
-static TrSystemInfo build_system_info(System &sys) {
-    TrSystemInfo info{};
-    info.sys_num = sys.get_sys_num();
-    // Map C++ SystemType enum (0-based) to proto SystemType enum (1-based, 0 = UNSPECIFIED)
-    info.system_type = static_cast<int32_t>(sys.get_system_type()) + 1;
-    // DSP parameters (read by recorders at start time)
-    info.bandplan = rust::String(sys.get_bandplan());
-    info.analog_levels = sys.get_analog_levels();
-    info.digital_levels = sys.get_digital_levels();
-    info.squelch_db = sys.get_squelch_db();
-    // Remaining fields (short_name, identity, conversation_mode, rates)
-    // are zero-initialized — Rust fills them from its own caches.
-    return info;
-}
-
-
-// ── Call accessor implementations (most removed — Rust owns call state via CallEntry) ──
-
-int32_t call_get_freq_error(const TrCall &call) { return call.ptr->get_freq_error(); }
-double call_get_current_length(const TrCall &call) {
-    // Bypass Call_impl::get_current_length() state check — Rust owns state
-    auto rec = call.ptr->get_recorder();
-    return rec ? rec->get_current_length() : 0.0;
-}
-
-// ── Recorder accessor implementations ──
-
-int32_t recorder_get_num(const TrRecorder &rec) { return rec.ptr->get_num(); }
-double recorder_get_freq(const TrRecorder &rec) { return rec.ptr->get_freq(); }
-int32_t recorder_get_freq_error(const TrRecorder &rec) { return rec.ptr->get_freq_error(); }
-int64_t recorder_get_talkgroup(const TrRecorder &rec) { return rec.ptr->get_talkgroup(); }
-int64_t recorder_get_wav_hz(const TrRecorder &rec) { return rec.ptr->get_wav_hz(); }
-bool recorder_is_analog(const TrRecorder &rec) { return rec.ptr->is_analog(); }
-bool recorder_is_conventional(const TrRecorder &rec) { return rec.ptr->is_conventional(); }
-bool recorder_is_active(const TrRecorder &rec) { return rec.ptr->is_active(); }
-bool recorder_is_idle(const TrRecorder &rec) { return rec.ptr->is_idle(); }
-double recorder_get_current_length(const TrRecorder &rec) { return rec.ptr->get_current_length(); }
-
-// ── Source accessor implementations ──
-
-// ── CxxEventSink: EventSink subclass for the 3 C++-initiated callbacks ──
+// ── CxxEventSink: EventSink subclass for C++-initiated callbacks ──
 // Calls Rust trampolines directly on the EventHandlerBox.
 
 class CxxEventSink : public EventSink {
 public:
     explicit CxxEventSink(EventHandlerBox *handler) : handler_(handler) {}
 
-    void audio_callback(const std::shared_ptr<Call> &call, const std::shared_ptr<Recorder> &recorder,
+    void audio_callback(const std::shared_ptr<Recorder> &recorder,
                         int16_t *samples, int sampleCount) override {
-        TrCall tr_call(call);
-        TrRecorder tr_rec(recorder);
+        if (!recorder) return;
         rust::Slice<const int16_t> slice(samples, static_cast<size_t>(sampleCount));
-        event_handler_audio_stream(*handler_, call ? &tr_call : nullptr, tr_rec, slice);
-    }
-
-    void setup_recorder(const std::shared_ptr<Recorder> &recorder) override {
-        TrRecorder tr_rec(recorder);
-        event_handler_setup_recorder(*handler_, tr_rec);
+        event_handler_audio_stream(*handler_, recorder->get_rust_call_id(), slice);
     }
 
     void unit_alias_discovered(const std::shared_ptr<System> &system,
@@ -207,16 +161,6 @@ TrContext::~TrContext() = default;
 TrContext::TrContext(TrContext &&) noexcept = default;
 TrContext &TrContext::operator=(TrContext &&) noexcept = default;
 
-TrSystemInfo tr_context_get_system_info(TrContext &ctx, int32_t sys_num) {
-    for (auto &sys : ctx.impl->trunk_ctx.systems) {
-        if (sys->get_sys_num() == sys_num) {
-            return build_system_info(*sys);
-        }
-    }
-    TrSystemInfo info = {};
-    info.sys_num = sys_num;
-    return info;
-}
 
 // ── Lifecycle function implementations ──
 
@@ -234,13 +178,13 @@ std::unique_ptr<TrContext> tr_create_from_builder(rust::Box<EventHandlerBox> han
 // ── Builder: finalize (setup_systems only — event callbacks moved to Rust) ──
 
 void tr_finalize(TrContext &ctx) {
-    setup_systems(ctx.impl->trunk_ctx.config, ctx.impl->trunk_ctx.tb,
-                  ctx.impl->trunk_ctx.sources, ctx.impl->trunk_ctx.systems,
-                  ctx.impl->trunk_ctx.calls);
-
-    // Conventional calls remain in trunk_ctx.calls for Rust to drain
-    // via tr_context_take_next_conventional_call after finalize.
-    // setup_config, setup_system, and start are now fired from Rust.
+    // Only set up trunking system decoders here.
+    // Conventional channels are set up per-channel from Rust via tr_setup_conventional_channel.
+    for (auto &system : ctx.impl->trunk_ctx.systems) {
+        if (!is_conventional(system->get_system_type())) {
+            system->setup_decoders(ctx.impl->trunk_ctx.tb, ctx.impl->trunk_ctx.sources);
+        }
+    }
 }
 
 // ── Config builder implementations ──
@@ -302,12 +246,9 @@ int32_t tr_add_system_from_config(TrContext &ctx, const TrSystemConfig &cfg) {
 
     // DSP settings
     sys->set_qpsk_mod(cfg.qpsk_mod);
-    sys->set_squelch_db(cfg.squelch_db);
     sys->set_analog_levels(cfg.analog_levels);
-    sys->set_digital_levels(cfg.digital_levels);
     sys->set_tau(static_cast<float>(cfg.tau));
     sys->set_max_dev(static_cast<int32_t>(cfg.max_dev));
-    sys->set_filter_width(cfg.filter_width);
 
     // Decoder options
     sys->set_mdc_enabled(cfg.decode_mdc);
@@ -326,33 +267,6 @@ int32_t tr_add_system_from_config(TrContext &ctx, const TrSystemConfig &cfg) {
     // XOR mask
     if (cfg.sys_id != 0 || cfg.wacn != 0 || cfg.nac != 0) {
         sys->set_xor_mask(cfg.sys_id, cfg.wacn, cfg.nac);
-    }
-
-    // Talkgroups
-    for (const auto &tg : cfg.talkgroups) {
-        auto tg_obj = std::make_shared<Talkgroup>(
-            sys->get_sys_num(), tg.id,
-            std::string(tg.mode.data(), tg.mode.size()),
-            tg.priority, tg.preferred_nac);
-        sys->add_talkgroup(tg_obj);
-    }
-
-    // Conventional channels
-    for (const auto &ch : cfg.channels) {
-        auto tg_obj = std::make_shared<Talkgroup>(
-            sys->get_sys_num(), ch.id, ch.freq, ch.tone, ch.squelch_db, ch.signal_detection);
-        sys->add_talkgroup(tg_obj);
-        sys->add_channel(ch.freq);
-    }
-
-    // Unit tags
-    for (const auto &ut : cfg.unit_tags) {
-        sys->add_unit_tag(
-            std::string(ut.pattern.data(), ut.pattern.size()),
-            std::string(ut.tag.data(), ut.tag.size()));
-    }
-    if (!cfg.unit_tags_mode.empty()) {
-        sys->set_unit_tags_mode(std::string(cfg.unit_tags_mode.data(), cfg.unit_tags_mode.size()));
     }
 
     ctx.impl->trunk_ctx.systems.push_back(sys);
@@ -524,8 +438,6 @@ void tr_context_wire_event_notifiers(TrContext &ctx) {
                 P25ParserConfig p25_config;
                 p25_config.sys_num = system->get_sys_num();
                 p25_config.short_name = system->get_short_name();
-                p25_config.custom_freq_table_file = system->has_custom_freq_table_file()
-                    ? system->get_custom_freq_table_file() : "";
                 state->p25_config = std::move(p25_config);
             }
 
@@ -583,23 +495,20 @@ void tr_context_wire_event_notifiers(TrContext &ctx) {
                     **notifier, src_num, center, std::move(rust_signals));
             });
     }
+
 }
 
 void tr_context_check_sources(TrContext &ctx) {
     for (auto &source : ctx.impl->trunk_ctx.sources) {
-        if (!source->got_samples()) {
-            std::cerr << "Source " << source->get_num() << " has stopped receiving samples - Terminating trunk recorder" << std::endl;
-            throw std::runtime_error("Source stopped receiving samples");
-        }
-    }
-}
-
-void tr_context_autotune_control_channels(TrContext &ctx) {
-    for (auto &sys : ctx.impl->trunk_ctx.systems) {
-        if (!is_conventional(sys->get_system_type())) {
-            if ((sys->get_source()->get_autotune_source()) && (sys->get_system_type() == SYS_P25)) {
-                autotune_control_channel(sys);
-            }
+        bool samples = source->got_samples();
+        if (!samples) {
+            std::cerr << "FATAL: Source " << source->get_num()
+                      << " (" << source->get_device()
+                      << ") stopped receiving samples - will exit" << std::endl;
+            throw std::runtime_error(
+                "Source " + std::to_string(source->get_num()) +
+                " (" + source->get_device() +
+                ") stopped receiving samples");
         }
     }
 }
@@ -622,40 +531,46 @@ rust::Vec<TrRecorderStatus> tr_context_get_recorder_status(const TrContext &ctx)
     return result;
 }
 
-// ── Conventional call management — recorder status (null-guarded) ──
+// ── Call — recorder status (null-guarded) ──
 
 bool call_has_recorder(const TrCall &call) {
     return call.ptr->get_recorder() != nullptr;
 }
 
-bool call_get_recorder_is_active(const TrCall &call) {
-    auto rec = call.ptr->get_recorder();
-    return rec ? rec->is_active() : false;
+// ── Call — Rust call ID round-trip ──
+
+void call_set_rust_call_id(TrCall &call, uint64_t id) {
+    call.ptr->set_rust_call_id(id);
 }
 
-bool call_get_recorder_is_enabled(const TrCall &call) {
-    auto rec = call.ptr->get_recorder();
-    return rec ? rec->is_enabled() : false;
+// ── Config conversion (Rust TrRecorderConfig → C++ RecorderConfig) ──
+
+static RecorderConfig to_cpp_config(const TrRecorderConfig &cfg) {
+    return RecorderConfig{
+        .talkgroup = cfg.talkgroup,
+        .call_num = cfg.call_num,
+        .freq = cfg.freq,
+        .short_name = std::string(cfg.short_name),
+        .temp_dir = std::string(cfg.temp_dir),
+        .phase2_tdma = cfg.phase2_tdma,
+        .tdma_slot = cfg.tdma_slot,
+        .xor_mask = std::string(reinterpret_cast<const char*>(cfg.xor_mask.data()), cfg.xor_mask.size()),
+        .squelch_db = cfg.squelch_db,
+        .digital_levels = cfg.digital_levels,
+        .rust_call_id = cfg.rust_call_id,
+    };
 }
 
-int32_t call_get_recorder_state(const TrCall &call) {
-    auto rec = call.ptr->get_recorder();
-    return rec ? static_cast<int32_t>(rec->get_state()) : static_cast<int32_t>(REC_INACTIVE);
+// ── Call — lifecycle ──
+
+void call_restart(TrCall &call, const TrRecorderConfig &cfg) {
+    call.ptr->restart_call(to_cpp_config(cfg));
 }
 
-// ── Conventional call management — signal/noise (removed — Rust owns) ──
-// ── Conventional call management — system info (removed — Rust owns via CallEntry::max_duration) ──
-
-// ── Conventional call management — lifecycle ──
-
-void call_restart(TrCall &call) {
-    call.ptr->restart_call();
-}
-
-void call_start_initial_recording(TrCall &call) {
+void call_start_initial_recording(TrCall &call, const TrRecorderConfig &cfg) {
     auto rec = call.ptr->get_recorder();
     if (rec) {
-        rec->start(call.ptr);
+        rec->start(to_cpp_config(cfg));
     }
 }
 
@@ -666,65 +581,80 @@ void call_set_recorder_enabled(TrCall &call, bool enabled) {
     }
 }
 
-// ── Conventional call management — context-level ──
+// ── Conventional channel setup (Rust selects source, C++ creates objects) ──
 
-std::unique_ptr<TrCall> tr_context_take_next_conventional_call(TrContext &ctx) {
-    auto &calls = ctx.impl->trunk_ctx.calls;
-    if (calls.empty()) {
+std::unique_ptr<TrCall> tr_create_conventional_call(
+    TrContext &ctx, int32_t sys_num, int32_t source_idx,
+    const TrChannelConfig &channel) {
+
+    auto system = find_system_by_num(ctx, sys_num);
+    if (!system) return nullptr;
+
+    auto &sources = ctx.impl->trunk_ctx.sources;
+    if (source_idx < 0 || source_idx >= static_cast<int32_t>(sources.size()))
+        return nullptr;
+    auto &source = sources[source_idx];
+    auto &tb = ctx.impl->trunk_ctx.tb;
+
+    auto call = std::make_shared<Call_conventional>(system);
+
+    // NOTE: This function must be called BEFORE tb->start(). Conventional
+    // recorders are hier_block2 subgraphs; adding them to a running GNU Radio
+    // flowgraph via lock/unlock crashes in block_detail::output() during the
+    // graph restart. By creating them before start(), they are part of the
+    // initial graph topology and no restart is needed.
+
+    std::shared_ptr<Recorder> rec;
+    auto sys_type = system->get_system_type();
+    if (sys_type == SYS_CONVENTIONAL) {
+        auto analog_rec = (channel.tone > 0.0)
+            ? source->create_conventional_recorder(tb, static_cast<float>(channel.tone))
+            : source->create_conventional_recorder(tb);
+        analog_rec->set_tau(system->get_tau());
+        rec = analog_rec;
+        call->set_recorder(rec);
+    } else if (sys_type == SYS_CONVENTIONAL_DMR) {
+        rec = source->create_dmr_conventional_recorder(tb);
+        call->set_recorder(rec);
+    } else if (sys_type == SYS_CONVENTIONAL_P25) {
+        rec = source->create_digital_conventional_recorder(tb);
+        call->set_recorder(rec);
+    } else if (sys_type == SYS_CONVENTIONAL_SIGMF) {
+        rec = source->create_sigmf_conventional_recorder(tb);
+        call->set_recorder(rec);
+    } else {
         return nullptr;
     }
-    auto call_ptr = std::move(calls.back());
-    calls.pop_back();
-    return std::make_unique<TrCall>(call_ptr);
+
+    rec->set_system(system);
+
+    // Wire squelch callback — Phase 3 only covers pre-existing recorders,
+    // so conventional recorders created here need it wired explicitly.
+    assert(ctx.impl->event_bridge && "event_bridge must be set before creating conventional calls");
+    auto notifier = ctx.impl->event_bridge->make_notifier();
+    int rec_num = rec->get_num();
+    rec->set_squelch_callback(
+        [notifier = std::make_shared<rust::Box<EventNotifier>>(std::move(notifier)),
+         rec_num](bool muted, double pwr_db) {
+            event_notifier_notify_squelch(**notifier, rec_num, muted, pwr_db);
+        });
+
+    return std::make_unique<TrCall>(call);
 }
 
-// ── Call accessors for audio stream callback (C++ calls into Rust with TrCall pointer) ──
-
-int64_t call_get_talkgroup(const TrCall &call) {
-    return call.ptr->get_talkgroup();
-}
-
-int32_t call_get_sys_num(const TrCall &call) {
-    return call.ptr->get_sys_num();
-}
-
-double call_get_freq(const TrCall &call) {
-    return call.ptr->get_freq();
-}
-
-// ── Phase C: Call Management — additional recorder accessors ──
-
-double recorder_since_last_write_secs(const TrRecorder &rec) {
-    return rec.ptr->since_last_write().count();
-}
-
-int32_t recorder_get_type(const TrRecorder &rec) {
-    return static_cast<int32_t>(rec.ptr->get_type());
-}
+// ── Call accessors (audio callback now uses rust_call_id round-trip) ──
 
 // ── Phase C: Call Management — lifecycle operations ──
 
 std::unique_ptr<TrCall> tr_context_create_call(TrContext &ctx, const TrTrunkMessage &msg) {
-    auto cpp_msg = convert_trunk_message_back(msg);
     auto sys = find_system_by_num(ctx, msg.sys_num);
     if (!sys) {
         throw std::runtime_error("System not found for sys_num");
     }
-    auto call = Call::make(cpp_msg, sys, ctx.impl->trunk_ctx.config);
+    auto call = Call::make(sys);
     return std::make_unique<TrCall>(call);
 }
 
-
-int32_t tr_context_source_count(const TrContext &ctx) {
-    return static_cast<int32_t>(ctx.impl->trunk_ctx.sources.size());
-}
-
-bool tr_source_covers_freq(const TrContext &ctx, int32_t source_idx, double freq) {
-    auto &sources = ctx.impl->trunk_ctx.sources;
-    if (source_idx < 0 || source_idx >= static_cast<int32_t>(sources.size())) return false;
-    auto &source = sources[source_idx];
-    return source->get_min_hz() <= freq && freq <= source->get_max_hz();
-}
 
 int32_t tr_source_available_recorders(const TrContext &ctx, int32_t source_idx, bool is_analog) {
     auto &sources = ctx.impl->trunk_ctx.sources;
@@ -735,40 +665,42 @@ int32_t tr_source_available_recorders(const TrContext &ctx, int32_t source_idx, 
         : source->get_num_available_digital_recorders();
 }
 
-bool tr_source_start_recording(TrContext &ctx, int32_t source_idx, TrCall &call, bool is_analog) {
+bool tr_source_start_recording(TrContext &ctx, int32_t source_idx, TrCall &call, bool is_analog, const TrRecorderConfig &cfg) {
     auto &sources = ctx.impl->trunk_ctx.sources;
     if (source_idx < 0 || source_idx >= static_cast<int32_t>(sources.size())) return false;
     auto &source = sources[source_idx];
     auto &config = ctx.impl->trunk_ctx.config;
 
     std::shared_ptr<Recorder> recorder = is_analog
-        ? source->get_analog_recorder(call.ptr)
-        : source->get_digital_recorder(call.ptr);
+        ? source->get_analog_recorder()
+        : source->get_digital_recorder();
 
-    if (!recorder || !recorder->start(call.ptr)) {
+    auto rc = to_cpp_config(cfg);
+
+    if (!recorder) {
+        return false;
+    }
+
+    recorder->set_system(call.ptr->get_system());
+
+    if (!recorder->start(rc)) {
         return false;
     }
 
     call.ptr->set_recorder(recorder);
-    // State is now owned by Rust — caller sets entry.state = Recording
-    config.event_sink->setup_recorder(recorder);
 
     // Debug recorder
     auto debug_recorder = source->get_debug_recorder();
     if (debug_recorder) {
-        debug_recorder->start(call.ptr);
+        debug_recorder->start(rc);
         call.ptr->set_debug_recorder(debug_recorder);
-        call.ptr->set_debug_recording(true);
-        config.event_sink->setup_recorder(debug_recorder);
     }
 
     // SigMF recorder
     auto sigmf_recorder = source->get_sigmf_recorder();
     if (sigmf_recorder) {
-        sigmf_recorder->start(call.ptr);
+        sigmf_recorder->start(rc);
         call.ptr->set_sigmf_recorder(sigmf_recorder);
-        call.ptr->set_sigmf_recording(true);
-        config.event_sink->setup_recorder(sigmf_recorder);
     }
 
     return true;
@@ -783,19 +715,18 @@ TrStopRecordingResult call_stop_recording(TrCall &call) {
         return result;  // has_recorder = false
     }
     result.has_recorder = true;
-    result.final_length = rec->get_current_length();
     result.freq_error = rec->get_freq_error();
     result.recorder_pwr = rec->get_pwr();
-    result.recorder_idle = rec->is_idle();
     result.is_dmr = (call.ptr->get_system()->get_system_type() == SYS_CONVENTIONAL_DMR);
 
     rec->stop();
+    rec->flush_audio();
 
     if (auto sigmf = call.ptr->get_sigmf_recorder()) {
-        if (call.ptr->get_sigmf_recording()) sigmf->stop();
+        sigmf->stop();
     }
     if (auto debug = call.ptr->get_debug_recorder()) {
-        if (call.ptr->get_debug_recording()) debug->stop();
+        debug->stop();
     }
     return result;
 }
@@ -836,8 +767,15 @@ void call_recorder_set_source(TrCall &call, int64_t src) {
     if (rec) rec->set_source(src);
 }
 
-void call_set_freq(TrCall &call, double freq) {
-    call.ptr->set_freq(freq);
+void call_set_squelch_db(TrCall &call, double db) {
+    auto rec = call.ptr->get_recorder();
+    if (rec) rec->set_squelch_db(db);
+}
+
+double call_get_pwr_db(const TrCall &call) {
+    auto rec = call.ptr->get_recorder();
+    if (rec) return rec->get_pwr();
+    return 0.0;
 }
 
 // ── Phase C: Call Management — call-level recorder accessors ──
@@ -850,29 +788,68 @@ double call_recorder_since_last_write_secs(const TrCall &call) {
     return recorder->since_last_write().count();
 }
 
-void call_process_recorder_queue(const TrCall &call) {
-    auto recorder = call.ptr->get_recorder();
-    if (!recorder) return;
-    recorder->process_message_queues();
-}
+// ── GR block performance metrics ──
 
-// ── Recorder setup notification (Rust calls this to fire setup_recorder through event_sink) ──
-// Needed because Rust doesn't have direct access to the C++ recorder shared_ptr.
+static TrGrBlockMetrics collect_block_metrics(const gr::block_sptr &blk) {
+    TrGrBlockMetrics m;
+    m.block_name = rust::String(blk->name());
+    m.block_alias = rust::String(blk->alias());
+    m.items_read = 0;
+    m.items_written = 0;
+    m.work_time_total = 0.0f;
+    m.input_buf_full = 0.0f;
+    m.output_buf_full = 0.0f;
 
-void call_notify_setup_recorder(TrContext &ctx, const TrCall &call) {
-    auto recorder = call.ptr->get_recorder();
-    if (recorder) {
-        ctx.impl->trunk_ctx.config.event_sink->setup_recorder(recorder);
+    auto d = blk->detail();
+    if (!d) return m;
+
+    if (d->ninputs() > 0) {
+        m.items_read = blk->nitems_read(0);
+        m.input_buf_full = blk->pc_input_buffers_full(0);
     }
+    if (d->noutputs() > 0) {
+        m.items_written = blk->nitems_written(0);
+        m.output_buf_full = blk->pc_output_buffers_full(0);
+    }
+    m.work_time_total = blk->pc_work_time_total();
+    return m;
 }
 
-void tr_recorder_process_queue(const TrRecorder &rec) {
-    if (rec.ptr && (rec.ptr->get_type() == P25 || rec.ptr->get_type() == P25C)) {
-        auto p25_rec = std::dynamic_pointer_cast<p25_recorder>(rec.ptr);
-        if (p25_rec && p25_rec->is_active()) {
-            p25_rec->process_message_queues();
+rust::Vec<TrRecorderMetrics> tr_collect_recorder_metrics(const TrContext &ctx) {
+    rust::Vec<TrRecorderMetrics> result;
+    for (auto &source : ctx.impl->trunk_ctx.sources) {
+        int src_num = source->get_num();
+        auto recorders = source->get_recorders();
+        for (auto &rec : recorders) {
+            TrRecorderMetrics rm;
+            rm.recorder_id = rec->get_num();
+            rm.recorder_type = rust::String(rec->get_type_string());
+            rm.source_id = src_num;
+
+            for (auto &blk : rec->get_metric_blocks()) {
+                rm.blocks.push_back(collect_block_metrics(blk));
+            }
+            result.push_back(std::move(rm));
         }
     }
+    return result;
+}
+
+rust::Vec<TrSourceMetrics> tr_collect_source_metrics(const TrContext &ctx) {
+    rust::Vec<TrSourceMetrics> result;
+    for (auto &source : ctx.impl->trunk_ctx.sources) {
+        TrSourceMetrics sm;
+        sm.source_id = source->get_num();
+        sm.center_freq = source->get_center();
+        sm.sample_rate = source->get_rate();
+
+        auto src_block = std::dynamic_pointer_cast<gr::block>(source->get_src_block());
+        if (src_block) {
+            sm.blocks.push_back(collect_block_metrics(src_block));
+        }
+        result.push_back(std::move(sm));
+    }
+    return result;
 }
 
 } // namespace trunk_oxide

@@ -4,9 +4,7 @@ use std::sync::RwLock;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use trunk_recorder_sys::ffi::{
-    TrCallData, TrCallInfo, TrRecorder, TrSystem, TrTrunkMessage, TrUnitEventType,
-};
+use trunk_recorder_sys::ffi::{TrCallData, TrCallInfo, TrSystem, TrTrunkMessage, TrUnitEventType};
 use trunk_recorder_sys::{CxxCallbacks, SystemInfo};
 
 pub use trunk_oxide_proto as proto;
@@ -44,24 +42,10 @@ fn system_info_from(info: &SystemInfo) -> proto::SystemInfo {
     }
 }
 
-fn recorder_info(rec: &TrRecorder) -> proto::RecorderInfo {
-    use trunk_recorder_sys::ffi::{
-        recorder_get_current_length, recorder_get_freq, recorder_get_freq_error, recorder_get_num,
-        recorder_get_talkgroup, recorder_get_wav_hz, recorder_is_active, recorder_is_analog,
-        recorder_is_conventional, recorder_is_idle,
-    };
+const fn recorder_info(rec_num: i32) -> proto::RecorderInfo {
     proto::RecorderInfo {
-        id: recorder_get_num(rec),
-        r#type: String::new(),
-        freq: recorder_get_freq(rec),
-        freq_error: recorder_get_freq_error(rec),
-        talkgroup: recorder_get_talkgroup(rec),
-        wav_hz: recorder_get_wav_hz(rec),
-        is_analog: recorder_is_analog(rec),
-        is_conventional: recorder_is_conventional(rec),
-        is_active: recorder_is_active(rec),
-        is_idle: recorder_is_idle(rec),
-        current_length: recorder_get_current_length(rec),
+        id: rec_num,
+        freq_error: 0,
     }
 }
 
@@ -135,11 +119,11 @@ fn convert_call_data(cd: &TrCallData) -> proto::CallData {
                 spike_count: t.spike_count,
                 error_count: t.error_count,
                 freq: t.freq,
-                length: t.length,
             })
             .collect(),
         status: i32::from(cd.status.repr),
         segments: Vec::new(), // populated by caller if applicable
+        is_conventional: false, // set by caller
     }
 }
 
@@ -204,68 +188,35 @@ fn convert_trunk_messages(messages: &[TrTrunkMessage]) -> Vec<proto::TrunkMessag
 // ── gRPC service implementation ──
 
 struct TrunkOxideService {
-    audio_tx: broadcast::Sender<proto::AudioSample>,
-    event_tx: broadcast::Sender<proto::PluginEvent>,
+    tx: broadcast::Sender<proto::StreamMessage>,
 }
 
 #[tonic::async_trait]
 impl TrunkOxide for TrunkOxideService {
-    type SubscribeEventsStream = ReceiverStream<std::result::Result<proto::PluginEvent, Status>>;
-    type SubscribeAudioStream = ReceiverStream<std::result::Result<proto::AudioSample, Status>>;
+    type SubscribeStream = ReceiverStream<std::result::Result<proto::StreamMessage, Status>>;
 
-    async fn subscribe_events(
+    async fn subscribe(
         &self,
         _request: Request<()>,
-    ) -> std::result::Result<Response<Self::SubscribeEventsStream>, Status> {
-        tracing::info!("client subscribed to events");
-        let mut broadcast_rx = self.event_tx.subscribe();
+    ) -> std::result::Result<Response<Self::SubscribeStream>, Status> {
+        tracing::info!("client subscribed to unified stream");
+        let mut broadcast_rx = self.tx.subscribe();
         let (tx, rx) = tokio::sync::mpsc::channel(4096);
 
         tokio::spawn(async move {
             loop {
                 match broadcast_rx.recv().await {
-                    Ok(event) => {
-                        if tx.send(Ok(event)).await.is_err() {
-                            tracing::info!("event subscriber disconnected");
+                    Ok(msg) => {
+                        if tx.send(Ok(msg)).await.is_err() {
+                            tracing::info!("subscriber disconnected");
                             break;
                         }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(skipped = n, "event subscriber lagged");
+                        tracing::warn!(skipped = n, "subscriber lagged");
                     }
                     Err(broadcast::error::RecvError::Closed) => {
-                        tracing::info!("event broadcast channel closed");
-                        break;
-                    }
-                }
-            }
-        });
-
-        Ok(Response::new(ReceiverStream::new(rx)))
-    }
-
-    async fn subscribe_audio(
-        &self,
-        _request: Request<()>,
-    ) -> std::result::Result<Response<Self::SubscribeAudioStream>, Status> {
-        tracing::info!("client subscribed to audio");
-        let mut broadcast_rx = self.audio_tx.subscribe();
-        let (tx, rx) = tokio::sync::mpsc::channel(4096);
-
-        tokio::spawn(async move {
-            loop {
-                match broadcast_rx.recv().await {
-                    Ok(sample) => {
-                        if tx.send(Ok(sample)).await.is_err() {
-                            tracing::info!("audio subscriber disconnected");
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!(skipped = n, "audio subscriber lagged");
-                    }
-                    Err(broadcast::error::RecvError::Closed) => {
-                        tracing::info!("audio broadcast channel closed");
+                        tracing::info!("broadcast channel closed");
                         break;
                     }
                 }
@@ -292,37 +243,51 @@ impl Default for GrpcConfig {
     }
 }
 
-/// Bridges trunk-recorder events to gRPC subscribers via broadcast channels.
+/// Audio metadata registered by Rust for each active call, keyed by `CallId`.
+/// This avoids FFI round-trips in the hot audio callback path.
+#[derive(Debug, Clone, Copy)]
+pub struct AudioMeta {
+    pub talkgroup: i64,
+    pub sys_num: i32,
+    pub freq: f64,
+    pub sample_rate: i32,
+}
+
+/// Bridges trunk-recorder events to gRPC subscribers via a single broadcast channel.
 ///
-/// All methods take `&self` — no mutex needed. The broadcast senders are
+/// All methods take `&self` — no mutex needed. The broadcast sender is
 /// inherently `Sync`, talkgroups are read-only after construction, and
-/// `unit_aliases` uses a `RwLock` for rare writes.
+/// `unit_aliases`/`audio_meta` use `RwLock` for rare writes.
 pub struct EventBridge {
-    audio_tx: broadcast::Sender<proto::AudioSample>,
-    event_tx: broadcast::Sender<proto::PluginEvent>,
+    tx: broadcast::Sender<proto::StreamMessage>,
     /// (`short_name`, `talkgroup_id`) → metadata from config CSVs
     talkgroups: HashMap<(String, i64), TalkgroupMeta>,
     /// (`sys_num`, `radio_id`) → OTA-discovered alias
     unit_aliases: RwLock<HashMap<(i32, i64), String>>,
+    /// `rust_call_id` → audio metadata (set by Rust, read by GR audio callback)
+    audio_meta: RwLock<HashMap<u64, AudioMeta>>,
 }
 
 impl EventBridge {
     pub fn new(
         talkgroups: HashMap<(String, i64), TalkgroupMeta>,
-    ) -> (
-        Self,
-        broadcast::Sender<proto::AudioSample>,
-        broadcast::Sender<proto::PluginEvent>,
-    ) {
-        let (audio_tx, _) = broadcast::channel::<proto::AudioSample>(4096);
-        let (event_tx, _) = broadcast::channel::<proto::PluginEvent>(4096);
+    ) -> (Self, broadcast::Sender<proto::StreamMessage>) {
+        let (tx, _) = broadcast::channel::<proto::StreamMessage>(4096);
         let bridge = Self {
-            audio_tx: audio_tx.clone(),
-            event_tx: event_tx.clone(),
+            tx: tx.clone(),
             talkgroups,
             unit_aliases: RwLock::new(HashMap::new()),
+            audio_meta: RwLock::new(HashMap::new()),
         };
-        (bridge, audio_tx, event_tx)
+        (bridge, tx)
+    }
+
+    pub fn broadcast_depth(&self) -> usize {
+        self.tx.len()
+    }
+
+    pub const fn broadcast_capacity(&self) -> usize {
+        4096
     }
 
     fn call_info_from(&self, info: &TrCallInfo) -> proto::CallInfo {
@@ -356,7 +321,6 @@ impl EventBridge {
             duplex: info.duplex,
             conversation_mode: info.conversation_mode,
             current_source_id: info.current_source_id,
-            current_length: info.current_length,
             start_time: Some(prost_types::Timestamp {
                 seconds: info.start_time,
                 nanos: 0,
@@ -386,9 +350,13 @@ impl EventBridge {
     }
 
     fn send_event(&self, event: proto::plugin_event::Event) {
-        let msg = proto::PluginEvent { event: Some(event) };
-        if let Err(e) = self.event_tx.send(msg) {
-            tracing::trace!(event = %e.0.event.as_ref().map_or("none", |_| "some"), "no event subscribers");
+        let msg = proto::StreamMessage {
+            message: Some(proto::stream_message::Message::Event(proto::PluginEvent {
+                event: Some(event),
+            })),
+        };
+        if let Err(_e) = self.tx.send(msg) {
+            tracing::trace!("no subscribers");
         }
     }
 
@@ -398,41 +366,50 @@ impl EventBridge {
             signaling_type: String::new(),
             signal_type: proto::SignalType::Normal as i32,
             call: Some(self.call_info_from(info)),
-            system: None,
-            recorder: None,
             unit_alias: self.unit_alias(info.sys_num, unit_id),
         }));
     }
 
-    pub fn audio_stream(
-        &self,
-        call: Option<&trunk_recorder_sys::ffi::TrCall>,
-        recorder: &TrRecorder,
-        samples: &[i16],
-    ) {
-        use trunk_recorder_sys::ffi::{
-            call_get_freq, call_get_sys_num, call_get_talkgroup, recorder_get_wav_hz,
-        };
-        let Some(call) = call else {
+    /// Register audio metadata for a call. Called when a call starts recording.
+    pub fn register_audio_meta(&self, rust_call_id: u64, meta: AudioMeta) {
+        self.audio_meta.write().unwrap().insert(rust_call_id, meta);
+    }
+
+    /// Remove audio metadata for a call. Called when a call ends.
+    pub fn unregister_audio_meta(&self, rust_call_id: u64) {
+        self.audio_meta.write().unwrap().remove(&rust_call_id);
+    }
+
+    /// Update the frequency for a call (e.g. on retune).
+    pub fn update_audio_meta_freq(&self, rust_call_id: u64, freq: f64) {
+        if let Some(meta) = self.audio_meta.write().unwrap().get_mut(&rust_call_id) {
+            meta.freq = freq;
+        }
+    }
+
+    pub fn audio_stream(&self, rust_call_id: u64, samples: &[i16]) {
+        if rust_call_id == 0 {
             return;
+        }
+        let meta = {
+            let guard = self.audio_meta.read().unwrap();
+            match guard.get(&rust_call_id) {
+                Some(&m) => m,
+                None => return,
+            }
         };
         let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-        let sample_rate_i64 = recorder_get_wav_hz(recorder);
-        let Ok(sample_rate) = i32::try_from(sample_rate_i64) else {
-            tracing::warn!(
-                sample_rate = sample_rate_i64,
-                "sample rate outside i32 range; dropping audio chunk"
-            );
-            return;
-        };
         let msg = proto::AudioSample {
-            talkgroup: call_get_talkgroup(call),
-            sys_num: call_get_sys_num(call),
-            freq: call_get_freq(call),
+            talkgroup: meta.talkgroup,
+            sys_num: meta.sys_num,
+            freq: meta.freq,
             samples: bytes,
-            sample_rate,
+            sample_rate: meta.sample_rate,
         };
-        if let Err(_e) = self.audio_tx.send(msg) {
+        let stream_msg = proto::StreamMessage {
+            message: Some(proto::stream_message::Message::Audio(msg)),
+        };
+        if let Err(_e) = self.tx.send(stream_msg) {
             tracing::trace!("no audio subscribers");
         }
     }
@@ -445,9 +422,15 @@ impl EventBridge {
         ));
     }
 
-    pub fn call_end(&self, call_data: &TrCallData, segments: &[proto::CallSegment]) {
+    pub fn call_end(
+        &self,
+        call_data: &TrCallData,
+        segments: &[proto::CallSegment],
+        is_conventional: bool,
+    ) {
         let mut data = convert_call_data(call_data);
         data.segments = segments.to_vec();
+        data.is_conventional = is_conventional;
         self.send_event(proto::plugin_event::Event::CallEnd(proto::CallEndEvent {
             call_data: Some(data),
         }));
@@ -461,10 +444,10 @@ impl EventBridge {
         ));
     }
 
-    pub fn setup_recorder(&self, recorder: &TrRecorder) {
+    pub fn setup_recorder(&self, rec_num: i32) {
         self.send_event(proto::plugin_event::Event::SetupRecorder(
             proto::SetupRecorderEvent {
-                recorder: Some(recorder_info(recorder)),
+                recorder: Some(recorder_info(rec_num)),
             },
         ));
     }
@@ -480,7 +463,6 @@ impl EventBridge {
     pub fn setup_config(&self, infos: &[SystemInfo]) {
         self.send_event(proto::plugin_event::Event::SetupConfig(
             proto::SetupConfigEvent {
-                sources: vec![],
                 systems: infos.iter().map(system_info_from).collect(),
             },
         ));
@@ -491,15 +473,6 @@ impl EventBridge {
             proto::TrunkMessageEvent {
                 messages: convert_trunk_messages(messages),
                 system: Some(system_info_from(info)),
-            },
-        ));
-    }
-
-    pub fn system_rates(&self, infos: &[SystemInfo], time_diff: f32) {
-        self.send_event(proto::plugin_event::Event::SystemRates(
-            proto::SystemRatesEvent {
-                systems: infos.iter().map(system_info_from).collect(),
-                time_diff,
             },
         ));
     }
@@ -548,7 +521,6 @@ impl EventBridge {
             .insert((0, radio_id), alias.to_string());
         self.send_event(proto::plugin_event::Event::UnitAlias(
             proto::UnitAliasEvent {
-                system: None,
                 radio_id,
                 alias: alias.to_string(),
                 source: source.to_string(),
@@ -559,17 +531,8 @@ impl EventBridge {
 }
 
 impl CxxCallbacks for EventBridge {
-    fn audio_stream(
-        &self,
-        call: Option<&trunk_recorder_sys::ffi::TrCall>,
-        recorder: &TrRecorder,
-        samples: &[i16],
-    ) {
-        Self::audio_stream(self, call, recorder, samples);
-    }
-
-    fn setup_recorder(&self, recorder: &TrRecorder) {
-        Self::setup_recorder(self, recorder);
+    fn audio_stream(&self, rust_call_id: u64, samples: &[i16]) {
+        Self::audio_stream(self, rust_call_id, samples);
     }
 
     fn unit_alias_discovered(
@@ -585,12 +548,8 @@ impl CxxCallbacks for EventBridge {
 }
 
 /// Spawn the gRPC server as an async task.
-pub async fn serve_grpc(
-    socket_path: String,
-    audio_tx: broadcast::Sender<proto::AudioSample>,
-    event_tx: broadcast::Sender<proto::PluginEvent>,
-) {
-    let service = TrunkOxideService { audio_tx, event_tx };
+pub async fn serve_grpc(socket_path: String, tx: broadcast::Sender<proto::StreamMessage>) {
+    let service = TrunkOxideService { tx };
 
     let _ = std::fs::remove_file(&socket_path);
     let listener = match tokio::net::UnixListener::bind(&socket_path) {

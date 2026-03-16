@@ -6,13 +6,21 @@ import "google/protobuf/empty.proto";
 import "google/protobuf/timestamp.proto";
 
 // ── Service ──
-// trunk-oxide acts as a gRPC SERVER; clients subscribe to streams.
+// trunk-oxide acts as a gRPC SERVER; clients subscribe to a unified stream.
 
 service TrunkOxide {
-  // Server-streaming: clients subscribe to receive events
-  rpc SubscribeEvents(google.protobuf.Empty) returns (stream PluginEvent);
-  // Server-streaming: clients subscribe to receive audio samples
-  rpc SubscribeAudio(google.protobuf.Empty) returns (stream AudioSample);
+  // Server-streaming: unified stream of audio samples and events.
+  // Ordering guarantee: CallEnd always follows the last AudioSample for a call.
+  rpc Subscribe(google.protobuf.Empty) returns (stream StreamMessage);
+}
+
+// ── Stream ──
+
+message StreamMessage {
+  oneof message {
+    AudioSample audio = 1;
+    PluginEvent event = 2;
+  }
 }
 
 // ── Audio ──
@@ -66,8 +74,8 @@ message SignalEvent {
   string signaling_type = 2;
   SignalType signal_type = 3;
   CallInfo call = 4;
-  SystemInfo system = 5;
-  RecorderInfo recorder = 6;
+  reserved 5; // was system, never populated
+  reserved 6; // was recorder, never populated
   string unit_alias = 7; // OTA-discovered friendly name, if known
 }
 
@@ -92,7 +100,7 @@ message CallInfo {
   bool duplex = 16;
   bool conversation_mode = 17;
   int64 current_source_id = 18;
-  double current_length = 19;
+  reserved 19; // was current_length, replaced by elapsed
   google.protobuf.Timestamp start_time = 20;
   google.protobuf.Duration elapsed = 21;
   string short_name = 22;
@@ -153,16 +161,16 @@ message SystemInfo {
 
 message RecorderInfo {
   int32 id = 1;
-  string type = 2;
-  double freq = 3;
+  reserved 2;  // was type
+  reserved 3;  // was freq, now known in Rust CallEntry
   int32 freq_error = 4;
-  int64 talkgroup = 5;
-  int64 wav_hz = 6;
-  bool is_analog = 7;
-  bool is_conventional = 8;
-  bool is_active = 9;
-  bool is_idle = 10;
-  double current_length = 11;
+  reserved 5;  // was talkgroup, now known in Rust CallEntry
+  reserved 6;  // was wav_hz, now cached in Rust AudioMeta
+  reserved 7;  // was is_analog, now known in Rust CallEntry
+  reserved 8;  // was is_conventional, now known in Rust CallEntry
+  reserved 9;  // was is_active, now known in Rust CallEntry
+  reserved 10; // was is_idle, now known in Rust CallEntry
+  reserved 11; // was current_length, now computed in Rust
 }
 
 // ── Source info ──
@@ -221,6 +229,7 @@ message CallData {
   repeated Transmission transmissions = 33;
   int32 status = 34;
   repeated CallSegment segments = 35;
+  bool is_conventional = 36;
 }
 
 message Transmission {
@@ -234,7 +243,7 @@ message Transmission {
   int64 spike_count = 8;
   int64 error_count = 9;
   double freq = 10;
-  double length = 11;
+  reserved 11; // was length, now computed in Rust
 }
 
 message CallSource {
@@ -372,12 +381,12 @@ message SetupSourcesEvent {
 }
 
 message SetupConfigEvent {
-  repeated SourceInfo sources = 1;
+  reserved 1; // was sources, never populated
   repeated SystemInfo systems = 2;
 }
 
 message UnitAliasEvent {
-  SystemInfo system = 1;
+  reserved 1; // was system, never populated
   int64 radio_id = 2;
   string alias = 3;
   string source = 4;

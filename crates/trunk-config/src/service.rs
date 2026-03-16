@@ -30,6 +30,8 @@ pub struct AudioConfig {
     pub tone_detection_duration_s: f32,
     #[serde(default = "default_audio_attachment")]
     pub audio_attachment: bool,
+    #[serde(default)]
+    pub coalesce_timeout_ms: u64,
 }
 
 impl Default for AudioConfig {
@@ -39,6 +41,7 @@ impl Default for AudioConfig {
             tone_detection: default_tone_detection(),
             tone_detection_duration_s: default_tone_detection_duration_s(),
             audio_attachment: default_audio_attachment(),
+            coalesce_timeout_ms: 10_000,
         }
     }
 }

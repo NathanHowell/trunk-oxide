@@ -4,8 +4,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use opentelemetry::KeyValue;
 use serenity::model::id::ChannelId;
 use tokio::sync::{Mutex, mpsc};
+use tonic::Streaming;
 use tracing::Instrument;
 use trunk_oxide_proto as proto;
 
@@ -16,33 +18,51 @@ use crate::aggregator::Aggregator;
 use crate::call_handler::{CallHandler, CallHandlerConfig, CallMessage};
 use crate::channel_manager::ChannelLookup;
 use crate::discord::DiscordClient;
-use crate::dispatcher_state::{CallKey, DispatchEffect, DispatcherState, ThreadCacheKey};
+use crate::dispatcher_state::{CallKey, DispatchEffect, DispatcherState};
 use crate::grpc_whisperer::WhispererConnection;
+use crate::metrics::Metrics;
 
 /// How often to check for stuck calls.
 const REAP_INTERVAL: Duration = Duration::from_secs(60);
+
+/// How often to check for expired coalescing calls.
+const COALESCE_TICK_INTERVAL: Duration = Duration::from_secs(1);
 
 struct ActiveCall {
     tx: mpsc::Sender<CallMessage>,
 }
 
-pub struct Dispatcher {
-    state: Mutex<DispatcherState>,
-    calls: Mutex<HashMap<CallKey, ActiveCall>>,
+struct ResolveResult {
+    key: CallKey,
+    call: proto::CallInfo,
+    post_channel: Option<ChannelId>,
+}
+
+/// Shared resources accessed by the pump and spawned tasks.
+pub struct DispatchContext {
     whisperer: WhispererConnection,
     discord: Arc<DiscordClient>,
     aggregator: Arc<Aggregator>,
-    buffer_duration_ms: u64,
+    config: CallHandlerConfig,
     channel_id: ChannelId,
     channel_lookup: ChannelLookup,
-    tone_detection: bool,
-    tone_detection_duration_s: f32,
-    audio_attachment: bool,
     db: Arc<Mutex<Database>>,
     db_path: PathBuf,
+    metrics: Arc<Metrics>,
 }
 
-impl Dispatcher {
+/// Single-owner pump loop. Owns `DispatcherState` directly — no Mutex.
+pub struct DispatchPump {
+    state: DispatcherState,
+    calls: HashMap<CallKey, ActiveCall>,
+    pending_rx: HashMap<CallKey, mpsc::Receiver<CallMessage>>,
+    ctx: Arc<DispatchContext>,
+    resolve_tx: mpsc::Sender<ResolveResult>,
+    resolve_rx: mpsc::Receiver<ResolveResult>,
+    coalesce_enabled: bool,
+}
+
+impl DispatchPump {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         whisperer: WhispererConnection,
@@ -54,59 +74,108 @@ impl Dispatcher {
         tone_detection: bool,
         tone_detection_duration_s: f32,
         audio_attachment: bool,
+        coalesce_timeout_ms: u64,
         db: Arc<Mutex<Database>>,
         db_path: PathBuf,
+        metrics: Arc<Metrics>,
     ) -> Self {
+        let (resolve_tx, resolve_rx) = mpsc::channel(64);
+
         Self {
-            state: Mutex::new(DispatcherState::new()),
-            calls: Mutex::new(HashMap::new()),
-            whisperer,
-            discord,
-            aggregator,
-            buffer_duration_ms,
-            channel_id,
-            channel_lookup,
-            tone_detection,
-            tone_detection_duration_s,
-            audio_attachment,
-            db,
-            db_path,
+            state: DispatcherState::new(coalesce_timeout_ms),
+            calls: HashMap::new(),
+            pending_rx: HashMap::new(),
+            ctx: Arc::new(DispatchContext {
+                whisperer,
+                discord,
+                aggregator,
+                config: CallHandlerConfig {
+                    buffer_duration_ms,
+                    tone_detection,
+                    tone_detection_duration_s,
+                    audio_attachment,
+                },
+                channel_id,
+                channel_lookup,
+                db,
+                db_path,
+                metrics,
+            }),
+            resolve_tx,
+            resolve_rx,
+            coalesce_enabled: coalesce_timeout_ms > 0,
         }
     }
 
-    pub async fn handle_audio(&self, sample: proto::AudioSample) {
-        let effects = {
-            let state = self.state.lock().await;
-            state.on_audio(&sample)
-        };
-        self.process_effects(effects).await;
-    }
+    pub async fn run(&mut self, stream: &mut Streaming<proto::StreamMessage>) {
+        let mut reap_interval = tokio::time::interval(REAP_INTERVAL);
+        let mut coalesce_interval = tokio::time::interval(COALESCE_TICK_INTERVAL);
+        reap_interval.tick().await; // skip immediate first tick
+        coalesce_interval.tick().await;
 
-    pub async fn handle_event(&self, event: proto::PluginEvent) {
-        let effects = {
-            let mut state = self.state.lock().await;
-            state.on_event(event)
-        };
-        self.process_effects(effects).await;
-    }
-
-    pub fn spawn_reaper(self: &Arc<Self>) {
-        let dispatcher = Arc::clone(self);
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(REAP_INTERVAL);
-            interval.tick().await; // first tick is immediate, skip it
-            loop {
-                interval.tick().await;
-                let effects = {
-                    let mut state = dispatcher.state.lock().await;
-                    state.on_reap_tick()
-                };
-                dispatcher.process_effects(effects).await;
+        loop {
+            tokio::select! {
+                msg = stream.message() => {
+                    match msg {
+                        Ok(Some(msg)) => self.handle_stream_message(msg).await,
+                        Ok(None) => {
+                            tracing::info!("gRPC stream closed by server");
+                            break;
+                        }
+                        Err(status) => {
+                            tracing::error!(%status, "gRPC stream error");
+                            break;
+                        }
+                    }
+                }
+                _ = reap_interval.tick() => {
+                    let effects = self.state.on_reap_tick();
+                    self.process_effects(effects).await;
+                }
+                _ = coalesce_interval.tick(), if self.coalesce_enabled => {
+                    let effects = self.state.on_coalesce_tick();
+                    self.process_effects(effects).await;
+                }
+                Some(result) = self.resolve_rx.recv() => {
+                    self.handle_resolve_result(result).await;
+                }
             }
-        });
+        }
     }
 
-    async fn process_effects(&self, effects: Vec<DispatchEffect>) {
+    async fn handle_stream_message(&mut self, msg: proto::StreamMessage) {
+        use proto::stream_message::Message;
+
+        let Some(message) = msg.message else {
+            return;
+        };
+
+        match message {
+            Message::Audio(sample) => {
+                let effects = self.state.on_audio(&sample);
+                self.process_effects(effects).await;
+            }
+            Message::Event(event) => {
+                let effects = self.state.on_event(event);
+                self.process_effects(effects).await;
+            }
+        }
+    }
+
+    async fn handle_resolve_result(&mut self, result: ResolveResult) {
+        if let Some(post_channel) = result.post_channel {
+            let effects = self.state.on_channel_resolved(result.call, post_channel);
+            self.process_effects(effects).await;
+        } else {
+            self.ctx.metrics.channel_resolution_failures.add(1, &[]);
+            self.state.on_channel_resolution_failed(&result.key);
+            self.calls.remove(&result.key);
+            self.pending_rx.remove(&result.key);
+        }
+    }
+
+    #[allow(clippy::too_many_lines)]
+    async fn process_effects(&mut self, effects: Vec<DispatchEffect>) {
         for effect in effects {
             match effect {
                 DispatchEffect::SendAudio {
@@ -114,67 +183,89 @@ impl Dispatcher {
                     samples,
                     sample_rate,
                 } => {
-                    let calls = self.calls.lock().await;
-                    if let Some(active) = calls.get(&key) {
-                        if let Err(e) = active.tx.try_send(CallMessage::Audio {
+                    if let Some(active) = self.calls.get(&key)
+                        && let Err(e) = active.tx.try_send(CallMessage::Audio {
                             samples,
                             sample_rate,
-                        }) {
-                            tracing::warn!(talkgroup = key.talkgroup.0, "audio packet dropped: {e}");
-                        }
+                        })
+                    {
+                        self.ctx
+                            .metrics
+                            .audio_packets_dropped
+                            .add(1, &[KeyValue::new("talkgroup", key.talkgroup.0)]);
+                        tracing::warn!(talkgroup = key.talkgroup.0, "audio packet dropped: {e}");
                     }
                 }
 
                 DispatchEffect::SendEvent { key, text } => {
-                    let calls = self.calls.lock().await;
-                    if let Some(active) = calls.get(&key) {
-                        if let Err(e) = active.tx.try_send(CallMessage::Event(text)) {
-                            tracing::warn!(talkgroup = key.talkgroup.0, "event dropped: {e}");
-                        }
+                    if let Some(active) = self.calls.get(&key)
+                        && let Err(e) = active.tx.try_send(CallMessage::Event(text))
+                    {
+                        self.ctx
+                            .metrics
+                            .events_dropped
+                            .add(1, &[KeyValue::new("talkgroup", key.talkgroup.0)]);
+                        tracing::warn!(talkgroup = key.talkgroup.0, "event dropped: {e}");
                     }
                 }
 
                 DispatchEffect::EndCall { key, call_data } => {
-                    let active = self.calls.lock().await.remove(&key);
-                    if let Some(active) = active {
+                    if let Some(active) = self.calls.remove(&key) {
                         let _ = active.tx.send(CallMessage::End(call_data)).await;
                     }
                 }
 
                 DispatchEffect::ReapCall { key } => {
-                    let active = self.calls.lock().await.remove(&key);
-                    if let Some(active) = active {
+                    self.ctx.metrics.calls_reaped.add(1, &[]);
+                    if let Some(active) = self.calls.remove(&key) {
                         let _ = active.tx.try_send(CallMessage::End(None));
                     }
                 }
 
+                DispatchEffect::PttEnd { key, call_data } => {
+                    if let Some(active) = self.calls.get(&key) {
+                        let _ = active.tx.send(CallMessage::PttEnd(call_data)).await;
+                    }
+                }
+
+                DispatchEffect::CoalesceResume { key, call } => {
+                    if let Some(active) = self.calls.get(&key) {
+                        let _ = active.tx.send(CallMessage::PttStart(Box::new(call))).await;
+                    }
+                }
+
+                DispatchEffect::CoalesceTimeout { key } => {
+                    if let Some(active) = self.calls.remove(&key) {
+                        let _ = active.tx.send(CallMessage::End(None)).await;
+                    }
+                }
+
                 DispatchEffect::ForwardToAggregator { message } => {
-                    self.aggregator.send(message);
+                    self.ctx.aggregator.send(message);
                 }
 
                 DispatchEffect::RotateDb => {
                     self.rotate_db().await;
                 }
 
-                DispatchEffect::ResolveChannel { call } => {
-                    let post_channel = self.resolve_channel(&call).await;
-                    if let Some(post_channel) = post_channel {
-                        let follow_up = {
-                            let mut state = self.state.lock().await;
-                            state.on_channel_resolved(call, post_channel)
-                        };
-                        // on_channel_resolved returns SpawnCallHandler — process inline
-                        for effect in follow_up {
-                            if let DispatchEffect::SpawnCallHandler {
+                DispatchEffect::ResolveChannel { key, call } => {
+                    // Create mpsc for buffering audio during resolution
+                    let (tx, rx) = mpsc::channel(1024);
+                    self.calls.insert(key.clone(), ActiveCall { tx });
+                    self.pending_rx.insert(key.clone(), rx);
+
+                    let ctx = Arc::clone(&self.ctx);
+                    let resolve_tx = self.resolve_tx.clone();
+                    tokio::spawn(async move {
+                        let post_channel = ctx.resolve_channel(&call).await;
+                        let _ = resolve_tx
+                            .send(ResolveResult {
                                 key,
                                 call,
                                 post_channel,
-                            } = effect
-                            {
-                                self.spawn_call_handler(key, call, post_channel).await;
-                            }
-                        }
-                    }
+                            })
+                            .await;
+                    });
                 }
 
                 DispatchEffect::SpawnCallHandler {
@@ -182,7 +273,8 @@ impl Dispatcher {
                     call,
                     post_channel,
                 } => {
-                    self.spawn_call_handler(key, call, post_channel).await;
+                    let rx = self.pending_rx.remove(&key);
+                    self.spawn_call_handler(key, call, post_channel, rx).await;
                 }
 
                 DispatchEffect::Log { message } => {
@@ -190,9 +282,128 @@ impl Dispatcher {
                 }
             }
         }
+
+        self.ctx
+            .metrics
+            .active_calls
+            .record(self.state.active_call_count() as u64, &[]);
+        self.ctx
+            .metrics
+            .coalescing_calls
+            .record(self.state.coalescing_call_count() as u64, &[]);
     }
 
+    async fn spawn_call_handler(
+        &mut self,
+        key: CallKey,
+        call: proto::CallInfo,
+        post_channel: ChannelId,
+        pending_rx: Option<mpsc::Receiver<CallMessage>>,
+    ) {
+        let call_row_id = {
+            let record = trunk_database::CallRecord {
+                talkgroup: Talkgroup(call.talkgroup),
+                sys_num: SysNum(call.sys_num),
+                freq: proto::types::Freq(call.freq),
+                encrypted: call.encrypted,
+                emergency: call.emergency,
+                start_time: call.start_time.as_ref().map_or(0, |ts| ts.seconds),
+                tag: call.talkgroup.to_string(),
+                short_name: call.short_name.clone(),
+                thread_id: Some(post_channel.get()),
+                embed_message_id: None,
+            };
+            let db = self.ctx.db.lock().await;
+            match db.insert_call(&record) {
+                Ok(id) => Some(id),
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to insert call into db");
+                    None
+                }
+            }
+        };
+
+        // If we have a pending receiver (from buffering during resolution),
+        // use it. Otherwise create a fresh channel (e.g. CoalesceResume path).
+        let (tx, rx) = if let Some(rx) = pending_rx {
+            // Reuse existing sender from self.calls
+            let existing = self.calls.remove(&key);
+            if let Some(active) = existing {
+                (active.tx, rx)
+            } else {
+                // Shouldn't happen, but handle gracefully
+                let (tx, _) = mpsc::channel(1024);
+                (tx, rx)
+            }
+        } else {
+            let (tx, rx) = mpsc::channel(1024);
+            (tx, rx)
+        };
+
+        let span = tracing::info_span!(
+            "call",
+            talkgroup = call.talkgroup,
+            sys_num = call.sys_num,
+            freq = call.freq,
+            encrypted = call.encrypted,
+        );
+
+        let handler = match CallHandler::new(
+            &call,
+            rx,
+            self.ctx.whisperer.clone(),
+            Arc::clone(&self.ctx.discord),
+            self.ctx.config,
+            post_channel,
+            Arc::clone(&self.ctx.db),
+            call_row_id,
+            Arc::clone(&self.ctx.metrics),
+        ) {
+            Ok(h) => h,
+            Err(e) => {
+                tracing::error!(error = %e, "failed to create call handler");
+                return;
+            }
+        };
+
+        tokio::spawn(handler.run().instrument(span));
+
+        self.calls.insert(key, ActiveCall { tx });
+    }
+
+    async fn rotate_db(&self) {
+        let now_hour = Utc::now().format("%Y-%m-%dT%H").to_string();
+        let today = Utc::now().format("%Y-%m-%d").to_string();
+
+        match Database::open_hourly(&self.ctx.db_path, &now_hour) {
+            Ok(new_db) => {
+                {
+                    let mut db = self.ctx.db.lock().await;
+                    if let Err(e) = new_db.copy_threads_from(&db, &today) {
+                        tracing::warn!(error = %e, "failed to copy thread cache to new hourly db");
+                    }
+                    *db = new_db;
+                }
+                tracing::info!(hour = %now_hour, "rotated to new hourly database");
+            }
+            Err(e) => {
+                tracing::error!(error = %e, "failed to open new hourly database");
+            }
+        }
+    }
+}
+
+impl DispatchContext {
     async fn resolve_channel(&self, call: &proto::CallInfo) -> Option<ChannelId> {
+        let start = std::time::Instant::now();
+        let result = self.resolve_channel_inner(call).await;
+        self.metrics
+            .channel_resolution_duration
+            .record(start.elapsed().as_secs_f64(), &[]);
+        result
+    }
+
+    async fn resolve_channel_inner(&self, call: &proto::CallInfo) -> Option<ChannelId> {
         let talkgroup = Talkgroup(call.talkgroup);
         let sys_num = SysNum(call.sys_num);
 
@@ -216,20 +427,6 @@ impl Dispatcher {
             .unwrap_or_else(Utc::now);
         let date_str = start_time.format("%Y-%m-%d").to_string();
 
-        let cache_key = ThreadCacheKey {
-            sys_num,
-            talkgroup,
-            date: date_str.clone(),
-        };
-
-        // Check in-memory thread cache
-        {
-            let state = self.state.lock().await;
-            if let Some(channel) = state.get_cached_thread(&cache_key) {
-                return Some(channel);
-            }
-        }
-
         // Check DB for thread from earlier this session/hour
         let db_thread = {
             let db = self.db.lock().await;
@@ -239,8 +436,6 @@ impl Dispatcher {
         };
 
         if let Some(id) = db_thread {
-            let mut state = self.state.lock().await;
-            state.cache_thread(cache_key, id);
             return Some(id);
         }
 
@@ -258,12 +453,11 @@ impl Dispatcher {
             .await
         {
             Ok(id) => {
-                let mut state = self.state.lock().await;
-                state.cache_thread(cache_key, id);
-
-                let db = self.db.lock().await;
-                if let Err(e) = db.set_thread(sys_num, talkgroup, &date_str, id.get()) {
-                    tracing::warn!(error = %e, "failed to persist thread to db");
+                {
+                    let db = self.db.lock().await;
+                    if let Err(e) = db.set_thread(sys_num, talkgroup, &date_str, id.get()) {
+                        tracing::warn!(error = %e, "failed to persist thread to db");
+                    }
                 }
 
                 Some(id)
@@ -275,91 +469,6 @@ impl Dispatcher {
                     "failed to create discord thread"
                 );
                 None
-            }
-        }
-    }
-
-    async fn spawn_call_handler(
-        &self,
-        key: CallKey,
-        call: proto::CallInfo,
-        post_channel: ChannelId,
-    ) {
-        let call_row_id = {
-            let record = trunk_database::CallRecord {
-                talkgroup: Talkgroup(call.talkgroup),
-                sys_num: SysNum(call.sys_num),
-                freq: proto::types::Freq(call.freq),
-                encrypted: call.encrypted,
-                emergency: call.emergency,
-                start_time: call.start_time.as_ref().map_or(0, |ts| ts.seconds),
-                tag: call.talkgroup.to_string(),
-                short_name: call.short_name.clone(),
-                thread_id: Some(post_channel.get()),
-                embed_message_id: None,
-            };
-            let db = self.db.lock().await;
-            match db.insert_call(&record) {
-                Ok(id) => Some(id),
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to insert call into db");
-                    None
-                }
-            }
-        };
-
-        let (tx, rx) = mpsc::channel(1024);
-
-        let span = tracing::info_span!(
-            "call",
-            talkgroup = call.talkgroup,
-            sys_num = call.sys_num,
-            freq = call.freq,
-            encrypted = call.encrypted,
-        );
-
-        let handler = match CallHandler::new(
-            call,
-            rx,
-            self.whisperer.clone(),
-            Arc::clone(&self.discord),
-            CallHandlerConfig {
-                buffer_duration_ms: self.buffer_duration_ms,
-                tone_detection: self.tone_detection,
-                tone_detection_duration_s: self.tone_detection_duration_s,
-                audio_attachment: self.audio_attachment,
-            },
-            post_channel,
-            Arc::clone(&self.db),
-            call_row_id,
-        ) {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::error!(error = %e, "failed to create call handler");
-                return;
-            }
-        };
-
-        tokio::spawn(handler.run().instrument(span));
-
-        self.calls.lock().await.insert(key, ActiveCall { tx });
-    }
-
-    async fn rotate_db(&self) {
-        let now_hour = Utc::now().format("%Y-%m-%dT%H").to_string();
-        let today = Utc::now().format("%Y-%m-%d").to_string();
-
-        match Database::open_hourly(&self.db_path, &now_hour) {
-            Ok(new_db) => {
-                let mut db = self.db.lock().await;
-                if let Err(e) = new_db.copy_threads_from(&db, &today) {
-                    tracing::warn!(error = %e, "failed to copy thread cache to new hourly db");
-                }
-                *db = new_db;
-                tracing::info!(hour = %now_hour, "rotated to new hourly database");
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "failed to open new hourly database");
             }
         }
     }

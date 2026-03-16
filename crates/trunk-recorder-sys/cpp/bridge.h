@@ -5,6 +5,7 @@
 
 // trunk-recorder headers — these provide the real type definitions.
 // Include paths are set by build.rs (gnuradio, boost, op25_repeater, etc.)
+#include "trunk-recorder/call.h"
 #include "trunk-recorder/recorders/recorder.h"
 #include "trunk-recorder/systems/parser.h"
 
@@ -23,7 +24,7 @@ struct TrCallSource;
 struct TrCallError;
 struct TrCallData;
 struct TrCallInfo;
-struct TrSystemInfo;
+struct TrRecorderConfig;
 struct TrRecorderStatus;
 struct EventHandlerBox;
 struct EventNotifier;
@@ -49,30 +50,6 @@ struct TrSystem final {
     explicit TrSystem(const std::shared_ptr<System> &p) : ptr(p) {}
 };
 
-struct TrRecorder final {
-    std::shared_ptr<Recorder> ptr;
-    explicit TrRecorder(const std::shared_ptr<Recorder> &p) : ptr(p) {}
-};
-
-// ── Call accessor wrappers ──
-int32_t call_get_freq_error(const TrCall &call);
-double call_get_current_length(const TrCall &call);
-int64_t call_get_talkgroup(const TrCall &call);
-int32_t call_get_sys_num(const TrCall &call);
-double call_get_freq(const TrCall &call);
-
-// ── Recorder accessor wrappers ──
-int32_t recorder_get_num(const TrRecorder &rec);
-double recorder_get_freq(const TrRecorder &rec);
-int32_t recorder_get_freq_error(const TrRecorder &rec);
-int64_t recorder_get_talkgroup(const TrRecorder &rec);
-int64_t recorder_get_wav_hz(const TrRecorder &rec);
-bool recorder_is_analog(const TrRecorder &rec);
-bool recorder_is_conventional(const TrRecorder &rec);
-bool recorder_is_active(const TrRecorder &rec);
-bool recorder_is_idle(const TrRecorder &rec);
-double recorder_get_current_length(const TrRecorder &rec);
-
 // ── Opaque lifecycle type (pimpl) ──
 struct TrContextImpl;
 struct TrContext {
@@ -82,9 +59,6 @@ struct TrContext {
     TrContext(TrContext &&) noexcept;
     TrContext &operator=(TrContext &&) noexcept;
 };
-
-// ── System info bulk read (replaces 15 individual system_get_* functions) ──
-TrSystemInfo tr_context_get_system_info(TrContext &ctx, int32_t sys_num);
 
 // ── Lifecycle functions ──
 std::unique_ptr<TrContext> tr_create_from_builder(rust::Box<EventHandlerBox> handler);
@@ -110,72 +84,66 @@ int32_t tr_add_system_from_config(TrContext &ctx, const TrSystemConfig &cfg);
 void tr_context_set_event_notifier(TrContext &ctx, rust::Box<EventNotifier> notifier);
 void tr_context_wire_event_notifiers(TrContext &ctx);
 
+// ── GR block performance metrics ──
+struct TrGrBlockMetrics;
+struct TrRecorderMetrics;
+struct TrSourceMetrics;
+rust::Vec<TrRecorderMetrics> tr_collect_recorder_metrics(const TrContext &ctx);
+rust::Vec<TrSourceMetrics> tr_collect_source_metrics(const TrContext &ctx);
+
 // ── Trunk message conversion (used by GR callbacks) ──
 TrTrunkMessage convert_trunk_message(const TrunkMessage &msg);
 
-// ── Phase A: Loop Control ──
+// ── Loop Control ──
 void tr_start_gnuradio(TrContext &ctx);
 void tr_stop_gnuradio(TrContext &ctx);
-
 void tr_context_check_sources(TrContext &ctx);
 rust::Vec<TrRecorderStatus> tr_context_get_recorder_status(const TrContext &ctx);
-void tr_context_autotune_control_channels(TrContext &ctx);
 
-// ── Phase B: Message Routing (called from Rust handle_message) ──
+// ── Message Routing ──
 enum class TrUnitEventType : uint8_t;
 void tr_system_add_control_channel_runtime(TrContext &ctx, int32_t sys_num, double freq);
 bool tr_system_update_sysid(TrContext &ctx, const TrTrunkMessage &msg);
 bool tr_system_update_status(TrContext &ctx, const TrTrunkMessage &msg);
 
-// ── Phase B: Decode Rate Checking (called from Rust check_decode_rates) ──
+// ── Decode Rate Checking ──
 double tr_system_get_current_control_channel(TrContext &ctx, int32_t sys_num);
 double tr_system_get_control_channel_pwr(TrContext &ctx, int32_t sys_num);
 
-// ── Conventional call management — recorder status (null-guarded) ──
+// ── Call — recorder status ──
 bool call_has_recorder(const TrCall &call);
-bool call_get_recorder_is_active(const TrCall &call);
-bool call_get_recorder_is_enabled(const TrCall &call);
-int32_t call_get_recorder_state(const TrCall &call);
 
-// ── Conventional call management — lifecycle ──
-void call_restart(TrCall &call);
-void call_start_initial_recording(TrCall &call);
+// ── Call — Rust call ID ──
+void call_set_rust_call_id(TrCall &call, uint64_t id);
+
+// ── Call — lifecycle ──
+void call_restart(TrCall &call, const TrRecorderConfig &cfg);
+void call_start_initial_recording(TrCall &call, const TrRecorderConfig &cfg);
 void call_set_recorder_enabled(TrCall &call, bool enabled);
+std::unique_ptr<TrCall> tr_create_conventional_call(
+    TrContext &ctx, int32_t sys_num, int32_t source_idx,
+    const TrChannelConfig &channel);
 
-// ── Conventional call management — context-level ──
-std::unique_ptr<TrCall> tr_context_take_next_conventional_call(TrContext &ctx);
-
-// ── Phase C: Call Management — additional recorder accessors ──
-double recorder_since_last_write_secs(const TrRecorder &rec);
-int32_t recorder_get_type(const TrRecorder &rec);
-
-// ── Phase C: Call Management — lifecycle operations ──
+// ── Call — creation and recording ──
 std::unique_ptr<TrCall> tr_context_create_call(TrContext &ctx, const TrTrunkMessage &msg);
-
-// ── Phase C: Call Management — recording policy support ──
-int32_t tr_context_source_count(const TrContext &ctx);
-bool tr_source_covers_freq(const TrContext &ctx, int32_t source_idx, double freq);
 int32_t tr_source_available_recorders(const TrContext &ctx, int32_t source_idx, bool is_analog);
-bool tr_source_start_recording(TrContext &ctx, int32_t source_idx, TrCall &call, bool is_analog);
+bool tr_source_start_recording(TrContext &ctx, int32_t source_idx, TrCall &call, bool is_analog, const TrRecorderConfig &cfg);
 
-// ── Phase C: Call Management — conclude recording (recorder mechanics) ──
+// ── Call — stop recording ──
 struct TrStopRecordingResult;
 TrStopRecordingResult call_stop_recording(TrCall &call);
 rust::Vec<TrTransmission> call_get_transmission_list(const TrCall &call);
 rust::Vec<TrTransmission> call_get_dmr_transmission_list(const TrCall &call, int32_t slot);
 int32_t call_get_recorder_num(const TrCall &call);
 
-// ── Phase C: Call Management — update source tracking ──
+// ── Call — source updates ──
 void call_recorder_set_source(TrCall &call, int64_t src);
-void call_set_freq(TrCall &call, double freq);
 
-// ── Phase C: Call Management — call-level recorder accessors ──
+// ── Call — adaptive squelch ──
+void call_set_squelch_db(TrCall &call, double db);
+double call_get_pwr_db(const TrCall &call);
+
+// ── Call — recorder timing ──
 double call_recorder_since_last_write_secs(const TrCall &call);
-void call_process_recorder_queue(const TrCall &call);
-
-// ── Recorder setup notification (extracts recorder from call, fires through event_sink) ──
-void call_notify_setup_recorder(TrContext &ctx, const TrCall &call);
-
-void tr_recorder_process_queue(const TrRecorder &rec);
 
 } // namespace trunk_oxide

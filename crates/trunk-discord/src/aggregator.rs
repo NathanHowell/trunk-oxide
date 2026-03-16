@@ -16,7 +16,6 @@ pub enum AggregatorMessage {
     Signal(Box<proto::SignalEvent>),
     TrunkMessage(proto::TrunkMessageEvent),
     Unit(proto::UnitEvent),
-    SystemRates(proto::SystemRatesEvent),
     CallsActive(proto::CallsActiveEvent),
     SetupRecorder(proto::SetupRecorderEvent),
     SetupSystem(proto::SetupSystemEvent),
@@ -98,8 +97,7 @@ impl AggregatorExecutor {
                         .await
                     {
                         Ok(thread_id) => {
-                            let hour_key =
-                                Utc::now().format("%Y-%m-%d %H:00").to_string();
+                            let hour_key = Utc::now().format("%Y-%m-%d %H:00").to_string();
                             self.current_thread_id = Some(thread_id);
                             self.recorder_embed_id = None;
                             self.activity_embed_id = None;
@@ -135,21 +133,16 @@ impl AggregatorExecutor {
                 }
                 AggEffect::EditEmbed { target, embed } => {
                     let (thread_id, msg_id) = match target {
-                        EmbedTarget::Recorder => {
-                            (self.current_thread_id, self.recorder_embed_id)
-                        }
-                        EmbedTarget::Activity => {
-                            (self.current_thread_id, self.activity_embed_id)
-                        }
+                        EmbedTarget::Recorder => (self.current_thread_id, self.recorder_embed_id),
+                        EmbedTarget::Activity => (self.current_thread_id, self.activity_embed_id),
                     };
-                    if let (Some(tid), Some(mid)) = (thread_id, msg_id) {
-                        if let Err(e) = self
+                    if let (Some(tid), Some(mid)) = (thread_id, msg_id)
+                        && let Err(e) = self
                             .discord
                             .edit_embed(tid, mid, embed_data_to_serenity(&embed))
                             .await
-                        {
-                            tracing::error!(error = %e, "failed to edit embed");
-                        }
+                    {
+                        tracing::error!(error = %e, "failed to edit embed");
                     }
                 }
                 AggEffect::InsertActivity { snapshot } => {
@@ -158,7 +151,6 @@ impl AggregatorExecutor {
                         signal_counts: snapshot.signal_counts,
                         trunk_msg_counts: snapshot.trunk_msg_counts,
                         unit_counts: snapshot.unit_counts,
-                        decode_rates: snapshot.decode_rates,
                         active_calls: snapshot.active_calls,
                     };
                     let db = self.db.lock().await;
@@ -176,7 +168,6 @@ fn convert_message(msg: AggregatorMessage) -> AggMessage {
         AggregatorMessage::Signal(e) => AggMessage::Signal(e),
         AggregatorMessage::TrunkMessage(e) => AggMessage::TrunkMessage(e),
         AggregatorMessage::Unit(e) => AggMessage::Unit(e),
-        AggregatorMessage::SystemRates(e) => AggMessage::SystemRates(e),
         AggregatorMessage::CallsActive(e) => AggMessage::CallsActive(e),
         AggregatorMessage::SetupRecorder(e) => AggMessage::SetupRecorder(e),
         AggregatorMessage::SetupSystem(e) => AggMessage::SetupSystem(e),
@@ -189,9 +180,7 @@ fn convert_message(msg: AggregatorMessage) -> AggMessage {
 fn embed_data_to_serenity(data: &EmbedData) -> serenity::all::CreateEmbed {
     use serenity::all::{CreateEmbed, CreateEmbedFooter};
 
-    let mut embed = CreateEmbed::new()
-        .title(&data.title)
-        .colour(data.colour);
+    let mut embed = CreateEmbed::new().title(&data.title).colour(data.colour);
 
     if let Some(desc) = &data.description {
         embed = embed.description(desc);

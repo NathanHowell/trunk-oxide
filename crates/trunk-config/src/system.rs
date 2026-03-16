@@ -5,7 +5,7 @@ use std::path::Path;
 use anyhow::{Context, Result};
 use serde::Deserialize;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum SystemType {
     Conventional,
@@ -14,6 +14,7 @@ pub enum SystemType {
     #[serde(rename = "conventionalSIGMF")]
     ConventionalSigmf,
     Smartnet,
+    #[default]
     P25,
 }
 
@@ -122,11 +123,7 @@ pub struct SystemConfig {
 
     // Duration limits
     #[serde(default)]
-    pub min_duration: f64,
-    #[serde(default)]
     pub max_duration: f64,
-    #[serde(default)]
-    pub min_transmission_duration: f64,
 
     // Multi-site
     #[serde(default)]
@@ -166,12 +163,16 @@ pub enum TalkgroupMode {
     /// Digital voice ("D") — default
     #[default]
     Digital,
+    /// TDMA / P25 Phase II ("T")
+    Tdma,
     /// Encrypted ("E")
     Encrypted,
     /// Trunked encrypted ("TE")
     TrunkedEncrypted,
     /// Digital encrypted ("DE")
     DigitalEncrypted,
+    /// Mixed analog/digital ("M")
+    Mixed,
 }
 
 impl TalkgroupMode {
@@ -186,9 +187,11 @@ impl TalkgroupMode {
         match self {
             Self::Analog => "A",
             Self::Digital => "D",
+            Self::Tdma => "T",
             Self::Encrypted => "E",
             Self::TrunkedEncrypted => "TE",
             Self::DigitalEncrypted => "DE",
+            Self::Mixed => "M",
         }
     }
 }
@@ -214,7 +217,9 @@ impl TalkgroupMode {
         match s {
             "A" => Self::Analog,
             "D" => Self::Digital,
+            "T" => Self::Tdma,
             "E" => Self::Encrypted,
+            "M" => Self::Mixed,
             "TE" => Self::TrunkedEncrypted,
             "DE" => Self::DigitalEncrypted,
             other => {
@@ -266,8 +271,9 @@ pub struct ChannelConfig {
     pub tag: String,
     #[serde(default)]
     pub group: String,
-    #[serde(default = "default_squelch")]
-    pub squelch_db: f64,
+    /// Per-channel squelch override.  `None` inherits the system-level squelch.
+    #[serde(default)]
+    pub squelch_db: Option<f64>,
     #[serde(default)]
     pub signal_detection: bool,
 }
@@ -549,8 +555,8 @@ pub(crate) fn load_channels_csv(path: &Path) -> Result<HashMap<i64, ChannelConfi
                 description: get(col_description),
                 tag: get(col_tag),
                 group: get(col_category),
-                squelch_db: default_squelch(),
-                signal_detection: true,
+                squelch_db: None,
+                signal_detection: false,
             },
         );
     }
@@ -579,7 +585,7 @@ fn apply_channel_overlay(ch: &mut ChannelConfig, table: &toml::Table) {
         ch.group = v.to_string();
     }
     if let Some(v) = table.get("squelch_db").and_then(toml::Value::as_float) {
-        ch.squelch_db = v;
+        ch.squelch_db = Some(v);
     }
     if let Some(v) = table.get("signal_detection").and_then(toml::Value::as_bool) {
         ch.signal_detection = v;
@@ -618,7 +624,7 @@ pub(crate) fn resolve_channels(
             description: String::new(),
             tag: String::new(),
             group: String::new(),
-            squelch_db: default_squelch(),
+            squelch_db: None,
             signal_detection: false,
         });
 

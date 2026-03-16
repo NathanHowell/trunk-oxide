@@ -23,10 +23,10 @@ fn decimation_guard(rate: i64) -> i64 {
             continue;
         }
         let q = rate / if_freq;
-        if q & 1 != 0 {
+        if q.trailing_zeros() == 0 {
             continue;
         }
-        if q >= 40 && (q & 3) == 0 {
+        if q >= 40 && q.trailing_zeros() >= 2 {
             decim = q / 4;
         } else {
             decim = q / 2;
@@ -470,17 +470,48 @@ mod tests {
         // the preferred one per system; alternates are soft constraints.
         let channels = vec![
             // System 0: preferred = 772_306_250
-            Channel { frequency: 771_856_250, signal: Signal::Digital, tag: Some(Tag::Alternate), system: Some(0) },
-            Channel { frequency: 772_156_250, signal: Signal::Digital, tag: Some(Tag::Alternate), system: Some(0) },
-            Channel { frequency: 772_306_250, signal: Signal::Digital, tag: Some(Tag::Primary), system: Some(0) },
-            Channel { frequency: 772_456_250, signal: Signal::Digital, tag: Some(Tag::Alternate), system: Some(0) },
+            Channel {
+                frequency: 771_856_250,
+                signal: Signal::Digital,
+                tag: Some(Tag::Alternate),
+                system: Some(0),
+            },
+            Channel {
+                frequency: 772_156_250,
+                signal: Signal::Digital,
+                tag: Some(Tag::Alternate),
+                system: Some(0),
+            },
+            Channel {
+                frequency: 772_306_250,
+                signal: Signal::Digital,
+                tag: Some(Tag::Primary),
+                system: Some(0),
+            },
+            Channel {
+                frequency: 772_456_250,
+                signal: Signal::Digital,
+                tag: Some(Tag::Alternate),
+                system: Some(0),
+            },
             // System 1: preferred = 773_481_250
-            Channel { frequency: 772_031_250, signal: Signal::Digital, tag: Some(Tag::Alternate), system: Some(1) },
-            Channel { frequency: 773_481_250, signal: Signal::Digital, tag: Some(Tag::Primary), system: Some(1) },
+            Channel {
+                frequency: 772_031_250,
+                signal: Signal::Digital,
+                tag: Some(Tag::Alternate),
+                system: Some(1),
+            },
+            Channel {
+                frequency: 773_481_250,
+                signal: Signal::Digital,
+                tag: Some(Tag::Primary),
+                system: Some(1),
+            },
         ];
 
         let devices = vec![Device::rtlsdr(), Device::rtlsdr()];
-        let sources = solve(&channels, &devices).expect("should find a solution with preferred channels");
+        let sources =
+            solve(&channels, &devices).expect("should find a solution with preferred channels");
         assert!(!sources.is_empty());
 
         // The two Primary channels must be covered
@@ -490,7 +521,8 @@ mod tests {
                     let guard = decimation_guard(s.rate);
                     let min = s.center - s.rate / 2 + guard;
                     let max = s.center + s.rate / 2 - guard;
-                    ch.frequency >= min + CHANNEL_HALFWIDTH && ch.frequency <= max - CHANNEL_HALFWIDTH
+                    ch.frequency >= min + CHANNEL_HALFWIDTH
+                        && ch.frequency <= max - CHANNEL_HALFWIDTH
                 });
                 assert!(covered, "preferred channel {} not covered", ch.frequency);
             }

@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use opentelemetry::KeyValue;
 use proto::types::CallRowId;
 use serenity::all::{CreateEmbed, CreateEmbedFooter};
 use serenity::model::id::{ChannelId, MessageId};
@@ -12,6 +13,7 @@ use trunk_database::Database;
 use crate::call_state::{CallEffect, CallState, CallStateConfig, EmbedData};
 use crate::discord::DiscordClient;
 use crate::grpc_whisperer::WhispererConnection;
+use crate::metrics::Metrics;
 use crate::ogg_encoder::OggOpusEncoder;
 use crate::resampler::Resampler;
 use crate::tone_detect::{DetectedTone, NotchFilter, ToneDetector};
@@ -20,6 +22,8 @@ pub enum CallMessage {
     Audio { samples: Vec<u8>, sample_rate: i32 },
     Event(String),
     End(Option<Box<proto::CallData>>),
+    PttEnd(Option<Box<proto::CallData>>),
+    PttStart(Box<proto::CallInfo>),
 }
 
 #[derive(Clone, Copy)]
@@ -35,7 +39,7 @@ pub struct CallHandler {
     rx: mpsc::Receiver<CallMessage>,
     whisperer: WhispererConnection,
     discord: Arc<DiscordClient>,
-    buffer_duration_ms: u64,
+    config: CallHandlerConfig,
     audio_buffer: Vec<f32>,
     resampler: Option<Resampler>,
     tone_detector: Option<ToneDetector>,
@@ -45,7 +49,8 @@ pub struct CallHandler {
 
     embed_message_id: Option<MessageId>,
 
-    // Database
+    metrics: Arc<Metrics>,
+
     db: Arc<Mutex<Database>>,
     call_row_id: Option<CallRowId>,
 }
@@ -53,7 +58,7 @@ pub struct CallHandler {
 impl CallHandler {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        call_info: proto::CallInfo,
+        call_info: &proto::CallInfo,
         rx: mpsc::Receiver<CallMessage>,
         whisperer: WhispererConnection,
         discord: Arc<DiscordClient>,
@@ -61,6 +66,7 @@ impl CallHandler {
         post_channel: ChannelId,
         db: Arc<Mutex<Database>>,
         call_row_id: Option<CallRowId>,
+        metrics: Arc<Metrics>,
     ) -> Result<Self> {
         let detect_ctcss = config.tone_detection && call_info.is_conventional;
         let tone_detector = if config.tone_detection {
@@ -79,13 +85,10 @@ impl CallHandler {
             None
         };
 
-        let buffer_duration_ms = config.buffer_duration_ms;
-        let buffer_threshold = usize::try_from(buffer_duration_ms)
-            .unwrap_or(usize::MAX)
-            .saturating_mul(16);
+        let buffer_threshold = buffer_threshold(config.buffer_duration_ms);
 
         let state = CallState::new(
-            &call_info,
+            call_info,
             CallStateConfig {
                 buffer_threshold,
                 audio_attachment: config.audio_attachment,
@@ -97,7 +100,7 @@ impl CallHandler {
             rx,
             whisperer,
             discord,
-            buffer_duration_ms,
+            config,
             audio_buffer: Vec::new(),
             resampler: None,
             tone_detector,
@@ -105,6 +108,7 @@ impl CallHandler {
             post_channel,
             ogg_encoder,
             embed_message_id: None,
+            metrics,
             db,
             call_row_id,
         })
@@ -134,6 +138,17 @@ impl CallHandler {
                         tracing::error!(error = %e, "event posting error");
                     }
                 }
+                CallMessage::PttEnd(call_data) => {
+                    if let Err(e) = self.handle_ptt_end(call_data).await {
+                        tracing::error!(error = %e, "PTT end handling error");
+                    }
+                }
+                CallMessage::PttStart(call_info) => {
+                    let effects = self.state.on_ptt_start(call_info.as_ref());
+                    if let Err(e) = self.process_effects(effects).await {
+                        tracing::error!(error = %e, "PTT start handling error");
+                    }
+                }
                 CallMessage::End(call_data) => {
                     if let Err(e) = self.handle_end(call_data).await {
                         tracing::error!(error = %e, "call end handling error");
@@ -144,6 +159,7 @@ impl CallHandler {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn process_effects(&mut self, effects: Vec<CallEffect>) -> Result<()> {
         // Use a queue to avoid async recursion (Transcribe → on_transcription → EditEmbed)
         let mut queue: std::collections::VecDeque<CallEffect> = effects.into();
@@ -151,27 +167,41 @@ impl CallHandler {
             match effect {
                 CallEffect::SendEmbed { embed } => {
                     let serenity_embed = embed_data_to_serenity(&embed);
+                    let start = std::time::Instant::now();
                     let msg_id = self
                         .discord
                         .send_embed(self.post_channel, serenity_embed)
                         .await?;
+                    self.metrics.discord_api_duration.record(
+                        start.elapsed().as_secs_f64(),
+                        &[KeyValue::new("operation", "send_embed")],
+                    );
                     self.embed_message_id = Some(msg_id);
                 }
                 CallEffect::EditEmbed { embed } => {
                     if let Some(msg_id) = self.embed_message_id {
                         let serenity_embed = embed_data_to_serenity(&embed);
+                        let start = std::time::Instant::now();
                         self.discord
                             .edit_embed(self.post_channel, msg_id, serenity_embed)
                             .await?;
+                        self.metrics.discord_api_duration.record(
+                            start.elapsed().as_secs_f64(),
+                            &[KeyValue::new("operation", "edit_embed")],
+                        );
                     }
                 }
                 CallEffect::DeleteEmbed => {
                     if let Some(msg_id) = self.embed_message_id {
-                        if let Err(e) =
-                            self.discord.delete_message(self.post_channel, msg_id).await
+                        let start = std::time::Instant::now();
+                        if let Err(e) = self.discord.delete_message(self.post_channel, msg_id).await
                         {
                             tracing::warn!(error = %e, "failed to delete empty call embed");
                         }
+                        self.metrics.discord_api_duration.record(
+                            start.elapsed().as_secs_f64(),
+                            &[KeyValue::new("operation", "delete_embed")],
+                        );
                     }
                 }
                 CallEffect::AttachAudio {
@@ -181,6 +211,7 @@ impl CallHandler {
                 } => {
                     if let Some(msg_id) = self.embed_message_id {
                         let serenity_embed = embed_data_to_serenity(&embed);
+                        let start = std::time::Instant::now();
                         if let Err(e) = self
                             .discord
                             .edit_embed_with_attachment(
@@ -194,14 +225,20 @@ impl CallHandler {
                         {
                             tracing::warn!(error = %e, "failed to attach audio to call embed");
                         }
+                        self.metrics.discord_api_duration.record(
+                            start.elapsed().as_secs_f64(),
+                            &[KeyValue::new("operation", "attach_audio")],
+                        );
                     }
                 }
                 CallEffect::Transcribe { audio } => {
                     if !audio.is_empty() {
+                        let start = std::time::Instant::now();
                         let text = self.whisperer.transcribe(audio).await?;
+                        self.metrics
+                            .transcription_duration
+                            .record(start.elapsed().as_secs_f64(), &[]);
                         let followup = self.state.on_transcription(&text);
-                        // on_transcription never emits Transcribe, so this won't loop.
-                        // Insert at front to preserve ordering relative to remaining effects.
                         for (i, e) in followup.into_iter().enumerate() {
                             queue.insert(i, e);
                         }
@@ -248,12 +285,12 @@ impl CallHandler {
             detector.process(&samples);
 
             // Check for CTCSS early-fire to start notch filtering as soon as possible
-            if let Some(ctcss_freq) = detector.take_early_ctcss() {
-                if self.notch_filter.is_none() {
-                    tracing::info!(freq = ctcss_freq, "CTCSS early-fire, starting notch filter");
-                    let filter = NotchFilter::new(16000, ctcss_freq, 30.0);
-                    self.notch_filter = Some(filter);
-                }
+            if let Some(ctcss_freq) = detector.take_early_ctcss()
+                && self.notch_filter.is_none()
+            {
+                tracing::info!(freq = ctcss_freq, "CTCSS early-fire, starting notch filter");
+                let filter = NotchFilter::new(16000, ctcss_freq, 30.0);
+                self.notch_filter = Some(filter);
             }
         }
 
@@ -263,8 +300,8 @@ impl CallHandler {
         }
 
         // Compute energy for silence detection
-        let energy: f64 = samples.iter().map(|&s| (s as f64) * (s as f64)).sum();
-        let sample_count = samples.len() as u64;
+        let energy: f64 = samples.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
+        let sample_count: u32 = samples.len().try_into().expect("audio chunk exceeds u32");
 
         if let Some(enc) = &mut self.ogg_encoder {
             enc.process(&samples)?;
@@ -281,11 +318,12 @@ impl CallHandler {
         }
 
         let buffer_len = self.audio_buffer.len();
-        let audio_drain: Vec<f32> = if buffer_len >= self.buffer_threshold() {
-            self.audio_buffer.drain(..).collect()
-        } else {
-            Vec::new()
-        };
+        let audio_drain: Vec<f32> =
+            if buffer_len >= buffer_threshold(self.config.buffer_duration_ms) {
+                self.audio_buffer.drain(..).collect()
+            } else {
+                Vec::new()
+            };
 
         let effects = self
             .state
@@ -293,11 +331,6 @@ impl CallHandler {
         self.process_effects(effects).await?;
 
         Ok(())
-    }
-
-    fn buffer_threshold(&self) -> usize {
-        let ms = usize::try_from(self.buffer_duration_ms).unwrap_or(usize::MAX);
-        ms.saturating_mul(16)
     }
 
     async fn finish_tone_detection(&mut self) -> Result<()> {
@@ -339,6 +372,46 @@ impl CallHandler {
         Ok(())
     }
 
+    /// Handle a PTT boundary within a coalesced call.
+    /// Flushes audio for transcription and marks the boundary, but keeps the handler alive.
+    async fn handle_ptt_end(&mut self, call_data: Option<Box<proto::CallData>>) -> Result<()> {
+        // Flush resampler
+        if let Some(resampler) = &mut self.resampler {
+            let mut flushed = resampler.flush()?;
+            if let Some(filter) = &mut self.notch_filter {
+                filter.process(&mut flushed);
+            }
+            if let Some(enc) = &mut self.ogg_encoder {
+                enc.process(&flushed)?;
+            }
+            self.audio_buffer.extend_from_slice(&flushed);
+        }
+
+        // Force-finish tone detection if still active (short call)
+        if self.tone_detector.is_some() {
+            self.finish_tone_detection().await?;
+        }
+
+        // Transcribe remaining audio
+        if !self.audio_buffer.is_empty() {
+            let audio: Vec<f32> = std::mem::take(&mut self.audio_buffer);
+            if !audio.is_empty() {
+                let text = self.whisperer.transcribe(audio).await?;
+                let effects = self.state.on_transcription(&text);
+                self.process_effects(effects).await?;
+            }
+        }
+
+        // Let state machine record PTT boundary
+        let effects = self.state.on_ptt_end(call_data.as_deref());
+        self.process_effects(effects).await?;
+
+        // Reset resampler for next PTT (may have different sample rate)
+        self.resampler = None;
+
+        Ok(())
+    }
+
     async fn handle_end(&mut self, call_data: Option<Box<proto::CallData>>) -> Result<()> {
         // Flush resampler
         if let Some(resampler) = &mut self.resampler {
@@ -368,15 +441,16 @@ impl CallHandler {
         }
 
         // Finalize OGG encoder
-        let ogg_data = self.ogg_encoder.take().and_then(|encoder| {
-            match encoder.finish() {
+        let ogg_data = self
+            .ogg_encoder
+            .take()
+            .and_then(|encoder| match encoder.finish() {
                 Ok(data) => Some(data),
                 Err(e) => {
                     tracing::warn!(error = %e, "failed to encode OGG audio");
                     None
                 }
-            }
-        });
+            });
 
         // Let the state machine decide what to do
         let effects = self.state.on_end(call_data.as_deref(), ogg_data);
@@ -384,6 +458,12 @@ impl CallHandler {
 
         Ok(())
     }
+}
+
+fn buffer_threshold(buffer_duration_ms: u64) -> usize {
+    usize::try_from(buffer_duration_ms)
+        .unwrap_or(usize::MAX)
+        .saturating_mul(16)
 }
 
 fn decode_audio(bytes: &[u8]) -> Vec<f32> {

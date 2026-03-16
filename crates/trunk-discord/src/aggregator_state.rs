@@ -14,7 +14,10 @@ pub enum AggEffect {
     /// Post a new embed into the current hourly thread.
     PostEmbed { embed: EmbedData },
     /// Edit an existing pinned embed (recorder table or activity summary).
-    EditEmbed { target: EmbedTarget, embed: EmbedData },
+    EditEmbed {
+        target: EmbedTarget,
+        embed: EmbedData,
+    },
     /// Create a new hourly thread with the given name.
     CreateThread { name: String },
     /// Persist an activity snapshot to the database.
@@ -34,7 +37,6 @@ pub struct ActivitySnapshot {
     pub signal_counts: HashMap<String, u64>,
     pub trunk_msg_counts: HashMap<String, (u64, u64)>,
     pub unit_counts: HashMap<String, u64>,
-    pub decode_rates: Vec<(String, i32)>,
     pub active_calls: Option<usize>,
 }
 
@@ -55,15 +57,6 @@ impl FormatEmbed for proto::SetupConfigEvent {
                 sys.short_name,
                 sys.sys_num,
                 format_system_type(sys.system_type)
-            );
-        }
-        for src in &self.sources {
-            let _ = writeln!(
-                text,
-                "Source {}: {} @ {:.3} MHz",
-                src.src_num,
-                src.driver,
-                src.center_freq / 1_000_000.0
             );
         }
         text
@@ -157,34 +150,10 @@ fn build_recorder_table(recorders: &HashMap<i32, proto::RecorderInfo>) -> String
     ids.sort_unstable();
 
     let mut table = String::from("```\n");
-    let _ = writeln!(
-        table,
-        "{:<4} {:<8} {:>12} {:>10} State",
-        "ID", "Type", "Freq (MHz)", "TG"
-    );
+    let _ = writeln!(table, "{:<4} {:>10}", "ID", "Freq Err");
     for id in ids {
         let rec = &recorders[&id];
-        let state = if rec.is_active {
-            "active"
-        } else if rec.is_idle {
-            "idle"
-        } else {
-            "—"
-        };
-        let tg = if rec.talkgroup != 0 {
-            rec.talkgroup.to_string()
-        } else {
-            "—".to_string()
-        };
-        let _ = writeln!(
-            table,
-            "{:<4} {:<8} {:>12.4} {:>10} {}",
-            rec.id,
-            rec.r#type,
-            rec.freq / 1_000_000.0,
-            tg,
-            state,
-        );
+        let _ = writeln!(table, "{:<4} {:>+10}", rec.id, rec.freq_error);
     }
     table.push_str("```");
     table
@@ -224,7 +193,6 @@ pub struct AggregatorState {
     signal_counts: HashMap<String, u64>,
     trunk_message_counts: HashMap<String, (u64, u64)>,
     unit_counts: HashMap<String, u64>,
-    latest_rates: Option<proto::SystemRatesEvent>,
     latest_calls_active: Option<usize>,
 
     // Hourly thread tracking
@@ -245,7 +213,6 @@ impl AggregatorState {
             signal_counts: HashMap::new(),
             trunk_message_counts: HashMap::new(),
             unit_counts: HashMap::new(),
-            latest_rates: None,
             latest_calls_active: None,
             current_hour: String::new(),
             has_thread: false,
@@ -319,19 +286,13 @@ impl AggregatorState {
                     .as_ref()
                     .map_or_else(|| "unknown".to_string(), |s| s.short_name.clone());
                 let msg_count = e.messages.len() as u64;
-                let entry = self
-                    .trunk_message_counts
-                    .entry(sys_name)
-                    .or_insert((0, 0));
+                let entry = self.trunk_message_counts.entry(sys_name).or_insert((0, 0));
                 entry.0 += msg_count;
                 entry.1 += 1;
             }
             AggMessage::Unit(e) => {
                 let event_type = format_unit_type(e.r#type);
                 *self.unit_counts.entry(event_type).or_insert(0) += 1;
-            }
-            AggMessage::SystemRates(e) => {
-                self.latest_rates = Some(e);
             }
             AggMessage::CallsActive(e) => {
                 self.latest_calls_active = Some(e.calls.len());
@@ -355,16 +316,6 @@ impl AggregatorState {
             signal_counts: self.signal_counts.clone(),
             trunk_msg_counts: self.trunk_message_counts.clone(),
             unit_counts: self.unit_counts.clone(),
-            decode_rates: self
-                .latest_rates
-                .as_ref()
-                .map(|r| {
-                    r.systems
-                        .iter()
-                        .map(|s| (s.short_name.clone(), s.decode_rate))
-                        .collect()
-                })
-                .unwrap_or_default(),
             active_calls: self.latest_calls_active,
         };
         effects.push(AggEffect::InsertActivity { snapshot });
@@ -396,7 +347,6 @@ impl AggregatorState {
         !self.signal_counts.is_empty()
             || !self.trunk_message_counts.is_empty()
             || !self.unit_counts.is_empty()
-            || self.latest_rates.is_some()
             || self.latest_calls_active.is_some()
     }
 
@@ -472,19 +422,6 @@ impl AggregatorState {
             });
         }
 
-        if let Some(rates) = self.latest_rates.take() {
-            let text: Vec<String> = rates
-                .systems
-                .iter()
-                .map(|s| format!("{}: {} msg/s", s.short_name, s.decode_rate))
-                .collect();
-            fields.push(EmbedField {
-                name: "Decode Rates".into(),
-                value: text.join(", "),
-                inline: true,
-            });
-        }
-
         if let Some(count) = self.latest_calls_active.take() {
             fields.push(EmbedField {
                 name: "Active Calls".into(),
@@ -510,7 +447,6 @@ pub enum AggMessage {
     Signal(Box<proto::SignalEvent>),
     TrunkMessage(proto::TrunkMessageEvent),
     Unit(proto::UnitEvent),
-    SystemRates(proto::SystemRatesEvent),
     CallsActive(proto::CallsActiveEvent),
     SetupRecorder(proto::SetupRecorderEvent),
     SetupSystem(proto::SetupSystemEvent),
@@ -544,7 +480,6 @@ mod tests {
                 system_type: 0,
                 ..Default::default()
             }],
-            sources: vec![],
         };
 
         let effects = s.on_message(AggMessage::SetupConfig(event.clone()));
@@ -594,11 +529,6 @@ mod tests {
         let event1 = proto::SetupRecorderEvent {
             recorder: Some(proto::RecorderInfo {
                 id: 1,
-                r#type: "P25".into(),
-                freq: 851_125_000.0,
-                talkgroup: 12345,
-                is_active: true,
-                is_idle: false,
                 ..Default::default()
             }),
         };
@@ -610,11 +540,6 @@ mod tests {
         let event2 = proto::SetupRecorderEvent {
             recorder: Some(proto::RecorderInfo {
                 id: 2,
-                r#type: "P25".into(),
-                freq: 852_000_000.0,
-                talkgroup: 0,
-                is_active: false,
-                is_idle: true,
                 ..Default::default()
             }),
         };
@@ -681,12 +606,16 @@ mod tests {
         })));
 
         let effects = s.on_flush(1000);
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, AggEffect::InsertActivity { .. })));
-        assert!(effects
-            .iter()
-            .any(|e| matches!(e, AggEffect::PostEmbed { .. })));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, AggEffect::InsertActivity { .. }))
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, AggEffect::PostEmbed { .. }))
+        );
     }
 
     #[test]

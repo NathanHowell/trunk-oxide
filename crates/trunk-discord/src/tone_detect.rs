@@ -444,7 +444,7 @@ enum StreamingState {
     EarlyWatch,
     /// At least one tone window seen; watching for a silence gap.
     ToneActive { consecutive_silent: usize },
-    /// Detection finished (early-exit, silence gap, or max_samples).
+    /// Detection finished (early-exit, silence gap, or `max_samples`).
     Done,
 }
 
@@ -575,7 +575,7 @@ impl ToneDetector {
     }
 
     /// Poll for a CTCSS early-fire event. Returns `Some(freq)` once, then `None` forever.
-    pub fn take_early_ctcss(&mut self) -> Option<f32> {
+    pub const fn take_early_ctcss(&mut self) -> Option<f32> {
         self.pending_ctcss.take()
     }
 
@@ -608,9 +608,7 @@ impl ToneDetector {
                     self.streaming_state = StreamingState::Done;
                 }
             }
-            StreamingState::ToneActive {
-                consecutive_silent,
-            } => {
+            StreamingState::ToneActive { consecutive_silent } => {
                 if last_has_tone {
                     *consecutive_silent = 0;
                 } else {
@@ -1323,10 +1321,7 @@ mod tests {
             }
         }
 
-        assert!(
-            det.is_complete(),
-            "should complete after silence gap"
-        );
+        assert!(det.is_complete(), "should complete after silence gap");
         // Should complete around 4s + 200ms gap = ~4.2s = ~67,200 samples
         let completed_at = completed_at.unwrap();
         assert!(
@@ -1340,7 +1335,11 @@ mod tests {
             .tones
             .iter()
             .any(|t| matches!(t, DetectedTone::TwoTone { .. }));
-        assert!(has_two_tone, "should detect two-tone, got: {:?}", result.tones);
+        assert!(
+            has_two_tone,
+            "should detect two-tone, got: {:?}",
+            result.tones
+        );
     }
 
     #[test]
@@ -1390,8 +1389,7 @@ mod tests {
             .map(|i| {
                 let t = i as f32 / sr as f32;
                 let ctcss = 0.15 * (2.0 * PI * 118.8 * t).sin();
-                let voice = 0.3 * (2.0 * PI * 350.0 * t).sin()
-                    + 0.2 * (2.0 * PI * 800.0 * t).sin();
+                let voice = 0.3 * (2.0 * PI * 350.0 * t).sin() + 0.2 * (2.0 * PI * 800.0 * t).sin();
                 ctcss + voice
             })
             .collect();
@@ -1410,15 +1408,8 @@ mod tests {
             }
         }
 
-        assert!(
-            early_ctcss.is_some(),
-            "should early-fire CTCSS"
-        );
-        assert_eq!(
-            early_ctcss.unwrap(),
-            118.8,
-            "should detect 118.8 Hz CTCSS"
-        );
+        assert!(early_ctcss.is_some(), "should early-fire CTCSS");
+        assert_eq!(early_ctcss.unwrap(), 118.8, "should detect 118.8 Hz CTCSS");
         // Should fire within ~1s (CTCSS needs 200ms windows, 5 consecutive = ~600ms minimum)
         assert!(
             early_at < sr as usize * 2,

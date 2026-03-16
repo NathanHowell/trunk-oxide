@@ -10,7 +10,7 @@ use crate::aggregator::AggregatorMessage;
 
 // ── Keys ─────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Hash, Eq, PartialEq)]
+#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
 pub struct CallKey {
     pub sys_num: SysNum,
     pub talkgroup: Talkgroup,
@@ -184,13 +184,13 @@ impl DispatcherState {
 
         // Check if this talkgroup is coalescing (between PTTs)
         if self.coalescing_calls.remove(&key).is_some() {
-            self.active_calls.insert(key.clone(), Instant::now());
+            self.active_calls.insert(key, Instant::now());
             effects.push(DispatchEffect::CoalesceResume { key, call });
             return effects;
         }
 
         // Normal path: register as active immediately, then resolve channel
-        self.active_calls.insert(key.clone(), Instant::now());
+        self.active_calls.insert(key, Instant::now());
         effects.push(DispatchEffect::ResolveChannel { key, call });
 
         effects
@@ -241,7 +241,7 @@ impl DispatcherState {
         // within one logical call). Discord-side coalescing would prevent
         // conventional calls from ever ending.
         if !self.coalesce_timeout.is_zero() && !call_data.is_conventional {
-            self.coalescing_calls.insert(key.clone(), Instant::now());
+            self.coalescing_calls.insert(key, Instant::now());
             return vec![DispatchEffect::PttEnd {
                 key,
                 call_data: event.call_data.map(Box::new),
@@ -297,7 +297,7 @@ impl DispatcherState {
         for (key, started_at) in &self.active_calls {
             let age = now.duration_since(*started_at);
             if age > MAX_CALL_AGE {
-                reap_keys.push((key.clone(), age));
+                reap_keys.push((*key, age));
             }
         }
 
@@ -328,7 +328,7 @@ impl DispatcherState {
         let mut effects = Vec::new();
         self.coalescing_calls.retain(|key, entered_at| {
             if now.duration_since(*entered_at) > self.coalesce_timeout {
-                effects.push(DispatchEffect::CoalesceTimeout { key: key.clone() });
+                effects.push(DispatchEffect::CoalesceTimeout { key: *key });
                 false
             } else {
                 true
@@ -445,7 +445,7 @@ mod tests {
             sys_num: SysNum(1),
             talkgroup: Talkgroup(12345),
         };
-        s.active_calls.insert(key.clone(), Instant::now());
+        s.active_calls.insert(key, Instant::now());
 
         let sample = proto::AudioSample {
             sys_num: 1,
@@ -706,7 +706,7 @@ mod tests {
             talkgroup: Talkgroup(12345),
         };
         s.active_calls.insert(
-            key.clone(),
+            key,
             Instant::now() - std::time::Duration::from_secs(700),
         );
 
@@ -726,7 +726,7 @@ mod tests {
             sys_num: SysNum(1),
             talkgroup: Talkgroup(12345),
         };
-        s.active_calls.insert(key.clone(), Instant::now());
+        s.active_calls.insert(key, Instant::now());
 
         let effects = s.on_reap_tick();
         assert!(effects.is_empty());
@@ -855,7 +855,7 @@ mod tests {
         };
         // Simulate an entry that's already expired
         s.coalescing_calls
-            .insert(key.clone(), Instant::now() - Duration::from_millis(200));
+            .insert(key, Instant::now() - Duration::from_millis(200));
 
         let effects = s.on_coalesce_tick();
         assert!(
@@ -873,7 +873,7 @@ mod tests {
             sys_num: SysNum(1),
             talkgroup: Talkgroup(12345),
         };
-        s.coalescing_calls.insert(key.clone(), Instant::now());
+        s.coalescing_calls.insert(key, Instant::now());
 
         let effects = s.on_coalesce_tick();
         assert!(effects.is_empty());
@@ -889,7 +889,7 @@ mod tests {
         };
         // This shouldn't happen in practice, but verify it's safe
         s.coalescing_calls
-            .insert(key.clone(), Instant::now() - Duration::from_secs(100));
+            .insert(key, Instant::now() - Duration::from_secs(100));
         let effects = s.on_coalesce_tick();
         assert!(effects.is_empty());
     }

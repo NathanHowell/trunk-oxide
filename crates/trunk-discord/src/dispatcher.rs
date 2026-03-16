@@ -251,8 +251,8 @@ impl DispatchPump {
                 DispatchEffect::ResolveChannel { key, call } => {
                     // Create mpsc for buffering audio during resolution
                     let (tx, rx) = mpsc::channel(1024);
-                    self.calls.insert(key.clone(), ActiveCall { tx });
-                    self.pending_rx.insert(key.clone(), rx);
+                    self.calls.insert(key, ActiveCall { tx });
+                    self.pending_rx.insert(key, rx);
 
                     let ctx = Arc::clone(&self.ctx);
                     let resolve_tx = self.resolve_tx.clone();

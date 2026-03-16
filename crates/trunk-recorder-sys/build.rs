@@ -70,8 +70,8 @@ fn main() {
     // Cargo doesn't expose target-cpu to build scripts, so we extract it from
     // CARGO_ENCODED_RUSTFLAGS (set by .cargo/config.toml [target.*] rustflags).
     if let Some(march) = target_cpu_from_rustflags() {
-        cmake_cfg.cflag(&format!("-march={march}"));
-        cmake_cfg.cxxflag(&format!("-march={march}"));
+        cmake_cfg.cflag(format!("-march={march}"));
+        cmake_cfg.cxxflag(format!("-march={march}"));
     }
 
     let cmake_dst = cmake_cfg.build();
@@ -171,11 +171,21 @@ fn compute_gnuradio_version(version: &str) -> u32 {
         | (patch % 10)
 }
 
-/// Find boost library directory
-fn find_boost_lib() -> Option<PathBuf> {
+/// Find a boost directory by probing pkg-config, brew, and system paths.
+///
+/// `pkg_config_paths` selects which paths from pkg-config to check (e.g. `link_paths` or `include_paths`).
+/// `subdir` is appended to the brew prefix (e.g. "lib" or "include").
+/// `system_paths` are fallback directories to check.
+/// `exists_check` verifies a candidate path actually has the expected content.
+fn find_boost_path(
+    pkg_config_paths: fn(&pkg_config::Library) -> &[PathBuf],
+    subdir: &str,
+    system_paths: &[&str],
+    exists_check: fn(&PathBuf) -> bool,
+) -> Option<PathBuf> {
     // Try pkg-config first
     if let Ok(boost) = pkg_config::Config::new().probe("boost")
-        && let Some(path) = boost.link_paths.first()
+        && let Some(path) = pkg_config_paths(&boost).first()
     {
         return Some(path.clone());
     }
@@ -187,16 +197,16 @@ fn find_boost_lib() -> Option<PathBuf> {
         && output.status.success()
     {
         let prefix = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let lib = PathBuf::from(format!("{prefix}/lib"));
-        if lib.exists() {
-            return Some(lib);
+        let path = PathBuf::from(format!("{prefix}/{subdir}"));
+        if path.exists() {
+            return Some(path);
         }
     }
 
     // System paths
-    for p in ["/usr/lib", "/usr/local/lib"] {
+    for p in system_paths {
         let path = PathBuf::from(p);
-        if path.join("libboost_log.so").exists() || path.join("libboost_log.dylib").exists() {
+        if exists_check(&path) {
             return Some(path);
         }
     }
@@ -204,37 +214,24 @@ fn find_boost_lib() -> Option<PathBuf> {
     None
 }
 
+/// Find boost library directory
+fn find_boost_lib() -> Option<PathBuf> {
+    find_boost_path(
+        |lib| &lib.link_paths,
+        "lib",
+        &["/usr/lib", "/usr/local/lib"],
+        |path| path.join("libboost_log.so").exists() || path.join("libboost_log.dylib").exists(),
+    )
+}
+
 /// Find boost include directory
 fn find_boost_include() -> Option<PathBuf> {
-    // Try pkg-config first
-    if let Ok(boost) = pkg_config::Config::new().probe("boost")
-        && let Some(path) = boost.include_paths.first()
-    {
-        return Some(path.clone());
-    }
-
-    // Try brew
-    if let Ok(output) = std::process::Command::new("brew")
-        .args(["--prefix", "boost"])
-        .output()
-        && output.status.success()
-    {
-        let prefix = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        let inc = PathBuf::from(format!("{prefix}/include"));
-        if inc.exists() {
-            return Some(inc);
-        }
-    }
-
-    // System paths
-    for p in ["/usr/include", "/usr/local/include"] {
-        let path = PathBuf::from(p);
-        if path.join("boost/shared_ptr.hpp").exists() {
-            return Some(path);
-        }
-    }
-
-    None
+    find_boost_path(
+        |lib| &lib.include_paths,
+        "include",
+        &["/usr/include", "/usr/local/include"],
+        |path| path.join("boost/shared_ptr.hpp").exists(),
+    )
 }
 
 /// Generate minimal stub headers for optional dependencies that aren't installed.
@@ -305,12 +302,11 @@ fn target_cpu_from_rustflags() -> Option<String> {
         if let Some(rest) = flag.strip_prefix("target-cpu=") {
             return Some(rest.to_string());
         }
-        if flag == "-C" {
-            if let Some(next) = iter.next() {
-                if let Some(rest) = next.strip_prefix("target-cpu=") {
-                    return Some(rest.to_string());
-                }
-            }
+        if flag == "-C"
+            && let Some(next) = iter.next()
+            && let Some(rest) = next.strip_prefix("target-cpu=")
+        {
+            return Some(rest.to_string());
         }
     }
     None

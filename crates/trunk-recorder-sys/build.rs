@@ -54,10 +54,27 @@ fn main() {
 
     // ── Build trunk-recorder via CMake as static libraries ──
 
-    let cmake_dst = cmake::Config::new(&trunk_recorder_dir)
-        .define("CMAKE_INSTALL_LIBDIR", "lib")
-        .build_target("trunk_recorder_static")
-        .build();
+    let mut cmake_cfg = cmake::Config::new(&trunk_recorder_dir);
+    cmake_cfg.define("CMAKE_INSTALL_LIBDIR", "lib");
+    cmake_cfg.build_target("trunk_recorder_static");
+
+    // Match Cargo's optimization profile for the C++ build
+    let profile = std::env::var("PROFILE").unwrap();
+    if profile == "release" {
+        cmake_cfg.profile("Release");
+    } else {
+        cmake_cfg.profile("Debug");
+    }
+
+    // Pass through target-cpu as -march if set (e.g. znver2 for AMD Zen 2).
+    // Cargo doesn't expose target-cpu to build scripts, so we extract it from
+    // CARGO_ENCODED_RUSTFLAGS (set by .cargo/config.toml [target.*] rustflags).
+    if let Some(march) = target_cpu_from_rustflags() {
+        cmake_cfg.cflag(&format!("-march={march}"));
+        cmake_cfg.cxxflag(&format!("-march={march}"));
+    }
+
+    let cmake_dst = cmake_cfg.build();
 
     let cmake_build_dir = cmake_dst.join("build");
 
@@ -240,6 +257,27 @@ public:
             println!("cargo:warning=Generated compat stub for {header} (not found on system)");
         }
     }
+}
+
+/// Extract `-C target-cpu=<value>` from `CARGO_ENCODED_RUSTFLAGS` if present.
+/// This lets us pass the same `-march` to the C++ compiler via CMake.
+fn target_cpu_from_rustflags() -> Option<String> {
+    let flags = std::env::var("CARGO_ENCODED_RUSTFLAGS").ok()?;
+    let mut iter = flags.split('\x1f');
+    while let Some(flag) = iter.next() {
+        // Handles both `-C target-cpu=znver2` and `-C` `target-cpu=znver2`
+        if let Some(rest) = flag.strip_prefix("target-cpu=") {
+            return Some(rest.to_string());
+        }
+        if flag == "-C" {
+            if let Some(next) = iter.next() {
+                if let Some(rest) = next.strip_prefix("target-cpu=") {
+                    return Some(rest.to_string());
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Check if a header can be found via pkg-config include paths

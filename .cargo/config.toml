@@ -1,5 +1,2 @@
-[env]
-TRUNK_RECORDER_LIB_DIR = { value = "trunk-recorder/build", relative = true }
-
 [target.x86_64-unknown-linux-gnu]
-rustflags = ["-C", "target-cpu=znver2", "-C", "link-arg=-Wl,-rpath,$ORIGIN/../../../trunk-recorder/build"]
+rustflags = ["-C", "target-cpu=znver2"]

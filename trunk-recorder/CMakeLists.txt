@@ -108,6 +108,7 @@ set(GR_LIBEXEC_DIR      libexec)
 set(GR_PKG_LIBEXEC_DIR  ${GR_LIBEXEC_DIR}/${CMAKE_PROJECT_NAME})
 set(GRC_BLOCKS_DIR      ${GR_PKG_DATA_DIR}/grc/blocks)
 set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR})
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${PROJECT_BINARY_DIR})
 
 ########################################################################
 # Find gnuradio build dependencies
@@ -294,13 +295,11 @@ set_property(
 )
 
 ########################################################################
-# Shared library target (the only build output — driven by Rust FFI)
+# Static library target (linked directly into Rust binary via cargo)
 ########################################################################
-add_library(trunk_recorder_shared SHARED ${trunk_recorder_sources})
-# Override the global -fvisibility=hidden so symbols are exported
-target_compile_options(trunk_recorder_shared PRIVATE -fvisibility=default)
-set_target_properties(trunk_recorder_shared PROPERTIES OUTPUT_NAME "trunk-recorder")
-target_link_libraries(trunk_recorder_shared
+add_library(trunk_recorder_static STATIC ${trunk_recorder_sources})
+set_target_properties(trunk_recorder_static PROPERTIES OUTPUT_NAME "trunk-recorder")
+target_link_libraries(trunk_recorder_static
     gnuradio-op25_repeater
     ${Boost_LIBRARIES}
     ${GNURADIO_PMT_LIBRARIES}
@@ -313,12 +312,12 @@ target_link_libraries(trunk_recorder_shared
     ${UHD_LIBRARIES}
     ${GNURADIO_BLOCKS_LIBRARIES})
 if(GNURADIO_OSMOSDR_FOUND)
-  target_link_libraries(trunk_recorder_shared ${GNURADIO_OSMOSDR_LIBRARIES})
+  target_link_libraries(trunk_recorder_static ${GNURADIO_OSMOSDR_LIBRARIES})
 endif()
 
 message(STATUS "All libraries:" ${GNURADIO_ALL_LIBRARIES})
 if(NOT Gnuradio_VERSION VERSION_LESS "3.8")
-    target_link_libraries(trunk_recorder_shared
+    target_link_libraries(trunk_recorder_static
         gnuradio::gnuradio-analog
         gnuradio::gnuradio-blocks
         gnuradio::gnuradio-digital
@@ -326,12 +325,12 @@ if(NOT Gnuradio_VERSION VERSION_LESS "3.8")
         gnuradio::gnuradio-pmt)
 endif()
 
-target_include_directories(trunk_recorder_shared PRIVATE
+target_include_directories(trunk_recorder_static PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/trunk-recorder
     ${CMAKE_CURRENT_SOURCE_DIR}/lib
     ${CMAKE_CURRENT_SOURCE_DIR}/lib/op25_repeater/include)
 
-install(TARGETS trunk_recorder_shared LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(TARGETS trunk_recorder_static LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR})
 
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/trunk-recorder/" # source directory
     DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}/trunk-recorder" # target directory

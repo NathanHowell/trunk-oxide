@@ -3054,6 +3054,7 @@ dependencies = [
 name = "trunk-recorder-sys"
 version = "0.1.0"
 dependencies = [
+ "cmake",
  "cxx",
  "cxx-build",
  "pkg-config",

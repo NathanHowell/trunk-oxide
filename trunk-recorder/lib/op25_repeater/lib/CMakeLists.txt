@@ -118,7 +118,7 @@ list(APPEND op25_repeater_sources
     imbe_vocoder/v_uv_det.cc
 )
 
-add_library(gnuradio-op25_repeater SHARED ${op25_repeater_sources})
+add_library(gnuradio-op25_repeater STATIC ${op25_repeater_sources})
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     find_library(GR_FILTER_LIBRARY libgnuradio-filter.dylib )
     find_library(GR_PMT_LIBRARY libgnuradio-pmt.dylib )

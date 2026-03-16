@@ -12,5 +12,6 @@ cxx.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 
 [build-dependencies]
+cmake = "0.1"
 cxx-build.workspace = true
 pkg-config.workspace = true

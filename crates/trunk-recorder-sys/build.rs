@@ -99,7 +99,7 @@ fn main() {
     if let Some(boost_lib_dir) = find_boost_lib() {
         println!("cargo:rustc-link-search=native={}", boost_lib_dir.display());
     }
-    for lib in ["boost_log", "boost_log_setup"] {
+    for lib in ["boost_log", "boost_log_setup", "boost_thread", "boost_filesystem"] {
         println!("cargo:rustc-link-lib={lib}");
     }
 

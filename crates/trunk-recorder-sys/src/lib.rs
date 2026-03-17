@@ -469,6 +469,12 @@ pub mod ffi {
         );
     }
 
+    // ── Rust logging bridge (Boost.Log → tracing) ──
+
+    extern "Rust" {
+        fn rust_tracing_event(level: u8, message: &str);
+    }
+
     // ── Rust event notifier callable from C++ (GR thread → channel) ──
 
     extern "Rust" {
@@ -645,6 +651,20 @@ impl EventHandlerBox {
 #[allow(clippy::boxed_local)]
 fn drop_event_handler_box(_handler: Box<EventHandlerBox>) {
     // Box is dropped automatically
+}
+
+// ── Boost.Log → tracing bridge ──
+// Called from the custom Boost.Log sink backend in bridge.cpp.
+// Boost trivial severity: 0=trace, 1=debug, 2=info, 3=warning, 4=error, 5=fatal
+
+fn rust_tracing_event(level: u8, message: &str) {
+    match level {
+        0 => tracing::trace!(target: "trunk_recorder", "{message}"),
+        1 => tracing::debug!(target: "trunk_recorder", "{message}"),
+        2 => tracing::info!(target: "trunk_recorder", "{message}"),
+        3 => tracing::warn!(target: "trunk_recorder", "{message}"),
+        _ => tracing::error!(target: "trunk_recorder", "{message}"),
+    }
 }
 
 // ── Trampoline functions for C++-initiated callbacks ──

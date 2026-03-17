@@ -26,7 +26,10 @@
 #include "trunk-recorder/systems/system.h"
 #include "trunk-recorder/recorders/p25_recorder.h"
 
-#include "trunk-recorder/monitor_systems.h"
+#include <boost/log/core.hpp>
+#include <boost/log/expressions.hpp>
+#include <boost/log/sinks.hpp>
+#include <boost/log/trivial.hpp>
 
 // Forward declarations for functions provided by libtrunk-recorder.so
 bool setup_systems(Config &config, gr::top_block_sptr &tb,
@@ -380,11 +383,42 @@ double tr_system_get_control_channel_pwr(TrContext &ctx, int32_t sys_num) {
     return pwr;
 }
 
+// ── Boost.Log → Rust tracing sink ──
+
+namespace {
+
+class RustTracingSinkBackend
+    : public boost::log::sinks::basic_sink_backend<
+          boost::log::sinks::concurrent_feeding> {
+public:
+    void consume(const boost::log::record_view &rec) {
+        auto severity = rec[boost::log::trivial::severity];
+        uint8_t level = severity ? static_cast<uint8_t>(severity.get()) : 2;
+
+        auto msg = rec[boost::log::expressions::smessage];
+        if (msg) {
+            const auto &s = msg.get();
+            rust_tracing_event(level, rust::Str(s.data(), s.size()));
+        }
+    }
+};
+
+void install_rust_tracing_sink() {
+    auto core = boost::log::core::get();
+    core->remove_all_sinks();
+    using sink_t = boost::log::sinks::synchronous_sink<RustTracingSinkBackend>;
+    core->add_sink(boost::make_shared<sink_t>(
+        boost::make_shared<RustTracingSinkBackend>()));
+    // Let everything through — Rust's EnvFilter handles filtering
+    core->set_filter(boost::log::trivial::severity >= boost::log::trivial::trace);
+}
+
+} // anonymous namespace
+
 // ── Phase A: Loop Control ──
 
 void tr_start_gnuradio(TrContext &ctx) {
-    const char *env = std::getenv("RUST_LOG");
-    set_logging_level(env ? std::string(env) : "info");
+    install_rust_tracing_sink();
     ctx.impl->trunk_ctx.tb->start();
 }
 

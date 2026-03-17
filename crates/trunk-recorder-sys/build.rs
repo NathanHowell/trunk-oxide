@@ -108,6 +108,14 @@ fn main() {
     let mut build = cxx_build::bridge("src/lib.rs");
     build.file("cpp/bridge.cpp").std("c++17");
 
+    // Boost.Log uses different inline namespaces for static vs dynamic linking
+    // (v2s_mt_posix vs v2_mt_posix). On Linux, the shared library exports the
+    // dynamic variant, so we must define BOOST_LOG_DYN_LINK to match.
+    let target = std::env::var("TARGET").unwrap();
+    if target.contains("linux") {
+        build.define("BOOST_LOG_DYN_LINK", None);
+    }
+
     // Define GNURADIO_VERSION so trunk-recorder headers use correct conditionals
     build.define(
         "GNURADIO_VERSION",

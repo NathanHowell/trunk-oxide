@@ -7,7 +7,6 @@
 #include <cassert>
 #include <cstdlib>
 #include <cstring>
-#include <iostream>
 #include <limits>
 #include <map>
 
@@ -536,9 +535,9 @@ void tr_context_check_sources(TrContext &ctx) {
     for (auto &source : ctx.impl->trunk_ctx.sources) {
         bool samples = source->got_samples();
         if (!samples) {
-            std::cerr << "FATAL: Source " << source->get_num()
+            BOOST_LOG_TRIVIAL(fatal) << "Source " << source->get_num()
                       << " (" << source->get_device()
-                      << ") stopped receiving samples - will exit" << std::endl;
+                      << ") stopped receiving samples - will exit";
             throw std::runtime_error(
                 "Source " + std::to_string(source->get_num()) +
                 " (" + source->get_device() +

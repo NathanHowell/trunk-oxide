@@ -85,7 +85,6 @@ pub struct CallStateConfig {
 pub struct CallState {
     // Identity (immutable)
     talkgroup: i64,
-    talkgroup_alpha_tag: String,
     talkgroup_tag: String,
     freq: f64,
     short_name: String,
@@ -133,7 +132,6 @@ impl CallState {
 
         Self {
             talkgroup: call_info.talkgroup,
-            talkgroup_alpha_tag: call_info.talkgroup_alpha_tag.clone(),
             talkgroup_tag: call_info.talkgroup_tag.clone(),
             freq: call_info.freq,
             short_name: call_info.short_name.clone(),
@@ -442,10 +440,17 @@ impl CallState {
         final_duration: Option<Duration>,
         final_signal: Option<SignalDb>,
     ) -> EmbedData {
-        let title = if self.call_ended {
-            self.tag.clone()
-        } else {
-            format!("{} ...", self.tag)
+        let title = {
+            let base = if self.call_ended {
+                self.tag.clone()
+            } else {
+                format!("{} ...", self.tag)
+            };
+            if self.talkgroup_tag.is_empty() {
+                base
+            } else {
+                format!("{base} · {}", self.talkgroup_tag)
+            }
         };
 
         let colour = if self.call_ended {
@@ -466,7 +471,12 @@ impl CallState {
             colour,
             description,
             fields,
-            footer: self.start_time.format("%H:%M:%S UTC").to_string(),
+            footer: format!(
+                "TG {} · {} · {}",
+                self.talkgroup,
+                self.short_name,
+                self.start_time.format("%H:%M:%S UTC"),
+            ),
         }
     }
 
@@ -492,34 +502,11 @@ impl CallState {
     ) -> Vec<EmbedField> {
         let mut fields = Vec::new();
 
-        let tg_display = if self.talkgroup_alpha_tag.is_empty() {
-            self.talkgroup.to_string()
-        } else {
-            format!("{} — {}", self.talkgroup, self.talkgroup_alpha_tag)
-        };
-        fields.push(EmbedField {
-            name: "Talkgroup".into(),
-            value: tg_display,
-            inline: true,
-        });
         fields.push(EmbedField {
             name: "Frequency".into(),
             value: Freq(self.freq).to_string(),
             inline: true,
         });
-        fields.push(EmbedField {
-            name: "System".into(),
-            value: self.short_name.clone(),
-            inline: true,
-        });
-
-        if !self.talkgroup_tag.is_empty() {
-            fields.push(EmbedField {
-                name: "Category".into(),
-                value: self.talkgroup_tag.clone(),
-                inline: true,
-            });
-        }
 
         if self.encrypted {
             fields.push(EmbedField {
@@ -535,7 +522,7 @@ impl CallState {
             fields.push(EmbedField {
                 name: "Tones".into(),
                 value: tones_str.join(", "),
-                inline: false,
+                inline: true,
             });
         }
 
@@ -543,7 +530,7 @@ impl CallState {
             fields.push(EmbedField {
                 name: "Events".into(),
                 value: self.events.join("\n"),
-                inline: false,
+                inline: true,
             });
         }
 
@@ -700,7 +687,7 @@ mod tests {
         let CallEffect::SendEmbed { embed } = &effects[0] else {
             panic!("expected SendEmbed");
         };
-        assert_eq!(embed.title, "Fire Dispatch ...");
+        assert_eq!(embed.title, "Fire Dispatch ... · Fire");
         assert_eq!(embed.colour, 0x0095_a5a6); // grey (not ended)
         assert_eq!(embed.description.as_deref(), Some("hello world"));
         assert!(s.has_embed);
@@ -1005,7 +992,7 @@ mod tests {
         s.on_start();
         s.call_ended = true;
         let embed = s.build_embed();
-        assert_eq!(embed.title, "Fire Dispatch"); // no ellipsis
+        assert_eq!(embed.title, "Fire Dispatch · Fire"); // no ellipsis
         assert_eq!(embed.colour, 0x002e_cc71); // green
     }
 

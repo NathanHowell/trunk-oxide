@@ -413,6 +413,34 @@ impl CallHandler {
     }
 
     async fn handle_end(&mut self, call_data: Option<Box<proto::CallData>>) -> Result<()> {
+        // Best-effort pre-finalization: failures here must not prevent on_end().
+        if let Err(e) = self.flush_before_end().await {
+            tracing::warn!(error = %e, "pre-finalization failed, proceeding to end call");
+        }
+
+        // Finalize OGG encoder
+        let ogg_data = self
+            .ogg_encoder
+            .take()
+            .and_then(|encoder| match encoder.finish() {
+                Ok(data) => Some(data),
+                Err(e) => {
+                    tracing::warn!(error = %e, "failed to encode OGG audio");
+                    None
+                }
+            });
+
+        // Always let the state machine finalize — this is what turns the embed
+        // green / deletes it / persists to DB. Skipping this orphans the embed.
+        let effects = self.state.on_end(call_data.as_deref(), ogg_data);
+        self.process_effects(effects).await?;
+
+        Ok(())
+    }
+
+    /// Flush resampler, finish tone detection, and transcribe remaining audio.
+    /// Called as best-effort before `on_end`; errors are logged, not fatal.
+    async fn flush_before_end(&mut self) -> Result<()> {
         // Flush resampler
         if let Some(resampler) = &mut self.resampler {
             let mut flushed = resampler.flush()?;
@@ -439,22 +467,6 @@ impl CallHandler {
                 self.process_effects(effects).await?;
             }
         }
-
-        // Finalize OGG encoder
-        let ogg_data = self
-            .ogg_encoder
-            .take()
-            .and_then(|encoder| match encoder.finish() {
-                Ok(data) => Some(data),
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to encode OGG audio");
-                    None
-                }
-            });
-
-        // Let the state machine decide what to do
-        let effects = self.state.on_end(call_data.as_deref(), ogg_data);
-        self.process_effects(effects).await?;
 
         Ok(())
     }

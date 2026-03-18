@@ -218,7 +218,7 @@ impl DispatchPump {
                 DispatchEffect::ReapCall { key } => {
                     self.ctx.metrics.calls_reaped.add(1, &[]);
                     if let Some(active) = self.calls.remove(&key) {
-                        let _ = active.tx.try_send(CallMessage::End(None));
+                        let _ = active.tx.send(CallMessage::End(None)).await;
                     }
                 }
 

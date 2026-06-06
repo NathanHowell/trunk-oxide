@@ -966,10 +966,12 @@ impl TrunkStateMachine {
                     }
                 }
 
-                if self.update_call_source(idx, msg.source, &mut effects) {
-                    let call_id = self.calls[idx].id;
-                    effects.push(Effect::EmitCallStart { call_id });
-                }
+                // Source changed: re-route to the new source (SetSource +
+                // EmitSignal inside update_call_source). Do NOT emit
+                // EmitCallStart — this is the same logical call already in
+                // progress, and a duplicate call_start orphans/duplicates the
+                // downstream embed (it is keyed by talkgroup, not call id).
+                self.update_call_source(idx, msg.source, &mut effects);
             } else {
                 // Retune: close current segment (if Recording), start new one
                 let entry = &mut self.calls[idx];
@@ -994,6 +996,10 @@ impl TrunkStateMachine {
                 }
 
                 entry.freq = msg.freq;
+                // Refresh the tracked source for the new freq so the next grant
+                // on it isn't misread as a source change (which would emit a
+                // spurious SetSource/EmitSignal).
+                entry.current_source_id = msg.source;
                 effects.push(Effect::SetFreq {
                     call_id: entry.id,
                     freq: msg.freq,
@@ -1098,9 +1104,9 @@ impl TrunkStateMachine {
                     entry.encrypted = true;
                 }
 
-                if Self::update_call_source_entry(entry, msg.source, &mut effects) {
-                    effects.push(Effect::EmitCallStart { call_id: entry.id });
-                }
+                // Source changed: re-route only (SetSource + EmitSignal). No
+                // EmitCallStart for an already-started call — see on_grant.
+                Self::update_call_source_entry(entry, msg.source, &mut effects);
             }
         }
 
@@ -2444,7 +2450,7 @@ mod tests {
     // ── Update message handling ──
 
     #[test]
-    fn update_with_source_change_emits_signal_and_call_start() {
+    fn update_with_source_change_emits_signal_not_call_start() {
         let mut sm = TrunkStateMachine::new(test_config());
 
         // Create an existing call via grant
@@ -2469,8 +2475,11 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, Effect::EmitSignal { source_id: 200, .. }))
         );
+        // A source change on an already-started call must NOT re-emit
+        // EmitCallStart — that produced duplicate downstream call_starts which
+        // orphaned the Discord embed (keyed by talkgroup).
         assert!(
-            effects
+            !effects
                 .iter()
                 .any(|e| matches!(e, Effect::EmitCallStart { .. }))
         );

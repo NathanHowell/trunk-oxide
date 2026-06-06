@@ -677,6 +677,25 @@ impl CallManager {
                         self.bridge.call_end(&data, &segments, is_conventional);
                     }
                 }
+            } else {
+                // A call in a should-conclude state but with no recorder tracked
+                // by the state machine (e.g. the recorder was dropped on a
+                // retune that never re-acquired one). Audio for this call has
+                // already streamed live to subscribers, so we MUST still emit
+                // call_end or the call never finalizes downstream — it lingers
+                // showing only a partial transcription. Stop any recorder the
+                // C++ side still holds first, so we don't re-leak the slot.
+                if ffi::call_has_recorder(handle) {
+                    let _ = ffi::call_stop_recording(handle.pin_mut());
+                }
+                let talkgroup = self
+                    .state
+                    .get_call_view(call_id)
+                    .map_or(0, |v| v.talkgroup());
+                tracing::warn!(talkgroup, ?state, "concluding call with no recorder");
+                let segments = self.build_proto_segments_final(call_id, final_freq, -1);
+                let data = self.build_call_data(call_id);
+                self.bridge.call_end(&data, &segments, is_conventional);
             }
         } else if matches!(state, CallState::Rejected(_)) {
             let segments = self.build_proto_segments_final(call_id, final_freq, -1);

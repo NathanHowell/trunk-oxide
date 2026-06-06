@@ -249,6 +249,18 @@ impl DispatchPump {
                 }
 
                 DispatchEffect::ResolveChannel { key, call } => {
+                    // Finalize any handler still registered for this key before
+                    // replacing it. on_call_start's overlap check (state-level
+                    // active_calls) usually emits EndCall first, but if the
+                    // state's active_calls desynced from this executor map (e.g.
+                    // a conventional call_end early-returned and dropped the key
+                    // from active_calls while the handler stayed here), that
+                    // EndCall never fires — and overwriting the sender below
+                    // would orphan the embed in its grey in-progress state.
+                    // self.calls is the source of truth for live handlers.
+                    if let Some(old) = self.calls.remove(&key) {
+                        let _ = old.tx.send(CallMessage::End(None)).await;
+                    }
                     // Create mpsc for buffering audio during resolution
                     let (tx, rx) = mpsc::channel(1024);
                     self.calls.insert(key, ActiveCall { tx });

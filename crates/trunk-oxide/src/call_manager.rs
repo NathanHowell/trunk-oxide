@@ -518,38 +518,43 @@ impl CallManager {
             None => return,
         };
 
-        let view = self.state.get_call_view(call_id);
-        if let Some(view) = view
-            && view.recorder().is_some()
-        {
-            let rec_num = view.recorder().unwrap();
-            let is_conventional = view.is_conventional();
-            let was_idle = view.state() == CallState::Idle;
-            drop(view);
-
-            let metrics = ffi::call_stop_recording(handle.pin_mut());
-
-            if let Some(view) = self.state.get_call_view(call_id) {
-                tracing::info!(
-                    short_name = %view.short_name(),
-                    rec_num = rec_num.0,
-                    talkgroup = view.talkgroup(),
-                    freq = %view.freq(),
-                    tdma = view.phase2_tdma(),
-                    slot = view.tdma_slot(),
-                    freq_error = format_args!("{:+.0} Hz", metrics.freq_error),
-                    "stopping recorder"
-                );
-            }
-
-            // Update signal/noise from conventional recorder metrics
-            if is_conventional {
-                self.state
-                    .feed_recorder_power(call_id, metrics.recorder_pwr, was_idle);
-            }
-
-            self.state.on_recorder_stopped(call_id);
+        // Consult the C++ Call — not the state machine — to decide whether a
+        // recorder is attached. On retune, on_grant clears entry.recorder
+        // *before* this StopRecording effect is processed, so a
+        // `view.recorder().is_some()` guard here would always be false and the
+        // old digital recorder would never be stopped, leaking the slot until
+        // the source's recorder pool is exhausted.
+        if !ffi::call_has_recorder(handle) {
+            return;
         }
+        let rec_num = ffi::call_get_recorder_num(handle);
+
+        let metrics = ffi::call_stop_recording(handle.pin_mut());
+
+        let mut is_conventional = false;
+        let mut was_idle = false;
+        if let Some(view) = self.state.get_call_view(call_id) {
+            is_conventional = view.is_conventional();
+            was_idle = view.state() == CallState::Idle;
+            tracing::info!(
+                short_name = %view.short_name(),
+                rec_num,
+                talkgroup = view.talkgroup(),
+                freq = %view.freq(),
+                tdma = view.phase2_tdma(),
+                slot = view.tdma_slot(),
+                freq_error = format_args!("{:+.0} Hz", metrics.freq_error),
+                "stopping recorder"
+            );
+        }
+
+        // Update signal/noise from conventional recorder metrics
+        if is_conventional {
+            self.state
+                .feed_recorder_power(call_id, metrics.recorder_pwr, was_idle);
+        }
+
+        self.state.on_recorder_stopped(call_id);
     }
 
     fn exec_conclude_call(&mut self, call_id: CallId) {

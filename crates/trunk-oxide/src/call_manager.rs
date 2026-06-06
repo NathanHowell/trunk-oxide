@@ -145,16 +145,20 @@ impl CallManager {
             .map(|i| i as i32)
     }
 
-    /// Suggested per-source ppm correction that would null the FLL frequency
-    /// error observed on a recording. `freq_error_hz > 0` means the signal sat
-    /// above the tuned center (we tuned low), which the rtlsdr ppm convention
-    /// (`LO ≈ f·(1 − ppm/1e6)`) corrects with a *more negative* ppm. Returns
-    /// the source's configured ppm unchanged when there's no error, so a logged
-    /// value drifting away from the config is a calibration signal.
+    /// Suggested per-source ppm correction that would pull the FLL frequency
+    /// error toward zero. `freq_error_hz > 0` means the signal sat above the
+    /// tuned center; empirically (confirmed against live readings on these
+    /// rtlsdr dongles) raising the ppm correction lowers a positive error, so
+    /// the suggestion adds the error-in-ppm to the configured value. Hardware
+    /// sensitivity is sub-unity and the offset drifts with temperature, so
+    /// converging on a dongle may take a step or two — treat this as a
+    /// first-order estimate, not an exact target. Returns the configured ppm
+    /// unchanged when there's no error, so a logged value drifting away from
+    /// the config is the calibration signal.
     fn preferred_ppm(&self, freq_hz: f64, freq_error_hz: i32) -> Option<f64> {
         let idx = usize::try_from(self.find_source(freq_hz)?).ok()?;
         let current = *self.source_ppms.get(idx)?;
-        Some(current - f64::from(freq_error_hz) / freq_hz * 1e6)
+        Some(current + f64::from(freq_error_hz) / freq_hz * 1e6)
     }
 
     /// Update a conventional channel's metrics entry by talkgroup + freq.

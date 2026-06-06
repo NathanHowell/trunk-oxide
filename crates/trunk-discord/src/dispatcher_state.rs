@@ -189,6 +189,26 @@ impl DispatcherState {
             return effects;
         }
 
+        // Overlapping start: a handler is already active for this talkgroup (a
+        // new grant arrived before the previous call ended — e.g. a duplicate
+        // call_start on source change, or genuinely back-to-back calls). The
+        // ResolveChannel below overwrites self.calls[key], dropping the old
+        // handler's sender; its run loop would then exit on the closed channel
+        // *without* finalizing, orphaning the embed in its grey in-progress
+        // state forever. Finalize the old handler first so its embed closes.
+        if self.active_calls.contains_key(&key) {
+            effects.push(DispatchEffect::Log {
+                message: format!(
+                    "overlapping call_start for tg {} sys {}: finalizing previous handler",
+                    key.talkgroup.0, key.sys_num.0
+                ),
+            });
+            effects.push(DispatchEffect::EndCall {
+                key,
+                call_data: None,
+            });
+        }
+
         // Normal path: register as active immediately, then resolve channel
         self.active_calls.insert(key, Instant::now());
         effects.push(DispatchEffect::ResolveChannel { key, call });
@@ -582,6 +602,77 @@ mod tests {
             !effects
                 .iter()
                 .any(|e| matches!(e, DispatchEffect::EndCall { .. }))
+        );
+    }
+
+    #[test]
+    fn overlapping_call_start_finalizes_previous_handler() {
+        let mut s = DispatcherState::new(0);
+        // First call_start for the talkgroup, resolved into an active handler.
+        s.on_event(make_call_start(1, 12345));
+        s.on_channel_resolved(
+            proto::CallInfo {
+                sys_num: 1,
+                talkgroup: 12345,
+                ..Default::default()
+            },
+            ChannelId::from(999),
+        );
+
+        // Second call_start arrives before the first ended (overlap). It must
+        // end the previous handler before resolving the new one, otherwise the
+        // first embed is orphaned grey when its sender is overwritten.
+        let effects = s.on_event(make_call_start(1, 12345));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, DispatchEffect::EndCall { .. })),
+            "overlapping call_start must finalize the previous handler"
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, DispatchEffect::ResolveChannel { .. })),
+            "overlapping call_start must still resolve the new call"
+        );
+
+        // The talkgroup is still active (now owned by the new call).
+        let key = CallKey {
+            sys_num: SysNum(1),
+            talkgroup: Talkgroup(12345),
+        };
+        assert!(s.is_active(&key));
+    }
+
+    #[test]
+    fn coalescing_call_start_does_not_finalize() {
+        // A call_start that resumes a coalescing call must NOT emit EndCall —
+        // it resumes the same handler rather than replacing it.
+        let mut s = DispatcherState::new(5000);
+        s.on_event(make_call_start(1, 12345));
+        s.on_channel_resolved(
+            proto::CallInfo {
+                sys_num: 1,
+                talkgroup: 12345,
+                ..Default::default()
+            },
+            ChannelId::from(999),
+        );
+        // End moves it to coalescing (between PTTs).
+        s.on_event(make_call_end(1, 12345));
+
+        let effects = s.on_event(make_call_start(1, 12345));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, DispatchEffect::CoalesceResume { .. })),
+            "coalescing resume expected"
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, DispatchEffect::EndCall { .. })),
+            "coalescing resume must not finalize the handler"
         );
     }
 

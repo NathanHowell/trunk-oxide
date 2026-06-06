@@ -62,6 +62,8 @@ pub struct CallManager {
     handles: HashMap<CallId, UniquePtr<TrCall>>,
     /// Per-source frequency coverage, indexed by source position.
     source_ranges: Vec<RangeInclusive<f64>>,
+    /// Per-source configured ppm correction, indexed by source position.
+    source_ppms: Vec<f64>,
     calls_started: Counter<u64>,
     calls_ended: Counter<u64>,
     recorder_denied: Counter<u64>,
@@ -75,6 +77,7 @@ impl CallManager {
         config: CallManagerConfig,
         bridge: Arc<EventBridge>,
         source_ranges: Vec<RangeInclusive<f64>>,
+        source_ppms: Vec<f64>,
         conv_metrics: Arc<Mutex<ConventionalMetricsSnapshot>>,
     ) -> Self {
         // Pre-populate conventional channel metrics entries.
@@ -109,6 +112,7 @@ impl CallManager {
             bridge,
             handles: HashMap::new(),
             source_ranges,
+            source_ppms,
             calls_started: meter
                 .u64_counter("trunk.oxide.calls_started")
                 .with_description("Total calls started")
@@ -139,6 +143,18 @@ impl CallManager {
             .iter()
             .position(|r| r.contains(&freq_hz))
             .map(|i| i as i32)
+    }
+
+    /// Suggested per-source ppm correction that would null the FLL frequency
+    /// error observed on a recording. `freq_error_hz > 0` means the signal sat
+    /// above the tuned center (we tuned low), which the rtlsdr ppm convention
+    /// (`LO ≈ f·(1 − ppm/1e6)`) corrects with a *more negative* ppm. Returns
+    /// the source's configured ppm unchanged when there's no error, so a logged
+    /// value drifting away from the config is a calibration signal.
+    fn preferred_ppm(&self, freq_hz: f64, freq_error_hz: i32) -> Option<f64> {
+        let idx = usize::try_from(self.find_source(freq_hz)?).ok()?;
+        let current = *self.source_ppms.get(idx)?;
+        Some(current - f64::from(freq_error_hz) / freq_hz * 1e6)
     }
 
     /// Update a conventional channel's metrics entry by talkgroup + freq.
@@ -536,6 +552,9 @@ impl CallManager {
         if let Some(view) = self.state.get_call_view(call_id) {
             is_conventional = view.is_conventional();
             was_idle = view.state() == CallState::Idle;
+            let pref_ppm = self
+                .preferred_ppm(view.freq().as_hz(), metrics.freq_error)
+                .unwrap_or(f64::NAN);
             tracing::info!(
                 short_name = %view.short_name(),
                 rec_num,
@@ -544,6 +563,7 @@ impl CallManager {
                 tdma = view.phase2_tdma(),
                 slot = view.tdma_slot(),
                 freq_error = format_args!("{:+.0} Hz", metrics.freq_error),
+                preferred_ppm = format_args!("{pref_ppm:.2}"),
                 "stopping recorder"
             );
         }
@@ -594,6 +614,9 @@ impl CallManager {
                         .feed_recorder_power(call_id, metrics.recorder_pwr, was_idle);
                 }
 
+                let pref_ppm = self
+                    .preferred_ppm(final_freq.as_hz(), metrics.freq_error)
+                    .unwrap_or(f64::NAN);
                 if let Some(view) = self.state.get_call_view(call_id) {
                     tracing::info!(
                         short_name = %view.short_name(),
@@ -603,6 +626,7 @@ impl CallManager {
                         tdma = view.phase2_tdma(),
                         slot = view.tdma_slot(),
                         freq_error = format_args!("{:+.0} Hz", metrics.freq_error),
+                        preferred_ppm = format_args!("{pref_ppm:.2}"),
                         "stopping recorder"
                     );
 

@@ -46,8 +46,12 @@ fn main() {
 
     // Optional external SDR packages
     let optional_sdr_packages = ["gnuradio-osmosdr", "osmosdr", "gr-osmosdr", "uhd"];
+    let mut have_osmosdr = false;
     for pkg in &optional_sdr_packages {
         if let Ok(lib) = pkg_config::Config::new().probe(pkg) {
+            if matches!(*pkg, "gnuradio-osmosdr" | "osmosdr" | "gr-osmosdr") {
+                have_osmosdr = true;
+            }
             all_gnuradio_libs.push(lib);
         }
     }
@@ -114,6 +118,14 @@ fn main() {
     let target = std::env::var("TARGET").unwrap();
     if target.contains("linux") {
         build.define("BOOST_LOG_DYN_LINK", None);
+    }
+
+    // The bridge's pre-flight gain probe uses osmosdr directly. CMake defines
+    // HAVE_OSMOSDR for the trunk-recorder library, but the cxx bridge is a
+    // separate compilation unit, so it needs the define too — otherwise the
+    // probe silently compiles to throwing stubs even where osmosdr exists.
+    if have_osmosdr {
+        build.define("HAVE_OSMOSDR", None);
     }
 
     // Define GNURADIO_VERSION so trunk-recorder headers use correct conditionals

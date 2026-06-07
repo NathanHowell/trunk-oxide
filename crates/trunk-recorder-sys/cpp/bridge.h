@@ -64,6 +64,23 @@ struct TrContext {
 std::unique_ptr<TrContext> tr_create_from_builder(rust::Box<EventHandlerBox> handler);
 void tr_finalize(TrContext &ctx);
 
+// ── Pre-flight gain calibration probe ──
+// A standalone, stateful handle around an opened SDR source, used to sweep gain
+// before the main flowgraph is built. Pimpl so the osmosdr type stays out of
+// the header (and the build works when osmosdr is absent).
+struct TrProbeConfig;
+struct TrProbeImpl;
+struct TrProbe {
+    std::unique_ptr<TrProbeImpl> impl;
+    TrProbe();
+    ~TrProbe();
+    TrProbe(TrProbe &&) noexcept;
+    TrProbe &operator=(TrProbe &&) noexcept;
+};
+std::unique_ptr<TrProbe> tr_probe_open(const TrProbeConfig &cfg);
+rust::Vec<double> tr_probe_gain_steps(const TrProbe &probe);
+rust::Vec<float> tr_probe_capture(TrProbe &probe, double gain_db, size_t n_samples, size_t settle_samples);
+
 // ── Config builder functions ──
 void tr_config_set_temp_dir(TrContext &ctx, rust::Str dir);
 void tr_config_set_soft_vocoder(TrContext &ctx, bool enabled);

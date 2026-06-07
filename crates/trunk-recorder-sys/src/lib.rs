@@ -266,6 +266,18 @@ pub mod ffi {
         pub sigmf_recorders: i32,
     }
 
+    /// Minimal device parameters needed to open a source standalone for
+    /// pre-flight gain calibration (a subset of `TrSourceConfig`).
+    struct TrProbeConfig {
+        pub driver: String,
+        pub device: String,
+        pub center: f64,
+        pub rate: f64,
+        pub error: f64,
+        pub ppm: f64,
+        pub antenna: String,
+    }
+
     struct TrTalkgroupConfig {
         pub id: i64,
         pub mode: String,
@@ -348,6 +360,17 @@ pub mod ffi {
 
         // ── Opaque lifecycle type ──
         type TrContext;
+
+        // ── Pre-flight gain calibration probe (standalone device access) ──
+        type TrProbe;
+        fn tr_probe_open(cfg: &TrProbeConfig) -> Result<UniquePtr<TrProbe>>;
+        fn tr_probe_gain_steps(probe: &TrProbe) -> Vec<f64>;
+        fn tr_probe_capture(
+            probe: Pin<&mut TrProbe>,
+            gain_db: f64,
+            n_samples: usize,
+            settle_samples: usize,
+        ) -> Result<Vec<f32>>;
 
         // ── Lifecycle functions ──
         fn tr_create_from_builder(handler: Box<EventHandlerBox>) -> Result<UniquePtr<TrContext>>;

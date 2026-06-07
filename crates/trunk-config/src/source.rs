@@ -48,6 +48,12 @@ pub struct SourceConfig {
     pub vga2_gain: f64,
     #[serde(default)]
     pub agc: bool,
+    /// When true, sweep the device's gain steps at startup and pick the gain
+    /// with the best noise figure that stays clear of overload, ignoring the
+    /// configured `gain` (which becomes a fallback if calibration fails).
+    /// Only supported for the `osmosdr` driver.
+    #[serde(default)]
+    pub auto_gain: bool,
     #[serde(default)]
     pub antenna: String,
     #[serde(default)]

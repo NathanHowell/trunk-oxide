@@ -12,6 +12,18 @@
 
 #include <gnuradio/block.h>
 #include <gnuradio/block_detail.h>
+#include <gnuradio/top_block.h>
+#include <gnuradio/blocks/head.h>
+#include <gnuradio/blocks/skiphead.h>
+#include <gnuradio/blocks/vector_sink.h>
+
+#include <cctype>
+#include <sstream>
+#include <stdexcept>
+
+#ifdef HAVE_OSMOSDR
+#include <osmosdr/source.h>
+#endif
 
 #include "trunk-recorder/trunk_context.h"
 #include "trunk-recorder/call_conventional.h"
@@ -36,6 +48,119 @@ bool setup_systems(Config &config, gr::top_block_sptr &tb,
                    std::vector<std::shared_ptr<Call>> &calls);
 
 namespace trunk_oxide {
+
+// ── Pre-flight gain calibration probe ──
+//
+// Opens an SDR source standalone (before the main flowgraph exists) and lets
+// Rust sweep gain steps, capturing a block of raw IQ at each. The device stays
+// open for the probe's lifetime; each capture builds a short-lived flowgraph
+// (source → skiphead(settle) → head(N) → vector_sink) around the persistent
+// source. All measurement/selection policy lives in Rust — this is pure
+// acquisition. Compiled to throwing stubs when osmosdr is unavailable.
+
+#ifdef HAVE_OSMOSDR
+struct TrProbeImpl {
+    osmosdr::source::sptr src;
+    double rate = 0.0;
+};
+#else
+struct TrProbeImpl {};
+#endif
+
+TrProbe::TrProbe() = default;
+TrProbe::~TrProbe() = default;
+TrProbe::TrProbe(TrProbe &&) noexcept = default;
+TrProbe &TrProbe::operator=(TrProbe &&) noexcept = default;
+
+std::unique_ptr<TrProbe> tr_probe_open(const TrProbeConfig &cfg) {
+#ifdef HAVE_OSMOSDR
+    std::string driver(cfg.driver);
+    if (driver != "osmosdr") {
+        throw std::runtime_error("gain auto-calibration is only supported for the osmosdr driver");
+    }
+
+    std::string dev(cfg.device);
+    std::ostringstream args;
+    if (!dev.empty() && std::isdigit(static_cast<unsigned char>(dev[0]))) {
+        // Bare serial number → default to rtl, matching Source's behavior.
+        args << "rtl=" << dev;
+    } else {
+        args << dev;
+    }
+
+    osmosdr::source::sptr src = osmosdr::source::make(args.str());
+    src->set_sample_rate(cfg.rate);
+    src->set_center_freq(cfg.center + cfg.error, 0);
+    if (cfg.ppm != 0.0) {
+        src->set_freq_corr(cfg.ppm, 0);
+    }
+    // Hardware AGC off: gain calibration needs a stationary dB scale.
+    src->set_gain_mode(false, 0);
+    std::string antenna(cfg.antenna);
+    if (!antenna.empty()) {
+        src->set_antenna(antenna, 0);
+    }
+
+    auto probe = std::make_unique<TrProbe>();
+    probe->impl = std::make_unique<TrProbeImpl>();
+    probe->impl->src = src;
+    probe->impl->rate = src->get_sample_rate();
+    return probe;
+#else
+    (void)cfg;
+    throw std::runtime_error("osmosdr support not compiled in; cannot auto-calibrate gain");
+#endif
+}
+
+rust::Vec<double> tr_probe_gain_steps(const TrProbe &probe) {
+    rust::Vec<double> out;
+#ifdef HAVE_OSMOSDR
+    if (probe.impl && probe.impl->src) {
+        osmosdr::gain_range_t range = probe.impl->src->get_gain_range(0);
+        for (double g : range.values()) {
+            out.push_back(g);
+        }
+    }
+#else
+    (void)probe;
+#endif
+    return out;
+}
+
+rust::Vec<float> tr_probe_capture(TrProbe &probe, double gain_db, size_t n_samples, size_t settle_samples) {
+    rust::Vec<float> out;
+#ifdef HAVE_OSMOSDR
+    if (!probe.impl || !probe.impl->src) {
+        throw std::runtime_error("probe is not open");
+    }
+    osmosdr::source::sptr src = probe.impl->src;
+    src->set_gain(gain_db, 0);
+
+    gr::top_block_sptr tb = gr::make_top_block("gain_probe_capture");
+    auto skip = gr::blocks::skiphead::make(sizeof(gr_complex), settle_samples);
+    auto head = gr::blocks::head::make(sizeof(gr_complex), n_samples);
+    auto sink = gr::blocks::vector_sink<gr_complex>::make();
+    tb->connect(src, 0, skip, 0);
+    tb->connect(skip, 0, head, 0);
+    tb->connect(head, 0, sink, 0);
+    tb->run(); // returns once head has collected n_samples
+    tb.reset();
+
+    const std::vector<gr_complex> &data = sink->data();
+    out.reserve(data.size() * 2);
+    for (const gr_complex &c : data) {
+        out.push_back(c.real());
+        out.push_back(c.imag());
+    }
+#else
+    (void)probe;
+    (void)gain_db;
+    (void)n_samples;
+    (void)settle_samples;
+    throw std::runtime_error("osmosdr support not compiled in; cannot auto-calibrate gain");
+#endif
+    return out;
+}
 
 // ── Enum conversion helpers ──
 

@@ -7,6 +7,7 @@
 //! Events flow: SDR → C++ gnuradio graph → cxx callbacks → EventBridge
 
 mod adaptive_squelch;
+mod calibrate;
 mod call_manager;
 mod call_state;
 mod dedup;
@@ -103,9 +104,75 @@ fn delayed_interval(period: Duration) -> tokio::time::Interval {
 use call_manager::CallManager;
 use std::collections::HashMap;
 
-use trunk_config::{Config, DefaultMode, Modulation, SourceDriver, SystemType};
+use trunk_config::{Config, DefaultMode, Modulation, SourceConfig, SourceDriver, SystemType};
 use trunk_oxide_grpc::EventBridge;
 use trunk_recorder_sys::ffi;
+
+/// Resolve a source's effective gain, running pre-flight auto-calibration when
+/// `auto_gain` is set. Falls back to the configured `gain` on any failure (or
+/// for non-osmosdr drivers), so a calibration problem can never block startup.
+fn calibrate_source_gain(src: &SourceConfig) -> f64 {
+    if !src.auto_gain {
+        return src.gain;
+    }
+    if !matches!(src.driver, SourceDriver::Osmosdr) {
+        tracing::warn!(
+            device = %src.device,
+            "auto_gain is only supported for the osmosdr driver; using configured gain"
+        );
+        return src.gain;
+    }
+
+    let policy = calibrate::CalibrationPolicy::default();
+    let probe_cfg = ffi::TrProbeConfig {
+        driver: "osmosdr".into(),
+        device: src.device.clone(),
+        center: src.center,
+        rate: src.rate,
+        error: src.error,
+        ppm: src.ppm,
+        antenna: src.antenna.clone(),
+    };
+
+    // The probe holds the device open for the sweep and releases it on drop
+    // (end of this scope), before the real source is opened.
+    let mut probe = match calibrate::preflight::PreflightProbe::open(
+        &probe_cfg,
+        policy.capture_samples,
+        policy.settle_samples,
+    ) {
+        Ok(probe) => probe,
+        Err(e) => {
+            tracing::warn!(
+                device = %src.device, error = %e,
+                "gain calibration: could not open device; using configured gain"
+            );
+            return src.gain;
+        }
+    };
+
+    tracing::info!(device = %src.device, "starting gain auto-calibration sweep");
+    match calibrate::calibrate(&mut probe, &policy, src.gain) {
+        Ok(sel) => {
+            tracing::info!(
+                device = %src.device,
+                gain_db = sel.gain_db,
+                noise_floor_db = sel.noise_floor_db,
+                reason = ?sel.reason,
+                configured_gain = src.gain,
+                "gain auto-calibration complete"
+            );
+            sel.gain_db
+        }
+        Err(e) => {
+            tracing::warn!(
+                device = %src.device, error = %e,
+                "gain calibration failed; using configured gain"
+            );
+            src.gain
+        }
+    }
+}
 
 /// Configures and initializes a trunk-recorder instance without starting it.
 ///
@@ -224,6 +291,11 @@ impl TrunkRecorderBuilder {
                 }
             }
 
+            // Pre-flight gain calibration, if requested. Runs before the source
+            // is opened for real; the probe releases the device on drop inside
+            // the helper, so reopening below is safe.
+            let gain = calibrate_source_gain(src);
+
             ffi::tr_add_source_from_config(
                 ctx.pin_mut(),
                 &ffi::TrSourceConfig {
@@ -232,7 +304,7 @@ impl TrunkRecorderBuilder {
                     center: src.center,
                     rate: src.rate,
                     error: src.error,
-                    gain: src.gain,
+                    gain,
                     agc: src.agc,
                     ppm: src.ppm,
                     antenna: src.antenna.clone(),

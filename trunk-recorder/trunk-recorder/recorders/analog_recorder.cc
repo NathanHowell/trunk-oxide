@@ -121,7 +121,11 @@ analog_recorder::analog_recorder(const std::shared_ptr<Source> &src, const std::
   squelch_two = gr::analog::pwr_squelch_ff::make(-200, 0.01, 0, true);
 
   if (use_tone_squelch) {
-    tone_squelch = gr::analog::ctcss_squelch_ff::make(system_channel_rate, this->tone_freq, 0.01, 0, 0, false);
+    // callback variant so the recorder's squelch callback (and therefore the
+    // call/segment boundaries) can be driven by PL-tone presence instead of
+    // carrier power. gate=false keeps the audio-path behaviour identical
+    // (toneless audio is muted to zero rather than dropped).
+    tone_squelch = callback_ctcss_squelch_ff::make(system_channel_rate, this->tone_freq, 0.01, 0, 0, false);
   }
   // k = quad_rate/(2*math.pi*max_dev) = 48k / (6.283185*5000) = 1.527
 
@@ -238,7 +242,15 @@ double analog_recorder::get_pwr() const {
 }
 
 void analog_recorder::set_squelch_callback(std::function<void(bool, double)> cb) {
-  prefilter->set_squelch_callback(std::move(cb));
+  // On a tone (PL/CTCSS) channel the carrier squelch never closes when the
+  // channel carries a constant carrier, so call boundaries must follow the
+  // tone, not the carrier. The carrier squelch stays in the signal path as a
+  // coarse pre-gate; the tone squelch drives the boundary callback.
+  if (use_tone_squelch && tone_squelch) {
+    tone_squelch->set_squelch_callback(std::move(cb));
+  } else {
+    prefilter->set_squelch_callback(std::move(cb));
+  }
 }
 
 void analog_recorder::set_squelch_db(double db) {

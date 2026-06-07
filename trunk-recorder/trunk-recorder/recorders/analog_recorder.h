@@ -36,6 +36,7 @@
 class Source;
 class analog_recorder;
 
+#include "../gr_blocks/callback_ctcss_squelch_ff.h"
 #include "../gr_blocks/channelizer.h"
 #include "../gr_blocks/decoder_wrapper.h"
 #include "../gr_blocks/freq_xlating_fft_filter.h"
@@ -130,7 +131,7 @@ private:
   gr::filter::fir_filter_fff::sptr high_f;
   gr::filter::fir_filter_fff::sptr low_f;
   gr::analog::pwr_squelch_ff::sptr squelch_two;
-  gr::analog::ctcss_squelch_ff::sptr tone_squelch;
+  callback_ctcss_squelch_ff::sptr tone_squelch;
 
   gr::analog::quadrature_demod_cf::sptr demod;
   gr::blocks::float_to_short::sptr converter;

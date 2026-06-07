@@ -255,12 +255,15 @@ impl DispatcherState {
             return vec![];
         }
 
-        // Coalescing enabled: transition to coalescing state.
-        // Skip coalescing for conventional calls — trunk-oxide's state machine
-        // handles the full lifecycle (squelch open/close cycles as segments
-        // within one logical call). Discord-side coalescing would prevent
-        // conventional calls from ever ending.
-        if !self.coalesce_timeout.is_zero() && !call_data.is_conventional {
+        // Coalescing enabled: transition to coalescing state. Both trunked and
+        // conventional calls coalesce identically — trunk-oxide now emits one
+        // CallStart/CallEnd per keyed transmission for conventional channels
+        // (squelch open/close), exactly like a trunked grant, so consecutive
+        // transmissions on a talkgroup group into a single embed with the same
+        // PTT splitting. (Conventional calls used to be excluded here because a
+        // free-running recorder restart loop emitted CallStarts during dead air
+        // that would have kept the handler alive forever; that loop is gone.)
+        if !self.coalesce_timeout.is_zero() {
             self.coalescing_calls.insert(key, Instant::now());
             return vec![DispatchEffect::PttEnd {
                 key,
@@ -1003,7 +1006,7 @@ mod tests {
         assert!(effects.is_empty());
     }
 
-    // ── Conventional calls skip coalescing ───────────────────────────
+    // ── Conventional calls coalesce like trunked ─────────────────────
 
     fn make_conventional_call_end(sys_num: i32, talkgroup: i64) -> proto::PluginEvent {
         proto::PluginEvent {
@@ -1020,7 +1023,7 @@ mod tests {
     }
 
     #[test]
-    fn conventional_call_skips_coalescing() {
+    fn conventional_call_coalesces_like_trunked() {
         let mut s = DispatcherState::new(10_000); // coalescing enabled
         s.on_event(make_call_start(1, 12345));
         s.on_channel_resolved(
@@ -1033,25 +1036,26 @@ mod tests {
             ChannelId::from(999),
         );
 
-        // CallEnd for a conventional call should produce EndCall, not PttEnd
+        // trunk-oxide now emits one CallStart/CallEnd per keyed transmission for
+        // conventional channels, so CallEnd coalesces (PttEnd), not EndCall.
         let effects = s.on_event(make_conventional_call_end(1, 12345));
         assert!(
             effects
                 .iter()
-                .any(|e| matches!(e, DispatchEffect::EndCall { .. })),
-            "conventional call should end immediately"
+                .any(|e| matches!(e, DispatchEffect::PttEnd { .. })),
+            "conventional call should coalesce"
         );
         assert!(
             !effects
                 .iter()
-                .any(|e| matches!(e, DispatchEffect::PttEnd { .. })),
-            "conventional call should not coalesce"
+                .any(|e| matches!(e, DispatchEffect::EndCall { .. })),
+            "conventional call should not end immediately when coalescing"
         );
         let key = CallKey {
             sys_num: SysNum(1),
             talkgroup: Talkgroup(12345),
         };
-        assert!(!s.is_coalescing(&key));
+        assert!(s.is_coalescing(&key));
         assert!(!s.is_active(&key));
     }
 

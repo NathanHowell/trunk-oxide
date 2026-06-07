@@ -1106,7 +1106,14 @@ impl CallManager {
             .iter()
             .map(|s| Self::make_proto_segment(s.freq.as_hz(), s.start, s.rec_num.0))
             .collect();
-        if view.is_trunked() || !view.segments().is_empty() {
+        // Append the still-open segment when concluding mid-recording. For
+        // always-on conventional channels a transmission is concluded while
+        // still in Recording with no prior pushed segment, so this is the one
+        // segment that represents the keyed transmission.
+        if view.is_trunked()
+            || !view.segments().is_empty()
+            || view.state() == CallState::Recording
+        {
             segments.push(Self::make_proto_segment(
                 final_freq.as_hz(),
                 view.segment_start(),

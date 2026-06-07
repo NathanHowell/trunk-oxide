@@ -1441,7 +1441,8 @@ impl TrunkStateMachine {
 
     fn tick_conventional(&mut self) -> Effects {
         let timeout = self.config.call_timeout;
-        let mut debounce_ready = Vec::new();
+        let mut debounce_always_on = Vec::new();
+        let mut debounce_sig_det = Vec::new();
         let mut timed_out = Vec::new();
 
         for entry in &self.calls {
@@ -1449,12 +1450,22 @@ impl TrunkStateMachine {
                 continue;
             }
 
-            // Collect entries whose squelch close debounce has expired.
+            // Collect entries whose squelch close debounce has expired. On an
+            // always-on channel each squelch open/close is a discrete keyed
+            // transmission, so a debounced close concludes the current call
+            // (one CallStart/CallEnd per transmission, like a trunked grant);
+            // the channel then re-arms to Idle for the next open. Signal-
+            // detection channels keep the old behaviour: push a segment and
+            // wait for the idle timeout to conclude the detection cycle.
             if entry
                 .squelch_closed_at
                 .is_some_and(|t| t.elapsed() >= SQUELCH_DEBOUNCE)
             {
-                debounce_ready.push(entry.id);
+                if entry.signal_detection {
+                    debounce_sig_det.push(entry.id);
+                } else {
+                    debounce_always_on.push(entry.id);
+                }
             }
 
             if entry.state == CallState::Disabled {
@@ -1480,36 +1491,80 @@ impl TrunkStateMachine {
             }
         }
 
-        // Finalize debounced squelch closes: push segment, transition to Idle.
-        for call_id in debounce_ready {
+        let mut effects = Effects::new();
+
+        // Signal-detection: finalize the segment, transition to Idle, and let
+        // the idle timeout conclude the detection cycle.
+        for call_id in debounce_sig_det {
             if let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) {
                 entry.finalize_squelch_debounce();
             }
         }
 
-        let mut effects = Effects::new();
+        // Always-on: conclude each keyed transmission as its own call.
+        let mut concluded = Vec::new();
+        for call_id in debounce_always_on {
+            concluded.push(call_id);
+            effects.extend(self.conclude_conventional_transmission(call_id));
+        }
+
+        // Idle/stuck/max-duration backstops — skip any channel we just
+        // concluded above so a single tick never finalizes a call twice.
         for call_id in timed_out {
+            if concluded.contains(&call_id) {
+                continue;
+            }
             effects.extend(self.on_conventional_idle_timeout(call_id));
         }
+        effects
+    }
+
+    /// Conclude the current keyed transmission on an always-on conventional
+    /// channel and re-arm it for the next squelch open.
+    ///
+    /// The entry is left in `Recording` so [`Self::exec_conclude_call`] (via
+    /// the `EmitCallEnd` effect) captures the open segment (`segment_start..now`)
+    /// before the `ConventionalRestart` effect rotates the WAV, assigns a fresh
+    /// `call_num`, clears the segments, and re-arms the channel to `Idle`. No
+    /// `EmitCallStart` is emitted here — the next squelch open does that, so
+    /// each transmission becomes one CallStart/CallEnd pair on the wire,
+    /// identical to a trunked grant.
+    fn conclude_conventional_transmission(&mut self, call_id: CallId) -> Effects {
+        let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) else {
+            return Effects::new();
+        };
+        // Clear the debounce marker; the conclude reads the open segment
+        // directly while the entry is still Recording.
+        entry.squelch_closed_at = None;
+
+        let mut effects = Effects::new();
+        effects.push(Effect::EmitCallEnd { call_id });
+        effects.push(Effect::ConventionalRestart { call_id });
+        effects.push(Effect::EmitSetupRecorder { call_id });
+        effects.push(Effect::EnableRecorder { call_id });
         effects
     }
 
     // ── Conventional callbacks from executor ──
 
     pub(crate) fn on_conventional_idle_timeout(&mut self, call_id: CallId) -> Effects {
-        let entry = match self.calls.iter_mut().find(|e| e.id == call_id) {
-            Some(e) => e,
+        let signal_detection = match self.calls.iter_mut().find(|e| e.id == call_id) {
+            Some(entry) => {
+                entry.finalize_squelch_debounce();
+                entry.signal_detection
+            }
             None => return Effects::new(),
         };
-
-        entry.finalize_squelch_debounce();
 
         // Don't clear segments or change state here — EmitCallEnd is processed
         // later as an effect and needs the current segments/state intact.
         // State reset happens in on_conventional_restarted() during the
         // ConventionalRestart effect, which runs after EmitCallEnd.
 
-        if entry.signal_detection {
+        if signal_detection {
+            let Some(entry) = self.calls.iter().find(|e| e.id == call_id) else {
+                return Effects::new();
+            };
             let mut effects = Effects::new();
 
             // Conclude the current call if any audio was captured.
@@ -1526,15 +1581,11 @@ impl TrunkStateMachine {
             return effects;
         }
 
-        // Non-signal-detection: full restart cycle (always-on recorders).
-        let mut effects = Effects::new();
-        effects.push(Effect::EmitCallEnd { call_id });
-        effects.push(Effect::ConventionalRestart { call_id });
-        effects.push(Effect::EmitSetupRecorder { call_id });
-        effects.push(Effect::EmitCallStart { call_id });
-        effects.push(Effect::EnableRecorder { call_id });
-
-        effects
+        // Always-on (non-signal-detection): this is only reached via the
+        // stuck-recording / max-duration backstops — a transmission that never
+        // produced a clean squelch close. Conclude it like any other and
+        // re-arm; the next squelch open starts the next call.
+        self.conclude_conventional_transmission(call_id)
     }
 
     pub(crate) fn on_conventional_restarted(
@@ -1551,10 +1602,15 @@ impl TrunkStateMachine {
             entry.last_update = Instant::now();
             entry.idle_since = None;
             entry.squelch_closed_at = None;
+            // Re-arm to Idle (not Recording): an always-on channel waits for the
+            // next squelch open to start the next keyed transmission as its own
+            // call. (Previously this eagerly returned to Recording as part of a
+            // free-running restart loop, which is what made conventional calls
+            // un-coalescable on the Discord side.)
             entry.state = if entry.signal_detection {
                 CallState::Disabled
             } else {
-                CallState::Recording
+                CallState::Idle
             };
         }
     }
@@ -2275,20 +2331,28 @@ mod tests {
 
         let effects = sm.on_conventional_idle_timeout(call_id);
 
-        // Full restart cycle: end → restart C++ → setup → start → enable
+        // Per-transmission conclude: end → restart C++ → setup → enable. No
+        // eager EmitCallStart — the next squelch open starts the next call.
         assert_effects_contain_ordered(
             &effects,
             &[
                 "EmitCallEnd",
                 "ConventionalRestart",
                 "EmitSetupRecorder",
-                "EmitCallStart",
                 "EnableRecorder",
             ],
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::EmitCallStart { .. })),
+            "idle timeout must not eagerly emit CallStart"
         );
 
         // Recorder must still be set after timeout — the executor conclude path
         // must NOT clear it, or tick_conventional will skip this call forever.
+        // State stays Recording in the pure state machine; the executor's
+        // ConventionalRestart re-arms it to Idle.
         let entry = sm.get_call(call_id).unwrap();
         assert_eq!(entry.recorder, Some(RecorderNum(12)));
         assert_eq!(entry.state, CallState::Recording);
@@ -2309,22 +2373,21 @@ mod tests {
         let (call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
         sm.calls[0].state = CallState::Recording;
 
-        // Simulate restart with a new recorder number (C++ may reassign)
+        // Simulate restart with a new recorder number (C++ may reassign). The
+        // channel re-arms to Idle, waiting for the next squelch open.
         sm.on_conventional_restarted(call_id, Some(RecorderNum(13)));
 
         let entry = sm.get_call(call_id).unwrap();
         assert_eq!(entry.recorder, Some(RecorderNum(13)));
+        assert_eq!(entry.state, CallState::Idle);
 
-        // Squelch on the NEW recorder must match this call
-        let _effects = sm.on_squelch(RecorderNum(13), true, -30.0);
-        // Debounce: stays Recording until finalized
+        // Squelch open on the NEW recorder must match this call → Recording
+        let _effects = sm.on_squelch(RecorderNum(13), false, -20.0);
         assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Recording);
-        sm.calls[0].finalize_squelch_debounce();
-        assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Idle);
 
-        // Squelch on the OLD recorder must NOT match
-        let _effects = sm.on_squelch(RecorderNum(12), false, -20.0);
-        assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Idle);
+        // Squelch on the OLD recorder must NOT match (no state change)
+        let _effects = sm.on_squelch(RecorderNum(12), true, -30.0);
+        assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Recording);
     }
 
     // ── Squelch handling ──
@@ -2398,10 +2461,69 @@ mod tests {
         // Close
         let _effects = sm.on_squelch(RecorderNum(5), true, -30.0);
 
-        // Re-open — should NOT emit CallStart again (same call lifecycle)
+        // Re-open before the debounce conclude — should NOT emit CallStart
+        // again (a brief un-key under the debounce window stays one call).
         let effects = sm.on_squelch(RecorderNum(5), false, -20.0);
         assert!(effects.is_empty());
         assert_eq!(sm.calls[0].state, CallState::Recording);
+    }
+
+    #[test]
+    fn always_on_conventional_conclude_per_transmission() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let channel = ConventionalChannel {
+            talkgroup: Talkgroup(1),
+            freq: Freq::from_hz(488_000_000.0),
+            is_analog: true,
+            ..Default::default()
+        };
+        let policy = sm.config.systems.get(&1).unwrap().clone();
+        let (call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(5)));
+
+        // First keyed transmission: squelch open → CallStart + Recording.
+        let effects = sm.on_squelch(RecorderNum(5), false, -20.0);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::EmitCallStart { .. }))
+        );
+        assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Recording);
+
+        // Squelch close arms the debounce (stays Recording, no segment yet).
+        let _ = sm.on_squelch(RecorderNum(5), true, -30.0);
+        assert!(sm.get_call(call_id).unwrap().squelch_closed_at.is_some());
+
+        // Debounce conclude ends this transmission as its own call and clears
+        // the debounce marker. No eager CallStart.
+        let effects = sm.conclude_conventional_transmission(call_id);
+        assert_effects_contain_ordered(
+            &effects,
+            &[
+                "EmitCallEnd",
+                "ConventionalRestart",
+                "EmitSetupRecorder",
+                "EnableRecorder",
+            ],
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::EmitCallStart { .. }))
+        );
+        assert!(sm.get_call(call_id).unwrap().squelch_closed_at.is_none());
+
+        // Executor re-arms to Idle via ConventionalRestart.
+        sm.on_conventional_restarted(call_id, Some(RecorderNum(5)));
+        assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Idle);
+
+        // Second keyed transmission: the next open is a fresh CallStart.
+        let effects = sm.on_squelch(RecorderNum(5), false, -20.0);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::EmitCallStart { .. })),
+            "each squelch open after a conclude starts a new call"
+        );
     }
 
     // ── expire_call ──

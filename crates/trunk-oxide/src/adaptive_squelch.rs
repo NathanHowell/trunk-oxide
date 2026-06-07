@@ -10,10 +10,9 @@ pub(crate) struct AdaptiveSquelch {
     buffer: VecDeque<f32>,
     /// Maximum buffer size.
     capacity: usize,
-    /// Current computed optimal threshold in dB.
+    /// Current computed threshold in dB. Initialized to the configured squelch
+    /// (the cold-start default) and tracks the measured floor thereafter.
     current_threshold_db: f64,
-    /// The configured (static) squelch threshold, used as fallback.
-    configured_threshold_db: f64,
     /// Minimum number of samples before adaptive mode activates.
     min_samples: usize,
     /// Minimum change in dB to trigger an update.
@@ -28,14 +27,24 @@ const BIN_WIDTH: f64 = 0.5;
 const MARGIN_DB: f64 = 3.0;
 
 /// Minimum bimodality ratio (between-class variance / total variance).
-/// Below this the distribution is considered unimodal and we keep the
-/// configured threshold.
+/// Below this the distribution is considered unimodal (idle / noise-only) and
+/// the threshold simply sits a margin above the measured floor.
 ///
 /// A unimodal normal distribution yields ~0.64; a uniform ~0.75.
 /// Well-separated bimodal distributions (>5 dB apart) yield >0.85.
 const BIMODALITY_MIN: f64 = 0.75;
 
-/// Maximum deviation from the configured threshold in dB.
+/// Percentile of the recent power buffer taken as the noise floor. A low
+/// percentile stays within the noise even when a signal occupies a large
+/// fraction of the window, so the floor estimate is robust to active calls.
+const NOISE_FLOOR_PERCENTILE: f64 = 0.25;
+
+/// Margin above the measured noise floor for the most-open (idle) threshold.
+/// Covers the percentile offset below the noise mean plus a few dB of
+/// clearance so normal noise fluctuation stays squelched.
+const FLOOR_MARGIN_DB: f64 = 4.0;
+
+/// Maximum the threshold may tighten above the floor-anchored base, in dB.
 const CLAMP_DB: f64 = 10.0;
 
 /// Default circular buffer capacity (10 minutes at ~10 readings/s).
@@ -55,66 +64,51 @@ impl AdaptiveSquelch {
             buffer: VecDeque::with_capacity(DEFAULT_CAPACITY),
             capacity: DEFAULT_CAPACITY,
             current_threshold_db: configured_threshold_db,
-            configured_threshold_db,
             min_samples: DEFAULT_MIN_SAMPLES,
             hysteresis_db: DEFAULT_HYSTERESIS_DB,
         }
     }
 
     /// Feed a power reading in dB. Returns `Some(new_threshold)` if the
-    /// optimal threshold changed by more than `hysteresis_db`.
+    /// threshold changed by more than `hysteresis_db`.
+    ///
+    /// The threshold tracks the measured noise floor: it sits `FLOOR_MARGIN_DB`
+    /// above a robust low-percentile estimate of the recent power buffer (the
+    /// most-open operating point), and tightens toward the signal when a clear
+    /// bimodal split is present. Unlike the previous tighten-only design, it is
+    /// allowed to open *below* the configured threshold when the floor is
+    /// genuinely lower, so weak signals near the noise aren't lost. The
+    /// configured value is only the cold-start default, used until enough
+    /// samples accumulate.
     pub(crate) fn feed(&mut self, power_db: f32) -> Option<f64> {
-        let adaptive_engaged =
-            (self.current_threshold_db - self.configured_threshold_db).abs() > f64::EPSILON;
-
-        // Push into circular buffer, saving the evicted sample for undo.
-        let evicted = if self.buffer.len() >= self.capacity {
-            self.buffer.pop_front()
-        } else {
-            None
-        };
+        if self.buffer.len() >= self.capacity {
+            self.buffer.pop_front();
+        }
         self.buffer.push_back(power_db);
 
+        // Cold start: hold the configured default until we have enough data.
         if self.buffer.len() < self.min_samples {
             return None;
         }
 
-        // When adaptive is engaged and the distribution is not clearly
-        // bimodal, freeze noise-level samples to preserve the buffer shape
-        // that established the current threshold. Signal-level samples
-        // (above the current threshold) are always kept so a new call can
-        // gradually rebuild the bimodal distribution.
-        let is_noise = f64::from(power_db) < self.current_threshold_db;
+        let samples = self.buffer.make_contiguous();
 
-        let Some((threshold, bimodality)) = otsu_threshold(self.buffer.make_contiguous()) else {
-            if adaptive_engaged && is_noise {
-                self.buffer.pop_back();
-                if let Some(old) = evicted {
-                    self.buffer.push_front(old);
-                }
+        // Robust noise-floor estimate in the squelch block's own dB scale.
+        let noise_floor = percentile(samples, NOISE_FLOOR_PERCENTILE);
+        // Most-open operating point: a margin above the measured floor.
+        let base = noise_floor + FLOOR_MARGIN_DB;
+
+        // When a signal is present (clear bimodal split), tighten toward it;
+        // otherwise (idle/noise-only) sit at the floor-anchored base.
+        let candidate = match otsu_threshold(samples) {
+            Some((split, bimodality)) if bimodality >= BIMODALITY_MIN => {
+                (split + MARGIN_DB).max(base)
             }
-            return None;
+            _ => base,
         };
 
-        if bimodality < BIMODALITY_MIN {
-            if adaptive_engaged && is_noise {
-                self.buffer.pop_back();
-                if let Some(old) = evicted {
-                    self.buffer.push_front(old);
-                }
-            }
-            return None;
-        }
-
-        // Apply margin: bias toward rejecting noise.
-        let candidate = threshold + MARGIN_DB;
-
-        // Never go below (more open than) the configured threshold — adaptive
-        // squelch should only tighten, not loosen. Also clamp above.
-        let clamped = candidate.clamp(
-            self.configured_threshold_db,
-            self.configured_threshold_db + CLAMP_DB,
-        );
+        // Bound how far above the floor we tighten.
+        let clamped = candidate.min(base + CLAMP_DB);
 
         if (clamped - self.current_threshold_db).abs() > self.hysteresis_db {
             self.current_threshold_db = clamped;
@@ -224,6 +218,18 @@ fn otsu_threshold(samples: &[f32]) -> Option<(f64, f64)> {
 /// Center of histogram bin `i` given the minimum value.
 fn bin_center(i: usize, min_db: f64) -> f64 {
     min_db + (i as f64 + 0.5) * BIN_WIDTH
+}
+
+/// Value at percentile `p` (`0.0..=1.0`) of `samples`, nearest-rank on a sorted
+/// copy. Returns `NaN` for an empty slice.
+fn percentile(samples: &[f32], p: f64) -> f64 {
+    if samples.is_empty() {
+        return f64::NAN;
+    }
+    let mut sorted: Vec<f32> = samples.to_vec();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let idx = ((sorted.len() - 1) as f64 * p.clamp(0.0, 1.0)).round() as usize;
+    f64::from(sorted[idx])
 }
 
 #[cfg(test)]
@@ -373,10 +379,10 @@ mod tests {
     }
 
     #[test]
-    fn safety_clamp_limits_deviation() {
+    fn tracks_below_configured_when_floor_is_low() {
+        // Configured -50, but the real floor is way down at -90. Floor-tracking
+        // should open the squelch well below -50 (the old design clamped here).
         let mut tracker = AdaptiveSquelch::new(-50.0);
-
-        // Feed extreme values — adaptive should never go below configured.
         let samples = make_bimodal(-90.0, 1.0, 400, -30.0, 1.0, 200);
         let mut last_update = None;
         for &s in &samples {
@@ -384,17 +390,16 @@ mod tests {
                 last_update = Some(t);
             }
         }
-
-        if let Some(t) = last_update {
-            assert!(
-                t >= -50.0,
-                "threshold {t} should be >= configured (never loosen)"
-            );
-            assert!(
-                t <= -50.0 + CLAMP_DB,
-                "threshold {t} should be <= configured + clamp"
-            );
-        }
+        let t = last_update.expect("should establish a floor-tracked threshold");
+        assert!(
+            t < -50.0,
+            "threshold {t} should track below the configured -50 when the floor is low"
+        );
+        // Floor ≈ -90, so the threshold should sit in a sane band above it.
+        assert!(
+            (-90.0..-70.0).contains(&t),
+            "threshold {t} should sit a margin above the ~-90 floor"
+        );
     }
 
     #[test]
@@ -482,65 +487,49 @@ mod tests {
     }
 
     #[test]
-    fn buffer_freeze_holds_threshold_across_quiet_gap() {
+    fn relaxes_toward_floor_after_signal_ends() {
         let mut tracker = AdaptiveSquelch::new(-55.0);
 
-        // Fill the buffer with bimodal data to establish a threshold.
+        // Active call: tightens up toward the signal.
         let bimodal = make_bimodal(-50.0, 1.5, 4000, -35.0, 1.5, 2000);
         for &s in &bimodal {
             tracker.feed(s);
         }
         let engaged = tracker.current_threshold();
         assert!(
-            engaged > -55.0,
-            "should have tightened above configured: {engaged}"
+            engaged > -47.0,
+            "should tighten toward the signal: {engaged}"
         );
 
-        // Feed a long run of noise-only readings (simulating quiet gap).
-        // More than buffer capacity to ensure full replacement without freeze.
-        let noise_only = pseudo_normal(-50.0, 1.5, 10_000, 77);
-        for &s in &noise_only {
+        // Call ends: a long run of noise-only fills the buffer. The threshold
+        // should RELAX back toward the floor + margin (the old design froze it).
+        for &s in &pseudo_normal(-50.0, 1.5, 10_000, 77) {
             tracker.feed(s);
         }
-
+        let idle = tracker.current_threshold();
         assert!(
-            (tracker.current_threshold() - engaged).abs() < f64::EPSILON,
-            "threshold should hold during quiet gap: was {engaged}, now {}",
-            tracker.current_threshold()
+            idle < engaged,
+            "threshold should relax once the signal ends: engaged {engaged} → idle {idle}"
+        );
+        assert!(
+            (-50.0..-43.0).contains(&idle),
+            "idle threshold {idle} should sit just above the -50 noise floor"
         );
     }
 
     #[test]
-    fn buffer_freeze_allows_update_on_new_call() {
-        let mut tracker = AdaptiveSquelch::new(-55.0);
-
-        // Phase 1: fill buffer with bimodal data.
-        let phase1 = make_bimodal(-54.0, 0.5, 4000, -48.0, 0.5, 2000);
-        for &s in &phase1 {
+    fn idle_threshold_anchors_to_floor_not_configured() {
+        // Configured intentionally high (-30); the real floor is -65 with no
+        // signal. The threshold should anchor near floor + margin, ignoring the
+        // stale configured value.
+        let mut tracker = AdaptiveSquelch::new(-30.0);
+        for &s in &pseudo_normal(-65.0, 1.0, 2000, 5) {
             tracker.feed(s);
         }
-        let thresh1 = tracker.current_threshold();
-        assert!(thresh1 > -55.0, "should engage: {thresh1}");
-
-        // Quiet gap — noise frozen out, threshold holds.
-        for &s in &pseudo_normal(-54.0, 0.5, 10_000, 88) {
-            tracker.feed(s);
-        }
+        let t = tracker.current_threshold();
         assert!(
-            (tracker.current_threshold() - thresh1).abs() < f64::EPSILON,
-            "should hold during gap"
-        );
-
-        // Phase 2: new call with higher noise floor. Signal samples
-        // (above threshold) enter the buffer, then bimodal data updates it.
-        let phase2 = make_bimodal(-48.0, 0.5, 5000, -42.0, 0.5, 2000);
-        for &s in &phase2 {
-            tracker.feed(s);
-        }
-        let thresh2 = tracker.current_threshold();
-        assert!(
-            thresh2 > thresh1,
-            "threshold should track new noise floor: {thresh1} → {thresh2}"
+            (-65.0..-55.0).contains(&t),
+            "idle threshold {t} should sit a few dB above the -65 floor, not at configured -30"
         );
     }
 }

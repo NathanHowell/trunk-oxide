@@ -108,70 +108,107 @@ use trunk_config::{Config, DefaultMode, Modulation, SourceConfig, SourceDriver, 
 use trunk_oxide_grpc::EventBridge;
 use trunk_recorder_sys::ffi;
 
-/// Resolve a source's effective gain, running pre-flight auto-calibration when
-/// `auto_gain` is set. Falls back to the configured `gain` on any failure (or
-/// for non-osmosdr drivers), so a calibration problem can never block startup.
-fn calibrate_source_gain(src: &SourceConfig) -> f64 {
-    if !src.auto_gain {
-        return src.gain;
-    }
-    if !matches!(src.driver, SourceDriver::Osmosdr) {
-        tracing::warn!(
-            device = %src.device,
-            "auto_gain is only supported for the osmosdr driver; using configured gain"
-        );
-        return src.gain;
-    }
-
-    let policy = calibrate::CalibrationPolicy::default();
-    let probe_cfg = ffi::TrProbeConfig {
-        driver: "osmosdr".into(),
-        device: src.device.clone(),
-        center: src.center,
-        rate: src.rate,
-        error: src.error,
-        ppm: src.ppm,
-        antenna: src.antenna.clone(),
-    };
-
+/// Run one pre-flight gain-calibration sweep and return the chosen gain.
+/// Falls back to `fallback_gain` on any failure so calibration can't block
+/// startup. Runs on its own thread via [`calibrate_sources_parallel`].
+fn run_calibration(
+    probe_cfg: &ffi::TrProbeConfig,
+    policy: &calibrate::CalibrationPolicy,
+    fallback_gain: f64,
+    device: &str,
+) -> f64 {
     // The probe holds the device open for the sweep and releases it on drop
-    // (end of this scope), before the real source is opened.
+    // (end of this function), before the real source is opened.
     let mut probe = match calibrate::preflight::PreflightProbe::open(
-        &probe_cfg,
+        probe_cfg,
         policy.capture_samples,
         policy.settle_samples,
     ) {
         Ok(probe) => probe,
         Err(e) => {
             tracing::warn!(
-                device = %src.device, error = %e,
+                device = %device, error = %e,
                 "gain calibration: could not open device; using configured gain"
             );
-            return src.gain;
+            return fallback_gain;
         }
     };
 
-    tracing::info!(device = %src.device, "starting gain auto-calibration sweep");
-    match calibrate::calibrate(&mut probe, &policy, src.gain) {
+    tracing::info!(device = %device, "starting gain auto-calibration sweep");
+    match calibrate::calibrate(&mut probe, policy, fallback_gain) {
         Ok(sel) => {
             tracing::info!(
-                device = %src.device,
+                device = %device,
                 gain_db = sel.gain_db,
                 noise_floor_db = sel.noise_floor_db,
                 reason = ?sel.reason,
-                configured_gain = src.gain,
+                configured_gain = fallback_gain,
                 "gain auto-calibration complete"
             );
             sel.gain_db
         }
         Err(e) => {
             tracing::warn!(
-                device = %src.device, error = %e,
+                device = %device, error = %e,
                 "gain calibration failed; using configured gain"
             );
-            src.gain
+            fallback_gain
         }
     }
+}
+
+/// Calibrate every `auto_gain` source concurrently — one thread per device —
+/// and return a map from source index to the chosen gain. Sources absent from
+/// the map keep their configured gain.
+///
+/// Each thread opens and releases its own device, and all threads are joined
+/// before any source is opened for real, so the devices are free again by the
+/// time the main flowgraph is built. Non-osmosdr drivers are skipped with a
+/// warning.
+fn calibrate_sources_parallel(sources: &[SourceConfig]) -> HashMap<usize, f64> {
+    let policy = calibrate::CalibrationPolicy::default();
+    let mut handles = Vec::new();
+
+    for (idx, src) in sources.iter().enumerate() {
+        if src.enabled == Some(false) || !src.auto_gain {
+            continue;
+        }
+        if !matches!(src.driver, SourceDriver::Osmosdr) {
+            tracing::warn!(
+                device = %src.device,
+                "auto_gain is only supported for the osmosdr driver; using configured gain"
+            );
+            continue;
+        }
+
+        let probe_cfg = ffi::TrProbeConfig {
+            driver: "osmosdr".into(),
+            device: src.device.clone(),
+            center: src.center,
+            rate: src.rate,
+            error: src.error,
+            ppm: src.ppm,
+            antenna: src.antenna.clone(),
+        };
+        let device = src.device.clone();
+        let fallback = src.gain;
+        handles.push(std::thread::spawn(move || {
+            (idx, run_calibration(&probe_cfg, &policy, fallback, &device))
+        }));
+    }
+
+    let mut gains = HashMap::new();
+    for handle in handles {
+        match handle.join() {
+            Ok((idx, gain)) => {
+                gains.insert(idx, gain);
+            }
+            Err(_) => tracing::error!(
+                "a gain calibration thread panicked; that source will use its configured gain"
+            ),
+        }
+    }
+    gains
 }
 
 /// Configures and initializes a trunk-recorder instance without starting it.
@@ -247,9 +284,14 @@ impl TrunkRecorderBuilder {
         }
 
         // ── Sources ──
+        // Pre-flight gain calibration for all auto_gain sources runs first, in
+        // parallel (one thread per device), so the devices are free before any
+        // source is opened below. Maps source index → calibrated gain.
+        let calibrated_gains = calibrate_sources_parallel(&config.source);
+
         let mut source_ranges = Vec::new();
         let mut source_ppms = Vec::new();
-        for src in &config.source {
+        for (idx, src) in config.source.iter().enumerate() {
             if src.enabled == Some(false) {
                 continue;
             }
@@ -291,10 +333,9 @@ impl TrunkRecorderBuilder {
                 }
             }
 
-            // Pre-flight gain calibration, if requested. Runs before the source
-            // is opened for real; the probe releases the device on drop inside
-            // the helper, so reopening below is safe.
-            let gain = calibrate_source_gain(src);
+            // Use the pre-flight calibrated gain if this source was swept,
+            // otherwise the configured gain.
+            let gain = calibrated_gains.get(&idx).copied().unwrap_or(src.gain);
 
             ffi::tr_add_source_from_config(
                 ctx.pin_mut(),

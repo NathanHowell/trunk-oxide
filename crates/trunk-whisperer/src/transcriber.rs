@@ -14,6 +14,7 @@ pub struct Transcriber {
     language: String,
     beam_size: i32,
     transcription_duration: Histogram<f64>,
+    queue_wait_duration: Histogram<f64>,
     audio_input_duration: Histogram<f64>,
     transcriptions_completed: Counter<u64>,
     transcription_errors: Counter<u64>,
@@ -62,6 +63,13 @@ impl Transcriber {
             beam_size: config.beam_size,
             transcription_duration: meter
                 .f64_histogram("trunk.whisperer.transcription_duration_seconds")
+                .with_description("Time spent decoding audio in whisper (after acquiring a permit)")
+                .build(),
+            queue_wait_duration: meter
+                .f64_histogram("trunk.whisperer.queue_wait_seconds")
+                .with_description(
+                    "Time a request waited for a concurrency permit before decoding (backlog)",
+                )
                 .build(),
             audio_input_duration: meter
                 .f64_histogram("trunk.whisperer.audio_input_duration_seconds")
@@ -88,7 +96,10 @@ impl Transcriber {
         self.audio_input_duration
             .record(audio.len() as f64 / 16000.0, &[]);
 
+        let queue_start = std::time::Instant::now();
         let permit = Arc::clone(&self.semaphore).acquire_owned().await?;
+        self.queue_wait_duration
+            .record(queue_start.elapsed().as_secs_f64(), &[]);
         let gpu_idx = self.next_gpu.fetch_add(1, Ordering::Relaxed) % self.contexts.len();
         let ctx = Arc::clone(&self.contexts[gpu_idx]);
         let language = self.language.clone();

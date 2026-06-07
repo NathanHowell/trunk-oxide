@@ -9,6 +9,7 @@ pub struct Metrics {
     pub channel_resolution_duration: Histogram<f64>,
     pub discord_api_duration: Histogram<f64>,
     pub transcription_duration: Histogram<f64>,
+    pub transcriptions_timed_out: Counter<u64>,
     pub active_calls: Gauge<u64>,
     pub coalescing_calls: Gauge<u64>,
 }
@@ -49,6 +50,10 @@ impl Metrics {
             transcription_duration: meter
                 .f64_histogram("trunk.discord.transcription_duration_seconds")
                 .with_description("Duration of whisper transcription requests")
+                .build(),
+            transcriptions_timed_out: meter
+                .u64_counter("trunk.discord.transcriptions_timed_out")
+                .with_description("Transcription requests abandoned after exceeding the timeout")
                 .build(),
             active_calls: meter
                 .u64_gauge("trunk.discord.active_calls")

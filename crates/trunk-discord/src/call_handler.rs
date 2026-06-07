@@ -233,11 +233,7 @@ impl CallHandler {
                 }
                 CallEffect::Transcribe { audio } => {
                     if !audio.is_empty() {
-                        let start = std::time::Instant::now();
-                        let text = self.whisperer.transcribe(audio).await?;
-                        self.metrics
-                            .transcription_duration
-                            .record(start.elapsed().as_secs_f64(), &[]);
+                        let text = self.transcribe_recorded(audio).await?;
                         let followup = self.state.on_transcription(&text);
                         for (i, e) in followup.into_iter().enumerate() {
                             queue.insert(i, e);
@@ -372,6 +368,31 @@ impl CallHandler {
         Ok(())
     }
 
+    /// Transcribe `audio`, recording client-side latency and timeout metrics.
+    ///
+    /// Centralises instrumentation so every transcription path (mid-call,
+    /// PTT-end, call-end) is measured identically. A timeout returns an empty
+    /// transcript (treated like silence) but is counted separately.
+    // Takes `&mut self` (not `&self`) so the returned future is `Send`: a shared
+    // `&CallHandler` would require `CallHandler: Sync`, which the resampler is not.
+    #[allow(clippy::needless_pass_by_ref_mut)]
+    async fn transcribe_recorded(&mut self, audio: Vec<f32>) -> Result<String> {
+        // Clone the cheap (Arc-backed) handles so nothing borrows `self` across
+        // the await.
+        let whisperer = self.whisperer.clone();
+        let duration = self.metrics.transcription_duration.clone();
+        let timed_out = self.metrics.transcriptions_timed_out.clone();
+
+        let start = std::time::Instant::now();
+        let outcome = whisperer.transcribe(audio).await?;
+        duration.record(start.elapsed().as_secs_f64(), &[]);
+        let text = outcome.unwrap_or_else(|| {
+            timed_out.add(1, &[]);
+            String::new()
+        });
+        Ok(text)
+    }
+
     /// Handle a PTT boundary within a coalesced call.
     /// Flushes audio for transcription and marks the boundary, but keeps the handler alive.
     async fn handle_ptt_end(&mut self, call_data: Option<Box<proto::CallData>>) -> Result<()> {
@@ -396,7 +417,7 @@ impl CallHandler {
         if !self.audio_buffer.is_empty() {
             let audio: Vec<f32> = std::mem::take(&mut self.audio_buffer);
             if !audio.is_empty() {
-                let text = self.whisperer.transcribe(audio).await?;
+                let text = self.transcribe_recorded(audio).await?;
                 let effects = self.state.on_transcription(&text);
                 self.process_effects(effects).await?;
             }
@@ -462,7 +483,7 @@ impl CallHandler {
         if !self.audio_buffer.is_empty() {
             let audio: Vec<f32> = std::mem::take(&mut self.audio_buffer);
             if !audio.is_empty() {
-                let text = self.whisperer.transcribe(audio).await?;
+                let text = self.transcribe_recorded(audio).await?;
                 let effects = self.state.on_transcription(&text);
                 self.process_effects(effects).await?;
             }

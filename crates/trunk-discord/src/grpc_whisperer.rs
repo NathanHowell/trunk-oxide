@@ -33,14 +33,18 @@ impl WhispererConnection {
         })
     }
 
-    pub async fn transcribe(&self, audio: Vec<f32>) -> Result<String> {
+    /// Transcribe `audio`, bounded by [`WhispererConnection::timeout`]. Returns
+    /// `Ok(Some(text))` on completion (the text may be empty for silence) and
+    /// `Ok(None)` when the request was abandoned after exceeding the timeout, so
+    /// the caller can record a distinct timeout metric.
+    pub async fn transcribe(&self, audio: Vec<f32>) -> Result<Option<String>> {
         let bytes: Vec<u8> = audio.iter().flat_map(|s| s.to_le_bytes()).collect();
 
         let mut client = self.client.clone();
         let rpc = client.transcribe(TranscribeRequest { audio: bytes });
 
         match tokio::time::timeout(self.timeout, rpc).await {
-            Ok(response) => Ok(response?.into_inner().text),
+            Ok(response) => Ok(Some(response?.into_inner().text)),
             Err(_elapsed) => {
                 // Abandon the request and let the call finalize without a
                 // transcript rather than hanging the handler forever.
@@ -48,7 +52,7 @@ impl WhispererConnection {
                     timeout_s = self.timeout.as_secs_f64(),
                     "transcription timed out, abandoning request"
                 );
-                Ok(String::new())
+                Ok(None)
             }
         }
     }

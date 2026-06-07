@@ -100,7 +100,10 @@ impl<'a> CallView<'a> {
     }
     #[allow(dead_code)]
     pub(crate) fn adaptive_squelch_threshold(&self) -> Option<f64> {
-        self.0.adaptive_squelch.as_ref().map(AdaptiveSquelch::current_threshold)
+        self.0
+            .adaptive_squelch
+            .as_ref()
+            .map(AdaptiveSquelch::current_threshold)
     }
 }
 
@@ -3099,13 +3102,16 @@ mod tests {
 
         // Simulate squelch opening → Recording, then time passing with no close.
         sm.calls[0].state = CallState::Recording;
-        sm.calls[0].segment_start = Instant::now() - STUCK_RECORDING_BACKSTOP - Duration::from_secs(1);
+        sm.calls[0].segment_start =
+            Instant::now() - STUCK_RECORDING_BACKSTOP - Duration::from_secs(1);
 
         let effects = sm.tick();
 
         // Should force an idle timeout (restart cycle).
         assert!(
-            effects.iter().any(|e| matches!(e, Effect::ConventionalRestart { .. })),
+            effects
+                .iter()
+                .any(|e| matches!(e, Effect::ConventionalRestart { .. })),
             "backstop should trigger restart: {effects:?}"
         );
     }
@@ -3124,7 +3130,8 @@ mod tests {
 
         // Recording for longer than backstop, BUT squelch has closed (pending debounce).
         sm.calls[0].state = CallState::Recording;
-        sm.calls[0].segment_start = Instant::now() - STUCK_RECORDING_BACKSTOP - Duration::from_secs(1);
+        sm.calls[0].segment_start =
+            Instant::now() - STUCK_RECORDING_BACKSTOP - Duration::from_secs(1);
         sm.calls[0].squelch_closed_at = Some(Instant::now());
 
         let effects = sm.tick();
@@ -3133,7 +3140,9 @@ mod tests {
         // The debounce finalization may push a segment and transition to Idle,
         // but it should not be from the backstop.
         assert!(
-            !effects.iter().any(|e| matches!(e, Effect::ConventionalRestart { .. })),
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::ConventionalRestart { .. })),
             "backstop should not fire when squelch has recent activity: {effects:?}"
         );
     }
@@ -3153,7 +3162,8 @@ mod tests {
         // Recording for longer than backstop, BUT has completed segments
         // (meaning squelch has been cycling normally).
         sm.calls[0].state = CallState::Recording;
-        sm.calls[0].segment_start = Instant::now() - STUCK_RECORDING_BACKSTOP - Duration::from_secs(1);
+        sm.calls[0].segment_start =
+            Instant::now() - STUCK_RECORDING_BACKSTOP - Duration::from_secs(1);
         sm.calls[0].segments.push(CallSegment {
             start: Instant::now() - Duration::from_secs(60),
             freq: Freq::from_hz(488_000_000.0),
@@ -3165,7 +3175,9 @@ mod tests {
         // Backstop should NOT fire — there are completed segments, so squelch
         // has been closing normally. This is just a long call.
         assert!(
-            !effects.iter().any(|e| matches!(e, Effect::ConventionalRestart { .. })),
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::ConventionalRestart { .. })),
             "backstop should not fire when segments exist: {effects:?}"
         );
     }
@@ -3189,7 +3201,9 @@ mod tests {
         let effects = sm.tick();
 
         assert!(
-            !effects.iter().any(|e| matches!(e, Effect::ConventionalRestart { .. })),
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::ConventionalRestart { .. })),
             "backstop should not fire before timeout: {effects:?}"
         );
     }
@@ -3220,7 +3234,10 @@ mod tests {
                 (true, -50.0)
             };
             let effects = sm.on_squelch(RecorderNum(5), muted, power);
-            if effects.iter().any(|e| matches!(e, Effect::UpdateSquelch { .. })) {
+            if effects
+                .iter()
+                .any(|e| matches!(e, Effect::UpdateSquelch { .. }))
+            {
                 got_update = true;
             }
         }
@@ -3250,7 +3267,9 @@ mod tests {
             };
             let effects = sm.on_squelch(RecorderNum(5), muted, power);
             assert!(
-                !effects.iter().any(|e| matches!(e, Effect::UpdateSquelch { .. })),
+                !effects
+                    .iter()
+                    .any(|e| matches!(e, Effect::UpdateSquelch { .. })),
                 "digital channel should never emit UpdateSquelch"
             );
         }

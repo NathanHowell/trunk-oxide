@@ -153,7 +153,10 @@ async fn init_channel_manager(
 /// Watches the dispatcher pump's heartbeat and makes the gRPC health check
 /// meaningful: stale → report `NotServing`; hard-stall → exit so the container
 /// is restarted. Without this, a frozen pump kept reporting `Serving` forever.
-async fn health_watchdog(reporter: tonic_health::server::HealthReporter, heartbeat: Arc<AtomicU64>) {
+async fn health_watchdog(
+    reporter: tonic_health::server::HealthReporter,
+    heartbeat: Arc<AtomicU64>,
+) {
     // Stale beyond SOFT: report unhealthy. Beyond HARD: force a restart.
     // The pump bumps its heartbeat at least once per second while alive, so
     // these thresholds never trip on normal (even idle) operation.
@@ -175,7 +178,10 @@ async fn health_watchdog(reporter: tonic_health::server::HealthReporter, heartbe
             );
             std::process::exit(1);
         } else if stale >= SOFT_STALL && serving {
-            tracing::error!(stale_ms = stale, "dispatcher pump heartbeat stale; health -> NotServing");
+            tracing::error!(
+                stale_ms = stale,
+                "dispatcher pump heartbeat stale; health -> NotServing"
+            );
             reporter
                 .set_service_status("", tonic_health::ServingStatus::NotServing)
                 .await;

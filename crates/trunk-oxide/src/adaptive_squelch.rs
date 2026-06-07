@@ -64,8 +64,8 @@ impl AdaptiveSquelch {
     /// Feed a power reading in dB. Returns `Some(new_threshold)` if the
     /// optimal threshold changed by more than `hysteresis_db`.
     pub(crate) fn feed(&mut self, power_db: f32) -> Option<f64> {
-        let adaptive_engaged = (self.current_threshold_db - self.configured_threshold_db).abs()
-            > f64::EPSILON;
+        let adaptive_engaged =
+            (self.current_threshold_db - self.configured_threshold_db).abs() > f64::EPSILON;
 
         // Push into circular buffer, saving the evicted sample for undo.
         let evicted = if self.buffer.len() >= self.capacity {
@@ -86,9 +86,7 @@ impl AdaptiveSquelch {
         // gradually rebuild the bimodal distribution.
         let is_noise = f64::from(power_db) < self.current_threshold_db;
 
-        let Some((threshold, bimodality)) =
-            otsu_threshold(self.buffer.make_contiguous())
-        else {
+        let Some((threshold, bimodality)) = otsu_threshold(self.buffer.make_contiguous()) else {
             if adaptive_engaged && is_noise {
                 self.buffer.pop_back();
                 if let Some(old) = evicted {
@@ -265,7 +263,12 @@ mod tests {
         signal_count: usize,
     ) -> Vec<f32> {
         let mut samples = pseudo_normal(noise_center, noise_spread, noise_count, 42);
-        samples.extend(pseudo_normal(signal_center, signal_spread, signal_count, 123));
+        samples.extend(pseudo_normal(
+            signal_center,
+            signal_spread,
+            signal_count,
+            123,
+        ));
         samples
     }
 
@@ -275,9 +278,18 @@ mod tests {
         let (thresh, bimodality) = otsu_threshold(&samples).unwrap();
 
         // Otsu split should be between the two modes.
-        assert!(thresh > -52.0, "threshold {thresh} should be above noise mode");
-        assert!(thresh < -38.0, "threshold {thresh} should be below signal mode");
-        assert!(bimodality > BIMODALITY_MIN, "should be bimodal: {bimodality}");
+        assert!(
+            thresh > -52.0,
+            "threshold {thresh} should be above noise mode"
+        );
+        assert!(
+            thresh < -38.0,
+            "threshold {thresh} should be below signal mode"
+        );
+        assert!(
+            bimodality > BIMODALITY_MIN,
+            "should be bimodal: {bimodality}"
+        );
     }
 
     #[test]
@@ -287,7 +299,10 @@ mod tests {
 
         assert!(thresh > -50.0, "threshold {thresh} should be above noise");
         assert!(thresh < -44.0, "threshold {thresh} should be below signal");
-        assert!(bimodality > BIMODALITY_MIN, "should be bimodal: {bimodality}");
+        assert!(
+            bimodality > BIMODALITY_MIN,
+            "should be bimodal: {bimodality}"
+        );
     }
 
     #[test]
@@ -390,7 +405,10 @@ mod tests {
 
         assert!(thresh > -52.0, "threshold {thresh} should be above noise");
         assert!(thresh < -38.0, "threshold {thresh} should be below signal");
-        assert!(bimodality > BIMODALITY_MIN, "should be bimodal: {bimodality}");
+        assert!(
+            bimodality > BIMODALITY_MIN,
+            "should be bimodal: {bimodality}"
+        );
     }
 
     #[test]
@@ -401,7 +419,10 @@ mod tests {
 
         assert!(thresh > -52.0, "threshold {thresh} should be above noise");
         assert!(thresh < -38.0, "threshold {thresh} should be below signal");
-        assert!(bimodality > BIMODALITY_MIN, "should be bimodal: {bimodality}");
+        assert!(
+            bimodality > BIMODALITY_MIN,
+            "should be bimodal: {bimodality}"
+        );
     }
 
     #[test]

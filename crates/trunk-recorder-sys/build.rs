@@ -83,7 +83,10 @@ fn main() {
     let cmake_build_dir = cmake_dst.join("build");
 
     // Link the static archives built by CMake
-    println!("cargo:rustc-link-search=native={}", cmake_build_dir.display());
+    println!(
+        "cargo:rustc-link-search=native={}",
+        cmake_build_dir.display()
+    );
     println!("cargo:rustc-link-lib=static=trunk-recorder");
     println!("cargo:rustc-link-lib=static=gnuradio-op25_repeater");
 
@@ -103,7 +106,12 @@ fn main() {
     if let Some(boost_lib_dir) = find_boost_lib() {
         println!("cargo:rustc-link-search=native={}", boost_lib_dir.display());
     }
-    for lib in ["boost_log", "boost_log_setup", "boost_thread", "boost_filesystem"] {
+    for lib in [
+        "boost_log",
+        "boost_log_setup",
+        "boost_thread",
+        "boost_filesystem",
+    ] {
         println!("cargo:rustc-link-lib={lib}");
     }
 

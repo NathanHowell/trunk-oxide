@@ -796,10 +796,8 @@ mod tests {
             sys_num: SysNum(1),
             talkgroup: Talkgroup(12345),
         };
-        s.active_calls.insert(
-            key,
-            Instant::now() - std::time::Duration::from_secs(700),
-        );
+        s.active_calls
+            .insert(key, Instant::now() - std::time::Duration::from_secs(700));
 
         let effects = s.on_reap_tick();
         assert!(

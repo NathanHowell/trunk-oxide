@@ -122,7 +122,7 @@ fn convert_call_data(cd: &TrCallData) -> proto::CallData {
             })
             .collect(),
         status: i32::from(cd.status.repr),
-        segments: Vec::new(), // populated by caller if applicable
+        segments: Vec::new(),   // populated by caller if applicable
         is_conventional: false, // set by caller
     }
 }

@@ -30,7 +30,9 @@ impl Metrics {
                 .build(),
             calls_dropped_stuck: meter
                 .u64_counter("trunk.discord.calls_dropped_stuck")
-                .with_description("Calls dropped because the handler stopped draining (bounded send timed out)")
+                .with_description(
+                    "Calls dropped because the handler stopped draining (bounded send timed out)",
+                )
                 .build(),
             channel_resolution_failures: meter
                 .u64_counter("trunk.discord.channel_resolution_failures")

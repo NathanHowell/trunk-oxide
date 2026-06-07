@@ -51,6 +51,13 @@ fn init_otel() -> OtelProviders {
         .with_service_name(env!("CARGO_PKG_NAME"))
         .build();
 
+    // W3C trace-context propagation: inject the active context into outgoing
+    // gRPC calls (e.g. the whisperer transcribe RPC) so downstream spans join
+    // this service's traces.
+    opentelemetry::global::set_text_map_propagator(
+        opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+    );
+
     let tracer_provider = if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
         let exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_http()

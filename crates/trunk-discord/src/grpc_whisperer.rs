@@ -2,9 +2,24 @@ use std::time::Duration;
 
 use anyhow::Result;
 use tonic::transport::Endpoint;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 use trunk_whisperer_proto::TranscribeRequest;
 use trunk_whisperer_proto::whisperer_client::WhispererClient;
+
+/// Writes W3C trace-context headers into outgoing gRPC metadata so the
+/// whisperer's transcribe span joins the active (call) trace.
+struct MetadataInjector<'a>(&'a mut tonic::metadata::MetadataMap);
+
+impl opentelemetry::propagation::Injector for MetadataInjector<'_> {
+    fn set(&mut self, key: &str, value: String) {
+        if let Ok(key) = tonic::metadata::MetadataKey::from_bytes(key.as_bytes())
+            && let Ok(value) = tonic::metadata::MetadataValue::try_from(value.as_str())
+        {
+            self.0.insert(key, value);
+        }
+    }
+}
 
 #[derive(Clone)]
 pub struct WhispererConnection {
@@ -37,11 +52,35 @@ impl WhispererConnection {
     /// `Ok(Some(text))` on completion (the text may be empty for silence) and
     /// `Ok(None)` when the request was abandoned after exceeding the timeout, so
     /// the caller can record a distinct timeout metric.
-    pub async fn transcribe(&self, audio: Vec<f32>) -> Result<Option<String>> {
+    ///
+    /// `short_name` / `is_conventional` become metric labels on the whisperer so
+    /// decode CPU is attributable by system; `talkgroup` rides on the span (it
+    /// is too high-cardinality for a metric label).
+    pub async fn transcribe(
+        &self,
+        audio: Vec<f32>,
+        short_name: &str,
+        is_conventional: bool,
+        talkgroup: i64,
+    ) -> Result<Option<String>> {
         let bytes: Vec<u8> = audio.iter().flat_map(|s| s.to_le_bytes()).collect();
 
+        let mut request = tonic::Request::new(TranscribeRequest {
+            audio: bytes,
+            short_name: short_name.to_string(),
+            is_conventional,
+            talkgroup,
+        });
+
+        // Inject the active trace context (the call span) so the whisperer's
+        // transcribe span is parented to it, stitching one end-to-end trace.
+        let cx = tracing::Span::current().context();
+        opentelemetry::global::get_text_map_propagator(|prop| {
+            prop.inject_context(&cx, &mut MetadataInjector(request.metadata_mut()));
+        });
+
         let mut client = self.client.clone();
-        let rpc = client.transcribe(TranscribeRequest { audio: bytes });
+        let rpc = client.transcribe(request);
 
         match tokio::time::timeout(self.timeout, rpc).await {
             Ok(response) => Ok(Some(response?.into_inner().text)),

@@ -53,6 +53,11 @@ pub struct CallHandler {
 
     db: Arc<Mutex<Database>>,
     call_row_id: Option<CallRowId>,
+
+    // Identity for transcription attribution (whisperer metric labels + span).
+    short_name: String,
+    is_conventional: bool,
+    talkgroup: i64,
 }
 
 impl CallHandler {
@@ -111,6 +116,9 @@ impl CallHandler {
             metrics,
             db,
             call_row_id,
+            short_name: call_info.short_name.clone(),
+            is_conventional: call_info.is_conventional,
+            talkgroup: call_info.talkgroup,
         })
     }
 
@@ -382,9 +390,14 @@ impl CallHandler {
         let whisperer = self.whisperer.clone();
         let duration = self.metrics.transcription_duration.clone();
         let timed_out = self.metrics.transcriptions_timed_out.clone();
+        let short_name = self.short_name.clone();
+        let is_conventional = self.is_conventional;
+        let talkgroup = self.talkgroup;
 
         let start = std::time::Instant::now();
-        let outcome = whisperer.transcribe(audio).await?;
+        let outcome = whisperer
+            .transcribe(audio, &short_name, is_conventional, talkgroup)
+            .await?;
         duration.record(start.elapsed().as_secs_f64(), &[]);
         let text = outcome.unwrap_or_else(|| {
             timed_out.add(1, &[]);

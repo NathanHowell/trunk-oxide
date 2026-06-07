@@ -2,6 +2,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use anyhow::Result;
+use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram};
 use tokio::sync::Semaphore;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
@@ -91,15 +92,28 @@ impl Transcriber {
         self.max_concurrent
     }
 
-    pub async fn transcribe(&self, audio: Vec<f32>) -> Result<String> {
+    pub async fn transcribe(
+        &self,
+        audio: Vec<f32>,
+        short_name: &str,
+        is_conventional: bool,
+    ) -> Result<String> {
+        // Attribute the decode cost by system. short_name + is_conventional are
+        // low-cardinality, so they are safe as metric labels (talkgroup is not —
+        // it rides on the span instead).
+        let attrs = [
+            KeyValue::new("short_name", short_name.to_string()),
+            KeyValue::new("is_conventional", is_conventional),
+        ];
+
         #[allow(clippy::cast_precision_loss)]
         self.audio_input_duration
-            .record(audio.len() as f64 / 16000.0, &[]);
+            .record(audio.len() as f64 / 16000.0, &attrs);
 
         let queue_start = std::time::Instant::now();
         let permit = Arc::clone(&self.semaphore).acquire_owned().await?;
         self.queue_wait_duration
-            .record(queue_start.elapsed().as_secs_f64(), &[]);
+            .record(queue_start.elapsed().as_secs_f64(), &attrs);
         let gpu_idx = self.next_gpu.fetch_add(1, Ordering::Relaxed) % self.contexts.len();
         let ctx = Arc::clone(&self.contexts[gpu_idx]);
         let language = self.language.clone();
@@ -139,15 +153,15 @@ impl Transcriber {
         })
         .await?;
         let elapsed = start.elapsed().as_secs_f64();
-        self.transcription_duration.record(elapsed, &[]);
+        self.transcription_duration.record(elapsed, &attrs);
 
         match result {
             Ok(text) => {
-                self.transcriptions_completed.add(1, &[]);
+                self.transcriptions_completed.add(1, &attrs);
                 Ok(text)
             }
             Err(e) => {
-                self.transcription_errors.add(1, &[]);
+                self.transcription_errors.add(1, &attrs);
                 Err(e)
             }
         }

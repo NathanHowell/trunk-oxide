@@ -15,6 +15,8 @@ mod tone_detect;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use anyhow::Result;
 use clap::Parser;
@@ -148,6 +150,46 @@ async fn init_channel_manager(
     lookup
 }
 
+/// Watches the dispatcher pump's heartbeat and makes the gRPC health check
+/// meaningful: stale → report `NotServing`; hard-stall → exit so the container
+/// is restarted. Without this, a frozen pump kept reporting `Serving` forever.
+async fn health_watchdog(reporter: tonic_health::server::HealthReporter, heartbeat: Arc<AtomicU64>) {
+    // Stale beyond SOFT: report unhealthy. Beyond HARD: force a restart.
+    // The pump bumps its heartbeat at least once per second while alive, so
+    // these thresholds never trip on normal (even idle) operation.
+    const SOFT_STALL: u64 = 20_000;
+    const HARD_STALL: u64 = 90_000;
+    const CHECK_INTERVAL: Duration = Duration::from_secs(5);
+
+    let mut interval = tokio::time::interval(CHECK_INTERVAL);
+    let mut serving = true;
+
+    loop {
+        interval.tick().await;
+        let stale = dispatcher::now_millis().saturating_sub(heartbeat.load(Ordering::Relaxed));
+
+        if stale >= HARD_STALL {
+            tracing::error!(
+                stale_ms = stale,
+                "dispatcher pump stalled past hard limit; exiting for restart"
+            );
+            std::process::exit(1);
+        } else if stale >= SOFT_STALL && serving {
+            tracing::error!(stale_ms = stale, "dispatcher pump heartbeat stale; health -> NotServing");
+            reporter
+                .set_service_status("", tonic_health::ServingStatus::NotServing)
+                .await;
+            serving = false;
+        } else if stale < SOFT_STALL && !serving {
+            tracing::info!("dispatcher pump heartbeat recovered; health -> Serving");
+            reporter
+                .set_service_status("", tonic_health::ServingStatus::Serving)
+                .await;
+            serving = true;
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     pid1::Pid1Settings::new().launch()?;
@@ -171,6 +213,15 @@ async fn main() -> Result<()> {
     }
 
     let (reporter, health_service) = tonic_health::server::health_reporter();
+
+    // Liveness: the dispatcher pump bumps `heartbeat` every loop iteration. The
+    // watchdog flips the gRPC health status to NotServing if it goes stale, and
+    // exits the process on a hard stall so the container restart policy
+    // (`restart: unless-stopped`) recovers it — a frozen pump can no longer
+    // masquerade as healthy.
+    let heartbeat = Arc::new(AtomicU64::new(dispatcher::now_millis()));
+    tokio::spawn(health_watchdog(reporter.clone(), Arc::clone(&heartbeat)));
+
     let health_listen_path = config.grpc.listen_path.clone();
     tokio::spawn(async move {
         let _ = std::fs::remove_file(&health_listen_path);
@@ -206,8 +257,11 @@ async fn main() -> Result<()> {
         .expect("missing [oxide] section in config");
     let fallback_channel_id = ChannelId::from(discord_config.channel_id.get());
 
-    let whisperer =
-        grpc_whisperer::WhispererConnection::connect(whisperer_config.socket_path.clone()).await?;
+    let whisperer = grpc_whisperer::WhispererConnection::connect(
+        whisperer_config.socket_path.clone(),
+        Duration::from_secs_f64(config.audio.transcription_timeout_s),
+    )
+    .await?;
     tracing::info!(
         path = %whisperer_config.socket_path,
         "connected to trunk-whisperer"
@@ -244,6 +298,7 @@ async fn main() -> Result<()> {
         Arc::clone(&db),
         args.db_path,
         metrics,
+        Arc::clone(&heartbeat),
     );
 
     discord_client
@@ -255,7 +310,13 @@ async fn main() -> Result<()> {
         "connecting to trunk-oxide"
     );
 
-    grpc_oxide::run(oxide_config.socket_path.clone(), pump, reporter).await?;
+    grpc_oxide::run(
+        oxide_config.socket_path.clone(),
+        pump,
+        reporter,
+        Arc::clone(&heartbeat),
+    )
+    .await?;
 
     if let Some(provider) = otel.meter {
         let _ = provider.shutdown();

@@ -32,6 +32,11 @@ pub struct AudioConfig {
     pub audio_attachment: bool,
     #[serde(default)]
     pub coalesce_timeout_ms: u64,
+    /// Hard ceiling on a single whisper transcription request. A request that
+    /// exceeds this is abandoned and treated as empty, so one runaway (e.g.
+    /// CPU-only whisper hallucination loop) cannot wedge the call handler.
+    #[serde(default = "default_transcription_timeout_s")]
+    pub transcription_timeout_s: f64,
 }
 
 impl Default for AudioConfig {
@@ -42,6 +47,7 @@ impl Default for AudioConfig {
             tone_detection_duration_s: default_tone_detection_duration_s(),
             audio_attachment: default_audio_attachment(),
             coalesce_timeout_ms: 10_000,
+            transcription_timeout_s: default_transcription_timeout_s(),
         }
     }
 }
@@ -57,6 +63,9 @@ const fn default_tone_detection_duration_s() -> f32 {
 }
 const fn default_audio_attachment() -> bool {
     true
+}
+const fn default_transcription_timeout_s() -> f64 {
+    30.0
 }
 
 #[derive(Debug, Deserialize)]

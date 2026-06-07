@@ -4,6 +4,7 @@ pub struct Metrics {
     pub audio_packets_dropped: Counter<u64>,
     pub events_dropped: Counter<u64>,
     pub calls_reaped: Counter<u64>,
+    pub calls_dropped_stuck: Counter<u64>,
     pub channel_resolution_failures: Counter<u64>,
     pub channel_resolution_duration: Histogram<f64>,
     pub discord_api_duration: Histogram<f64>,
@@ -26,6 +27,10 @@ impl Metrics {
             calls_reaped: meter
                 .u64_counter("trunk.discord.calls_reaped")
                 .with_description("Calls reaped due to timeout")
+                .build(),
+            calls_dropped_stuck: meter
+                .u64_counter("trunk.discord.calls_dropped_stuck")
+                .with_description("Calls dropped because the handler stopped draining (bounded send timed out)")
                 .build(),
             channel_resolution_failures: meter
                 .u64_counter("trunk.discord.channel_resolution_failures")

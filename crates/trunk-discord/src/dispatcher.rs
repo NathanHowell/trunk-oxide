@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
@@ -27,6 +28,32 @@ const REAP_INTERVAL: Duration = Duration::from_secs(60);
 
 /// How often to check for expired coalescing calls.
 const COALESCE_TICK_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Unconditional heartbeat tick so the liveness watchdog (see `main.rs`) sees a
+/// fresh timestamp whenever the pump loop is alive, independent of traffic or
+/// whether coalescing is enabled.
+const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
+
+/// Upper bound on how long the pump will wait to hand a message to a single
+/// call handler. A handler that won't accept within this window is treated as
+/// stuck and dropped, so one wedged call can never freeze the whole dispatcher.
+const CALL_SEND_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Milliseconds since the Unix epoch, saturating to 0 on clock errors.
+pub fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+}
+
+/// Send `msg` to a call handler, bounded by [`CALL_SEND_TIMEOUT`]. Returns
+/// `false` if the handler is gone or stuck (never freezes the caller).
+async fn send_bounded(tx: &mpsc::Sender<CallMessage>, msg: CallMessage) -> bool {
+    matches!(
+        tokio::time::timeout(CALL_SEND_TIMEOUT, tx.send(msg)).await,
+        Ok(Ok(()))
+    )
+}
 
 struct ActiveCall {
     tx: mpsc::Sender<CallMessage>,
@@ -60,6 +87,9 @@ pub struct DispatchPump {
     resolve_tx: mpsc::Sender<ResolveResult>,
     resolve_rx: mpsc::Receiver<ResolveResult>,
     coalesce_enabled: bool,
+    /// Last-progress timestamp (ms since epoch), bumped every loop iteration.
+    /// Read by the liveness watchdog to detect a stalled pump.
+    heartbeat: Arc<AtomicU64>,
 }
 
 impl DispatchPump {
@@ -78,6 +108,7 @@ impl DispatchPump {
         db: Arc<Mutex<Database>>,
         db_path: PathBuf,
         metrics: Arc<Metrics>,
+        heartbeat: Arc<AtomicU64>,
     ) -> Self {
         let (resolve_tx, resolve_rx) = mpsc::channel(64);
 
@@ -104,16 +135,24 @@ impl DispatchPump {
             resolve_tx,
             resolve_rx,
             coalesce_enabled: coalesce_timeout_ms > 0,
+            heartbeat,
         }
     }
 
     pub async fn run(&mut self, stream: &mut Streaming<proto::StreamMessage>) {
         let mut reap_interval = tokio::time::interval(REAP_INTERVAL);
         let mut coalesce_interval = tokio::time::interval(COALESCE_TICK_INTERVAL);
+        let mut heartbeat_interval = tokio::time::interval(HEARTBEAT_INTERVAL);
         reap_interval.tick().await; // skip immediate first tick
         coalesce_interval.tick().await;
+        heartbeat_interval.tick().await;
 
         loop {
+            // Mark progress at the top of every iteration. As long as the pump
+            // keeps looping (it wakes at least every HEARTBEAT_INTERVAL), the
+            // watchdog sees a fresh timestamp; a blocked iteration goes stale.
+            self.heartbeat.store(now_millis(), Ordering::Relaxed);
+
             tokio::select! {
                 msg = stream.message() => {
                     match msg {
@@ -136,11 +175,25 @@ impl DispatchPump {
                     let effects = self.state.on_coalesce_tick();
                     self.process_effects(effects).await;
                 }
+                _ = heartbeat_interval.tick() => {}
                 Some(result) = self.resolve_rx.recv() => {
                     self.handle_resolve_result(result).await;
                 }
             }
         }
+    }
+
+    /// Record that a call handler stopped accepting messages within
+    /// [`CALL_SEND_TIMEOUT`]: drop it from the live set so it can no longer
+    /// receive (or block the pump on) further sends.
+    fn note_stuck(&mut self, key: &CallKey) {
+        tracing::error!(
+            talkgroup = key.talkgroup.0,
+            sys_num = key.sys_num.0,
+            "call handler stuck (bounded send timed out); dropping it"
+        );
+        self.ctx.metrics.calls_dropped_stuck.add(1, &[]);
+        self.calls.remove(key);
     }
 
     async fn handle_stream_message(&mut self, msg: proto::StreamMessage) {
@@ -211,32 +264,36 @@ impl DispatchPump {
 
                 DispatchEffect::EndCall { key, call_data } => {
                     if let Some(active) = self.calls.remove(&key) {
-                        let _ = active.tx.send(CallMessage::End(call_data)).await;
+                        let _ = send_bounded(&active.tx, CallMessage::End(call_data)).await;
                     }
                 }
 
                 DispatchEffect::ReapCall { key } => {
                     self.ctx.metrics.calls_reaped.add(1, &[]);
                     if let Some(active) = self.calls.remove(&key) {
-                        let _ = active.tx.send(CallMessage::End(None)).await;
+                        let _ = send_bounded(&active.tx, CallMessage::End(None)).await;
                     }
                 }
 
                 DispatchEffect::PttEnd { key, call_data } => {
-                    if let Some(active) = self.calls.get(&key) {
-                        let _ = active.tx.send(CallMessage::PttEnd(call_data)).await;
+                    if let Some(tx) = self.calls.get(&key).map(|a| a.tx.clone())
+                        && !send_bounded(&tx, CallMessage::PttEnd(call_data)).await
+                    {
+                        self.note_stuck(&key);
                     }
                 }
 
                 DispatchEffect::CoalesceResume { key, call } => {
-                    if let Some(active) = self.calls.get(&key) {
-                        let _ = active.tx.send(CallMessage::PttStart(Box::new(call))).await;
+                    if let Some(tx) = self.calls.get(&key).map(|a| a.tx.clone())
+                        && !send_bounded(&tx, CallMessage::PttStart(Box::new(call))).await
+                    {
+                        self.note_stuck(&key);
                     }
                 }
 
                 DispatchEffect::CoalesceTimeout { key } => {
                     if let Some(active) = self.calls.remove(&key) {
-                        let _ = active.tx.send(CallMessage::End(None)).await;
+                        let _ = send_bounded(&active.tx, CallMessage::End(None)).await;
                     }
                 }
 
@@ -259,7 +316,7 @@ impl DispatchPump {
                     // would orphan the embed in its grey in-progress state.
                     // self.calls is the source of truth for live handlers.
                     if let Some(old) = self.calls.remove(&key) {
-                        let _ = old.tx.send(CallMessage::End(None)).await;
+                        let _ = send_bounded(&old.tx, CallMessage::End(None)).await;
                     }
                     // Create mpsc for buffering audio during resolution
                     let (tx, rx) = mpsc::channel(1024);

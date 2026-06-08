@@ -168,14 +168,13 @@ impl CallManager {
         freq: Freq,
         f: impl FnOnce(&mut crate::ConventionalChannelMetrics),
     ) {
-        if let Ok(mut snap) = self.conv_metrics.lock() {
-            if let Some(ch) = snap
+        if let Ok(mut snap) = self.conv_metrics.lock()
+            && let Some(ch) = snap
                 .channels
                 .iter_mut()
                 .find(|c| c.talkgroup == talkgroup && (c.freq_hz - freq.as_hz()).abs() < 1.0)
-            {
-                f(ch);
-            }
+        {
+            f(ch);
         }
     }
 
@@ -478,10 +477,9 @@ impl CallManager {
 
         // Build recorder config from Rust state (replaces C++ build_recorder_config)
         let cfg = self.build_recorder_config_from_view(&view);
-        // Capture values we need after dropping the view
+        // Capture values we need after the view borrow ends
         let talkgroup = view.talkgroup();
         let sys_num = view.sys_num();
-        drop(view);
 
         let freq_hz = freq.as_hz();
         let source_idx = self.find_source(freq_hz);
@@ -551,10 +549,8 @@ impl CallManager {
 
         let metrics = ffi::call_stop_recording(handle.pin_mut());
 
-        let mut is_conventional = false;
         let mut was_idle = false;
         if let Some(view) = self.state.get_call_view(call_id) {
-            is_conventional = view.is_conventional();
             was_idle = view.state() == CallState::Idle;
             let pref_ppm = self
                 .preferred_ppm(view.freq().as_hz(), metrics.freq_error)
@@ -572,11 +568,11 @@ impl CallManager {
             );
         }
 
-        // Update signal/noise from conventional recorder metrics
-        if is_conventional {
-            self.state
-                .feed_recorder_power(call_id, metrics.recorder_pwr, was_idle);
-        }
+        // Update signal/noise from the recorder's power probe. Works for every
+        // recorder type (analog/P25/DMR all read xlat_channelizer::get_pwr);
+        // a DB_UNSET reading is mapped to None inside feed_recorder_power.
+        self.state
+            .feed_recorder_power(call_id, metrics.recorder_pwr, was_idle);
 
         self.state.on_recorder_stopped(call_id);
     }
@@ -591,7 +587,6 @@ impl CallManager {
         let final_freq = view.freq();
         let is_conventional = view.is_conventional();
         let rec_num = view.recorder();
-        drop(view);
 
         // Signal-detection conventional channels transition to Disabled
         // inside on_conventional_idle_timeout() *before* effects are
@@ -611,12 +606,11 @@ impl CallManager {
             if let Some(rec_num) = rec_num {
                 let metrics = ffi::call_stop_recording(handle.pin_mut());
 
-                // Feed recorder power back into state machine
-                if is_conventional {
-                    let was_idle = state == CallState::Idle;
-                    self.state
-                        .feed_recorder_power(call_id, metrics.recorder_pwr, was_idle);
-                }
+                // Feed recorder power back into state machine (all recorder
+                // types; DB_UNSET maps to None inside feed_recorder_power).
+                let was_idle = state == CallState::Idle;
+                self.state
+                    .feed_recorder_power(call_id, metrics.recorder_pwr, was_idle);
 
                 let pref_ppm = self
                     .preferred_ppm(final_freq.as_hz(), metrics.freq_error)
@@ -656,7 +650,6 @@ impl CallManager {
                             m.recordings_completed += 1;
                         });
                     }
-                    drop(view);
 
                     let handle = self.handles.get(&call_id).unwrap();
                     if metrics.is_dmr {
@@ -715,18 +708,13 @@ impl CallManager {
         }
 
         // Sysid/Status need FFI call before state machine processes them
-        match rust_msg.message_type {
-            MessageType::Sysid => {
-                if !ffi::tr_system_update_sysid(ctx.as_mut(), msg) {
-                    return;
-                }
-            }
-            MessageType::Status => {
-                if !ffi::tr_system_update_status(ctx.as_mut(), msg) {
-                    return;
-                }
-            }
-            _ => {}
+        let ffi_ok = match rust_msg.message_type {
+            MessageType::Sysid => ffi::tr_system_update_sysid(ctx.as_mut(), msg),
+            MessageType::Status => ffi::tr_system_update_status(ctx.as_mut(), msg),
+            _ => true,
+        };
+        if !ffi_ok {
+            return;
         }
 
         let effects = self.state.on_message(&rust_msg);
@@ -1014,8 +1002,8 @@ impl CallManager {
             call_num: view.call_num(),
             sys_num: view.sys_num(),
             freq: view.freq().as_hz(),
-            signal: view.signal(),
-            noise: view.noise(),
+            signal: trunk_recorder_sys::signal_to_ffi(view.signal()),
+            noise: trunk_recorder_sys::signal_to_ffi(view.noise()),
             freq_error: 0,
             encrypted: view.encrypted(),
             emergency: view.emergency(),
@@ -1066,8 +1054,8 @@ impl CallManager {
             freq_error: 0,
             source_num: 0,
             recorder_num: view.recorder().map_or(-1, |r| r.0),
-            signal: view.signal(),
-            noise: view.noise(),
+            signal: trunk_recorder_sys::signal_to_ffi(view.signal()),
+            noise: trunk_recorder_sys::signal_to_ffi(view.noise()),
             start_time: crate::call_state::system_time_to_unix(view.start_time()),
             stop_time: now,
             error_count: 0,

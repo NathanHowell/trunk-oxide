@@ -62,10 +62,10 @@ impl<'a> CallView<'a> {
     pub(crate) fn current_source_id(&self) -> i64 {
         self.0.current_source_id
     }
-    pub(crate) fn signal(&self) -> f64 {
+    pub(crate) fn signal(&self) -> Option<f64> {
         self.0.signal
     }
-    pub(crate) fn noise(&self) -> f64 {
+    pub(crate) fn noise(&self) -> Option<f64> {
         self.0.noise
     }
     pub(crate) fn priority(&self) -> i32 {
@@ -436,8 +436,8 @@ pub(crate) struct CallEntry {
     pub(crate) encrypted: bool,
     pub(crate) is_analog: bool,
     pub(crate) current_source_id: i64,
-    pub(crate) signal: f64,
-    pub(crate) noise: f64,
+    pub(crate) signal: Option<f64>,
+    pub(crate) noise: Option<f64>,
     pub(crate) priority: i32,
     pub(crate) recorder: Option<RecorderNum>,
     pub(crate) last_update: Instant,
@@ -475,8 +475,8 @@ impl Default for CallEntry {
             encrypted: false,
             is_analog: false,
             current_source_id: 0,
-            signal: 0.0,
-            noise: 0.0,
+            signal: None,
+            noise: None,
             priority: 0,
             recorder: None,
             last_update: Instant::now(),
@@ -1650,7 +1650,7 @@ impl TrunkStateMachine {
                 // Squelch closed — debounce: don't transition immediately.
                 // tick_conventional() finalizes if squelch stays closed past
                 // SQUELCH_DEBOUNCE.
-                entry.noise = pwr_db;
+                entry.noise = trunk_recorder_sys::signal_from_ffi(pwr_db);
                 if entry.state == CallState::Recording {
                     entry.squelch_closed_at.get_or_insert_with(Instant::now);
                 } else if entry.idle_since.is_none() {
@@ -1658,7 +1658,7 @@ impl TrunkStateMachine {
                 }
             } else {
                 // Squelch open
-                entry.signal = pwr_db;
+                entry.signal = trunk_recorder_sys::signal_from_ffi(pwr_db);
                 if entry.squelch_closed_at.take().is_some() {
                     // Reopened before debounce expired — cancel pending close,
                     // stay in Recording. No audio lost.
@@ -1842,9 +1842,9 @@ impl TrunkStateMachine {
     pub(crate) fn feed_recorder_power(&mut self, call_id: CallId, pwr: f64, was_idle: bool) {
         if let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) {
             if was_idle {
-                entry.noise = pwr;
+                entry.noise = trunk_recorder_sys::signal_from_ffi(pwr);
             } else {
-                entry.signal = pwr;
+                entry.signal = trunk_recorder_sys::signal_from_ffi(pwr);
             }
         }
     }

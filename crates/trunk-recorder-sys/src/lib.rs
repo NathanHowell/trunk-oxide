@@ -519,6 +519,30 @@ pub mod ffi {
     }
 }
 
+// ── Signal/noise sentinel encoding ──
+
+/// dB value used on the FFI wire to mean "no measurement".
+///
+/// cxx shared structs (`TrCallData`/`TrCallInfo`) carry `signal`/`noise` as
+/// plain `f64`, so absence is encoded as a sentinel rather than `Option`. This
+/// is the threshold: any value at or above it decodes to `None`. It also
+/// catches trunk-recorder's C++ `DB_UNSET` (999) returned by `get_pwr()` when
+/// the power probe has no level.
+pub const NO_SIGNAL_DB: f64 = 998.0;
+
+/// Encode an optional dB reading for the FFI wire (`None` → [`NO_SIGNAL_DB`]).
+#[must_use]
+pub fn signal_to_ffi(value: Option<f64>) -> f64 {
+    value.unwrap_or(NO_SIGNAL_DB)
+}
+
+/// Decode a dB reading off the FFI wire, mapping the sentinel (and C++
+/// `DB_UNSET`) back to `None`.
+#[must_use]
+pub fn signal_from_ffi(value: f64) -> Option<f64> {
+    (value < NO_SIGNAL_DB).then_some(value)
+}
+
 // ── GR event channel types ──
 
 /// A signal detected by the signal detector FFT block.

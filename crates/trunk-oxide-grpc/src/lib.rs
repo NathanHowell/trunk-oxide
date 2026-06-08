@@ -59,16 +59,8 @@ fn convert_call_data(cd: &TrCallData) -> proto::CallData {
         freq_error: cd.freq_error,
         source_num: cd.source_num,
         recorder_num: cd.recorder_num,
-        signal: if cd.signal >= 998.0 {
-            None
-        } else {
-            Some(cd.signal)
-        },
-        noise: if cd.noise >= 998.0 {
-            None
-        } else {
-            Some(cd.noise)
-        },
+        signal: trunk_recorder_sys::signal_from_ffi(cd.signal),
+        noise: trunk_recorder_sys::signal_from_ffi(cd.noise),
         start_time: cd.start_time,
         stop_time: cd.stop_time,
         error_count: cd.error_count,
@@ -299,16 +291,8 @@ impl EventBridge {
             call_num: info.call_num,
             sys_num: info.sys_num,
             freq: info.freq,
-            signal: if info.signal >= 998.0 {
-                None
-            } else {
-                Some(info.signal)
-            },
-            noise: if info.noise >= 998.0 {
-                None
-            } else {
-                Some(info.noise)
-            },
+            signal: trunk_recorder_sys::signal_from_ffi(info.signal),
+            noise: trunk_recorder_sys::signal_from_ffi(info.noise),
             freq_error: info.freq_error,
             encrypted: info.encrypted,
             emergency: info.emergency,

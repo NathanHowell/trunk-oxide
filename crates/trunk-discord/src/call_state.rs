@@ -10,7 +10,9 @@ const MAX_DESCRIPTION_LEN: usize = 3800;
 
 /// RMS threshold below which post-filter audio is considered silent.
 /// Samples are normalized to [-1.0, 1.0]; an RMS of 0.005 is ~-46 dBFS.
-const SILENCE_RMS_THRESHOLD: f64 = 0.005;
+/// Shared with the call handler, which uses it to skip handing silent chunks to
+/// the whisperer (a chunk too quiet to transcribe is also too quiet to attach).
+pub const SILENCE_RMS_THRESHOLD: f64 = 0.005;
 
 // ── Effects ──────────────────────────────────────────────────────────────────
 

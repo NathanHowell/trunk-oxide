@@ -11,7 +11,7 @@ use trunk_oxide_proto as proto;
 
 use trunk_database::Database;
 
-use crate::call_state::{CallEffect, CallState, CallStateConfig, EmbedData};
+use crate::call_state::{CallEffect, CallState, CallStateConfig, EmbedData, SILENCE_RMS_THRESHOLD};
 use crate::discord::DiscordClient;
 use crate::grpc_whisperer::WhispererConnection;
 use crate::metrics::Metrics;
@@ -354,12 +354,10 @@ impl CallHandler {
                     }
                 }
                 CallEffect::Transcribe { audio } => {
-                    // Hand the audio to the slow-lane worker; the resulting text
-                    // is applied later (in FIFO order) via `apply_result`. The
-                    // send is on an unbounded channel and never blocks.
-                    if !audio.is_empty() {
-                        self.enqueue_job(TranscribeJob::Audio(audio));
-                    }
+                    // Hand the audio to the slow-lane worker (silence-gated); the
+                    // resulting text is applied later, in FIFO order, via
+                    // `apply_transcript`. The send never blocks (unbounded).
+                    self.enqueue_audio(audio);
                 }
                 CallEffect::UpdateDb { update } => {
                     if let Some(row_id) = self.call_row_id {
@@ -498,6 +496,19 @@ impl CallHandler {
         }
     }
 
+    /// Enqueue audio for transcription, skipping silent chunks so dead air never
+    /// reaches the capacity-constrained whisperer. Silence uses the same RMS
+    /// threshold as the embed/attachment gate, so a chunk too quiet to
+    /// transcribe is also too quiet to ever be attached. Gating here is purely
+    /// about transcription: the OGG encoder and the per-call silence decision
+    /// both work off the ingested samples and are unaffected.
+    fn enqueue_audio(&self, audio: Vec<f32>) {
+        if rms(&audio) < SILENCE_RMS_THRESHOLD {
+            return;
+        }
+        self.enqueue_job(TranscribeJob::Audio(audio));
+    }
+
     /// Flush the resampler tail and force-finish tone detection into
     /// `audio_buffer`. Shared by the PTT-boundary and call-end paths.
     async fn flush_dsp(&mut self) -> Result<()> {
@@ -519,12 +530,8 @@ impl CallHandler {
 
     /// Drain whatever remains in `audio_buffer` and enqueue it for transcription.
     fn enqueue_remaining_audio(&mut self) {
-        if !self.audio_buffer.is_empty() {
-            let audio: Vec<f32> = std::mem::take(&mut self.audio_buffer);
-            if !audio.is_empty() {
-                self.enqueue_job(TranscribeJob::Audio(audio));
-            }
-        }
+        let audio: Vec<f32> = std::mem::take(&mut self.audio_buffer);
+        self.enqueue_audio(audio);
     }
 
     /// Handle a PTT boundary within a coalesced call. Flushes audio for
@@ -668,6 +675,18 @@ fn buffer_threshold(buffer_duration_ms: u64) -> usize {
     usize::try_from(buffer_duration_ms)
         .unwrap_or(usize::MAX)
         .saturating_mul(16)
+}
+
+/// Root-mean-square of f32 PCM samples in [-1, 1]. Empty input is 0.0 (silent).
+fn rms(samples: &[f32]) -> f64 {
+    let Ok(count) = u32::try_from(samples.len()) else {
+        return 0.0;
+    };
+    if count == 0 {
+        return 0.0;
+    }
+    let sum_sq: f64 = samples.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
+    (sum_sq / f64::from(count)).sqrt()
 }
 
 fn decode_audio(bytes: &[u8]) -> Vec<f32> {

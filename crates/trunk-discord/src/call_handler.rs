@@ -6,6 +6,7 @@ use proto::types::CallRowId;
 use serenity::all::{CreateEmbed, CreateEmbedFooter};
 use serenity::model::id::{ChannelId, MessageId};
 use tokio::sync::{Mutex, mpsc};
+use tracing::Instrument;
 use trunk_oxide_proto as proto;
 
 use trunk_database::Database;
@@ -26,6 +27,31 @@ pub enum CallMessage {
     PttStart(Box<proto::CallInfo>),
 }
 
+/// Work item handed to the per-call transcription worker. Audio chunks are the
+/// only slow item; `Boundary`/`End` are ordering markers that ride the same
+/// FIFO so PTT separators and finalization stay correctly sequenced relative to
+/// the transcription text that precedes them.
+enum TranscribeJob {
+    Audio(Vec<f32>),
+    Boundary(Option<Box<proto::CallData>>),
+    End(Option<Box<proto::CallData>>),
+}
+
+/// Result handed back from the transcription worker, applied in FIFO order by
+/// the handler's main loop. `Boundary`/`End` are passed straight through.
+enum TranscribeResult {
+    Text(String),
+    Boundary(Option<Box<proto::CallData>>),
+    End(Option<Box<proto::CallData>>),
+}
+
+/// Per-call identity used to label whisperer transcription metrics.
+struct TranscribeIdentity {
+    short_name: String,
+    is_conventional: bool,
+    talkgroup: i64,
+}
+
 #[derive(Clone, Copy)]
 pub struct CallHandlerConfig {
     pub buffer_duration_ms: u64,
@@ -36,7 +62,16 @@ pub struct CallHandlerConfig {
 
 pub struct CallHandler {
     state: CallState,
-    rx: mpsc::Receiver<CallMessage>,
+    /// Inbound dispatcher messages. `Option` so [`CallHandler::run`] can move
+    /// the receiver into a local (the `select!` loop needs `&mut self` in arm
+    /// bodies, which would conflict with borrowing `self.rx`).
+    rx: Option<mpsc::Receiver<CallMessage>>,
+    /// Enqueues audio/markers for the transcription worker. Unbounded so the
+    /// handler never blocks here — a wedged transcription must not back-pressure
+    /// the responsive loop (that is the whole point of this design).
+    job_tx: mpsc::UnboundedSender<TranscribeJob>,
+    /// Receiver half handed to the worker in [`CallHandler::run`].
+    job_rx: Option<mpsc::UnboundedReceiver<TranscribeJob>>,
     whisperer: WhispererConnection,
     discord: Arc<DiscordClient>,
     config: CallHandlerConfig,
@@ -48,6 +83,10 @@ pub struct CallHandler {
     ogg_encoder: Option<OggOpusEncoder>,
 
     embed_message_id: Option<MessageId>,
+
+    /// Set once an end has been initiated (explicit `End` message or a dropped
+    /// dispatcher channel), so the synthesized-end path fires at most once.
+    ending: bool,
 
     metrics: Arc<Metrics>,
 
@@ -100,9 +139,13 @@ impl CallHandler {
             },
         );
 
+        let (job_tx, job_rx) = mpsc::unbounded_channel();
+
         Ok(Self {
             state,
-            rx,
+            rx: Some(rx),
+            job_tx,
+            job_rx: Some(job_rx),
             whisperer,
             discord,
             config,
@@ -113,6 +156,7 @@ impl CallHandler {
             post_channel,
             ogg_encoder,
             embed_message_id: None,
+            ending: false,
             metrics,
             db,
             call_row_id,
@@ -130,39 +174,100 @@ impl CallHandler {
         }
         tracing::info!(thread = %self.post_channel, "call started");
 
-        while let Some(msg) = self.rx.recv().await {
-            match msg {
-                CallMessage::Audio {
-                    samples,
-                    sample_rate,
-                } => {
-                    if let Err(e) = self.handle_audio(&samples, sample_rate).await {
-                        tracing::error!(error = %e, "audio handling error");
+        // Spawn the transcription worker on the "slow lane". It owns the gRPC
+        // call to whisper (bounded at 300s but potentially wedged) so the main
+        // loop below never blocks on it and always stays responsive to the
+        // dispatcher — which is what kept a wedged transcription from getting
+        // the handler dropped (note_stuck) and orphaning the embed.
+        //
+        // Instrumenting the worker with the current ("call") span keeps W3C
+        // trace-context propagation working: `WhispererConnection::transcribe`
+        // reads `Span::current()` to parent the whisperer's transcribe span.
+        let mut rx = self.rx.take().expect("rx taken once");
+        let job_rx = self.job_rx.take().expect("job_rx taken once");
+        let (result_tx, mut result_rx) = mpsc::channel::<TranscribeResult>(64);
+        tokio::spawn(
+            transcription_worker(
+                self.whisperer.clone(),
+                Arc::clone(&self.metrics),
+                TranscribeIdentity {
+                    short_name: self.short_name.clone(),
+                    is_conventional: self.is_conventional,
+                    talkgroup: self.talkgroup,
+                },
+                job_rx,
+                result_tx,
+            )
+            .instrument(tracing::Span::current()),
+        );
+
+        let mut rx_open = true;
+        loop {
+            tokio::select! {
+                // Apply transcription results in FIFO order. `None` means the
+                // worker exited (job channel closed) — finalize with whatever we
+                // have so the embed never lingers in its grey in-progress state.
+                result = result_rx.recv() => {
+                    if let Some(r) = result {
+                        if self.apply_result(r).await {
+                            return; // End marker → finalized
+                        }
+                    } else {
+                        // Worker exited before an End marker — finalize anyway.
+                        self.finalize(None).await;
+                        return;
                     }
                 }
-                CallMessage::Event(text) => {
-                    let effects = self.state.on_event(text);
-                    if let Err(e) = self.process_effects(effects).await {
-                        tracing::error!(error = %e, "event posting error");
+                // Dispatcher messages. Only polled while the channel is open;
+                // once it closes we synthesize an end (insurance against being
+                // dropped from the dispatcher without an explicit End).
+                msg = rx.recv(), if rx_open => {
+                    if let Some(m) = msg {
+                        self.handle_message(m).await;
+                    } else {
+                        rx_open = false;
+                        if !self.ending {
+                            self.ending = true;
+                            self.begin_end(None).await;
+                        }
                     }
                 }
-                CallMessage::PttEnd(call_data) => {
-                    if let Err(e) = self.handle_ptt_end(call_data).await {
-                        tracing::error!(error = %e, "PTT end handling error");
-                    }
+            }
+        }
+    }
+
+    /// Dispatch a single inbound message. Transcription-bearing paths only
+    /// *enqueue* work for the worker; they never await whisper inline.
+    async fn handle_message(&mut self, msg: CallMessage) {
+        match msg {
+            CallMessage::Audio {
+                samples,
+                sample_rate,
+            } => {
+                if let Err(e) = self.handle_audio(&samples, sample_rate).await {
+                    tracing::error!(error = %e, "audio handling error");
                 }
-                CallMessage::PttStart(call_info) => {
-                    let effects = self.state.on_ptt_start(call_info.as_ref());
-                    if let Err(e) = self.process_effects(effects).await {
-                        tracing::error!(error = %e, "PTT start handling error");
-                    }
+            }
+            CallMessage::Event(text) => {
+                let effects = self.state.on_event(text);
+                if let Err(e) = self.process_effects(effects).await {
+                    tracing::error!(error = %e, "event posting error");
                 }
-                CallMessage::End(call_data) => {
-                    if let Err(e) = self.handle_end(call_data).await {
-                        tracing::error!(error = %e, "call end handling error");
-                    }
-                    return;
+            }
+            CallMessage::PttEnd(call_data) => {
+                if let Err(e) = self.handle_ptt_end(call_data).await {
+                    tracing::error!(error = %e, "PTT end handling error");
                 }
+            }
+            CallMessage::PttStart(call_info) => {
+                let effects = self.state.on_ptt_start(call_info.as_ref());
+                if let Err(e) = self.process_effects(effects).await {
+                    tracing::error!(error = %e, "PTT start handling error");
+                }
+            }
+            CallMessage::End(call_data) => {
+                self.ending = true;
+                self.begin_end(call_data).await;
             }
         }
     }
@@ -240,12 +345,11 @@ impl CallHandler {
                     }
                 }
                 CallEffect::Transcribe { audio } => {
+                    // Hand the audio to the slow-lane worker; the resulting text
+                    // is applied later (in FIFO order) via `apply_result`. The
+                    // send is on an unbounded channel and never blocks.
                     if !audio.is_empty() {
-                        let text = self.transcribe_recorded(audio).await?;
-                        let followup = self.state.on_transcription(&text);
-                        for (i, e) in followup.into_iter().enumerate() {
-                            queue.insert(i, e);
-                        }
+                        self.enqueue_job(TranscribeJob::Audio(audio));
                     }
                 }
                 CallEffect::UpdateDb { update } => {
@@ -376,40 +480,15 @@ impl CallHandler {
         Ok(())
     }
 
-    /// Transcribe `audio`, recording client-side latency and timeout metrics.
-    ///
-    /// Centralises instrumentation so every transcription path (mid-call,
-    /// PTT-end, call-end) is measured identically. A timeout returns an empty
-    /// transcript (treated like silence) but is counted separately.
-    // Takes `&mut self` (not `&self`) so the returned future is `Send`: a shared
-    // `&CallHandler` would require `CallHandler: Sync`, which the resampler is not.
-    #[allow(clippy::needless_pass_by_ref_mut)]
-    async fn transcribe_recorded(&mut self, audio: Vec<f32>) -> Result<String> {
-        // Clone the cheap (Arc-backed) handles so nothing borrows `self` across
-        // the await.
-        let whisperer = self.whisperer.clone();
-        let duration = self.metrics.transcription_duration.clone();
-        let timed_out = self.metrics.transcriptions_timed_out.clone();
-        let short_name = self.short_name.clone();
-        let is_conventional = self.is_conventional;
-        let talkgroup = self.talkgroup;
-
-        let start = std::time::Instant::now();
-        let outcome = whisperer
-            .transcribe(audio, &short_name, is_conventional, talkgroup)
-            .await?;
-        duration.record(start.elapsed().as_secs_f64(), &[]);
-        let text = outcome.unwrap_or_else(|| {
-            timed_out.add(1, &[]);
-            String::new()
-        });
-        Ok(text)
+    /// Enqueue a job for the transcription worker. The channel is unbounded so
+    /// this never blocks; if the worker has already exited the job is dropped.
+    fn enqueue_job(&self, job: TranscribeJob) {
+        let _ = self.job_tx.send(job);
     }
 
-    /// Handle a PTT boundary within a coalesced call.
-    /// Flushes audio for transcription and marks the boundary, but keeps the handler alive.
-    async fn handle_ptt_end(&mut self, call_data: Option<Box<proto::CallData>>) -> Result<()> {
-        // Flush resampler
+    /// Flush the resampler tail and force-finish tone detection into
+    /// `audio_buffer`. Shared by the PTT-boundary and call-end paths.
+    async fn flush_dsp(&mut self) -> Result<()> {
         if let Some(resampler) = &mut self.resampler {
             let mut flushed = resampler.flush()?;
             if let Some(filter) = &mut self.notch_filter {
@@ -420,39 +499,83 @@ impl CallHandler {
             }
             self.audio_buffer.extend_from_slice(&flushed);
         }
-
-        // Force-finish tone detection if still active (short call)
         if self.tone_detector.is_some() {
             self.finish_tone_detection().await?;
         }
-
-        // Transcribe remaining audio
-        if !self.audio_buffer.is_empty() {
-            let audio: Vec<f32> = std::mem::take(&mut self.audio_buffer);
-            if !audio.is_empty() {
-                let text = self.transcribe_recorded(audio).await?;
-                let effects = self.state.on_transcription(&text);
-                self.process_effects(effects).await?;
-            }
-        }
-
-        // Let state machine record PTT boundary
-        let effects = self.state.on_ptt_end(call_data.as_deref());
-        self.process_effects(effects).await?;
-
-        // Reset resampler for next PTT (may have different sample rate)
-        self.resampler = None;
-
         Ok(())
     }
 
-    async fn handle_end(&mut self, call_data: Option<Box<proto::CallData>>) -> Result<()> {
-        // Best-effort pre-finalization: failures here must not prevent on_end().
-        if let Err(e) = self.flush_before_end().await {
-            tracing::warn!(error = %e, "pre-finalization failed, proceeding to end call");
+    /// Drain whatever remains in `audio_buffer` and enqueue it for transcription.
+    fn enqueue_remaining_audio(&mut self) {
+        if !self.audio_buffer.is_empty() {
+            let audio: Vec<f32> = std::mem::take(&mut self.audio_buffer);
+            if !audio.is_empty() {
+                self.enqueue_job(TranscribeJob::Audio(audio));
+            }
         }
+    }
 
-        // Finalize OGG encoder
+    /// Handle a PTT boundary within a coalesced call. Flushes audio for
+    /// transcription and enqueues a boundary marker, but keeps the handler
+    /// alive. The boundary (separator + duration/signal accumulation) is applied
+    /// later — after the worker has transcribed this PTT's audio — so the PTT
+    /// separator lands after that PTT's text, preserving ordering.
+    async fn handle_ptt_end(&mut self, call_data: Option<Box<proto::CallData>>) -> Result<()> {
+        if let Err(e) = self.flush_dsp().await {
+            tracing::warn!(error = %e, "PTT-end flush failed");
+        }
+        self.enqueue_remaining_audio();
+        self.enqueue_job(TranscribeJob::Boundary(call_data));
+
+        // Reset resampler for next PTT (may have different sample rate).
+        self.resampler = None;
+        Ok(())
+    }
+
+    /// Begin finalization: flush DSP, enqueue the trailing audio, then enqueue an
+    /// End marker. The actual terminal transition (`finalize`) runs once the
+    /// worker has drained everything ahead of that marker — see `apply_result`.
+    async fn begin_end(&mut self, call_data: Option<Box<proto::CallData>>) {
+        if let Err(e) = self.flush_dsp().await {
+            tracing::warn!(error = %e, "pre-finalization flush failed, proceeding to end call");
+        }
+        self.enqueue_remaining_audio();
+        self.enqueue_job(TranscribeJob::End(call_data));
+    }
+
+    /// Apply one worker result in FIFO order. Returns `true` once the call has
+    /// been finalized, signalling the run loop to exit.
+    async fn apply_result(&mut self, result: TranscribeResult) -> bool {
+        match result {
+            TranscribeResult::Text(text) => {
+                let effects = self.state.on_transcription(&text);
+                if let Err(e) = self.process_effects(effects).await {
+                    tracing::error!(error = %e, "transcription posting error");
+                }
+                false
+            }
+            TranscribeResult::Boundary(call_data) => {
+                let effects = self.state.on_ptt_end(call_data.as_deref());
+                if let Err(e) = self.process_effects(effects).await {
+                    tracing::error!(error = %e, "PTT boundary posting error");
+                }
+                false
+            }
+            TranscribeResult::End(call_data) => {
+                self.finalize(call_data).await;
+                true
+            }
+        }
+    }
+
+    /// Finalize the call: finish the OGG stream and run the state machine's
+    /// terminal transition (turns the embed green / attaches audio / deletes the
+    /// embed / persists to the DB). This is the one place an embed is closed
+    /// out, and it runs for *every* call exit — including being dropped by the
+    /// dispatcher or the worker dying — so an embed can never be orphaned grey.
+    async fn finalize(&mut self, call_data: Option<Box<proto::CallData>>) {
+        // All audio was fed to the encoder synchronously at ingestion and in
+        // `flush_dsp`, so nothing further is encoded after this point.
         let ogg_data = self
             .ogg_encoder
             .take()
@@ -464,45 +587,74 @@ impl CallHandler {
                 }
             });
 
-        // Always let the state machine finalize — this is what turns the embed
-        // green / deletes it / persists to DB. Skipping this orphans the embed.
         let effects = self.state.on_end(call_data.as_deref(), ogg_data);
-        self.process_effects(effects).await?;
-
-        Ok(())
+        if let Err(e) = self.process_effects(effects).await {
+            tracing::error!(error = %e, "call end finalization error");
+        }
     }
+}
 
-    /// Flush resampler, finish tone detection, and transcribe remaining audio.
-    /// Called as best-effort before `on_end`; errors are logged, not fatal.
-    async fn flush_before_end(&mut self) -> Result<()> {
-        // Flush resampler
-        if let Some(resampler) = &mut self.resampler {
-            let mut flushed = resampler.flush()?;
-            if let Some(filter) = &mut self.notch_filter {
-                filter.process(&mut flushed);
+/// Per-call transcription worker — the "slow lane". Consumes jobs in FIFO order
+/// and emits results in the same order, so transcription text, PTT separators,
+/// and finalization stay correctly sequenced. It owns the (300s-bounded, but
+/// possibly wedged) gRPC transcription call, keeping it off the handler's
+/// responsive loop. Exits when the job channel closes (handler dropped) or the
+/// handler stops receiving results.
+async fn transcription_worker(
+    whisperer: WhispererConnection,
+    metrics: Arc<Metrics>,
+    identity: TranscribeIdentity,
+    mut job_rx: mpsc::UnboundedReceiver<TranscribeJob>,
+    result_tx: mpsc::Sender<TranscribeResult>,
+) {
+    while let Some(job) = job_rx.recv().await {
+        let result = match job {
+            TranscribeJob::Audio(audio) => {
+                TranscribeResult::Text(transcribe_one(&whisperer, &metrics, &identity, audio).await)
             }
-            if let Some(enc) = &mut self.ogg_encoder {
-                enc.process(&flushed)?;
-            }
-            self.audio_buffer.extend_from_slice(&flushed);
+            TranscribeJob::Boundary(call_data) => TranscribeResult::Boundary(call_data),
+            TranscribeJob::End(call_data) => TranscribeResult::End(call_data),
+        };
+        if result_tx.send(result).await.is_err() {
+            break; // handler gone
         }
+    }
+}
 
-        // Force-finish tone detection if still active (short call)
-        if self.tone_detector.is_some() {
-            self.finish_tone_detection().await?;
+/// Transcribe a single audio chunk, recording client-side latency and timeout
+/// metrics. A timeout or RPC error yields an empty transcript (treated like
+/// silence downstream); timeouts are counted separately.
+async fn transcribe_one(
+    whisperer: &WhispererConnection,
+    metrics: &Metrics,
+    identity: &TranscribeIdentity,
+    audio: Vec<f32>,
+) -> String {
+    if audio.is_empty() {
+        return String::new();
+    }
+    let start = std::time::Instant::now();
+    let outcome = whisperer
+        .transcribe(
+            audio,
+            &identity.short_name,
+            identity.is_conventional,
+            identity.talkgroup,
+        )
+        .await;
+    metrics
+        .transcription_duration
+        .record(start.elapsed().as_secs_f64(), &[]);
+    match outcome {
+        Ok(Some(text)) => text,
+        Ok(None) => {
+            metrics.transcriptions_timed_out.add(1, &[]);
+            String::new()
         }
-
-        // Transcribe remaining audio
-        if !self.audio_buffer.is_empty() {
-            let audio: Vec<f32> = std::mem::take(&mut self.audio_buffer);
-            if !audio.is_empty() {
-                let text = self.transcribe_recorded(audio).await?;
-                let effects = self.state.on_transcription(&text);
-                self.process_effects(effects).await?;
-            }
+        Err(e) => {
+            tracing::error!(error = %e, "transcription request failed");
+            String::new()
         }
-
-        Ok(())
     }
 }
 

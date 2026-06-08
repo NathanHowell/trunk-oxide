@@ -28,21 +28,20 @@ pub enum CallMessage {
 }
 
 /// Work item handed to the per-call transcription worker. Audio chunks are the
-/// only slow item; `Boundary`/`End` are ordering markers that ride the same
-/// FIFO so PTT separators and finalization stay correctly sequenced relative to
-/// the transcription text that precedes them.
+/// only slow item; `Boundary` is an ordering marker that rides the same FIFO so
+/// the PTT separator lands after that transmission's transcript text. There is
+/// no end marker: the worker exits when its job channel closes (the handler
+/// drops the sender at finalization), and that closure is the "done" signal.
 enum TranscribeJob {
     Audio(Vec<f32>),
     Boundary(Option<Box<proto::CallData>>),
-    End(Option<Box<proto::CallData>>),
 }
 
 /// Result handed back from the transcription worker, applied in FIFO order by
-/// the handler's main loop. `Boundary`/`End` are passed straight through.
+/// the handler's main loop. `Boundary` is passed straight through.
 enum TranscribeResult {
     Text(String),
     Boundary(Option<Box<proto::CallData>>),
-    End(Option<Box<proto::CallData>>),
 }
 
 /// Per-call identity used to label whisperer transcription metrics.
@@ -68,8 +67,10 @@ pub struct CallHandler {
     rx: Option<mpsc::Receiver<CallMessage>>,
     /// Enqueues audio/markers for the transcription worker. Unbounded so the
     /// handler never blocks here — a wedged transcription must not back-pressure
-    /// the responsive loop (that is the whole point of this design).
-    job_tx: mpsc::UnboundedSender<TranscribeJob>,
+    /// the responsive loop (that is the whole point of this design). `Option` so
+    /// finalization can drop it, closing the worker's input: the worker then
+    /// drains its remaining jobs and exits, which is what ends the handler.
+    job_tx: Option<mpsc::UnboundedSender<TranscribeJob>>,
     /// Receiver half handed to the worker in [`CallHandler::run`].
     job_rx: Option<mpsc::UnboundedReceiver<TranscribeJob>>,
     whisperer: WhispererConnection,
@@ -83,10 +84,6 @@ pub struct CallHandler {
     ogg_encoder: Option<OggOpusEncoder>,
 
     embed_message_id: Option<MessageId>,
-
-    /// Set once an end has been initiated (explicit `End` message or a dropped
-    /// dispatcher channel), so the synthesized-end path fires at most once.
-    ending: bool,
 
     metrics: Arc<Metrics>,
 
@@ -144,7 +141,7 @@ impl CallHandler {
         Ok(Self {
             state,
             rx: Some(rx),
-            job_tx,
+            job_tx: Some(job_tx),
             job_rx: Some(job_rx),
             whisperer,
             discord,
@@ -156,7 +153,6 @@ impl CallHandler {
             post_channel,
             ogg_encoder,
             embed_message_id: None,
-            ending: false,
             metrics,
             db,
             call_row_id,
@@ -201,43 +197,56 @@ impl CallHandler {
             .instrument(tracing::Span::current()),
         );
 
-        let mut rx_open = true;
+        // ── Phase 1: handle the call, staying responsive to the dispatcher.
+        // Transcription is enqueued to the worker and applied opportunistically;
+        // it NEVER gates anything here. The call finalizes — audio attached,
+        // embed turned green, DB written — the instant the dispatcher ends it
+        // (`finalize_now`), independent of how far behind transcription is. This
+        // is the fix: audio attachment no longer waits on the whisper backlog.
+        let mut results_open = true;
         loop {
             tokio::select! {
-                // Apply transcription results in FIFO order. `None` means the
-                // worker exited (job channel closed) — finalize with whatever we
-                // have so the embed never lingers in its grey in-progress state.
-                result = result_rx.recv() => {
-                    if let Some(r) = result {
-                        if self.apply_result(r).await {
-                            return; // End marker → finalized
-                        }
-                    } else {
-                        // Worker exited before an End marker — finalize anyway.
-                        self.finalize(None).await;
-                        return;
+                // Apply transcription results as they arrive (in FIFO order).
+                result = result_rx.recv(), if results_open => {
+                    match result {
+                        Some(r) => self.apply_transcript(r).await,
+                        None => results_open = false, // worker gone; lose late text
                     }
                 }
-                // Dispatcher messages. Only polled while the channel is open;
-                // once it closes we synthesize an end (insurance against being
-                // dropped from the dispatcher without an explicit End).
-                msg = rx.recv(), if rx_open => {
-                    if let Some(m) = msg {
-                        self.handle_message(m).await;
-                    } else {
-                        rx_open = false;
-                        if !self.ending {
-                            self.ending = true;
-                            self.begin_end(None).await;
+                // Dispatcher messages. End (or a dropped channel) finalizes the
+                // call immediately and drops into the phase-2 transcript drain.
+                msg = rx.recv() => {
+                    match msg {
+                        Some(CallMessage::End(call_data)) => {
+                            self.finalize_now(call_data).await;
+                            break;
+                        }
+                        Some(m) => self.handle_message(m).await,
+                        None => {
+                            // Dropped by the dispatcher without an explicit End
+                            // (e.g. note_stuck or handler replacement). Finalize
+                            // anyway so the embed never lingers grey.
+                            self.finalize_now(None).await;
+                            break;
                         }
                     }
                 }
             }
         }
+
+        // ── Phase 2: the embed is already final (green + audio attached). Keep
+        // applying late transcription results as best-effort edits so the
+        // transcript fills in. `finalize_now` dropped the worker's input, so the
+        // worker drains its queued jobs, emits their results, and exits — closing
+        // this channel. That closure (not a timer) is what ends the handler: it
+        // lives exactly as long as there is transcription still in flight.
+        while let Some(r) = result_rx.recv().await {
+            self.apply_transcript(r).await;
+        }
     }
 
-    /// Dispatch a single inbound message. Transcription-bearing paths only
-    /// *enqueue* work for the worker; they never await whisper inline.
+    /// Dispatch a single non-terminal inbound message. Transcription-bearing
+    /// paths only *enqueue* work for the worker; they never await whisper inline.
     async fn handle_message(&mut self, msg: CallMessage) {
         match msg {
             CallMessage::Audio {
@@ -265,9 +274,9 @@ impl CallHandler {
                     tracing::error!(error = %e, "PTT start handling error");
                 }
             }
-            CallMessage::End(call_data) => {
-                self.ending = true;
-                self.begin_end(call_data).await;
+            // End is intercepted in the run loop's select; never routed here.
+            CallMessage::End(_) => {
+                tracing::error!("End message routed through handle_message");
             }
         }
     }
@@ -481,9 +490,12 @@ impl CallHandler {
     }
 
     /// Enqueue a job for the transcription worker. The channel is unbounded so
-    /// this never blocks; if the worker has already exited the job is dropped.
+    /// this never blocks; if the worker's input has been closed at finalization
+    /// (or the worker exited), the job is dropped.
     fn enqueue_job(&self, job: TranscribeJob) {
-        let _ = self.job_tx.send(job);
+        if let Some(tx) = &self.job_tx {
+            let _ = tx.send(job);
+        }
     }
 
     /// Flush the resampler tail and force-finish tone detection into
@@ -532,39 +544,33 @@ impl CallHandler {
         Ok(())
     }
 
-    /// Begin finalization: flush DSP, enqueue the trailing audio, then enqueue an
-    /// End marker. The actual terminal transition (`finalize`) runs once the
-    /// worker has drained everything ahead of that marker — see `apply_result`.
-    async fn begin_end(&mut self, call_data: Option<Box<proto::CallData>>) {
+    /// Finalize the call *now*, decoupled from transcription. Flushes DSP,
+    /// enqueues the trailing audio for (best-effort, late) transcription, then
+    /// closes the worker's input and runs `finalize` immediately — so the audio
+    /// attaches and the embed turns green without waiting on the whisper
+    /// backlog. Dropping `job_tx` lets the worker drain its queue and exit;
+    /// late transcript text then edits the already-final embed in phase 2.
+    async fn finalize_now(&mut self, call_data: Option<Box<proto::CallData>>) {
         if let Err(e) = self.flush_dsp().await {
             tracing::warn!(error = %e, "pre-finalization flush failed, proceeding to end call");
         }
         self.enqueue_remaining_audio();
-        self.enqueue_job(TranscribeJob::End(call_data));
+        self.job_tx = None; // close worker input → it drains then exits
+        self.finalize(call_data).await;
     }
 
-    /// Apply one worker result in FIFO order. Returns `true` once the call has
-    /// been finalized, signalling the run loop to exit.
-    async fn apply_result(&mut self, result: TranscribeResult) -> bool {
-        match result {
-            TranscribeResult::Text(text) => {
-                let effects = self.state.on_transcription(&text);
-                if let Err(e) = self.process_effects(effects).await {
-                    tracing::error!(error = %e, "transcription posting error");
-                }
-                false
-            }
-            TranscribeResult::Boundary(call_data) => {
-                let effects = self.state.on_ptt_end(call_data.as_deref());
-                if let Err(e) = self.process_effects(effects).await {
-                    tracing::error!(error = %e, "PTT boundary posting error");
-                }
-                false
-            }
-            TranscribeResult::End(call_data) => {
-                self.finalize(call_data).await;
-                true
-            }
+    /// Apply one worker result as a best-effort embed edit. Safe before *and*
+    /// after finalization: a plain embed edit preserves the green color,
+    /// duration, and audio attachment (the state machine derives those from
+    /// `call_ended` + accumulators, and a serenity edit without `new_attachment`
+    /// omits the attachments field, so Discord keeps the existing audio file).
+    async fn apply_transcript(&mut self, result: TranscribeResult) {
+        let effects = match result {
+            TranscribeResult::Text(text) => self.state.on_transcription(&text),
+            TranscribeResult::Boundary(call_data) => self.state.on_ptt_end(call_data.as_deref()),
+        };
+        if let Err(e) = self.process_effects(effects).await {
+            tracing::error!(error = %e, "transcript edit error");
         }
     }
 
@@ -595,11 +601,12 @@ impl CallHandler {
 }
 
 /// Per-call transcription worker — the "slow lane". Consumes jobs in FIFO order
-/// and emits results in the same order, so transcription text, PTT separators,
-/// and finalization stay correctly sequenced. It owns the (300s-bounded, but
-/// possibly wedged) gRPC transcription call, keeping it off the handler's
-/// responsive loop. Exits when the job channel closes (handler dropped) or the
-/// handler stops receiving results.
+/// and emits results in the same order, so transcript text and PTT separators
+/// stay correctly sequenced. It owns the (300s-bounded, but possibly wedged)
+/// gRPC transcription call, keeping it off the handler's responsive loop. Exits
+/// when the job channel closes (handler finalized/dropped) or the handler stops
+/// receiving results; that exit closes the result channel, which ends the
+/// handler's phase-2 drain.
 async fn transcription_worker(
     whisperer: WhispererConnection,
     metrics: Arc<Metrics>,
@@ -613,7 +620,6 @@ async fn transcription_worker(
                 TranscribeResult::Text(transcribe_one(&whisperer, &metrics, &identity, audio).await)
             }
             TranscribeJob::Boundary(call_data) => TranscribeResult::Boundary(call_data),
-            TranscribeJob::End(call_data) => TranscribeResult::End(call_data),
         };
         if result_tx.send(result).await.is_err() {
             break; // handler gone

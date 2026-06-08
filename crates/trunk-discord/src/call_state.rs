@@ -421,12 +421,16 @@ impl CallState {
     }
 
     /// Does this call have content worth posting?
+    ///
+    /// Non-silent audio is content on its own — the call is a real transmission
+    /// and gets an embed with its audio attached, whether or not a transcript
+    /// ever arrives (transcription is decoupled and may lag, fail, or be empty).
+    /// A transcript over silent audio is treated as a hallucination and does not
+    /// count, so dead-air calls with a spurious transcript are still dropped.
     fn has_content(&self) -> bool {
         let audio_is_silent = self.audio_rms() < SILENCE_RMS_THRESHOLD;
 
-        (!self.transcription_text.is_empty() && !audio_is_silent)
-            || self.has_interesting_tones()
-            || !self.events.is_empty()
+        !audio_is_silent || self.has_interesting_tones() || !self.events.is_empty()
     }
 
     /// Build a pure embed representation from current state.
@@ -838,6 +842,31 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, CallEffect::UpdateDb { .. }))
         );
+    }
+
+    #[test]
+    fn end_with_audio_but_no_transcription_attaches() {
+        // Decoupled transcription: a real (non-silent) transmission whose
+        // transcript never arrived (lagging or failed) still posts an embed and
+        // attaches its audio. The transcript, if it ever comes, edits later.
+        let mut s = make_state();
+        s.on_start();
+        s.audio_energy_sum = 1.0;
+        s.audio_sample_count = 1000;
+        let effects = s.on_end(None, Some(vec![1, 2, 3]));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, CallEffect::SendEmbed { .. })),
+            "embed should be created at end even without a transcript"
+        );
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, CallEffect::AttachAudio { .. })),
+            "non-silent audio should be attached"
+        );
+        assert!(!effects.iter().any(|e| matches!(e, CallEffect::DeleteEmbed)));
     }
 
     #[test]

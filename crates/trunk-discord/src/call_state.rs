@@ -106,6 +106,14 @@ pub struct CallState {
     audio_energy_sum: f64,
     audio_sample_count: u32,
 
+    /// Audio segments handed to the transcription worker that haven't returned
+    /// a result yet. Rendered as a "transcribing…" placeholder in the
+    /// description so a finalized embed visibly distinguishes "transcript still
+    /// pending" from "transcript complete". Incremented per enqueued segment
+    /// ([`Self::on_transcription_enqueued`]), decremented per result
+    /// ([`Self::on_transcription`]).
+    pending_transcriptions: u32,
+
     // PTT coalescing accumulators
     ptt_count: u32,
     accumulated_duration: Duration,
@@ -148,6 +156,7 @@ impl CallState {
             call_ended: false,
             audio_energy_sum: 0.0,
             audio_sample_count: 0,
+            pending_transcriptions: 0,
             ptt_count: 0,
             accumulated_duration: Duration::ZERO,
             accumulated_signal_sum: 0.0,
@@ -197,17 +206,54 @@ impl CallState {
         }
     }
 
-    /// Handle transcription text from Whisper.
+    /// Note that an audio segment was handed to the transcription worker but
+    /// hasn't come back yet. Bumps the in-flight count shown as a placeholder.
+    /// Never creates an embed on its own — pending work alone is not content.
+    pub fn on_transcription_enqueued(&mut self) -> Vec<CallEffect> {
+        self.pending_transcriptions = self.pending_transcriptions.saturating_add(1);
+        if self.has_embed {
+            vec![CallEffect::EditEmbed {
+                embed: self.build_embed(),
+            }]
+        } else {
+            vec![]
+        }
+    }
+
+    /// Force-clear the in-flight placeholder. A safety net for the rare case
+    /// where transcription results are lost (e.g. the worker task dies) before
+    /// the count drains to zero, so a finalized embed is never left showing a
+    /// stale "transcribing…" marker.
+    pub fn on_transcription_drained(&mut self) -> Vec<CallEffect> {
+        if self.pending_transcriptions == 0 {
+            return vec![];
+        }
+        self.pending_transcriptions = 0;
+        if self.has_embed {
+            vec![CallEffect::EditEmbed {
+                embed: self.build_embed(),
+            }]
+        } else {
+            vec![]
+        }
+    }
+
+    /// Handle transcription text from Whisper. Each call corresponds to one
+    /// previously enqueued audio segment (even an empty/blank result), so it
+    /// always decrements the in-flight count.
     pub fn on_transcription(&mut self, text: &str) -> Vec<CallEffect> {
+        self.pending_transcriptions = self.pending_transcriptions.saturating_sub(1);
         let text = text.trim();
         if text.is_empty() || is_blank_audio(text) {
             if !self.transcription_text.is_empty() {
                 self.transcription_text.push_str(" ...");
-                if self.has_embed {
-                    return vec![CallEffect::EditEmbed {
-                        embed: self.build_embed(),
-                    }];
-                }
+            }
+            // Re-render even on an empty result so the placeholder count updates
+            // (and disappears once the final segment lands).
+            if self.has_embed {
+                return vec![CallEffect::EditEmbed {
+                    embed: self.build_embed(),
+                }];
             }
             return vec![];
         }
@@ -523,18 +569,32 @@ impl CallState {
     }
 
     fn build_description(&self) -> Option<String> {
-        if self.transcription_text.is_empty() {
-            None
+        let mut out = if self.transcription_text.is_empty() {
+            String::new()
         } else if self.transcription_text.len() > MAX_DESCRIPTION_LEN {
             let skip = self.transcription_text.len() - MAX_DESCRIPTION_LEN;
             let start = self.transcription_text[skip..]
                 .char_indices()
                 .next()
                 .map_or(skip, |(i, _)| skip + i);
-            Some(format!("...{}", &self.transcription_text[start..]))
+            format!("...{}", &self.transcription_text[start..])
         } else {
-            Some(self.transcription_text.clone())
+            self.transcription_text.clone()
+        };
+
+        // Show an in-flight marker while transcription segments are still
+        // pending, so a finalized embed reads as "transcript loading" rather
+        // than "no transcript".
+        if self.pending_transcriptions > 0 {
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            let n = self.pending_transcriptions;
+            let plural = if n == 1 { "" } else { "s" };
+            out.push_str(&format!("⏳ *transcribing {n} segment{plural}…*"));
         }
+
+        if out.is_empty() { None } else { Some(out) }
     }
 
     fn build_fields(
@@ -770,6 +830,68 @@ mod tests {
         let desc = embed.description.unwrap();
         assert!(desc.starts_with("..."));
         assert!(desc.len() <= MAX_DESCRIPTION_LEN + 4); // "..." prefix
+    }
+
+    // ── in-flight transcription placeholder ──────────────────────────────
+
+    #[test]
+    fn pending_transcription_does_not_create_embed() {
+        let mut s = make_state();
+        s.on_start();
+        let effects = s.on_transcription_enqueued();
+        assert!(effects.is_empty(), "pending work alone must not post an embed");
+        assert!(!s.has_embed);
+    }
+
+    #[test]
+    fn pending_transcription_shows_placeholder_on_existing_embed() {
+        let mut s = make_state();
+        s.on_start();
+        s.on_event("**Signal**: unit 123".into()); // creates embed
+        s.on_transcription_enqueued();
+        let effects = s.on_transcription_enqueued();
+        let CallEffect::EditEmbed { embed } = &effects[0] else {
+            panic!("expected EditEmbed");
+        };
+        assert_eq!(
+            embed.description.as_deref(),
+            Some("⏳ *transcribing 2 segments…*")
+        );
+    }
+
+    #[test]
+    fn transcription_result_decrements_and_clears_placeholder() {
+        let mut s = make_state();
+        s.on_start();
+        s.on_event("**Signal**: unit 123".into());
+        s.on_transcription_enqueued();
+        s.on_transcription_enqueued();
+
+        // First result: real text, one segment still pending.
+        s.on_transcription("hello world");
+        let embed = s.build_embed();
+        assert_eq!(
+            embed.description.as_deref(),
+            Some("hello world\n⏳ *transcribing 1 segment…*")
+        );
+
+        // Second (final) result is empty: count hits zero, placeholder gone.
+        // The empty segment leaves the existing " ..." gap marker on the text.
+        s.on_transcription("");
+        let embed = s.build_embed();
+        assert_eq!(embed.description.as_deref(), Some("hello world ..."));
+    }
+
+    #[test]
+    fn drained_clears_stale_placeholder() {
+        let mut s = make_state();
+        s.on_start();
+        s.on_event("**Signal**: unit 123".into());
+        s.on_transcription_enqueued();
+        // Result never arrives; draining clears the marker.
+        let effects = s.on_transcription_drained();
+        assert!(matches!(&effects[0], CallEffect::EditEmbed { .. }));
+        assert_eq!(s.build_embed().description, None);
     }
 
     // ── on_audio_processed ───────────────────────────────────────────────

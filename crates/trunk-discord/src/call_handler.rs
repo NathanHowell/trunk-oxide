@@ -259,6 +259,13 @@ impl CallHandler {
         while let Some(r) = result_rx.recv().await {
             self.apply_transcript(r).await;
         }
+
+        // Safety net: if any results were lost (e.g. the worker task died), make
+        // sure the embed isn't left showing a stale "transcribing…" placeholder.
+        let drained = self.state.on_transcription_drained();
+        if let Err(e) = self.process_effects(drained).await {
+            tracing::error!(error = %e, "placeholder clear error");
+        }
     }
 
     /// Dispatch a single non-terminal inbound message. Transcription-bearing
@@ -372,8 +379,9 @@ impl CallHandler {
                 CallEffect::Transcribe { audio } => {
                     // Hand the audio to the slow-lane worker (silence-gated); the
                     // resulting text is applied later, in FIFO order, via
-                    // `apply_transcript`. The send never blocks (unbounded).
-                    self.enqueue_audio(audio);
+                    // `apply_transcript`. The send never blocks (unbounded). Any
+                    // in-flight-marker edit rides the same effect queue.
+                    queue.extend(self.enqueue_audio(audio));
                 }
                 CallEffect::UpdateDb { update } => {
                     if let Some(row_id) = self.call_row_id {
@@ -519,7 +527,7 @@ impl CallHandler {
     /// transcribe is also too quiet to ever be attached. Gating here is purely
     /// about transcription: the OGG encoder and the per-call silence decision
     /// both work off the ingested samples and are unaffected.
-    fn enqueue_audio(&mut self, audio: Vec<f32>) {
+    fn enqueue_audio(&mut self, audio: Vec<f32>) -> Vec<CallEffect> {
         let chunk_rms = rms(&audio);
         let samples = audio.len();
         let kept = chunk_rms >= SILENCE_RMS_THRESHOLD;
@@ -536,8 +544,12 @@ impl CallHandler {
             self.dbg_kept_samples += samples as u64;
             self.dbg_kept_chunks += 1;
             self.enqueue_job(TranscribeJob::Audio(audio));
+            // Track it as in-flight so the embed shows a "transcribing…" marker
+            // until the matching result comes back via `apply_transcript`.
+            self.state.on_transcription_enqueued()
         } else {
             self.dbg_gated_chunks += 1;
+            Vec::new()
         }
     }
 
@@ -561,9 +573,11 @@ impl CallHandler {
     }
 
     /// Drain whatever remains in `audio_buffer` and enqueue it for transcription.
-    fn enqueue_remaining_audio(&mut self) {
+    /// Returns the in-flight-marker effect; callers that re-render the embed
+    /// immediately afterwards (PTT boundary / finalize) can discard it.
+    fn enqueue_remaining_audio(&mut self) -> Vec<CallEffect> {
         let audio: Vec<f32> = std::mem::take(&mut self.audio_buffer);
-        self.enqueue_audio(audio);
+        self.enqueue_audio(audio)
     }
 
     /// Handle a PTT boundary within a coalesced call. Flushes audio for
@@ -575,7 +589,9 @@ impl CallHandler {
         if let Err(e) = self.flush_dsp().await {
             tracing::warn!(error = %e, "PTT-end flush failed");
         }
-        self.enqueue_remaining_audio();
+        // Bumps the in-flight count; the `on_ptt_boundary` render below already
+        // rebuilds the embed with it, so discard this effect.
+        let _ = self.enqueue_remaining_audio();
 
         // Account for this transmission *now* — duration, PTT count, signal —
         // decoupled from transcription. The embed then shows correct metadata
@@ -602,7 +618,8 @@ impl CallHandler {
         if let Err(e) = self.flush_dsp().await {
             tracing::warn!(error = %e, "pre-finalization flush failed, proceeding to end call");
         }
-        self.enqueue_remaining_audio();
+        // Bumps the in-flight count; `finalize`'s `on_end` render reflects it.
+        let _ = self.enqueue_remaining_audio();
         self.job_tx = None; // close worker input → it drains then exits
         self.finalize(call_data).await;
     }

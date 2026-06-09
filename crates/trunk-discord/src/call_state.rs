@@ -21,8 +21,18 @@ pub const SILENCE_RMS_THRESHOLD: f64 = 0.005;
 pub enum CallEffect {
     /// Post a new embed to Discord.
     SendEmbed { embed: EmbedData },
-    /// Edit the existing embed in place.
+    /// Edit the existing embed in place, promptly (call-state changes the user
+    /// must see right away: first content, finalization, tones, events).
     EditEmbed { embed: EmbedData },
+    /// Edit the existing embed, but coalesced/debounced by the executor.
+    ///
+    /// Used for the high-frequency transcript stream (one result per ~3s audio
+    /// segment, often bursting as the whisper backlog drains). The executor
+    /// keeps only the latest and flushes at most every couple of seconds, so
+    /// transcript churn stops hammering the per-channel edit rate-limit bucket.
+    /// Always carries the *full* current embed, so a later prompt `EditEmbed`
+    /// (e.g. finalization) supersedes any pending throttled edit.
+    EditEmbedThrottled { embed: EmbedData },
     /// Delete the embed (call produced no useful content).
     DeleteEmbed,
     /// Replace embed and attach OGG audio file.
@@ -113,9 +123,10 @@ pub struct CallState {
     audio_kept: bool,
 
     /// Audio segments handed to the transcription worker that haven't returned
-    /// a result yet. Rendered as a "transcribing…" placeholder in the
-    /// description so a finalized embed visibly distinguishes "transcript still
-    /// pending" from "transcript complete". Incremented per enqueued segment
+    /// a result yet. Surfaced as a reaction-based in-flight indicator (see
+    /// [`Self::wants_transcribing_indicator`]) rather than embed text, so the
+    /// "still transcribing" signal rides a cheap, separate rate-limit bucket
+    /// instead of churning embed edits. Incremented per enqueued segment
     /// ([`Self::on_transcription_enqueued`]), decremented per result
     /// ([`Self::on_transcription`]).
     pending_transcriptions: u32,
@@ -205,38 +216,33 @@ impl CallState {
     }
 
     /// Note that an audio segment was handed to the transcription worker but
-    /// hasn't come back yet. Bumps the in-flight count shown as a placeholder.
+    /// hasn't come back yet. Bumps the in-flight count that drives the
+    /// reaction-based [`Self::wants_transcribing_indicator`]; the executor
+    /// reconciles the reaction, so this emits no embed effect (and never an
+    /// edit per enqueued chunk — that churn is what jammed the edit bucket).
     /// Never creates an embed on its own — pending work alone is not content.
     pub fn on_transcription_enqueued(&mut self) -> Vec<CallEffect> {
         // A kept segment is the definition of "this call has audible audio",
         // used by `has_content` and the attachment gate.
         self.audio_kept = true;
         self.pending_transcriptions = self.pending_transcriptions.saturating_add(1);
-        if self.has_embed {
-            vec![CallEffect::EditEmbed {
-                embed: self.build_embed(),
-            }]
-        } else {
-            vec![]
-        }
+        vec![]
     }
 
-    /// Force-clear the in-flight placeholder. A safety net for the rare case
-    /// where transcription results are lost (e.g. the worker task dies) before
-    /// the count drains to zero, so a finalized embed is never left showing a
-    /// stale "transcribing…" marker.
-    pub fn on_transcription_drained(&mut self) -> Vec<CallEffect> {
-        if self.pending_transcriptions == 0 {
-            return vec![];
-        }
+    /// Whether the executor should be showing the "transcription in flight"
+    /// reaction. The executor reconciles the actual reaction against this after
+    /// each batch of effects (it owns the embed message id), so the pure state
+    /// machine never touches Discord.
+    pub fn wants_transcribing_indicator(&self) -> bool {
+        self.pending_transcriptions > 0
+    }
+
+    /// Force-clear the in-flight count. A safety net for the rare case where
+    /// transcription results are lost (e.g. the worker task dies) before the
+    /// count drains to zero, so the executor drops a stale reaction at exit.
+    /// Emits no effect: the reaction is reconciled by the executor.
+    pub fn on_transcription_drained(&mut self) {
         self.pending_transcriptions = 0;
-        if self.has_embed {
-            vec![CallEffect::EditEmbed {
-                embed: self.build_embed(),
-            }]
-        } else {
-            vec![]
-        }
     }
 
     /// Handle transcription text from Whisper. Each call corresponds to one
@@ -248,13 +254,13 @@ impl CallState {
         if text.is_empty() || is_blank_audio(text) {
             if !self.transcription_text.is_empty() {
                 self.transcription_text.push_str(" ...");
-            }
-            // Re-render even on an empty result so the placeholder count updates
-            // (and disappears once the final segment lands).
-            if self.has_embed {
-                return vec![CallEffect::EditEmbed {
-                    embed: self.build_embed(),
-                }];
+                // The gap marker is cosmetic — debounce it so a burst of empty
+                // results doesn't generate an edit each.
+                if self.has_embed {
+                    return vec![CallEffect::EditEmbedThrottled {
+                        embed: self.build_embed(),
+                    }];
+                }
             }
             return vec![];
         }
@@ -265,10 +271,13 @@ impl CallState {
         self.transcription_text.push_str(text);
 
         if self.has_embed {
-            vec![CallEffect::EditEmbed {
+            // Transcript stream is high-frequency and bursty — debounce.
+            vec![CallEffect::EditEmbedThrottled {
                 embed: self.build_embed(),
             }]
         } else {
+            // First content must create the message promptly so later edits
+            // (and the reaction) have something to attach to.
             self.has_embed = true;
             vec![CallEffect::SendEmbed {
                 embed: self.build_embed(),
@@ -358,7 +367,8 @@ impl CallState {
         }
 
         if self.has_embed {
-            vec![CallEffect::EditEmbed {
+            // Rides the transcript FIFO — debounce alongside the text edits.
+            vec![CallEffect::EditEmbedThrottled {
                 embed: self.build_embed(),
             }]
         } else {
@@ -558,7 +568,10 @@ impl CallState {
     }
 
     fn build_description(&self) -> Option<String> {
-        let mut out = if self.transcription_text.is_empty() {
+        // In-flight transcription is surfaced as a reaction (a separate
+        // rate-limit bucket), not embed text — so the description is purely the
+        // transcript and doesn't churn an edit per pending-count change.
+        let out = if self.transcription_text.is_empty() {
             String::new()
         } else if self.transcription_text.len() > MAX_DESCRIPTION_LEN {
             let skip = self.transcription_text.len() - MAX_DESCRIPTION_LEN;
@@ -570,18 +583,6 @@ impl CallState {
         } else {
             self.transcription_text.clone()
         };
-
-        // Show an in-flight marker while transcription segments are still
-        // pending, so a finalized embed reads as "transcript loading" rather
-        // than "no transcript".
-        if self.pending_transcriptions > 0 {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            let n = self.pending_transcriptions;
-            let plural = if n == 1 { "" } else { "s" };
-            out.push_str(&format!("⏳ *transcribing {n} segment{plural}…*"));
-        }
 
         if out.is_empty() { None } else { Some(out) }
     }
@@ -790,8 +791,8 @@ mod tests {
         s.on_start();
         s.on_transcription("hello");
         let effects = s.on_transcription("world");
-        let CallEffect::EditEmbed { embed } = &effects[0] else {
-            panic!("expected EditEmbed");
+        let CallEffect::EditEmbedThrottled { embed } = &effects[0] else {
+            panic!("expected EditEmbedThrottled");
         };
         assert_eq!(embed.description.as_deref(), Some("hello world"));
     }
@@ -803,8 +804,8 @@ mod tests {
         s.on_transcription("hello");
         let effects = s.on_transcription("");
         assert_eq!(effects.len(), 1);
-        let CallEffect::EditEmbed { embed } = &effects[0] else {
-            panic!("expected EditEmbed");
+        let CallEffect::EditEmbedThrottled { embed } = &effects[0] else {
+            panic!("expected EditEmbedThrottled");
         };
         assert_eq!(embed.description.as_deref(), Some("hello ..."));
     }
@@ -821,7 +822,7 @@ mod tests {
         assert!(desc.len() <= MAX_DESCRIPTION_LEN + 4); // "..." prefix
     }
 
-    // ── in-flight transcription placeholder ──────────────────────────────
+    // ── in-flight transcription indicator (reaction-driven) ──────────────
 
     #[test]
     fn pending_transcription_does_not_create_embed() {
@@ -833,54 +834,52 @@ mod tests {
     }
 
     #[test]
-    fn pending_transcription_shows_placeholder_on_existing_embed() {
+    fn enqueued_segment_sets_indicator_without_edit() {
         let mut s = make_state();
         s.on_start();
         s.on_event("**Signal**: unit 123".into()); // creates embed
-        s.on_transcription_enqueued();
+        assert!(!s.wants_transcribing_indicator());
+
+        // Enqueuing pending work flips the indicator but emits NO embed edit —
+        // the executor reconciles a reaction instead (separate rate bucket).
         let effects = s.on_transcription_enqueued();
-        let CallEffect::EditEmbed { embed } = &effects[0] else {
-            panic!("expected EditEmbed");
-        };
-        assert_eq!(
-            embed.description.as_deref(),
-            Some("⏳ *transcribing 2 segments…*")
-        );
+        assert!(effects.is_empty(), "enqueue must not churn an embed edit");
+        assert!(s.wants_transcribing_indicator());
+        // And it never leaks into the description text.
+        assert_eq!(s.build_embed().description.as_deref(), None);
     }
 
     #[test]
-    fn transcription_result_decrements_and_clears_placeholder() {
+    fn transcription_results_drain_indicator() {
         let mut s = make_state();
         s.on_start();
         s.on_event("**Signal**: unit 123".into());
         s.on_transcription_enqueued();
         s.on_transcription_enqueued();
+        assert!(s.wants_transcribing_indicator());
 
-        // First result: real text, one segment still pending.
+        // First result: real text, one segment still pending → indicator stays.
         s.on_transcription("hello world");
-        let embed = s.build_embed();
-        assert_eq!(
-            embed.description.as_deref(),
-            Some("hello world\n⏳ *transcribing 1 segment…*")
-        );
+        assert!(s.wants_transcribing_indicator());
+        assert_eq!(s.build_embed().description.as_deref(), Some("hello world"));
 
-        // Second (final) result is empty: count hits zero, placeholder gone.
-        // The empty segment leaves the existing " ..." gap marker on the text.
+        // Second (final) result drains the count → indicator clears. The empty
+        // segment leaves the existing " ..." gap marker on the text.
         s.on_transcription("");
-        let embed = s.build_embed();
-        assert_eq!(embed.description.as_deref(), Some("hello world ..."));
+        assert!(!s.wants_transcribing_indicator());
+        assert_eq!(s.build_embed().description.as_deref(), Some("hello world ..."));
     }
 
     #[test]
-    fn drained_clears_stale_placeholder() {
+    fn drained_clears_stale_indicator() {
         let mut s = make_state();
         s.on_start();
         s.on_event("**Signal**: unit 123".into());
         s.on_transcription_enqueued();
-        // Result never arrives; draining clears the marker.
-        let effects = s.on_transcription_drained();
-        assert!(matches!(&effects[0], CallEffect::EditEmbed { .. }));
-        assert_eq!(s.build_embed().description, None);
+        assert!(s.wants_transcribing_indicator());
+        // Result never arrives; draining clears the indicator (no embed edit).
+        s.on_transcription_drained();
+        assert!(!s.wants_transcribing_indicator());
     }
 
     // ── audio_kept: transcribed ⟺ attached ───────────────────────────────

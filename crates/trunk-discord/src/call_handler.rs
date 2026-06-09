@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use opentelemetry::KeyValue;
@@ -12,7 +13,14 @@ use trunk_oxide_proto as proto;
 use trunk_database::Database;
 
 use crate::call_state::{CallEffect, CallState, CallStateConfig, EmbedData, SILENCE_RMS_THRESHOLD};
-use crate::discord::DiscordClient;
+use crate::discord::{DiscordClient, TRANSCRIBING_EMOJI};
+
+/// Minimum spacing between throttled (transcript-stream) embed edits. The
+/// executor coalesces bursts into at most one edit per window, keeping
+/// high-frequency transcript churn off the per-channel edit rate-limit bucket
+/// while prompt edits (first content, finalization, events) still go straight
+/// through.
+const EMBED_DEBOUNCE: Duration = Duration::from_secs(2);
 use crate::grpc_whisperer::WhispererConnection;
 use crate::metrics::Metrics;
 use crate::ogg_encoder::OggOpusEncoder;
@@ -87,6 +95,16 @@ pub struct CallHandler {
     ogg_encoder: Option<OggOpusEncoder>,
 
     embed_message_id: Option<MessageId>,
+
+    /// Latest throttled (transcript-stream) embed awaiting a coalesced flush.
+    /// Holds the full embed, so it is simply dropped when a prompt edit
+    /// supersedes it. See [`EMBED_DEBOUNCE`].
+    dirty_embed: Option<EmbedData>,
+    /// When the embed was last actually edited — debounce reference point.
+    last_embed_edit: Instant,
+    /// Whether the in-flight-transcription reaction is currently on the embed.
+    /// Reconciled against [`CallState::wants_transcribing_indicator`].
+    indicator_shown: bool,
 
     // ── Debug instrumentation (audio-vs-duration / silence-gate diagnosis) ──
     /// Total 16 kHz samples ingested into the OGG/buffer (all captured audio).
@@ -165,6 +183,9 @@ impl CallHandler {
             post_channel,
             ogg_encoder,
             embed_message_id: None,
+            dirty_embed: None,
+            last_embed_edit: Instant::now(),
+            indicator_shown: false,
             metrics,
             db,
             call_row_id,
@@ -219,6 +240,12 @@ impl CallHandler {
         // embed turned green, DB written — the instant the dispatcher ends it
         // (`finalize_now`), independent of how far behind transcription is. This
         // is the fix: audio attachment no longer waits on the whisper backlog.
+        // Debounce timer for coalesced (transcript-stream) embed edits. Fires
+        // every window so a pending throttled edit can't sit unshown when the
+        // transcript stream goes quiet. The first tick is immediate, skip it.
+        let mut flush_interval = tokio::time::interval(EMBED_DEBOUNCE);
+        flush_interval.tick().await;
+
         let mut results_open = true;
         loop {
             tokio::select! {
@@ -247,25 +274,39 @@ impl CallHandler {
                         }
                     }
                 }
+                _ = flush_interval.tick() => {
+                    self.maybe_flush_dirty_embed().await;
+                }
             }
         }
 
         // ── Phase 2: the embed is already final (green + audio attached). Keep
-        // applying late transcription results as best-effort edits so the
-        // transcript fills in. `finalize_now` dropped the worker's input, so the
-        // worker drains its queued jobs, emits their results, and exits — closing
-        // this channel. That closure (not a timer) is what ends the handler: it
-        // lives exactly as long as there is transcription still in flight.
-        while let Some(r) = result_rx.recv().await {
-            self.apply_transcript(r).await;
+        // applying late transcription results as best-effort (debounced) edits
+        // so the transcript fills in. `finalize_now` dropped the worker's input,
+        // so the worker drains its queued jobs, emits their results, and exits —
+        // closing this channel. That closure (not a timer) is what ends the
+        // handler: it lives exactly as long as there is transcription in flight.
+        loop {
+            tokio::select! {
+                r = result_rx.recv() => {
+                    match r {
+                        Some(r) => self.apply_transcript(r).await,
+                        None => break,
+                    }
+                }
+                _ = flush_interval.tick() => {
+                    self.maybe_flush_dirty_embed().await;
+                }
+            }
         }
 
-        // Safety net: if any results were lost (e.g. the worker task died), make
-        // sure the embed isn't left showing a stale "transcribing…" placeholder.
-        let drained = self.state.on_transcription_drained();
-        if let Err(e) = self.process_effects(drained).await {
-            tracing::error!(error = %e, "placeholder clear error");
-        }
+        // Push any final coalesced transcript edit that hasn't been flushed.
+        self.flush_dirty_embed().await;
+
+        // Safety net: if any results were lost (e.g. the worker task died),
+        // clear the in-flight count and drop a stale ⏳ reaction.
+        self.state.on_transcription_drained();
+        self.reconcile_indicator().await;
     }
 
     /// Dispatch a single non-terminal inbound message. Transcription-bearing
@@ -322,6 +363,7 @@ impl CallHandler {
                         &[KeyValue::new("operation", "send_embed")],
                     );
                     self.embed_message_id = Some(msg_id);
+                    self.mark_embed_edited();
                 }
                 CallEffect::EditEmbed { embed } => {
                     if let Some(msg_id) = self.embed_message_id {
@@ -334,6 +376,19 @@ impl CallHandler {
                             start.elapsed().as_secs_f64(),
                             &[KeyValue::new("operation", "edit_embed")],
                         );
+                        self.mark_embed_edited();
+                    }
+                }
+                CallEffect::EditEmbedThrottled { embed } => {
+                    // Coalesce the transcript stream: keep only the latest embed
+                    // and flush at most once per debounce window. A pending
+                    // throttled edit is superseded (dropped) by any prompt edit
+                    // above, since all carry the full current embed.
+                    self.dirty_embed = Some(embed);
+                    if self.embed_message_id.is_some()
+                        && self.last_embed_edit.elapsed() >= EMBED_DEBOUNCE
+                    {
+                        self.flush_dirty_embed().await;
                     }
                 }
                 CallEffect::DeleteEmbed => {
@@ -374,6 +429,7 @@ impl CallHandler {
                             start.elapsed().as_secs_f64(),
                             &[KeyValue::new("operation", "attach_audio")],
                         );
+                        self.mark_embed_edited();
                     }
                 }
                 CallEffect::Transcribe { audio } => {
@@ -403,7 +459,85 @@ impl CallHandler {
                 }
             }
         }
+
+        // Reconcile the in-flight reaction against the state after every batch.
+        // Cheap no-op unless the pending-transcription count just crossed
+        // zero (the only times it does Discord I/O), and it lives on a separate
+        // rate-limit bucket from the edits above.
+        self.reconcile_indicator().await;
         Ok(())
+    }
+
+    /// Note that the embed was just edited (or created): drop any pending
+    /// throttled edit it supersedes and reset the debounce window.
+    fn mark_embed_edited(&mut self) {
+        self.dirty_embed = None;
+        self.last_embed_edit = Instant::now();
+    }
+
+    /// Flush a pending throttled embed edit, if any, to Discord now.
+    async fn flush_dirty_embed(&mut self) {
+        let Some(embed) = self.dirty_embed.take() else {
+            return;
+        };
+        let Some(msg_id) = self.embed_message_id else {
+            return;
+        };
+        let serenity_embed = embed_data_to_serenity(&embed);
+        let start = std::time::Instant::now();
+        if let Err(e) = self
+            .discord
+            .edit_embed(self.post_channel, msg_id, serenity_embed)
+            .await
+        {
+            tracing::warn!(error = %e, "failed to flush throttled embed edit");
+        }
+        self.metrics.discord_api_duration.record(
+            start.elapsed().as_secs_f64(),
+            &[KeyValue::new("operation", "edit_embed")],
+        );
+        self.last_embed_edit = Instant::now();
+    }
+
+    /// Flush a pending throttled edit only once the debounce window has elapsed.
+    /// Driven by the run loop's debounce timer so a final transcript burst
+    /// doesn't sit unshown.
+    async fn maybe_flush_dirty_embed(&mut self) {
+        if self.dirty_embed.is_some() && self.last_embed_edit.elapsed() >= EMBED_DEBOUNCE {
+            self.flush_dirty_embed().await;
+        }
+    }
+
+    /// Reconcile the ⏳ reaction against whether transcription is in flight.
+    /// Only touches Discord when the desired state actually flips, and only
+    /// once an embed message exists to react to.
+    async fn reconcile_indicator(&mut self) {
+        let want = self.state.wants_transcribing_indicator();
+        if want == self.indicator_shown {
+            return;
+        }
+        let Some(msg_id) = self.embed_message_id else {
+            return; // nothing to react to yet; revisit on a later batch
+        };
+        if want {
+            match self
+                .discord
+                .add_reaction(self.post_channel, msg_id, TRANSCRIBING_EMOJI)
+                .await
+            {
+                Ok(()) => self.indicator_shown = true,
+                Err(e) => tracing::warn!(error = %e, "failed to add transcribing reaction"),
+            }
+        } else {
+            if let Err(e) = self
+                .discord
+                .remove_reaction(self.post_channel, msg_id, TRANSCRIBING_EMOJI)
+                .await
+            {
+                tracing::warn!(error = %e, "failed to remove transcribing reaction");
+            }
+            self.indicator_shown = false;
+        }
     }
 
     async fn handle_audio(&mut self, raw_samples: &[u8], sample_rate: i32) -> Result<()> {
@@ -540,8 +674,9 @@ impl CallHandler {
             self.dbg_kept_samples += samples as u64;
             self.dbg_kept_chunks += 1;
             self.enqueue_job(TranscribeJob::Audio(audio));
-            // Track it as in-flight so the embed shows a "transcribing…" marker
-            // until the matching result comes back via `apply_transcript`.
+            // Track it as in-flight so the executor shows the ⏳ reaction until
+            // the matching result comes back via `apply_transcript`. Emits no
+            // effect (reaction is reconciled after each batch).
             self.state.on_transcription_enqueued()
         } else {
             self.dbg_gated_chunks += 1;

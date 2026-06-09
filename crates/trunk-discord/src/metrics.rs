@@ -9,6 +9,10 @@ pub struct Metrics {
     pub calls_reaped: Counter<u64>,
     pub calls_dropped_stuck: Counter<u64>,
     pub channel_resolution_failures: Counter<u64>,
+    /// Audio attachments dropped because the background upload backlog was
+    /// saturated (sustained overload — uploads arriving faster than Discord
+    /// accepts them). The embed is still green; only the audio file is skipped.
+    pub attach_dropped: Counter<u64>,
     pub channel_resolution_duration: Histogram<f64>,
     pub discord_api_duration: Histogram<f64>,
     pub transcription_duration: Histogram<f64>,
@@ -61,6 +65,10 @@ impl Metrics {
             channel_resolution_failures: meter
                 .u64_counter("trunk.discord.channel_resolution_failures")
                 .with_description("Failed channel resolutions")
+                .build(),
+            attach_dropped: meter
+                .u64_counter("trunk.discord.attach_dropped")
+                .with_description("Audio attachments dropped due to a saturated upload backlog")
                 .build(),
             channel_resolution_duration: meter
                 .f64_histogram("trunk.discord.channel_resolution_duration_seconds")

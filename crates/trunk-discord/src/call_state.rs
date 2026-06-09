@@ -35,12 +35,11 @@ pub enum CallEffect {
     EditEmbedThrottled { embed: EmbedData },
     /// Delete the embed (call produced no useful content).
     DeleteEmbed,
-    /// Replace embed and attach OGG audio file.
-    AttachAudio {
-        embed: EmbedData,
-        ogg_data: Vec<u8>,
-        filename: String,
-    },
+    /// Attach the OGG audio file to the (already-green) embed. The green
+    /// transition is a separate prompt `EditEmbed`/`SendEmbed` emitted just
+    /// before this, so the attach only adds the file — the executor uploads it
+    /// off the critical path and it never touches the embed body.
+    AttachAudio { ogg_data: Vec<u8>, filename: String },
     /// Request transcription of buffered audio.
     Transcribe { audio: Vec<f32> },
     /// Persist final call state to database.
@@ -477,11 +476,7 @@ impl CallState {
                     self.talkgroup,
                     self.start_time.format("%Y%m%dT%H%M%SZ"),
                 );
-                effects.push(CallEffect::AttachAudio {
-                    embed: self.build_embed_with(final_duration, final_signal),
-                    ogg_data,
-                    filename,
-                });
+                effects.push(CallEffect::AttachAudio { ogg_data, filename });
             }
         }
 

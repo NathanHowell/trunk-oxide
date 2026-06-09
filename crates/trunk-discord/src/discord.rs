@@ -112,22 +112,28 @@ impl DiscordClient {
         Ok(())
     }
 
-    pub async fn edit_embed_with_attachment(
+    /// Attach a file to an existing message *without* touching its embed.
+    ///
+    /// Omitting the embed field means Discord leaves the current embed
+    /// unchanged — so a slow background upload landing after late transcript
+    /// edits won't clobber them with a stale snapshot. The message has no prior
+    /// attachments (we attach once, at finalize), so adding one removes nothing.
+    /// Carries the longer [`DISCORD_ATTACH_TIMEOUT`] as a backstop.
+    pub async fn attach_file(
         &self,
         channel_id: ChannelId,
         message_id: MessageId,
-        embed: CreateEmbed,
         file_data: Vec<u8>,
         filename: &str,
     ) -> Result<()> {
         let attachment = CreateAttachment::bytes(file_data, filename.to_owned());
         with_timeout_for(
-            "edit_embed_with_attachment",
+            "attach_audio",
             DISCORD_ATTACH_TIMEOUT,
             channel_id.edit_message(
                 &self.http,
                 message_id,
-                EditMessage::new().embed(embed).new_attachment(attachment),
+                EditMessage::new().new_attachment(attachment),
             ),
         )
         .await?;

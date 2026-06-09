@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -6,7 +7,7 @@ use opentelemetry::KeyValue;
 use proto::types::CallRowId;
 use serenity::all::{CreateEmbed, CreateEmbedFooter};
 use serenity::model::id::{ChannelId, MessageId};
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, Semaphore, mpsc};
 use tracing::Instrument;
 use trunk_oxide_proto as proto;
 
@@ -14,6 +15,11 @@ use trunk_database::Database;
 
 use crate::call_state::{CallEffect, CallState, CallStateConfig, EmbedData, SILENCE_RMS_THRESHOLD};
 use crate::discord::{DiscordClient, TRANSCRIBING_EMOJI};
+use crate::grpc_whisperer::WhispererConnection;
+use crate::metrics::Metrics;
+use crate::ogg_encoder::OggOpusEncoder;
+use crate::resampler::Resampler;
+use crate::tone_detect::{DetectedTone, NotchFilter, ToneDetector};
 
 /// Minimum spacing between throttled (transcript-stream) embed edits. The
 /// executor coalesces bursts into at most one edit per window, keeping
@@ -55,11 +61,84 @@ impl Drop for UnfinalizedGuard {
         self.finalized();
     }
 }
-use crate::grpc_whisperer::WhispererConnection;
-use crate::metrics::Metrics;
-use crate::ogg_encoder::OggOpusEncoder;
-use crate::resampler::Resampler;
-use crate::tone_detect::{DetectedTone, NotchFilter, ToneDetector};
+
+/// Max concurrent background audio uploads across all handlers.
+const ATTACH_CONCURRENCY: usize = 4;
+/// Max queued+running uploads before new ones are dropped (bounds OGG bytes
+/// held in memory under sustained overload).
+const ATTACH_QUEUE_CAPACITY: usize = 128;
+
+/// A deferred audio attachment: the embed is already green; this only uploads
+/// the OGG file onto it.
+pub struct AttachJob {
+    pub channel: ChannelId,
+    pub message_id: MessageId,
+    pub ogg_data: Vec<u8>,
+    pub filename: String,
+}
+
+/// Shared, bounded background uploader for audio attachments.
+///
+/// A Discord file attach is `edit_message` with the OGG re-uploaded — slow
+/// (observed p90 ~160s) and sharing the per-channel edit bucket. Running it
+/// inline in `finalize` blocked handlers for the whole upload and piled them up.
+/// This runs uploads off the handler entirely, capping concurrency (a permit
+/// per upload) and total queued bytes (drops, with a metric, when saturated —
+/// graceful degradation rather than blocking a handler or growing memory).
+/// The embed is already green by the time a job is submitted, so a dropped or
+/// slow upload only affects whether the audio file appears, never the embed.
+pub struct AttachQueue {
+    discord: Arc<DiscordClient>,
+    metrics: Arc<Metrics>,
+    permits: Arc<Semaphore>,
+    inflight: Arc<AtomicUsize>,
+}
+
+impl AttachQueue {
+    pub fn new(discord: Arc<DiscordClient>, metrics: Arc<Metrics>) -> Self {
+        Self {
+            discord,
+            metrics,
+            permits: Arc::new(Semaphore::new(ATTACH_CONCURRENCY)),
+            inflight: Arc::new(AtomicUsize::new(0)),
+        }
+    }
+
+    /// Enqueue an attachment for background upload. Never blocks; drops (with a
+    /// metric) if the backlog is saturated.
+    pub fn submit(&self, job: AttachJob) {
+        if self.inflight.load(Ordering::Relaxed) >= ATTACH_QUEUE_CAPACITY {
+            self.metrics.attach_dropped.add(1, &[]);
+            tracing::warn!(channel = %job.channel, "audio attach dropped: upload backlog saturated");
+            return;
+        }
+        self.inflight.fetch_add(1, Ordering::Relaxed);
+        let discord = Arc::clone(&self.discord);
+        let metrics = Arc::clone(&self.metrics);
+        let permits = Arc::clone(&self.permits);
+        let inflight = Arc::clone(&self.inflight);
+        tokio::spawn(async move {
+            // Cap concurrency. The semaphore is never closed, so an error here
+            // means shutdown — just release the slot and bail.
+            let Ok(_permit) = permits.acquire_owned().await else {
+                inflight.fetch_sub(1, Ordering::Relaxed);
+                return;
+            };
+            let start = std::time::Instant::now();
+            if let Err(e) = discord
+                .attach_file(job.channel, job.message_id, job.ogg_data, &job.filename)
+                .await
+            {
+                tracing::warn!(error = %e, "failed to attach audio (background)");
+            }
+            metrics.discord_api_duration.record(
+                start.elapsed().as_secs_f64(),
+                &[KeyValue::new("operation", "attach_audio")],
+            );
+            inflight.fetch_sub(1, Ordering::Relaxed);
+        });
+    }
+}
 
 pub enum CallMessage {
     Audio { samples: Vec<u8>, sample_rate: i32 },
@@ -154,6 +233,9 @@ pub struct CallHandler {
     db: Arc<Mutex<Database>>,
     call_row_id: Option<CallRowId>,
 
+    /// Shared background uploader for the OGG attachment (off the critical path).
+    attach_queue: Arc<AttachQueue>,
+
     // Identity for transcription attribution (whisperer metric labels + span).
     short_name: String,
     is_conventional: bool,
@@ -172,6 +254,7 @@ impl CallHandler {
         db: Arc<Mutex<Database>>,
         call_row_id: Option<CallRowId>,
         metrics: Arc<Metrics>,
+        attach_queue: Arc<AttachQueue>,
     ) -> Result<Self> {
         let detect_ctcss = config.tone_detection && call_info.is_conventional;
         let tone_detector = if config.tone_detection {
@@ -223,6 +306,7 @@ impl CallHandler {
             metrics,
             db,
             call_row_id,
+            attach_queue,
             short_name: call_info.short_name.clone(),
             is_conventional: call_info.is_conventional,
             talkgroup: call_info.talkgroup,
@@ -447,32 +531,19 @@ impl CallHandler {
                         );
                     }
                 }
-                CallEffect::AttachAudio {
-                    embed,
-                    ogg_data,
-                    filename,
-                } => {
+                CallEffect::AttachAudio { ogg_data, filename } => {
+                    // The green embed edit already ran (just above, in this same
+                    // on_end batch). Hand the slow OGG upload to the shared
+                    // background worker so finalize returns promptly — the
+                    // handler never blocks on the upload, and a late transcript
+                    // edit can't be clobbered by it (the upload omits the embed).
                     if let Some(msg_id) = self.embed_message_id {
-                        let serenity_embed = embed_data_to_serenity(&embed);
-                        let start = std::time::Instant::now();
-                        if let Err(e) = self
-                            .discord
-                            .edit_embed_with_attachment(
-                                self.post_channel,
-                                msg_id,
-                                serenity_embed,
-                                ogg_data,
-                                &filename,
-                            )
-                            .await
-                        {
-                            tracing::warn!(error = %e, "failed to attach audio to call embed");
-                        }
-                        self.metrics.discord_api_duration.record(
-                            start.elapsed().as_secs_f64(),
-                            &[KeyValue::new("operation", "attach_audio")],
-                        );
-                        self.mark_embed_edited();
+                        self.attach_queue.submit(AttachJob {
+                            channel: self.post_channel,
+                            message_id: msg_id,
+                            ogg_data,
+                            filename,
+                        });
                     }
                 }
                 CallEffect::Transcribe { audio } => {

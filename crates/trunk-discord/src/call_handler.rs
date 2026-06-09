@@ -21,6 +21,40 @@ use crate::discord::{DiscordClient, TRANSCRIBING_EMOJI};
 /// while prompt edits (first content, finalization, events) still go straight
 /// through.
 const EMBED_DEBOUNCE: Duration = Duration::from_secs(2);
+
+/// Keeps the `unfinalized_handlers` gauge incremented for as long as a handler's
+/// embed is grey (started but not finalized). [`Self::finalized`] decrements it
+/// the moment the embed turns green; `Drop` is an idempotent safety net for any
+/// exit path that skips the explicit call (early return, panic). The gap between
+/// this gauge and `active + coalescing` is exactly the grey-embed leak that
+/// `live_handlers` (the executor's `self.calls` view) cannot see.
+struct UnfinalizedGuard {
+    metrics: Arc<Metrics>,
+    armed: bool,
+}
+
+impl UnfinalizedGuard {
+    fn new(metrics: Arc<Metrics>) -> Self {
+        metrics.handler_started();
+        Self {
+            metrics,
+            armed: true,
+        }
+    }
+
+    fn finalized(&mut self) {
+        if self.armed {
+            self.armed = false;
+            self.metrics.handler_finalized();
+        }
+    }
+}
+
+impl Drop for UnfinalizedGuard {
+    fn drop(&mut self) {
+        self.finalized();
+    }
+}
 use crate::grpc_whisperer::WhispererConnection;
 use crate::metrics::Metrics;
 use crate::ogg_encoder::OggOpusEncoder;
@@ -207,6 +241,11 @@ impl CallHandler {
         }
         tracing::info!(thread = %self.post_channel, "call started");
 
+        // Count this handler as an unfinalized (grey) embed until phase 1 ends.
+        // Decremented at finalize below — not at task exit — so a handler wedged
+        // grey after being removed from the executor's `self.calls` still shows.
+        let mut unfinalized = UnfinalizedGuard::new(Arc::clone(&self.metrics));
+
         // Spawn the transcription worker on the "slow lane". It owns the gRPC
         // call to whisper (bounded at 300s but potentially wedged) so the main
         // loop below never blocks on it and always stays responsive to the
@@ -279,6 +318,10 @@ impl CallHandler {
                 }
             }
         }
+
+        // Embed is now finalized (green + audio, or deleted-as-empty): no longer
+        // a grey embed. Phase 2 below is late-transcript drain, not a leak.
+        unfinalized.finalized();
 
         // ── Phase 2: the embed is already final (green + audio attached). Keep
         // applying late transcription results as best-effort (debounced) edits

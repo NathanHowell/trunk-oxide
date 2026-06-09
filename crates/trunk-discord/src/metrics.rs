@@ -1,4 +1,7 @@
-use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter, ObservableGauge};
 
 pub struct Metrics {
     pub audio_packets_dropped: Counter<u64>,
@@ -16,10 +19,26 @@ pub struct Metrics {
     /// equal to `active_calls + coalescing_calls`; a persistent excess means
     /// handlers are leaking (orphaned grey embeds).
     pub live_handlers: Gauge<u64>,
+
+    /// Backing counter for [`Self::unfinalized_handlers`]: handler tasks that
+    /// have started but not yet finalized (turned the embed green). Bumped by
+    /// [`Self::handler_started`] / [`Self::handler_finalized`].
+    unfinalized_handlers: Arc<AtomicU64>,
+    /// Observable gauge reporting `unfinalized_handlers`. Unlike `live_handlers`
+    /// (the executor's `self.calls` view, which is decremented the instant the
+    /// pump sends `End`), this is decremented only when the handler *actually*
+    /// finalizes — so a handler wedged grey *after* being removed from
+    /// `self.calls` (e.g. stuck in a slow Discord edit) stays counted here. A
+    /// persistent excess over `active + coalescing` is the grey-embed leak that
+    /// `live_handlers` is structurally blind to. Held to keep the callback
+    /// registered.
+    _unfinalized_handlers_gauge: ObservableGauge<u64>,
 }
 
 impl Metrics {
     pub fn new(meter: &Meter) -> Self {
+        let unfinalized_handlers = Arc::new(AtomicU64::new(0));
+        let unfinalized_for_cb = Arc::clone(&unfinalized_handlers);
         Self {
             audio_packets_dropped: meter
                 .u64_counter("trunk.discord.audio_packets_dropped")
@@ -73,6 +92,27 @@ impl Metrics {
                     "Live call-handler tasks tracked by the executor (should equal active + coalescing)",
                 )
                 .build(),
+            unfinalized_handlers,
+            _unfinalized_handlers_gauge: meter
+                .u64_observable_gauge("trunk.discord.unfinalized_handlers")
+                .with_description(
+                    "Handler tasks started but not yet finalized (grey embeds); persistent excess over active + coalescing is a leak live_handlers can't see",
+                )
+                .with_callback(move |observer| {
+                    observer.observe(unfinalized_for_cb.load(Ordering::Relaxed), &[]);
+                })
+                .build(),
         }
+    }
+
+    /// A handler task has started running (embed not yet finalized).
+    pub fn handler_started(&self) {
+        self.unfinalized_handlers.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// A handler task has finalized its embed (or exited). Idempotency is the
+    /// caller's responsibility (see the guard in `call_handler.rs`).
+    pub fn handler_finalized(&self) {
+        self.unfinalized_handlers.fetch_sub(1, Ordering::Relaxed);
     }
 }

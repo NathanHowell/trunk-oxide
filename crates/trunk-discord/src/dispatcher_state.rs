@@ -3,7 +3,6 @@ use std::time::{Duration, Instant};
 
 use chrono::Utc;
 use proto::types::{SysNum, Talkgroup};
-use serenity::model::id::ChannelId;
 use trunk_oxide_proto as proto;
 
 use crate::aggregator::AggregatorMessage;
@@ -40,16 +39,13 @@ pub enum DispatchEffect {
     ForwardToAggregator { message: AggregatorMessage },
     /// Rotate to a new hourly database.
     RotateDb,
-    /// Resolve a channel for a new call. The executor resolves the channel
-    /// (mapped lookup, thread cache, DB, or Discord create) then calls
-    /// [`DispatcherState::on_channel_resolved`].
+    /// Resolve a channel for a new call and run its handler. The executor
+    /// creates the handler's message channel up front, registers the sender as
+    /// the live handler, then spawns the handler — which owns the receiver from
+    /// creation and resolves its post channel (mapped lookup, thread cache, DB,
+    /// or Discord create) off the pump loop. Inbound messages buffer in the
+    /// channel until resolution completes.
     ResolveChannel { key: CallKey, call: proto::CallInfo },
-    /// Spawn a call handler after channel resolution.
-    SpawnCallHandler {
-        key: CallKey,
-        call: proto::CallInfo,
-        post_channel: ChannelId,
-    },
     /// PTT boundary within a coalesced call — handler stays alive.
     PttEnd {
         key: CallKey,
@@ -191,11 +187,11 @@ impl DispatcherState {
 
         // Overlapping start: a handler is already active for this talkgroup (a
         // new grant arrived before the previous call ended — e.g. a duplicate
-        // call_start on source change, or genuinely back-to-back calls). The
-        // ResolveChannel below overwrites self.calls[key], dropping the old
-        // handler's sender; its run loop would then exit on the closed channel
-        // *without* finalizing, orphaning the embed in its grey in-progress
-        // state forever. Finalize the old handler first so its embed closes.
+        // call_start on source change, or genuinely back-to-back calls).
+        // Explicitly finalize the old handler so its embed closes (turns green)
+        // before the new one takes over the slot, and log the transition. The
+        // ResolveChannel below also ends any lingering handler for the key, so
+        // this is belt-and-suspenders, but the log is useful diagnostics.
         if self.active_calls.contains_key(&key) {
             effects.push(DispatchEffect::Log {
                 message: format!(
@@ -216,27 +212,8 @@ impl DispatcherState {
         effects
     }
 
-    /// Two-phase callback: executor resolved the post channel for a new call.
-    /// The call is already in `active_calls` (inserted by `on_call_start`).
-    #[allow(clippy::unused_self)]
-    pub fn on_channel_resolved(
-        &self,
-        call: proto::CallInfo,
-        post_channel: ChannelId,
-    ) -> Vec<DispatchEffect> {
-        let key = CallKey {
-            sys_num: SysNum(call.sys_num),
-            talkgroup: Talkgroup(call.talkgroup),
-        };
-
-        vec![DispatchEffect::SpawnCallHandler {
-            key,
-            call,
-            post_channel,
-        }]
-    }
-
-    /// Channel resolution failed — remove from `active_calls`.
+    /// A handler could not resolve its post channel — remove it from
+    /// `active_calls`. The executor drops the matching `self.calls` entry.
     pub fn on_channel_resolution_failed(&mut self, key: &CallKey) {
         self.active_calls.remove(key);
     }
@@ -531,22 +508,15 @@ mod tests {
     }
 
     #[test]
-    fn channel_resolved_spawns_handler() {
+    fn call_start_registers_active_and_resolves() {
         let mut s = DispatcherState::new(0);
-        // Simulate call_start first (registers as active)
-        s.on_event(make_call_start(1, 12345));
-        let call = proto::CallInfo {
-            sys_num: 1,
-            talkgroup: 12345,
-            ..Default::default()
-        };
-        let channel = ChannelId::from(999);
-
-        let effects = s.on_channel_resolved(call, channel);
+        // A fresh call_start registers the call as active immediately (so audio
+        // can buffer) and asks the executor to resolve a channel + run a handler.
+        let effects = s.on_event(make_call_start(1, 12345));
         assert!(
             effects
                 .iter()
-                .any(|e| matches!(e, DispatchEffect::SpawnCallHandler { .. }))
+                .any(|e| matches!(e, DispatchEffect::ResolveChannel { .. }))
         );
 
         let key = CallKey {
@@ -574,14 +544,6 @@ mod tests {
         let mut s = DispatcherState::new(0);
         // Simulate full lifecycle: start → resolve → end
         s.on_event(make_call_start(1, 12345));
-        s.on_channel_resolved(
-            proto::CallInfo {
-                sys_num: 1,
-                talkgroup: 12345,
-                ..Default::default()
-            },
-            ChannelId::from(999),
-        );
 
         let effects = s.on_event(make_call_end(1, 12345));
 
@@ -613,14 +575,6 @@ mod tests {
         let mut s = DispatcherState::new(0);
         // First call_start for the talkgroup, resolved into an active handler.
         s.on_event(make_call_start(1, 12345));
-        s.on_channel_resolved(
-            proto::CallInfo {
-                sys_num: 1,
-                talkgroup: 12345,
-                ..Default::default()
-            },
-            ChannelId::from(999),
-        );
 
         // Second call_start arrives before the first ended (overlap). It must
         // end the previous handler before resolving the new one, otherwise the
@@ -653,14 +607,6 @@ mod tests {
         // it resumes the same handler rather than replacing it.
         let mut s = DispatcherState::new(5000);
         s.on_event(make_call_start(1, 12345));
-        s.on_channel_resolved(
-            proto::CallInfo {
-                sys_num: 1,
-                talkgroup: 12345,
-                ..Default::default()
-            },
-            ChannelId::from(999),
-        );
         // End moves it to coalescing (between PTTs).
         s.on_event(make_call_end(1, 12345));
 
@@ -685,14 +631,6 @@ mod tests {
     fn signal_during_active_call_routes_to_call() {
         let mut s = DispatcherState::new(0);
         s.on_event(make_call_start(1, 12345));
-        s.on_channel_resolved(
-            proto::CallInfo {
-                sys_num: 1,
-                talkgroup: 12345,
-                ..Default::default()
-            },
-            ChannelId::from(999),
-        );
 
         let event = proto::PluginEvent {
             event: Some(proto::plugin_event::Event::Signal(proto::SignalEvent {
@@ -741,14 +679,6 @@ mod tests {
     fn unit_during_active_call_routes_to_call() {
         let mut s = DispatcherState::new(0);
         s.on_event(make_call_start(1, 12345));
-        s.on_channel_resolved(
-            proto::CallInfo {
-                sys_num: 1,
-                talkgroup: 12345,
-                ..Default::default()
-            },
-            ChannelId::from(999),
-        );
 
         let event = proto::PluginEvent {
             event: Some(proto::plugin_event::Event::Unit(proto::UnitEvent {
@@ -849,14 +779,6 @@ mod tests {
     fn coalesce_off_call_end_emits_end_call() {
         let mut s = DispatcherState::new(0);
         s.on_event(make_call_start(1, 12345));
-        s.on_channel_resolved(
-            proto::CallInfo {
-                sys_num: 1,
-                talkgroup: 12345,
-                ..Default::default()
-            },
-            ChannelId::from(999),
-        );
         let effects = s.on_event(make_call_end(1, 12345));
         assert!(
             effects
@@ -874,14 +796,6 @@ mod tests {
     fn coalesce_on_call_end_emits_ptt_end() {
         let mut s = DispatcherState::new(10_000);
         s.on_event(make_call_start(1, 12345));
-        s.on_channel_resolved(
-            proto::CallInfo {
-                sys_num: 1,
-                talkgroup: 12345,
-                ..Default::default()
-            },
-            ChannelId::from(999),
-        );
         let effects = s.on_event(make_call_end(1, 12345));
         assert!(
             effects
@@ -906,14 +820,6 @@ mod tests {
         let mut s = DispatcherState::new(10_000);
         // Start → resolve → end (enters coalescing)
         s.on_event(make_call_start(1, 12345));
-        s.on_channel_resolved(
-            proto::CallInfo {
-                sys_num: 1,
-                talkgroup: 12345,
-                ..Default::default()
-            },
-            ChannelId::from(999),
-        );
         s.on_event(make_call_end(1, 12345));
 
         let key = CallKey {
@@ -1026,15 +932,6 @@ mod tests {
     fn conventional_call_coalesces_like_trunked() {
         let mut s = DispatcherState::new(10_000); // coalescing enabled
         s.on_event(make_call_start(1, 12345));
-        s.on_channel_resolved(
-            proto::CallInfo {
-                sys_num: 1,
-                talkgroup: 12345,
-                is_conventional: true,
-                ..Default::default()
-            },
-            ChannelId::from(999),
-        );
 
         // trunk-oxide now emits one CallStart/CallEnd per keyed transmission for
         // conventional channels, so CallEnd coalesces (PttEnd), not EndCall.
@@ -1063,14 +960,6 @@ mod tests {
     fn trunked_call_still_coalesces() {
         let mut s = DispatcherState::new(10_000); // coalescing enabled
         s.on_event(make_call_start(1, 12345));
-        s.on_channel_resolved(
-            proto::CallInfo {
-                sys_num: 1,
-                talkgroup: 12345,
-                ..Default::default()
-            },
-            ChannelId::from(999),
-        );
 
         // CallEnd for a trunked call should still coalesce
         let effects = s.on_event(make_call_end(1, 12345));

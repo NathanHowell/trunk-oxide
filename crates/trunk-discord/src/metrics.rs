@@ -12,6 +12,10 @@ pub struct Metrics {
     pub transcriptions_timed_out: Counter<u64>,
     pub active_calls: Gauge<u64>,
     pub coalescing_calls: Gauge<u64>,
+    /// Number of live call-handler tasks the executor is tracking. Should stay
+    /// equal to `active_calls + coalescing_calls`; a persistent excess means
+    /// handlers are leaking (orphaned grey embeds).
+    pub live_handlers: Gauge<u64>,
 }
 
 impl Metrics {
@@ -62,6 +66,12 @@ impl Metrics {
             coalescing_calls: meter
                 .u64_gauge("trunk.discord.coalescing_calls")
                 .with_description("Number of calls in coalescing state")
+                .build(),
+            live_handlers: meter
+                .u64_gauge("trunk.discord.live_handlers")
+                .with_description(
+                    "Live call-handler tasks tracked by the executor (should equal active + coalescing)",
+                )
                 .build(),
         }
     }

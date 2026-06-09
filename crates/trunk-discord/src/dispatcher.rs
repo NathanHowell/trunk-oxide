@@ -59,12 +59,6 @@ struct ActiveCall {
     tx: mpsc::Sender<CallMessage>,
 }
 
-struct ResolveResult {
-    key: CallKey,
-    call: proto::CallInfo,
-    post_channel: Option<ChannelId>,
-}
-
 /// Shared resources accessed by the pump and spawned tasks.
 pub struct DispatchContext {
     whisperer: WhispererConnection,
@@ -81,11 +75,18 @@ pub struct DispatchContext {
 /// Single-owner pump loop. Owns `DispatcherState` directly — no Mutex.
 pub struct DispatchPump {
     state: DispatcherState,
+    /// Live call handlers, keyed by talkgroup. The sole source of truth for
+    /// which handlers exist. Each entry holds the sender half of a channel
+    /// whose receiver is owned by exactly one spawned handler task (created
+    /// together in the `ResolveChannel` effect), so a handler can never be
+    /// orphaned by a concurrent resolve — `End` always reaches the handler
+    /// that owns the matching receiver.
     calls: HashMap<CallKey, ActiveCall>,
-    pending_rx: HashMap<CallKey, mpsc::Receiver<CallMessage>>,
     ctx: Arc<DispatchContext>,
-    resolve_tx: mpsc::Sender<ResolveResult>,
-    resolve_rx: mpsc::Receiver<ResolveResult>,
+    /// Handler tasks that failed to resolve a post channel report their key
+    /// here so the pump can drop the dead `calls` entry and clear active state.
+    dead_call_tx: mpsc::Sender<CallKey>,
+    dead_call_rx: mpsc::Receiver<CallKey>,
     coalesce_enabled: bool,
     /// Last-progress timestamp (ms since epoch), bumped every loop iteration.
     /// Read by the liveness watchdog to detect a stalled pump.
@@ -110,12 +111,11 @@ impl DispatchPump {
         metrics: Arc<Metrics>,
         heartbeat: Arc<AtomicU64>,
     ) -> Self {
-        let (resolve_tx, resolve_rx) = mpsc::channel(64);
+        let (dead_call_tx, dead_call_rx) = mpsc::channel(64);
 
         Self {
             state: DispatcherState::new(coalesce_timeout_ms),
             calls: HashMap::new(),
-            pending_rx: HashMap::new(),
             ctx: Arc::new(DispatchContext {
                 whisperer,
                 discord,
@@ -132,8 +132,8 @@ impl DispatchPump {
                 db_path,
                 metrics,
             }),
-            resolve_tx,
-            resolve_rx,
+            dead_call_tx,
+            dead_call_rx,
             coalesce_enabled: coalesce_timeout_ms > 0,
             heartbeat,
         }
@@ -176,8 +176,8 @@ impl DispatchPump {
                     self.process_effects(effects).await;
                 }
                 _ = heartbeat_interval.tick() => {}
-                Some(result) = self.resolve_rx.recv() => {
-                    self.handle_resolve_result(result).await;
+                Some(key) = self.dead_call_rx.recv() => {
+                    self.handle_dead_call(key);
                 }
             }
         }
@@ -215,16 +215,13 @@ impl DispatchPump {
         }
     }
 
-    async fn handle_resolve_result(&mut self, result: ResolveResult) {
-        if let Some(post_channel) = result.post_channel {
-            let effects = self.state.on_channel_resolved(result.call, post_channel);
-            self.process_effects(effects).await;
-        } else {
-            self.ctx.metrics.channel_resolution_failures.add(1, &[]);
-            self.state.on_channel_resolution_failed(&result.key);
-            self.calls.remove(&result.key);
-            self.pending_rx.remove(&result.key);
-        }
+    /// A handler task could not resolve its post channel (or failed to
+    /// initialize). Drop the now-dead `calls` entry (its receiver was already
+    /// dropped by the task) and clear the call from active state.
+    fn handle_dead_call(&mut self, key: CallKey) {
+        self.calls.remove(&key);
+        self.state.on_channel_resolution_failed(&key);
+        self.record_gauges();
     }
 
     #[allow(clippy::too_many_lines)]
@@ -306,44 +303,36 @@ impl DispatchPump {
                 }
 
                 DispatchEffect::ResolveChannel { key, call } => {
-                    // Finalize any handler still registered for this key before
-                    // replacing it. on_call_start's overlap check (state-level
-                    // active_calls) usually emits EndCall first, but if the
-                    // state's active_calls desynced from this executor map (e.g.
-                    // a conventional call_end early-returned and dropped the key
-                    // from active_calls while the handler stayed here), that
-                    // EndCall never fires — and overwriting the sender below
-                    // would orphan the embed in its grey in-progress state.
-                    // self.calls is the source of truth for live handlers.
+                    // End any handler still registered for this key before
+                    // replacing it, so its embed closes (turns green) instead of
+                    // lingering grey. self.calls is the source of truth for live
+                    // handlers.
                     if let Some(old) = self.calls.remove(&key) {
                         let _ = send_bounded(&old.tx, CallMessage::End(None)).await;
                     }
-                    // Create mpsc for buffering audio during resolution
+
+                    // Create the handler's channel and spawn the handler *now*,
+                    // bound to the receiver from the start. The sender lives in
+                    // self.calls and is only ever removed paired with an End, so
+                    // End always lands on the channel this handler owns — a
+                    // concurrent resolve can never orphan it. Inbound audio/
+                    // events buffer in the channel while the post channel
+                    // resolves off the pump loop (inside the spawned task).
                     let (tx, rx) = mpsc::channel(1024);
                     self.calls.insert(key, ActiveCall { tx });
-                    self.pending_rx.insert(key, rx);
 
                     let ctx = Arc::clone(&self.ctx);
-                    let resolve_tx = self.resolve_tx.clone();
-                    tokio::spawn(async move {
-                        let post_channel = ctx.resolve_channel(&call).await;
-                        let _ = resolve_tx
-                            .send(ResolveResult {
-                                key,
-                                call,
-                                post_channel,
-                            })
-                            .await;
-                    });
-                }
-
-                DispatchEffect::SpawnCallHandler {
-                    key,
-                    call,
-                    post_channel,
-                } => {
-                    let rx = self.pending_rx.remove(&key);
-                    self.spawn_call_handler(key, call, post_channel, rx).await;
+                    let dead_call_tx = self.dead_call_tx.clone();
+                    let span = tracing::info_span!(
+                        "call",
+                        talkgroup = call.talkgroup,
+                        sys_num = call.sys_num,
+                        freq = call.freq,
+                        encrypted = call.encrypted,
+                    );
+                    tokio::spawn(
+                        run_call(ctx, call, rx, key, dead_call_tx).instrument(span),
+                    );
                 }
 
                 DispatchEffect::Log { message } => {
@@ -352,6 +341,13 @@ impl DispatchPump {
             }
         }
 
+        self.record_gauges();
+    }
+
+    /// Publish the active/coalescing call gauges and the live-handler count.
+    /// `live_handlers` is the executor's own view (`self.calls`); divergence
+    /// from `active + coalescing` would indicate leaked handlers.
+    fn record_gauges(&self) {
         self.ctx
             .metrics
             .active_calls
@@ -360,84 +356,10 @@ impl DispatchPump {
             .metrics
             .coalescing_calls
             .record(self.state.coalescing_call_count() as u64, &[]);
-    }
-
-    async fn spawn_call_handler(
-        &mut self,
-        key: CallKey,
-        call: proto::CallInfo,
-        post_channel: ChannelId,
-        pending_rx: Option<mpsc::Receiver<CallMessage>>,
-    ) {
-        let call_row_id = {
-            let record = trunk_database::CallRecord {
-                talkgroup: Talkgroup(call.talkgroup),
-                sys_num: SysNum(call.sys_num),
-                freq: proto::types::Freq(call.freq),
-                encrypted: call.encrypted,
-                emergency: call.emergency,
-                start_time: call.start_time.as_ref().map_or(0, |ts| ts.seconds),
-                tag: call.talkgroup.to_string(),
-                short_name: call.short_name.clone(),
-                thread_id: Some(post_channel.get()),
-                embed_message_id: None,
-            };
-            let db = self.ctx.db.lock().await;
-            match db.insert_call(&record) {
-                Ok(id) => Some(id),
-                Err(e) => {
-                    tracing::warn!(error = %e, "failed to insert call into db");
-                    None
-                }
-            }
-        };
-
-        // If we have a pending receiver (from buffering during resolution),
-        // use it. Otherwise create a fresh channel (e.g. CoalesceResume path).
-        let (tx, rx) = if let Some(rx) = pending_rx {
-            // Reuse existing sender from self.calls
-            let existing = self.calls.remove(&key);
-            if let Some(active) = existing {
-                (active.tx, rx)
-            } else {
-                // Shouldn't happen, but handle gracefully
-                let (tx, _) = mpsc::channel(1024);
-                (tx, rx)
-            }
-        } else {
-            let (tx, rx) = mpsc::channel(1024);
-            (tx, rx)
-        };
-
-        let span = tracing::info_span!(
-            "call",
-            talkgroup = call.talkgroup,
-            sys_num = call.sys_num,
-            freq = call.freq,
-            encrypted = call.encrypted,
-        );
-
-        let handler = match CallHandler::new(
-            &call,
-            rx,
-            self.ctx.whisperer.clone(),
-            Arc::clone(&self.ctx.discord),
-            self.ctx.config,
-            post_channel,
-            Arc::clone(&self.ctx.db),
-            call_row_id,
-            Arc::clone(&self.ctx.metrics),
-        ) {
-            Ok(h) => h,
-            Err(e) => {
-                tracing::error!(error = %e, "failed to create call handler");
-                return;
-            }
-        };
-
-        tokio::spawn(handler.run().instrument(span));
-
-        self.calls.insert(key, ActiveCall { tx });
+        self.ctx
+            .metrics
+            .live_handlers
+            .record(self.calls.len() as u64, &[]);
     }
 
     async fn rotate_db(&self) {
@@ -462,7 +384,91 @@ impl DispatchPump {
     }
 }
 
+/// Resolve a new call's post channel, insert its DB row, then build and run the
+/// handler to completion. Spawned by the `ResolveChannel` effect with the
+/// receiver end of the handler's channel, so the handler owns `rx` for its whole
+/// life and can never be orphaned by a concurrent resolve. On resolution failure
+/// the key is reported back to the pump via `dead_call_tx` (so it drops the dead
+/// `calls` entry); dropping `rx` here closes the channel.
+async fn run_call(
+    ctx: Arc<DispatchContext>,
+    call: proto::CallInfo,
+    rx: mpsc::Receiver<CallMessage>,
+    key: CallKey,
+    dead_call_tx: mpsc::Sender<CallKey>,
+) {
+    let Some((post_channel, call_row_id)) = ctx.resolve_and_insert(&call).await else {
+        let _ = dead_call_tx.send(key).await;
+        return;
+    };
+
+    let handler = match CallHandler::new(
+        &call,
+        rx,
+        ctx.whisperer.clone(),
+        Arc::clone(&ctx.discord),
+        ctx.config,
+        post_channel,
+        Arc::clone(&ctx.db),
+        call_row_id,
+        Arc::clone(&ctx.metrics),
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to create call handler");
+            let _ = dead_call_tx.send(key).await;
+            return;
+        }
+    };
+
+    handler.run().await;
+}
+
 impl DispatchContext {
+    /// Resolve the post channel for a call and insert its DB row. Returns the
+    /// resolved channel and the (best-effort) DB row id, or `None` if the
+    /// channel could not be resolved.
+    async fn resolve_and_insert(
+        &self,
+        call: &proto::CallInfo,
+    ) -> Option<(ChannelId, Option<proto::types::CallRowId>)> {
+        let Some(post_channel) = self.resolve_channel(call).await else {
+            self.metrics.channel_resolution_failures.add(1, &[]);
+            return None;
+        };
+        let call_row_id = self.insert_call_row(call, post_channel).await;
+        Some((post_channel, call_row_id))
+    }
+
+    /// Insert the call's DB row, recording the resolved thread id. A failure is
+    /// non-fatal (the call still runs without persistence) and yields `None`.
+    async fn insert_call_row(
+        &self,
+        call: &proto::CallInfo,
+        post_channel: ChannelId,
+    ) -> Option<proto::types::CallRowId> {
+        let record = trunk_database::CallRecord {
+            talkgroup: Talkgroup(call.talkgroup),
+            sys_num: SysNum(call.sys_num),
+            freq: proto::types::Freq(call.freq),
+            encrypted: call.encrypted,
+            emergency: call.emergency,
+            start_time: call.start_time.as_ref().map_or(0, |ts| ts.seconds),
+            tag: call.talkgroup.to_string(),
+            short_name: call.short_name.clone(),
+            thread_id: Some(post_channel.get()),
+            embed_message_id: None,
+        };
+        let db = self.db.lock().await;
+        match db.insert_call(&record) {
+            Ok(id) => Some(id),
+            Err(e) => {
+                tracing::warn!(error = %e, "failed to insert call into db");
+                None
+            }
+        }
+    }
+
     async fn resolve_channel(&self, call: &proto::CallInfo) -> Option<ChannelId> {
         let start = std::time::Instant::now();
         let result = self.resolve_channel_inner(call).await;

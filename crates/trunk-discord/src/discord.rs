@@ -9,28 +9,48 @@ use serenity::all::{
 use serenity::http::Http;
 use serenity::model::id::{ChannelId, GuildId, MessageId};
 
-/// Hard cap on any single Discord HTTP call. Discord rate-limits message edits
-/// per-channel and serenity sleeps on 429s with no upper bound, so a hot thread
-/// can otherwise wedge a call handler for minutes (observed: `edit_embed` tail
-/// in the 250–500s range, with global request rate only ~2/s — the bottleneck
-/// is the per-channel edit bucket, not the global limit). Bounding each call
-/// lets the handler abandon a stuck edit and keep going, so finalization
-/// (grey→green + audio) can never be held hostage by the edit bucket.
+/// Hard cap on a grey-critical Discord HTTP call (embed create/edit, reactions).
+/// Discord rate-limits message edits per-channel and serenity sleeps on 429s
+/// with no upper bound, so a hot thread can otherwise wedge a call handler for
+/// minutes (observed: `edit_embed` tail in the 250–500s range, with global
+/// request rate only ~2/s — the bottleneck is the per-channel edit bucket, not
+/// the global limit). Bounding these lets the handler abandon a stuck edit and
+/// keep going, so the grey→green transition is never held hostage by the bucket.
 const DISCORD_API_TIMEOUT: Duration = Duration::from_secs(45);
+
+/// Longer cap for audio attachment. `edit_embed_with_attachment` re-uploads the
+/// OGG and is intrinsically slow (observed: ~55% of attaches exceeded the 45s
+/// grey-critical cap and lost their audio). It is safe to wait much longer: in
+/// `on_end` the green embed edit runs *before* the attach, so the embed is
+/// already finalized (not grey) by the time we get here — the attach is purely
+/// best-effort and post-transition, so a generous bound only delays the audio
+/// file appearing, never the grey→green flip.
+// `from_mins` is not stable on our MSRV (1.94); keep `from_secs`.
+#[allow(clippy::duration_suboptimal_units)]
+const DISCORD_ATTACH_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Emoji used as the in-flight transcription indicator. A reaction lives in a
 /// different per-channel rate-limit bucket than message edits, so toggling it
 /// does not compete with (or stall behind) the embed edits.
 pub const TRANSCRIBING_EMOJI: &str = "⏳";
 
-/// Run a single Discord HTTP call under [`DISCORD_API_TIMEOUT`], turning a
-/// timeout into an error the caller can log and move past.
+/// Run a single grey-critical Discord HTTP call under [`DISCORD_API_TIMEOUT`].
 async fn with_timeout<T>(op: &str, fut: impl Future<Output = serenity::Result<T>>) -> Result<T> {
-    match tokio::time::timeout(DISCORD_API_TIMEOUT, fut).await {
+    with_timeout_for(op, DISCORD_API_TIMEOUT, fut).await
+}
+
+/// Run a single Discord HTTP call under an explicit timeout, turning an expiry
+/// into an error the caller can log and move past.
+async fn with_timeout_for<T>(
+    op: &str,
+    timeout: Duration,
+    fut: impl Future<Output = serenity::Result<T>>,
+) -> Result<T> {
+    match tokio::time::timeout(timeout, fut).await {
         Ok(res) => Ok(res?),
         Err(_) => Err(anyhow::anyhow!(
             "discord {op} timed out after {}s",
-            DISCORD_API_TIMEOUT.as_secs()
+            timeout.as_secs()
         )),
     }
 }
@@ -101,8 +121,9 @@ impl DiscordClient {
         filename: &str,
     ) -> Result<()> {
         let attachment = CreateAttachment::bytes(file_data, filename.to_owned());
-        with_timeout(
+        with_timeout_for(
             "edit_embed_with_attachment",
+            DISCORD_ATTACH_TIMEOUT,
             channel_id.edit_message(
                 &self.http,
                 message_id,

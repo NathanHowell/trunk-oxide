@@ -34,14 +34,17 @@ pub enum CallMessage {
 /// drops the sender at finalization), and that closure is the "done" signal.
 enum TranscribeJob {
     Audio(Vec<f32>),
-    Boundary(Option<Box<proto::CallData>>),
+    Boundary,
 }
 
 /// Result handed back from the transcription worker, applied in FIFO order by
-/// the handler's main loop. `Boundary` is passed straight through.
+/// the handler's main loop. `Boundary` is passed straight through. It carries
+/// no data: duration/PTT/signal accounting happens synchronously at the PTT
+/// boundary ([`CallState::on_ptt_boundary`]); the marker only sequences the
+/// transcript separator against the text chunks.
 enum TranscribeResult {
     Text(String),
-    Boundary(Option<Box<proto::CallData>>),
+    Boundary,
 }
 
 /// Per-call identity used to label whisperer transcription metrics.
@@ -84,6 +87,15 @@ pub struct CallHandler {
     ogg_encoder: Option<OggOpusEncoder>,
 
     embed_message_id: Option<MessageId>,
+
+    // ── Debug instrumentation (audio-vs-duration / silence-gate diagnosis) ──
+    /// Total 16 kHz samples ingested into the OGG/buffer (all captured audio).
+    dbg_audio_samples: u64,
+    /// Samples that passed the silence gate and were enqueued for transcription.
+    dbg_kept_samples: u64,
+    /// Transcription chunks kept / dropped by the silence gate.
+    dbg_kept_chunks: u32,
+    dbg_gated_chunks: u32,
 
     metrics: Arc<Metrics>,
 
@@ -159,6 +171,10 @@ impl CallHandler {
             short_name: call_info.short_name.clone(),
             is_conventional: call_info.is_conventional,
             talkgroup: call_info.talkgroup,
+            dbg_audio_samples: 0,
+            dbg_kept_samples: 0,
+            dbg_kept_chunks: 0,
+            dbg_gated_chunks: 0,
         })
     }
 
@@ -423,6 +439,7 @@ impl CallHandler {
         }
 
         self.audio_buffer.extend_from_slice(&samples);
+        self.dbg_audio_samples += u64::from(sample_count);
 
         if self
             .tone_detector
@@ -502,11 +519,26 @@ impl CallHandler {
     /// transcribe is also too quiet to ever be attached. Gating here is purely
     /// about transcription: the OGG encoder and the per-call silence decision
     /// both work off the ingested samples and are unaffected.
-    fn enqueue_audio(&self, audio: Vec<f32>) {
-        if rms(&audio) < SILENCE_RMS_THRESHOLD {
-            return;
+    fn enqueue_audio(&mut self, audio: Vec<f32>) {
+        let chunk_rms = rms(&audio);
+        let samples = audio.len();
+        let kept = chunk_rms >= SILENCE_RMS_THRESHOLD;
+        tracing::info!(
+            target: "audio_debug",
+            rms = chunk_rms,
+            samples,
+            secs = samples as f64 / 16000.0,
+            threshold = SILENCE_RMS_THRESHOLD,
+            kept,
+            "transcription chunk silence-gate decision"
+        );
+        if kept {
+            self.dbg_kept_samples += samples as u64;
+            self.dbg_kept_chunks += 1;
+            self.enqueue_job(TranscribeJob::Audio(audio));
+        } else {
+            self.dbg_gated_chunks += 1;
         }
-        self.enqueue_job(TranscribeJob::Audio(audio));
     }
 
     /// Flush the resampler tail and force-finish tone detection into
@@ -544,7 +576,16 @@ impl CallHandler {
             tracing::warn!(error = %e, "PTT-end flush failed");
         }
         self.enqueue_remaining_audio();
-        self.enqueue_job(TranscribeJob::Boundary(call_data));
+
+        // Account for this transmission *now* — duration, PTT count, signal —
+        // decoupled from transcription. The embed then shows correct metadata
+        // even when whisper yields no text (clicks/static) or lags, instead of
+        // a bare embed whose duration only ever lands if a transcript happens
+        // to re-render it. The separator marker still rides the worker FIFO
+        // (enqueued after this PTT's audio) to stay sequenced with the text.
+        let effects = self.state.on_ptt_boundary(call_data.as_deref());
+        self.process_effects(effects).await?;
+        self.enqueue_job(TranscribeJob::Boundary);
 
         // Reset resampler for next PTT (may have different sample rate).
         self.resampler = None;
@@ -574,7 +615,7 @@ impl CallHandler {
     async fn apply_transcript(&mut self, result: TranscribeResult) {
         let effects = match result {
             TranscribeResult::Text(text) => self.state.on_transcription(&text),
-            TranscribeResult::Boundary(call_data) => self.state.on_ptt_end(call_data.as_deref()),
+            TranscribeResult::Boundary => self.state.on_ptt_separator(),
         };
         if let Err(e) = self.process_effects(effects).await {
             tracing::error!(error = %e, "transcript edit error");
@@ -604,6 +645,23 @@ impl CallHandler {
         if let Err(e) = self.process_effects(effects).await {
             tracing::error!(error = %e, "call end finalization error");
         }
+
+        // Audio-vs-duration diagnosis: compare the total captured audio (what's
+        // in the OGG) against the summed recording_length (what drives Duration)
+        // and the silence-gate's effect on transcription coverage.
+        let audio_secs = self.dbg_audio_samples as f64 / 16000.0;
+        let transcribed_secs = self.dbg_kept_samples as f64 / 16000.0;
+        tracing::info!(
+            target: "audio_debug",
+            audio_secs,
+            duration_secs = self.state.accumulated_duration().as_secs_f64(),
+            transcribed_secs,
+            gated_secs = audio_secs - transcribed_secs,
+            ptt_count = self.state.ptt_count(),
+            kept_chunks = self.dbg_kept_chunks,
+            gated_chunks = self.dbg_gated_chunks,
+            "call audio summary: OGG audio vs Duration vs transcribed"
+        );
     }
 }
 
@@ -626,7 +684,7 @@ async fn transcription_worker(
             TranscribeJob::Audio(audio) => {
                 TranscribeResult::Text(transcribe_one(&whisperer, &metrics, &identity, audio).await)
             }
-            TranscribeJob::Boundary(call_data) => TranscribeResult::Boundary(call_data),
+            TranscribeJob::Boundary => TranscribeResult::Boundary,
         };
         if result_tx.send(result).await.is_err() {
             break; // handler gone

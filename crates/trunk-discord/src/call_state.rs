@@ -166,6 +166,18 @@ impl CallState {
         vec![]
     }
 
+    /// Sum of per-transmission `recording_length` values accumulated so far
+    /// (what drives the embed Duration). Exposed for audio-vs-duration debug
+    /// instrumentation.
+    pub(crate) fn accumulated_duration(&self) -> Duration {
+        self.accumulated_duration
+    }
+
+    /// Number of coalesced PTTs counted so far. Exposed for debug logging.
+    pub(crate) fn ptt_count(&self) -> u32 {
+        self.ptt_count
+    }
+
     /// Accumulate audio energy and check if the audio buffer is ready for transcription.
     /// Returns a `Transcribe` effect when the buffer exceeds the configured threshold.
     pub fn on_audio_processed(
@@ -257,8 +269,17 @@ impl CallState {
     }
 
     /// Handle a PTT boundary within a coalesced call.
-    /// Accumulates duration/signal, inserts a separator in the transcription.
-    pub fn on_ptt_end(&mut self, call_data: Option<&proto::CallData>) -> Vec<CallEffect> {
+    /// Account for a completed transmission at a PTT boundary: bumps the PTT
+    /// count and folds the transmission's duration and signal into the call
+    /// accumulators.
+    ///
+    /// Runs **synchronously** at the boundary, decoupled from transcription, so
+    /// the embed's Duration / PTTs / Signal are correct even when whisper
+    /// produces no text (clicks, static) or lags behind. The matching
+    /// transcript separator is inserted later by [`Self::on_ptt_separator`],
+    /// which rides the transcription worker's FIFO to stay sequenced with the
+    /// text — keeping metadata accounting off the slow path.
+    pub fn on_ptt_boundary(&mut self, call_data: Option<&proto::CallData>) -> Vec<CallEffect> {
         self.ptt_count += 1;
 
         if let Some(data) = call_data {
@@ -269,7 +290,22 @@ impl CallState {
             }
         }
 
-        // Insert PTT separator in transcription
+        if self.has_embed {
+            vec![CallEffect::EditEmbed {
+                embed: self.build_embed(),
+            }]
+        } else {
+            vec![]
+        }
+    }
+
+    /// Insert a PTT separator into the accumulated transcript.
+    ///
+    /// Runs from the transcription worker's FIFO (one marker per boundary, after
+    /// that transmission's text chunks) so the `---` stays correctly ordered
+    /// between the text of consecutive transmissions. Metadata accounting is
+    /// handled separately and synchronously by [`Self::on_ptt_boundary`].
+    pub fn on_ptt_separator(&mut self) -> Vec<CallEffect> {
         if !self.transcription_text.is_empty() {
             self.transcription_text.push_str("\n---\n");
         }
@@ -1080,7 +1116,7 @@ mod tests {
     // ── PTT coalescing ──────────────────────────────────────────────────
 
     #[test]
-    fn ptt_end_inserts_separator() {
+    fn ptt_boundary_accounts_and_separator_inserts() {
         let mut s = make_state();
         s.on_start();
         s.on_transcription("hello");
@@ -1089,11 +1125,16 @@ mod tests {
             signal: Some(-15.0),
             ..Default::default()
         };
-        let effects = s.on_ptt_end(Some(&call_data));
+        // Accounting is synchronous at the boundary (decoupled from transcript).
+        let effects = s.on_ptt_boundary(Some(&call_data));
         assert_eq!(effects.len(), 1);
         assert!(matches!(&effects[0], CallEffect::EditEmbed { .. }));
-        assert!(s.transcription_text.ends_with("\n---\n"));
         assert_eq!(s.ptt_count, 1);
+        assert_eq!(s.accumulated_duration.as_secs_f64(), 3.0);
+        // The separator rides the worker FIFO and lands afterward.
+        let effects = s.on_ptt_separator();
+        assert_eq!(effects.len(), 1);
+        assert!(s.transcription_text.ends_with("\n---\n"));
     }
 
     #[test]
@@ -1101,7 +1142,7 @@ mod tests {
         let mut s = make_state();
         s.on_start();
         s.on_transcription("hello");
-        s.on_ptt_end(None);
+        s.on_ptt_boundary(None);
         s.call_ended = false; // simulating the natural state
 
         let call_info = test_call_info();
@@ -1117,7 +1158,7 @@ mod tests {
         s.on_transcription("test");
         s.audio_energy_sum = 1.0;
         s.audio_sample_count = 1000;
-        s.on_ptt_end(Some(&proto::CallData {
+        s.on_ptt_boundary(Some(&proto::CallData {
             length: 3.0,
             ..Default::default()
         }));
@@ -1145,7 +1186,7 @@ mod tests {
         s.audio_energy_sum = 1.0;
         s.audio_sample_count = 1000;
         s.on_transcription("test");
-        s.on_ptt_end(Some(&proto::CallData {
+        s.on_ptt_boundary(Some(&proto::CallData {
             length: 3.0,
             signal: Some(-15.0),
             ..Default::default()
@@ -1171,9 +1212,9 @@ mod tests {
     fn ptt_count_shown_in_embed() {
         let mut s = make_state();
         s.on_start();
-        s.on_ptt_end(None);
+        s.on_ptt_boundary(None);
         s.on_ptt_start(&test_call_info());
-        s.on_ptt_end(None);
+        s.on_ptt_boundary(None);
         s.on_ptt_start(&test_call_info());
         // ptt_count is 2, current PTT not yet ended
         let embed = s.build_embed();
@@ -1186,7 +1227,7 @@ mod tests {
         let mut s = make_state();
         s.on_start();
         s.on_transcription("first ptt");
-        s.on_ptt_end(None);
+        s.on_ptt_separator();
         s.on_ptt_start(&test_call_info());
         s.on_transcription("second ptt");
         assert_eq!(s.transcription_text, "first ptt\n---\nsecond ptt");

@@ -438,8 +438,6 @@ impl CallHandler {
             filter.process(&mut samples);
         }
 
-        // Compute energy for silence detection
-        let energy: f64 = samples.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
         let sample_count: u32 = samples.len().try_into().expect("audio chunk exceeds u32");
 
         if let Some(enc) = &mut self.ogg_encoder {
@@ -465,9 +463,7 @@ impl CallHandler {
                 Vec::new()
             };
 
-        let effects = self
-            .state
-            .on_audio_processed(sample_count, energy, buffer_len, audio_drain);
+        let effects = self.state.on_audio_processed(buffer_len, audio_drain);
         self.process_effects(effects).await?;
 
         Ok(())

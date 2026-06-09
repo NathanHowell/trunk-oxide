@@ -103,8 +103,14 @@ pub struct CallState {
     detected_tones: Vec<DetectedTone>,
     events: Vec<String>,
     call_ended: bool,
-    audio_energy_sum: f64,
-    audio_sample_count: u32,
+
+    /// Whether any audio segment cleared the silence gate (i.e. was kept for
+    /// transcription). The single notion of "this call has audible audio",
+    /// driving both `has_content` and the audio attachment decision — so a call
+    /// that is transcribed is exactly a call whose audio is attached. Set via
+    /// [`Self::on_transcription_enqueued`], which the handler calls when a
+    /// segment passes the per-chunk RMS gate.
+    audio_kept: bool,
 
     /// Audio segments handed to the transcription worker that haven't returned
     /// a result yet. Rendered as a "transcribing…" placeholder in the
@@ -154,8 +160,7 @@ impl CallState {
             detected_tones: Vec::new(),
             events: Vec::new(),
             call_ended: false,
-            audio_energy_sum: 0.0,
-            audio_sample_count: 0,
+            audio_kept: false,
             pending_transcriptions: 0,
             ptt_count: 0,
             accumulated_duration: Duration::ZERO,
@@ -187,18 +192,11 @@ impl CallState {
         self.ptt_count
     }
 
-    /// Accumulate audio energy and check if the audio buffer is ready for transcription.
-    /// Returns a `Transcribe` effect when the buffer exceeds the configured threshold.
-    pub fn on_audio_processed(
-        &mut self,
-        sample_count: u32,
-        energy: f64,
-        buffer_len: usize,
-        audio_drain: Vec<f32>,
-    ) -> Vec<CallEffect> {
-        self.audio_energy_sum += energy;
-        self.audio_sample_count += sample_count;
-
+    /// Check whether the audio buffer is ready for transcription. Returns a
+    /// `Transcribe` effect (carrying the drained chunk) when the buffer exceeds
+    /// the configured threshold; the handler applies the per-chunk silence gate
+    /// and, if the chunk is kept, reports it via [`Self::on_transcription_enqueued`].
+    pub fn on_audio_processed(&mut self, buffer_len: usize, audio_drain: Vec<f32>) -> Vec<CallEffect> {
         if buffer_len >= self.config.buffer_threshold {
             vec![CallEffect::Transcribe { audio: audio_drain }]
         } else {
@@ -210,6 +208,9 @@ impl CallState {
     /// hasn't come back yet. Bumps the in-flight count shown as a placeholder.
     /// Never creates an embed on its own — pending work alone is not content.
     pub fn on_transcription_enqueued(&mut self) -> Vec<CallEffect> {
+        // A kept segment is the definition of "this call has audible audio",
+        // used by `has_content` and the attachment gate.
+        self.audio_kept = true;
         self.pending_transcriptions = self.pending_transcriptions.saturating_add(1);
         if self.has_embed {
             vec![CallEffect::EditEmbed {
@@ -421,9 +422,8 @@ impl CallState {
 
         // Check if the call produced useful content
         if !self.has_content() {
-            let audio_rms = self.audio_rms();
             effects.push(CallEffect::Log {
-                message: format!("audio below silence threshold (rms={audio_rms:.6})"),
+                message: "no audible audio, tones, or events".into(),
             });
             if self.has_embed {
                 effects.push(CallEffect::DeleteEmbed);
@@ -450,17 +450,16 @@ impl CallState {
             });
         }
 
-        // Attach audio if available and non-silent
+        // Attach audio if available and the call had audible audio (same
+        // condition that gated transcription, so transcribed ⟺ attached).
         if self.config.audio_attachment
             && let Some(ogg_data) = ogg_data
         {
-            let audio_is_silent = self.audio_rms() < SILENCE_RMS_THRESHOLD;
-            if audio_is_silent {
+            if !self.audio_kept {
                 tracing::debug!(
                     talkgroup = self.talkgroup,
-                    rms = self.audio_rms(),
                     ogg_bytes = ogg_data.len(),
-                    "skipping audio attachment (silent)"
+                    "skipping audio attachment (no audible segment)"
                 );
             } else {
                 let filename = format!(
@@ -488,15 +487,6 @@ impl CallState {
         effects
     }
 
-    /// Compute audio RMS from accumulated energy.
-    fn audio_rms(&self) -> f64 {
-        if self.audio_sample_count > 0 {
-            (self.audio_energy_sum / f64::from(self.audio_sample_count)).sqrt()
-        } else {
-            0.0
-        }
-    }
-
     /// Are there non-CTCSS tones (dispatch tones, two-tone sequences)?
     fn has_interesting_tones(&self) -> bool {
         self.detected_tones
@@ -506,15 +496,14 @@ impl CallState {
 
     /// Does this call have content worth posting?
     ///
-    /// Non-silent audio is content on its own — the call is a real transmission
-    /// and gets an embed with its audio attached, whether or not a transcript
-    /// ever arrives (transcription is decoupled and may lag, fail, or be empty).
-    /// A transcript over silent audio is treated as a hallucination and does not
-    /// count, so dead-air calls with a spurious transcript are still dropped.
+    /// Audible audio is content on its own — the call is a real transmission and
+    /// gets an embed with its audio attached, whether or not a transcript ever
+    /// arrives (transcription is decoupled and may lag, fail, or be empty).
+    /// "Audible" means at least one segment cleared the silence gate
+    /// (`audio_kept`); a transcript over otherwise-silent audio is treated as a
+    /// hallucination and does not count, so dead-air calls are still dropped.
     fn has_content(&self) -> bool {
-        let audio_is_silent = self.audio_rms() < SILENCE_RMS_THRESHOLD;
-
-        !audio_is_silent || self.has_interesting_tones() || !self.events.is_empty()
+        self.audio_kept || self.has_interesting_tones() || !self.events.is_empty()
     }
 
     /// Build a pure embed representation from current state.
@@ -894,21 +883,60 @@ mod tests {
         assert_eq!(s.build_embed().description, None);
     }
 
+    // ── audio_kept: transcribed ⟺ attached ───────────────────────────────
+
+    #[test]
+    fn kept_segment_attaches_audio_and_keeps_embed() {
+        // The real path: a segment cleared the per-chunk silence gate (so it was
+        // enqueued for transcription), which makes the call audible — its audio
+        // attaches and the embed is kept, with no separate whole-call check.
+        let mut s = make_state();
+        s.on_start();
+        s.on_transcription_enqueued();
+        let effects = s.on_end(None, Some(vec![1, 2, 3]));
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, CallEffect::AttachAudio { .. })),
+            "a transcribed call must attach its audio"
+        );
+        assert!(!effects.iter().any(|e| matches!(e, CallEffect::DeleteEmbed)));
+    }
+
+    #[test]
+    fn no_kept_segment_skips_attach_and_drops_call() {
+        // No segment cleared the gate and nothing else of interest → not audible
+        // → dropped, and the ogg bytes are not attached even though present.
+        let mut s = make_state();
+        s.on_start();
+        let effects = s.on_end(None, Some(vec![1, 2, 3]));
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, CallEffect::AttachAudio { .. }))
+        );
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, CallEffect::UpdateDb { .. })),
+            "an inaudible, event-less call is dropped"
+        );
+    }
+
     // ── on_audio_processed ───────────────────────────────────────────────
 
     #[test]
     fn audio_below_threshold_no_transcribe() {
         let mut s = make_state();
-        let effects = s.on_audio_processed(100, 0.01, 100, vec![]);
+        let effects = s.on_audio_processed(100, vec![]);
         assert!(effects.is_empty());
-        assert_eq!(s.audio_sample_count, 100);
     }
 
     #[test]
     fn audio_above_threshold_emits_transcribe() {
         let mut s = make_state();
         let audio = vec![0.0f32; 16000];
-        let effects = s.on_audio_processed(16000, 0.0, 16000, audio);
+        let effects = s.on_audio_processed(16000, audio);
         assert_eq!(effects.len(), 1);
         assert!(matches!(&effects[0], CallEffect::Transcribe { .. }));
     }
@@ -1011,8 +1039,7 @@ mod tests {
         // attaches its audio. The transcript, if it ever comes, edits later.
         let mut s = make_state();
         s.on_start();
-        s.audio_energy_sum = 1.0;
-        s.audio_sample_count = 1000;
+        s.audio_kept = true; // simulate an audible (kept) segment
         let effects = s.on_end(None, Some(vec![1, 2, 3]));
         assert!(
             effects
@@ -1044,9 +1071,7 @@ mod tests {
         let mut s = make_state();
         s.on_start();
         s.on_transcription("hello world");
-        // Simulate non-silent audio: 1000 samples with energy summing to 1.0
-        s.audio_energy_sum = 1.0;
-        s.audio_sample_count = 1000;
+        s.audio_kept = true; // simulate an audible (kept) segment
         let call_data = proto::CallData {
             length: 5.5,
             signal: Some(-20.0),
@@ -1163,8 +1188,7 @@ mod tests {
         );
         s.on_start();
         s.on_transcription("hello");
-        s.audio_energy_sum = 1.0;
-        s.audio_sample_count = 1000;
+        s.audio_kept = true; // simulate an audible (kept) segment
         let effects = s.on_end(None, Some(vec![1, 2, 3]));
         assert!(
             !effects
@@ -1278,8 +1302,7 @@ mod tests {
         let mut s = make_state();
         s.on_start();
         s.on_transcription("test");
-        s.audio_energy_sum = 1.0;
-        s.audio_sample_count = 1000;
+        s.audio_kept = true; // simulate an audible (kept) segment
         s.on_ptt_boundary(Some(&proto::CallData {
             length: 3.0,
             ..Default::default()
@@ -1305,8 +1328,7 @@ mod tests {
     fn multi_ptt_averages_signal() {
         let mut s = make_state();
         s.on_start();
-        s.audio_energy_sum = 1.0;
-        s.audio_sample_count = 1000;
+        s.audio_kept = true; // simulate an audible (kept) segment
         s.on_transcription("test");
         s.on_ptt_boundary(Some(&proto::CallData {
             length: 3.0,
@@ -1360,8 +1382,7 @@ mod tests {
         let mut s = make_state();
         s.on_start();
         s.on_transcription("hello");
-        s.audio_energy_sum = 1.0;
-        s.audio_sample_count = 1000;
+        s.audio_kept = true; // simulate an audible (kept) segment
         let call_data = proto::CallData {
             length: 5.5,
             signal: Some(-20.0),

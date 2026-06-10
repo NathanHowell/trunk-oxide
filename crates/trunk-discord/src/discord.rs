@@ -4,7 +4,7 @@ use std::time::Duration;
 use anyhow::Result;
 use serenity::all::{
     AutoArchiveDuration, ChannelType, CreateAttachment, CreateChannel, CreateEmbed, CreateMessage,
-    CreateThread, EditMessage, GuildChannel, ReactionType,
+    CreateThread, EditAttachments, EditMessage, GuildChannel, ReactionType,
 };
 use serenity::http::Http;
 use serenity::model::id::{ChannelId, GuildId, MessageId};
@@ -140,6 +140,57 @@ impl DiscordClient {
                 CreateMessage::new()
                     .reference_message((channel_id, message_id))
                     .add_file(attachment),
+            ),
+        )
+        .await?;
+        Ok(())
+    }
+
+    /// Post an embed carrying an inline image attachment (the stats chart).
+    /// The embed should reference the image via `attachment://{filename}`.
+    /// Lives in the summary thread — a separate per-channel rate bucket from
+    /// the per-call embeds — so it carries the generous attach timeout.
+    pub async fn send_embed_with_image(
+        &self,
+        channel_id: ChannelId,
+        embed: CreateEmbed,
+        image: Vec<u8>,
+        filename: &str,
+    ) -> Result<MessageId> {
+        let attachment = CreateAttachment::bytes(image, filename.to_owned());
+        let msg = with_timeout_for(
+            "send_embed_with_image",
+            DISCORD_ATTACH_TIMEOUT,
+            channel_id.send_message(
+                &self.http,
+                CreateMessage::new().embed(embed).add_file(attachment),
+            ),
+        )
+        .await?;
+        Ok(msg.id)
+    }
+
+    /// Edit an existing embed-with-image message, replacing the attachment with
+    /// a fresh one. A new [`EditAttachments`] drops the old image; `.add`
+    /// supplies the replacement (referenced by the embed via `attachment://`).
+    pub async fn edit_embed_with_image(
+        &self,
+        channel_id: ChannelId,
+        message_id: MessageId,
+        embed: CreateEmbed,
+        image: Vec<u8>,
+        filename: &str,
+    ) -> Result<()> {
+        let attachment = CreateAttachment::bytes(image, filename.to_owned());
+        with_timeout_for(
+            "edit_embed_with_image",
+            DISCORD_ATTACH_TIMEOUT,
+            channel_id.edit_message(
+                &self.http,
+                message_id,
+                EditMessage::new()
+                    .embed(embed)
+                    .attachments(EditAttachments::new().add(attachment)),
             ),
         )
         .await?;

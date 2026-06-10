@@ -59,6 +59,9 @@ chrono = "0.4"
 cxx = "1"
 cxx-build = "1"
 ogg = "0.9"
+image = { version = "0.25", default-features = false, features = ["png"] }
+plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "ab_glyph", "line_series", "chrono"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 opentelemetry = "0.31"
 opentelemetry_sdk = { version = "0.31", features = ["rt-tokio"] }
 opentelemetry-otlp = { version = "0.31", default-features = false, features = ["trace", "metrics", "http-proto", "reqwest-blocking-client"] }

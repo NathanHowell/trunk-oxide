@@ -57,6 +57,7 @@ RUN cargo build --release -p trunk-discord || true
 
 # Copy real sources and rebuild
 COPY crates/trunk-discord/src crates/trunk-discord/src
+COPY crates/trunk-discord/assets crates/trunk-discord/assets
 COPY crates/trunk-oxide-proto/src crates/trunk-oxide-proto/src
 COPY crates/trunk-whisperer-proto/src crates/trunk-whisperer-proto/src
 COPY crates/trunk-config/src crates/trunk-config/src

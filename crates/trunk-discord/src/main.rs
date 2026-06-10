@@ -11,6 +11,7 @@ mod grpc_whisperer;
 mod metrics;
 mod ogg_encoder;
 mod resampler;
+mod stats_chart;
 mod tone_detect;
 
 use std::path::PathBuf;
@@ -288,10 +289,18 @@ async fn main() -> Result<()> {
     let discord_client = Arc::new(discord::DiscordClient::new(discord_config));
     let channel_lookup = init_channel_manager(&discord_client, discord_config).await;
 
+    // Register the bundled font before any chart renders (distroless has none).
+    stats_chart::register_font();
+    let stats_client = stats_chart::StatsClient::from_env();
+    if stats_client.is_none() {
+        tracing::info!("VM_QUERY_URL set empty; hourly stats chart disabled");
+    }
+
     let aggregator = Arc::new(aggregator::Aggregator::new(
         Arc::clone(&discord_client),
         fallback_channel_id,
         Arc::clone(&db),
+        stats_client,
     ));
 
     let meter = opentelemetry::global::meter("trunk-discord");

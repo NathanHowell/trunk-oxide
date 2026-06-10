@@ -18,13 +18,13 @@ use serenity::model::id::{ChannelId, GuildId, MessageId};
 /// keep going, so the grey→green transition is never held hostage by the bucket.
 const DISCORD_API_TIMEOUT: Duration = Duration::from_secs(45);
 
-/// Longer cap for audio attachment. `edit_embed_with_attachment` re-uploads the
-/// OGG and is intrinsically slow (observed: ~55% of attaches exceeded the 45s
-/// grey-critical cap and lost their audio). It is safe to wait much longer: in
-/// `on_end` the green embed edit runs *before* the attach, so the embed is
-/// already finalized (not grey) by the time we get here — the attach is purely
-/// best-effort and post-transition, so a generous bound only delays the audio
-/// file appearing, never the grey→green flip.
+/// Longer cap for audio attachment. The audio is posted as a reply on the
+/// per-channel *message-create* bucket, which is fast in the common case, but
+/// keep a generous backstop: it is safe to wait long because in `on_end` the
+/// green embed edit runs *before* the attach, so the embed is already finalized
+/// (not grey) by the time we get here — the attach is purely best-effort and
+/// post-transition, so a generous bound only delays the audio file appearing,
+/// never the grey→green flip.
 // `from_mins` is not stable on our MSRV (1.94); keep `from_secs`.
 #[allow(clippy::duration_suboptimal_units)]
 const DISCORD_ATTACH_TIMEOUT: Duration = Duration::from_secs(180);
@@ -112,13 +112,18 @@ impl DiscordClient {
         Ok(())
     }
 
-    /// Attach a file to an existing message *without* touching its embed.
+    /// Post the call audio as a *reply* to its embed message.
     ///
-    /// Omitting the embed field means Discord leaves the current embed
-    /// unchanged — so a slow background upload landing after late transcript
-    /// edits won't clobber them with a stale snapshot. The message has no prior
-    /// attachments (we attach once, at finalize), so adding one removes nothing.
-    /// Carries the longer [`DISCORD_ATTACH_TIMEOUT`] as a backstop.
+    /// Audio used to ride an `edit_message` on the embed, which shares the
+    /// per-channel *edit* rate-limit bucket with the transcript edits — on a hot
+    /// channel that bucket is saturated, so the upload sat in serenity's 429
+    /// queue for tens to 180+ seconds and the bounded uploader shed most of the
+    /// backlog. A fresh message hits the per-channel *message-create* bucket
+    /// instead (independent of, and far more generous than, the edit bucket), so
+    /// the upload is fast and the throughput ceiling lifts. Sending it as a reply
+    /// (rather than a bare message) keeps the audio visually tied to its embed
+    /// even when other calls' embeds land in between. Carries the longer
+    /// [`DISCORD_ATTACH_TIMEOUT`] purely as a backstop.
     pub async fn attach_file(
         &self,
         channel_id: ChannelId,
@@ -130,10 +135,11 @@ impl DiscordClient {
         with_timeout_for(
             "attach_audio",
             DISCORD_ATTACH_TIMEOUT,
-            channel_id.edit_message(
+            channel_id.send_message(
                 &self.http,
-                message_id,
-                EditMessage::new().new_attachment(attachment),
+                CreateMessage::new()
+                    .reference_message((channel_id, message_id))
+                    .add_file(attachment),
             ),
         )
         .await?;

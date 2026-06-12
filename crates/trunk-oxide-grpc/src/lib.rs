@@ -18,6 +18,9 @@ pub struct TalkgroupMeta {
     pub alpha_tag: String,
     pub tag: String,
     pub group: String,
+    /// CSV/TOML-configured talkgroup priority. `None` for conventional
+    /// channels (no priority field), which fall back to the FFI value.
+    pub priority: Option<i32>,
 }
 
 // ── Conversion helpers ──
@@ -300,7 +303,7 @@ impl EventBridge {
             is_conventional: info.is_conventional,
             phase2_tdma: info.phase2_tdma,
             tdma_slot: info.tdma_slot,
-            priority: info.priority,
+            priority: meta.and_then(|m| m.priority).unwrap_or(info.priority),
             mode: info.mode,
             duplex: info.duplex,
             conversation_mode: info.conversation_mode,

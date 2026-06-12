@@ -218,6 +218,7 @@ fn main() -> Result<()> {
                         alpha_tag: tg.alpha_tag.clone(),
                         tag: tg.tag.clone(),
                         group: tg.group.clone(),
+                        priority: Some(tg.priority),
                     },
                 );
             }
@@ -228,6 +229,7 @@ fn main() -> Result<()> {
                         alpha_tag: ch.alpha_tag.clone(),
                         tag: ch.tag.clone(),
                         group: ch.group.clone(),
+                        priority: None,
                     },
                 );
             }

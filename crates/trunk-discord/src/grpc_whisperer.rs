@@ -62,6 +62,7 @@ impl WhispererConnection {
         short_name: &str,
         is_conventional: bool,
         talkgroup: i64,
+        priority: i32,
     ) -> Result<Option<String>> {
         let bytes: Vec<u8> = audio.iter().flat_map(|s| s.to_le_bytes()).collect();
 
@@ -70,6 +71,7 @@ impl WhispererConnection {
             short_name: short_name.to_string(),
             is_conventional,
             talkgroup,
+            priority,
         });
 
         // Inject the active trace context (the call span) so the whisperer's

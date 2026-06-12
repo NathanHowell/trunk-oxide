@@ -4,13 +4,14 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use anyhow::Result;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram};
-use tokio::sync::Semaphore;
 use tracing::Instrument;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
+use crate::priority_semaphore::PrioritySemaphore;
+
 pub struct Transcriber {
     contexts: Vec<Arc<WhisperContext>>,
-    semaphore: Arc<Semaphore>,
+    semaphore: Arc<PrioritySemaphore>,
     max_concurrent: usize,
     next_gpu: AtomicUsize,
     language: String,
@@ -58,7 +59,7 @@ impl Transcriber {
 
         Ok(Self {
             contexts,
-            semaphore: Arc::new(Semaphore::new(config.max_concurrent)),
+            semaphore: PrioritySemaphore::new(config.max_concurrent),
             max_concurrent: config.max_concurrent,
             next_gpu: AtomicUsize::new(0),
             language: config.language.clone(),
@@ -85,7 +86,7 @@ impl Transcriber {
         })
     }
 
-    pub const fn semaphore(&self) -> &Arc<Semaphore> {
+    pub const fn semaphore(&self) -> &Arc<PrioritySemaphore> {
         &self.semaphore
     }
 
@@ -98,13 +99,21 @@ impl Transcriber {
         audio: Vec<f32>,
         short_name: &str,
         is_conventional: bool,
+        priority: i32,
     ) -> Result<String> {
         // Attribute the decode cost by system. short_name + is_conventional are
         // low-cardinality, so they are safe as metric labels (talkgroup is not —
-        // it rides on the span instead).
+        // it rides on the span instead). priority_bucket is also low-cardinality
+        // (a handful of tiers) and lets us watch the wait drop for high-priority
+        // calls once the priority gate is in effect.
         let attrs = [
             KeyValue::new("short_name", short_name.to_string()),
             KeyValue::new("is_conventional", is_conventional),
+        ];
+        let wait_attrs = [
+            KeyValue::new("short_name", short_name.to_string()),
+            KeyValue::new("is_conventional", is_conventional),
+            KeyValue::new("priority_bucket", i64::from(priority.max(0))),
         ];
 
         #[allow(clippy::cast_precision_loss)]
@@ -114,13 +123,15 @@ impl Transcriber {
         // Child span of `transcribe`: time spent waiting for a concurrency
         // permit (backlog), separated from the decode below so traces show the
         // split per-request (and per-talkgroup, via the parent span's tag).
+        // Admission is priority-ordered: a more important talkgroup parked here
+        // is woken ahead of a lower-priority one when a permit frees.
         let queue_start = std::time::Instant::now();
         let permit = Arc::clone(&self.semaphore)
-            .acquire_owned()
+            .acquire(priority)
             .instrument(tracing::info_span!("queue_wait"))
-            .await?;
+            .await;
         self.queue_wait_duration
-            .record(queue_start.elapsed().as_secs_f64(), &attrs);
+            .record(queue_start.elapsed().as_secs_f64(), &wait_attrs);
         let gpu_idx = self.next_gpu.fetch_add(1, Ordering::Relaxed) % self.contexts.len();
         let ctx = Arc::clone(&self.contexts[gpu_idx]);
         let language = self.language.clone();

@@ -10,6 +10,7 @@ message TranscribeRequest {
   string short_name = 2;    // system short name — metric label + span attr (low cardinality)
   bool is_conventional = 3; // analog conventional vs trunked — metric label
   int64 talkgroup = 4;      // span attribute only (high cardinality — never a metric label)
+  int32 priority = 5;       // talkgroup priority (lower = more important; 0/unset = least). Admission ordering.
 }
 
 message TranscribeResponse {

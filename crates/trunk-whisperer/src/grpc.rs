@@ -73,6 +73,7 @@ impl Whisperer for WhispererService {
             talkgroup = req.talkgroup,
             short_name = %req.short_name,
             is_conventional = req.is_conventional,
+            priority = req.priority,
             audio_samples = audio.len(),
         );
         if let Err(e) = span.set_parent(parent_cx) {
@@ -81,7 +82,7 @@ impl Whisperer for WhispererService {
 
         let text = self
             .transcriber
-            .transcribe(audio, &req.short_name, req.is_conventional)
+            .transcribe(audio, &req.short_name, req.is_conventional, req.priority)
             .instrument(span)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;

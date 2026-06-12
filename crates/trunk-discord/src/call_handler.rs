@@ -173,6 +173,8 @@ struct TranscribeIdentity {
     short_name: String,
     is_conventional: bool,
     talkgroup: i64,
+    /// Talkgroup priority (lower = more important) for whisperer admission order.
+    priority: i32,
 }
 
 #[derive(Clone, Copy)]
@@ -240,6 +242,8 @@ pub struct CallHandler {
     short_name: String,
     is_conventional: bool,
     talkgroup: i64,
+    /// Talkgroup priority (lower = more important); drives whisperer admission.
+    priority: i32,
 }
 
 impl CallHandler {
@@ -310,6 +314,7 @@ impl CallHandler {
             short_name: call_info.short_name.clone(),
             is_conventional: call_info.is_conventional,
             talkgroup: call_info.talkgroup,
+            priority: call_info.priority,
             dbg_audio_samples: 0,
             dbg_kept_samples: 0,
             dbg_kept_chunks: 0,
@@ -350,6 +355,7 @@ impl CallHandler {
                     short_name: self.short_name.clone(),
                     is_conventional: self.is_conventional,
                     talkgroup: self.talkgroup,
+                    priority: self.priority,
                 },
                 job_rx,
                 result_tx,
@@ -973,6 +979,7 @@ async fn transcribe_one(
             &identity.short_name,
             identity.is_conventional,
             identity.talkgroup,
+            identity.priority,
         )
         .await;
     metrics

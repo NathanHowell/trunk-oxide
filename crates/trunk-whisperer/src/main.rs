@@ -1,5 +1,6 @@
 mod config;
 mod grpc;
+mod priority_semaphore;
 mod transcriber;
 
 use std::sync::Arc;
@@ -100,6 +101,15 @@ async fn main() -> Result<()> {
                 #[allow(clippy::cast_precision_loss)]
                 let utilization = (max_concurrent - available) as f64 / max_concurrent as f64;
                 observer.observe(utilization, &[]);
+            })
+            .build();
+
+        let semaphore = Arc::clone(transcriber.semaphore());
+        let _depth = meter
+            .u64_observable_gauge("trunk.whisperer.queue.depth")
+            .with_description("Requests parked in the priority admission queue (backlog depth)")
+            .with_callback(move |observer| {
+                observer.observe(semaphore.waiting() as u64, &[]);
             })
             .build();
     }

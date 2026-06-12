@@ -5,6 +5,7 @@ use anyhow::Result;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Histogram};
 use tokio::sync::Semaphore;
+use tracing::Instrument;
 use whisper_rs::{FullParams, SamplingStrategy, WhisperContext, WhisperContextParameters};
 
 pub struct Transcriber {
@@ -110,8 +111,14 @@ impl Transcriber {
         self.audio_input_duration
             .record(audio.len() as f64 / 16000.0, &attrs);
 
+        // Child span of `transcribe`: time spent waiting for a concurrency
+        // permit (backlog), separated from the decode below so traces show the
+        // split per-request (and per-talkgroup, via the parent span's tag).
         let queue_start = std::time::Instant::now();
-        let permit = Arc::clone(&self.semaphore).acquire_owned().await?;
+        let permit = Arc::clone(&self.semaphore)
+            .acquire_owned()
+            .instrument(tracing::info_span!("queue_wait"))
+            .await?;
         self.queue_wait_duration
             .record(queue_start.elapsed().as_secs_f64(), &attrs);
         let gpu_idx = self.next_gpu.fetch_add(1, Ordering::Relaxed) % self.contexts.len();
@@ -151,6 +158,7 @@ impl Transcriber {
             drop(permit);
             Ok::<String, anyhow::Error>(text)
         })
+        .instrument(tracing::info_span!("decode"))
         .await?;
         let elapsed = start.elapsed().as_secs_f64();
         self.transcription_duration.record(elapsed, &attrs);

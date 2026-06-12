@@ -229,7 +229,7 @@ fn main() -> Result<()> {
                         alpha_tag: ch.alpha_tag.clone(),
                         tag: ch.tag.clone(),
                         group: ch.group.clone(),
-                        priority: None,
+                        priority: Some(ch.priority),
                     },
                 );
             }

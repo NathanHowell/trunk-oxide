@@ -1,5 +1,9 @@
 # trunk-whisperer: standalone gRPC speech-to-text service
 # whisper-rs statically links whisper.cpp — the binary is self-contained
+#
+# Requires BuildKit (default in modern Docker / `docker buildx`). Cargo's
+# registry, git, and target dirs are persisted across builds via cache mounts,
+# so only changed crates recompile — no per-crate stub scaffolding needed.
 
 FROM rust:trixie AS builder
 
@@ -12,58 +16,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 
-# Copy workspace manifests and lockfile first for dependency caching
-COPY Cargo.toml Cargo.lock ./
-COPY crates/trunk-whisperer/Cargo.toml crates/trunk-whisperer/Cargo.toml
-COPY crates/trunk-transcriber-proto/Cargo.toml crates/trunk-transcriber-proto/Cargo.toml
-COPY crates/trunk-transcriber-proto/build.rs crates/trunk-transcriber-proto/build.rs
-COPY crates/trunk-transcriber-proto/proto crates/trunk-transcriber-proto/proto
+COPY . .
 
-# Stub workspace members that trunk-whisperer doesn't depend on
-COPY crates/trunk-parakeet/Cargo.toml crates/trunk-parakeet/Cargo.toml
-COPY crates/trunk-oxide-grpc/Cargo.toml crates/trunk-oxide-grpc/Cargo.toml
-COPY crates/trunk-oxide-proto/Cargo.toml crates/trunk-oxide-proto/Cargo.toml
-COPY crates/trunk-recorder-sys/Cargo.toml crates/trunk-recorder-sys/Cargo.toml
-COPY crates/trunk-discord/Cargo.toml crates/trunk-discord/Cargo.toml
-COPY crates/trunk-oxide/Cargo.toml crates/trunk-oxide/Cargo.toml
-COPY crates/trunk-solver/Cargo.toml crates/trunk-solver/Cargo.toml
-COPY crates/trunk-database/Cargo.toml crates/trunk-database/Cargo.toml
-COPY crates/trunk-config/Cargo.toml crates/trunk-config/Cargo.toml
-
-# Create stub sources so cargo can resolve the workspace and cache dependencies
-RUN mkdir -p crates/trunk-whisperer/src \
-    && echo "fn main() {}" > crates/trunk-whisperer/src/main.rs \
-    && mkdir -p crates/trunk-transcriber-proto/src \
-    && echo "" > crates/trunk-transcriber-proto/src/lib.rs \
-    && mkdir -p crates/trunk-parakeet/src \
-    && echo "fn main() {}" > crates/trunk-parakeet/src/main.rs \
-    && mkdir -p crates/trunk-oxide-grpc/src \
-    && echo "" > crates/trunk-oxide-grpc/src/lib.rs \
-    && mkdir -p crates/trunk-oxide-proto/src \
-    && echo "" > crates/trunk-oxide-proto/src/lib.rs \
-    && mkdir -p crates/trunk-recorder-sys/src \
-    && echo "" > crates/trunk-recorder-sys/src/lib.rs \
-    && mkdir -p crates/trunk-discord/src \
-    && echo "fn main() {}" > crates/trunk-discord/src/main.rs \
-    && mkdir -p crates/trunk-oxide/src \
-    && echo "" > crates/trunk-oxide/src/lib.rs \
-    && mkdir -p crates/trunk-solver/src \
-    && echo "fn main() {}" > crates/trunk-solver/src/main.rs \
-    && mkdir -p crates/trunk-database/src \
-    && echo "" > crates/trunk-database/src/lib.rs \
-    && mkdir -p crates/trunk-config/src \
-    && echo "" > crates/trunk-config/src/lib.rs
-
-RUN cargo build --release -p trunk-whisperer || true
-
-# Copy real sources and rebuild
-COPY crates/trunk-whisperer/src crates/trunk-whisperer/src
-COPY crates/trunk-transcriber-proto/src crates/trunk-transcriber-proto/src
-
-# Touch sources to invalidate the stub build artifacts
-RUN touch crates/trunk-whisperer/src/main.rs crates/trunk-transcriber-proto/src/lib.rs
-
-RUN cargo build --release -p trunk-whisperer
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry \
+    --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git \
+    --mount=type=cache,target=/build/target,id=target-whisperer \
+    cargo build --release -p trunk-whisperer \
+    && cp target/release/trunk-whisperer /usr/local/bin/trunk-whisperer
 
 # Runtime — distroless for minimal attack surface
 FROM ghcr.io/grpc-ecosystem/grpc-health-probe:v0.4.45 AS health-probe
@@ -71,6 +30,6 @@ FROM ghcr.io/grpc-ecosystem/grpc-health-probe:v0.4.45 AS health-probe
 FROM gcr.io/distroless/cc-debian13:nonroot
 
 COPY --from=health-probe /ko-app/grpc-health-probe /usr/local/bin/grpc_health_probe
-COPY --from=builder /build/target/release/trunk-whisperer /usr/local/bin/trunk-whisperer
+COPY --from=builder /usr/local/bin/trunk-whisperer /usr/local/bin/trunk-whisperer
 
 ENTRYPOINT ["/usr/local/bin/trunk-whisperer"]

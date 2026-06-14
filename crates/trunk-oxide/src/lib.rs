@@ -223,6 +223,8 @@ pub struct TrunkRecorderBuilder {
     source_ranges: Vec<RangeInclusive<f64>>,
     /// Per-source configured ppm correction, indexed by source position.
     source_ppms: Vec<f64>,
+    /// Per-source software Hz tune correction, indexed by source position.
+    source_freq_corrections_hz: Vec<f64>,
 }
 
 /// A running trunk-recorder instance. Stops automatically on drop.
@@ -236,6 +238,8 @@ pub struct TrunkRecorder {
     source_ranges: Vec<RangeInclusive<f64>>,
     /// Per-source configured ppm correction, indexed by source position.
     source_ppms: Vec<f64>,
+    /// Per-source software Hz tune correction, indexed by source position.
+    source_freq_corrections_hz: Vec<f64>,
     /// Conventional calls created before the flowgraph starts, pending
     /// registration with the [`CallManager`].
     pending_conventional_calls: Vec<PendingConventionalCall>,
@@ -291,6 +295,7 @@ impl TrunkRecorderBuilder {
 
         let mut source_ranges = Vec::new();
         let mut source_ppms = Vec::new();
+        let mut source_freq_corrections_hz = Vec::new();
         for (idx, src) in config.source.iter().enumerate() {
             if src.enabled == Some(false) {
                 continue;
@@ -369,6 +374,7 @@ impl TrunkRecorderBuilder {
             let half_rate = src.rate / 2.0;
             source_ranges.push((src.center - half_rate)..=(src.center + half_rate));
             source_ppms.push(src.ppm);
+            source_freq_corrections_hz.push(src.freq_correction_hz);
         }
 
         // ── Systems ──
@@ -574,6 +580,7 @@ impl TrunkRecorderBuilder {
             bridge,
             source_ranges,
             source_ppms,
+            source_freq_corrections_hz,
         })
     }
 
@@ -649,6 +656,7 @@ impl TrunkRecorderBuilder {
             pending,
             source_ranges: self.source_ranges,
             source_ppms: self.source_ppms,
+            source_freq_corrections_hz: self.source_freq_corrections_hz,
             pending_conventional_calls,
             gr_metrics: Arc::new(Mutex::new(GrMetricsSnapshot::default())),
             conv_metrics: Arc::new(Mutex::new(ConventionalMetricsSnapshot::default())),
@@ -683,6 +691,7 @@ impl TrunkRecorder {
             self.bridge.clone(),
             self.source_ranges.clone(),
             self.source_ppms.clone(),
+            self.source_freq_corrections_hz.clone(),
             Arc::clone(&self.conv_metrics),
         );
 

@@ -83,6 +83,8 @@ pub struct CallManager {
     source_ranges: Vec<RangeInclusive<f64>>,
     /// Per-source configured ppm correction, indexed by source position.
     source_ppms: Vec<f64>,
+    /// Per-source software Hz tune correction, indexed by source position.
+    source_freq_corrections_hz: Vec<f64>,
     calls_started: Counter<u64>,
     calls_ended: Counter<u64>,
     /// Errored / spiked voice codewords reported by the op25 (P25) decoder,
@@ -106,6 +108,7 @@ impl CallManager {
         bridge: Arc<EventBridge>,
         source_ranges: Vec<RangeInclusive<f64>>,
         source_ppms: Vec<f64>,
+        source_freq_corrections_hz: Vec<f64>,
         conv_metrics: Arc<Mutex<ConventionalMetricsSnapshot>>,
     ) -> Self {
         // Pre-populate conventional channel metrics entries.
@@ -142,6 +145,7 @@ impl CallManager {
             call_spans: HashMap::new(),
             source_ranges,
             source_ppms,
+            source_freq_corrections_hz,
             calls_started: meter
                 .u64_counter("trunk.oxide.calls_started")
                 .with_description("Total calls started")
@@ -1075,19 +1079,18 @@ impl CallManager {
             .get(&view.sys_num())
             .map_or_else(Vec::new, |id| id.xor_mask.clone());
 
-        // Software half of the hybrid clock correction: the fractional ppm the
-        // integer hardware knob can't apply, as a per-recorder mixer offset.
-        // (Real-time adaptive deltas will add to this term.) The hardware took
-        // round(ppm); we apply the remainder so the total equals the configured
-        // ppm at full precision. Only the physical tune shifts — the displayed
-        // call frequency stays view.freq().
+        // Software clock correction: a per-source Hz tune offset (the everyday
+        // sub-ppm knob; the integer hardware ppm handles only coarse/wideband).
+        // Real-time adaptive deltas will add to this term. Only the physical tune
+        // shifts — the displayed call frequency stays view.freq().
         let true_freq = view.freq().as_hz();
-        let frac_ppm = self
+        let correction_hz = self
             .find_source(true_freq)
             .and_then(|i| usize::try_from(i).ok())
-            .and_then(|i| self.source_ppms.get(i))
-            .map_or(0.0, |&ppm| ppm - ppm.round());
-        let tune_freq = true_freq * (1.0 + frac_ppm / 1e6);
+            .and_then(|i| self.source_freq_corrections_hz.get(i))
+            .copied()
+            .unwrap_or(0.0);
+        let tune_freq = true_freq + correction_hz;
 
         TrRecorderConfig {
             talkgroup: view.talkgroup(),

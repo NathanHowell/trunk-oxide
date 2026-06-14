@@ -22,16 +22,22 @@ pub struct SourceConfig {
     pub rate: f64,
     #[serde(default)]
     pub error: f64,
-    /// Clock-error correction in parts-per-million. Applied hybrid: the rounded
-    /// (integer) part goes to the rtl-sdr hardware knob — a coarse whole-dongle
-    /// LO correction — and the fractional remainder is applied in software as a
-    /// per-recorder mixer offset (`tune × frac_ppm/1e6`), so sub-ppm values
-    /// work despite the hardware being integer-only. Real-time adaptive deltas
-    /// (future) ride the same software path. Set to the measured `freq_error` as
-    /// ppm for the source; verify via the `trunk.oxide.freq_error_hz{source}`
-    /// histogram (should center on 0). Displayed call frequency is unaffected.
+    /// Coarse clock correction in parts-per-million, sent to the rtl-sdr hardware
+    /// knob (`set_freq_corr`, rounded to integer — the hardware only does whole
+    /// ppm). Use this for large/wideband offsets (≥1 ppm). For the sub-ppm
+    /// per-dongle bias we actually see, use `freq_correction_hz` instead — it's
+    /// Hz-precise and is what the FLL measures.
     #[serde(default)]
     pub ppm: f64,
+    /// Fine clock correction in Hz, applied in software as a per-recorder tune
+    /// offset (`tune = chan_freq + freq_correction_hz`). This is the everyday
+    /// knob: set it to the negative of the measured `freq_error` for the source
+    /// (so `trunk.oxide.freq_error_hz{source}` centers on 0). Hz-precise, unlike
+    /// the integer hardware ppm. Only the physical tune shifts — the displayed
+    /// call frequency is unaffected. Within a dongle's narrow band a fixed Hz ≈
+    /// a fixed ppm, so per-channel scaling isn't needed.
+    #[serde(default)]
+    pub freq_correction_hz: f64,
     #[serde(default)]
     pub gain: f64,
     #[serde(default)]

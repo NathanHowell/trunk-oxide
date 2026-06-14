@@ -1107,8 +1107,12 @@ impl TrunkStateMachine {
                         source = msg.source,
                         "regrant with new speaker on parked call: cutting per-speaker boundary"
                     );
-                    return self
-                        .cut_transmission(call_id, RecorderPolicy::Span { source_id: msg.source });
+                    return self.cut_transmission(
+                        call_id,
+                        RecorderPolicy::Span {
+                            source_id: msg.source,
+                        },
+                    );
                 }
 
                 // TDULC may have moved this call to Idle — resume recording.

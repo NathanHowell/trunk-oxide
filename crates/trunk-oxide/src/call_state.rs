@@ -1081,20 +1081,46 @@ impl TrunkStateMachine {
         if let Some(idx) = existing_idx {
             let same_freq = self.calls[idx].freq == msg.freq;
             if same_freq {
-                {
-                    let entry = &mut self.calls[idx];
+                let entry = &mut self.calls[idx];
+                let resuming_idle = entry.state == CallState::Idle && entry.is_trunked();
+                let source_changed = msg.source > 0 && msg.source != entry.current_source_id;
 
-                    // TDULC may have moved this call to Idle — resume recording
-                    if entry.state == CallState::Idle && entry.is_trunked() {
-                        entry.state = CallState::Recording;
-                        entry.idle_since = None;
-                        entry.segment_start = Instant::now();
-                        tracing::trace!(
-                            short_name = %entry.short_name,
-                            talkgroup = entry.talkgroup,
-                            "Grant on Idle call: Idle → Recording"
-                        );
-                    }
+                // A TDULC parked this call Idle while keeping the recorder warm.
+                // If a *different* unit now keys up, the prior speaker's
+                // transmission must be cut as its own per-speaker boundary, not
+                // silently merged into the next: the control-channel regrant
+                // otherwise wins the race against the in-band `src_id` detector
+                // (which would then dedup on the already-moved source). The
+                // recorder spans the gap (`RecorderPolicy::Span`);
+                // `on_transmission_rotated` completes the Idle → Recording
+                // transition between the closing `EmitCallEnd` (which still sees
+                // the prior Idle state + segments) and the opening
+                // `EmitCallStart`. Same speaker (or unknown source) re-keying
+                // falls through to a plain in-place resume so we don't fragment
+                // one speaker's PTT cycle.
+                if resuming_idle && source_changed {
+                    let call_id = entry.id;
+                    entry.current_source_id = msg.source;
+                    tracing::info!(
+                        short_name = %entry.short_name,
+                        talkgroup = entry.talkgroup,
+                        source = msg.source,
+                        "regrant with new speaker on parked call: cutting per-speaker boundary"
+                    );
+                    return self
+                        .cut_transmission(call_id, RecorderPolicy::Span { source_id: msg.source });
+                }
+
+                // TDULC may have moved this call to Idle — resume recording.
+                if resuming_idle {
+                    entry.state = CallState::Recording;
+                    entry.idle_since = None;
+                    entry.segment_start = Instant::now();
+                    tracing::trace!(
+                        short_name = %entry.short_name,
+                        talkgroup = entry.talkgroup,
+                        "Grant on Idle call: Idle → Recording"
+                    );
                 }
 
                 // Source changed: re-route to the new source (SetSource +
@@ -1400,8 +1426,14 @@ impl TrunkStateMachine {
     pub(crate) fn on_transmission_rotated(&mut self, call_id: CallId, source_id: i64) {
         if let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) {
             entry.rotate_bookkeeping();
-            // Recorder spans the call (RecorderPolicy::Span): stays Recording,
-            // recorder untouched; just carry the new speaker's source id.
+            // Recorder spans the call (RecorderPolicy::Span): recorder untouched.
+            // Force Recording so a Span cut originating from a TDULC-parked
+            // (Idle) call completes the Idle → Recording transition *here* —
+            // after the closing EmitCallEnd saw the prior Idle state/segments,
+            // before the opening EmitCallStart. For a mid-keyup source change
+            // the call is already Recording, so this is a no-op.
+            entry.state = CallState::Recording;
+            entry.idle_since = None;
             entry.current_source_id = source_id;
         }
     }
@@ -2389,6 +2421,91 @@ mod tests {
             "below MIN_TRANSMISSION must not cut a transmission boundary"
         );
         assert_eq!(sm.calls[0].current_source_id, 2002);
+    }
+
+    #[test]
+    fn regrant_with_new_speaker_on_parked_call_cuts_boundary() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        // Recording, speaker 100 (recording_trunked_call grants source 100).
+        let call_id = recording_trunked_call(&mut sm);
+        assert_eq!(sm.calls[0].current_source_id, 100);
+
+        // PTT release: TDULC parks the call Idle (recorder kept warm), no event.
+        let tdulc = TrunkMessage {
+            message_type: MessageType::Tdulc,
+            ..grant_msg(100, 851_000_000.0)
+        };
+        assert!(sm.on_message(&tdulc).is_empty());
+        assert_eq!(sm.calls[0].state, CallState::Idle);
+
+        // A different unit (200) keys up: the regrant must cut a per-speaker
+        // boundary for speaker 100, not silently merge 100 and 200 into one
+        // transmission.
+        let regrant = TrunkMessage {
+            source: 200,
+            ..grant_msg(100, 851_000_000.0)
+        };
+        let effects = sm.on_message(&regrant);
+        assert_effects_contain_ordered(
+            &effects,
+            &[
+                "EmitCallEnd",
+                "RotateTransmission",
+                "SetSource",
+                "EmitSignal",
+                "EmitCallStart",
+            ],
+        );
+        // The new source is tracked synchronously so a following control-channel
+        // update for the same unit dedups.
+        assert_eq!(sm.calls[0].current_source_id, 200);
+        // EmitCallEnd is ordered before RotateTransmission, so the conclude still
+        // observes the parked Idle state (the executor processes effects in
+        // order). Simulate the RotateTransmission effect the executor applies
+        // between EmitCallEnd and EmitCallStart.
+        let end_pos = effects
+            .iter()
+            .position(|e| matches!(e, Effect::EmitCallEnd { .. }))
+            .unwrap();
+        let rotate_pos = effects
+            .iter()
+            .position(|e| matches!(e, Effect::RotateTransmission { .. }))
+            .unwrap();
+        assert!(end_pos < rotate_pos, "EmitCallEnd must precede the rotate");
+        assert_eq!(sm.calls[0].state, CallState::Idle);
+        sm.on_transmission_rotated(call_id, 200);
+        // After the rotate: Idle → Recording, prior speaker's segments cleared.
+        assert_eq!(sm.calls[0].state, CallState::Recording);
+        assert!(sm.calls[0].segments.is_empty());
+    }
+
+    #[test]
+    fn regrant_with_same_speaker_on_parked_call_does_not_cut_boundary() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let call_id = recording_trunked_call(&mut sm);
+
+        let tdulc = TrunkMessage {
+            message_type: MessageType::Tdulc,
+            ..grant_msg(100, 851_000_000.0)
+        };
+        let _ = sm.on_message(&tdulc);
+        assert_eq!(sm.calls[0].state, CallState::Idle);
+
+        // Same unit (100) re-keys: this is one speaker's PTT cycle, so resume in
+        // place — no boundary (no CallEnd/CallStart) — and stay coalesced.
+        let regrant = grant_msg(100, 851_000_000.0); // source 100
+        let effects = sm.on_message(&regrant);
+        assert!(
+            !effects.iter().any(|e| matches!(
+                e,
+                Effect::EmitCallEnd { .. }
+                    | Effect::EmitCallStart { .. }
+                    | Effect::RotateTransmission { .. }
+            )),
+            "same-speaker re-key must not cut a transmission boundary"
+        );
+        assert_eq!(sm.calls[0].state, CallState::Recording);
+        let _ = call_id;
     }
 
     #[test]

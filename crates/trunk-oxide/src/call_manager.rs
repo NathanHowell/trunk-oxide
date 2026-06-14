@@ -710,7 +710,13 @@ impl CallManager {
             if let Some(view) = self.state.get_call_view(call_id) {
                 let final_freq = view.freq();
                 let rec_num = view.recorder().map_or(-1, |r| r.0);
-                let recording_length = view.segment_start().elapsed().as_secs_f64();
+                // `recording_duration()` sums the closed segments plus the open
+                // one (when Recording). For a mid-keyup source change segments
+                // is empty and the call is still Recording, so this equals the
+                // open segment's elapsed; for a boundary cut at a regrant the
+                // prior speaker's audio is in a *closed* segment while the call
+                // is Idle, which `segment_start().elapsed()` would miss.
+                let recording_length = view.recording_duration().as_secs_f64();
                 let segments = self.build_proto_segments_final(call_id, final_freq, rec_num);
                 if let Some(s) = &span {
                     s.record("recording_length", recording_length);

@@ -118,6 +118,13 @@ const SQUELCH_DEBOUNCE: Duration = Duration::from_millis(250);
 /// preventing indefinite garbage recordings.
 const STUCK_RECORDING_BACKSTOP: Duration = Duration::from_secs(30);
 
+/// Minimum length of a trunked transmission before an in-band source change is
+/// allowed to cut a new per-speaker boundary. Rapid P25 dispatch hand-offs
+/// (A→B→A within a second) would otherwise fragment one exchange into many
+/// sub-second transmissions; below this floor the source change only re-routes
+/// (SetSource + EmitSignal) without ending the transmission.
+const MIN_TRANSMISSION: Duration = Duration::from_millis(700);
+
 // ── Newtypes ──
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -132,6 +139,13 @@ impl CallId {
 
     pub(crate) fn as_u64(self) -> u64 {
         self.0
+    }
+
+    /// Reconstruct a `CallId` from the `rust_call_id` round-tripped through C++
+    /// (set via [`Self::as_u64`] at recorder creation, returned on audio/source
+    /// callbacks).
+    pub(crate) fn from_u64(id: u64) -> Self {
+        Self(id)
     }
 }
 
@@ -575,6 +589,11 @@ pub(crate) enum CallEndReason {
     WriteTimeout,
     /// Conventional per-transmission boundary (squelch close / retune).
     Conventional,
+    /// Trunked per-speaker boundary: the in-band source (unit) changed mid-call.
+    /// A *logical* boundary — the recorder keeps running and audio stays
+    /// continuous; only the CallEnd/CallStart event pair is emitted. Distinct
+    /// from [`Self::Conventional`] (which stops/restarts the recorder).
+    SourceChange,
     /// Process shutdown drained all calls.
     Shutdown,
 }
@@ -588,6 +607,7 @@ impl CallEndReason {
             Self::Superseded => "superseded",
             Self::WriteTimeout => "write_timeout",
             Self::Conventional => "conventional",
+            Self::SourceChange => "source_change",
             Self::Shutdown => "shutdown",
         }
     }
@@ -623,6 +643,16 @@ pub(crate) enum Effect {
     EmitCallEnd {
         call_id: CallId,
         reason: CallEndReason,
+    },
+    /// Rotate to the next logical transmission on the SAME recorder (no
+    /// stop/restart): assign a fresh `call_num`, clear segments, reset
+    /// `segment_start`. The trunked soft-boundary analog of
+    /// [`Self::ConventionalRestart`] minus the recorder restart. Ordered after
+    /// the closing `EmitCallEnd` (which reads the old `call_num`/segments) and
+    /// before the opening `EmitCallStart` (which reads the new `call_num`).
+    RotateTransmission {
+        call_id: CallId,
+        source_id: i64,
     },
     EmitCallsActive,
     EmitSignal {
@@ -1219,6 +1249,86 @@ impl TrunkStateMachine {
             source_id: source,
         });
         true
+    }
+
+    /// Handle an in-band source (unit) change decoded by op25 on the voice
+    /// channel (carried as `rust_call_id` → [`CallId`]). Unlike the
+    /// control-channel source updates in [`Self::update_call_source_entry`],
+    /// this cuts a real per-speaker **transmission boundary** so each unit's
+    /// audio becomes its own CallStart/CallEnd pair — the same model as a
+    /// conventional keyed transmission, but on a continuously-running recorder
+    /// (no stop/retune; `rust_call_id` is unchanged so audio routing and Discord
+    /// coalescing carry across the boundary).
+    pub(crate) fn on_source_change(&mut self, call_id: CallId, source: i64) -> Effects {
+        let mut effects = Effects::new();
+        let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) else {
+            return effects;
+        };
+
+        // Only trunked, only while actively recording. Ignore unknown sources
+        // (encrypted / no-LC frames decode to -1) and no-op repeats: the tag
+        // re-fires every superframe, and the control channel may have already
+        // moved `current_source_id` — dedup against it so we never emit a
+        // double boundary.
+        if !entry.is_trunked()
+            || entry.state != CallState::Recording
+            || source <= 0
+            || source == entry.current_source_id
+        {
+            return effects;
+        }
+
+        // Below the minimum transmission length, treat it as a plain re-route
+        // (SetSource + EmitSignal) rather than fragmenting rapid A↔B↔A hand-offs
+        // into sub-second transmissions.
+        if entry.segment_start.elapsed() < MIN_TRANSMISSION {
+            Self::update_call_source_entry(entry, source, &mut effects);
+            return effects;
+        }
+
+        // Real per-speaker boundary: close the current transmission and open
+        // the next on the same recorder. Set `current_source_id` now so a
+        // following control-channel update for the same unit dedups.
+        entry.current_source_id = source;
+        tracing::info!(
+            short_name = %entry.short_name,
+            talkgroup = entry.talkgroup,
+            source,
+            "in-band source change: cutting per-speaker transmission boundary"
+        );
+        effects.push(Effect::EmitCallEnd {
+            call_id,
+            reason: CallEndReason::SourceChange,
+        });
+        effects.push(Effect::RotateTransmission {
+            call_id,
+            source_id: source,
+        });
+        effects.push(Effect::SetSource {
+            call_id,
+            source_id: source,
+        });
+        effects.push(Effect::EmitSignal {
+            call_id,
+            source_id: source,
+        });
+        effects.push(Effect::EmitCallStart { call_id });
+        effects
+    }
+
+    /// Apply a [`Effect::RotateTransmission`]: advance to the next logical
+    /// transmission on the same recorder. Mirrors the non-recorder half of
+    /// [`Self::on_conventional_restarted`] — fresh `call_num`, cleared segments,
+    /// reset `segment_start` — but stays `Recording` and leaves the recorder
+    /// untouched.
+    pub(crate) fn on_transmission_rotated(&mut self, call_id: CallId, source_id: i64) {
+        if let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) {
+            entry.call_num = next_call_num();
+            entry.start_time = SystemTime::now();
+            entry.segments.clear();
+            entry.segment_start = Instant::now();
+            entry.current_source_id = source_id;
+        }
     }
 
     // ── Recording policy (pure evaluation) ──
@@ -1993,6 +2103,7 @@ mod tests {
                 Effect::SetSource { .. } => "SetSource",
                 Effect::EmitCallStart { .. } => "EmitCallStart",
                 Effect::EmitCallEnd { .. } => "EmitCallEnd",
+                Effect::RotateTransmission { .. } => "RotateTransmission",
                 Effect::EmitCallsActive => "EmitCallsActive",
                 Effect::EmitSignal { .. } => "EmitSignal",
                 Effect::EmitUnitEvent { .. } => "EmitUnitEvent",
@@ -2107,6 +2218,77 @@ mod tests {
         assert_eq!(sm.calls[0].state, CallState::Recording);
         assert_eq!(sm.calls[0].recorder, Some(RecorderNum(5)));
         assert_effects_contain_ordered(&effects, &["EmitSetupRecorder"]);
+    }
+
+    // ── In-band source change → per-speaker transmission boundary ──
+
+    /// Drive a trunked call into Recording and return its `CallId`.
+    fn recording_trunked_call(sm: &mut TrunkStateMachine) -> CallId {
+        let effects = sm.on_message(&grant_msg(100, 851_000_000.0));
+        let call_id = extract_create_call_id(&effects);
+        let _ = sm.on_recording_result(
+            call_id,
+            RecordingResult::Started {
+                rec_num: RecorderNum(5),
+            },
+        );
+        call_id
+    }
+
+    #[test]
+    fn source_change_cuts_transmission_boundary() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let call_id = recording_trunked_call(&mut sm);
+        // Past MIN_TRANSMISSION so a real boundary is cut.
+        sm.calls[0].segment_start = Instant::now() - Duration::from_secs(2);
+
+        // A different unit keys up mid-call: end this transmission, start the next.
+        let effects = sm.on_source_change(call_id, 2002);
+        assert_effects_contain_ordered(
+            &effects,
+            &[
+                "EmitCallEnd",
+                "RotateTransmission",
+                "SetSource",
+                "EmitSignal",
+                "EmitCallStart",
+            ],
+        );
+        assert_eq!(sm.calls[0].current_source_id, 2002);
+
+        // The same source re-firing every superframe must not cut another boundary.
+        assert!(sm.on_source_change(call_id, 2002).is_empty());
+        // Unknown source (encrypted / no-LC) must not cut a boundary.
+        assert!(sm.on_source_change(call_id, -1).is_empty());
+    }
+
+    #[test]
+    fn source_change_below_min_transmission_only_reroutes() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let call_id = recording_trunked_call(&mut sm);
+        // segment_start is fresh (< MIN_TRANSMISSION): a rapid hand-off must
+        // only re-route the source, not fragment into a sub-second transmission.
+        let effects = sm.on_source_change(call_id, 2002);
+        assert_effects_contain_ordered(&effects, &["SetSource", "EmitSignal"]);
+        assert!(
+            !effects.iter().any(|e| matches!(
+                e,
+                Effect::EmitCallEnd { .. }
+                    | Effect::EmitCallStart { .. }
+                    | Effect::RotateTransmission { .. }
+            )),
+            "below MIN_TRANSMISSION must not cut a transmission boundary"
+        );
+        assert_eq!(sm.calls[0].current_source_id, 2002);
+    }
+
+    #[test]
+    fn source_change_ignored_when_not_recording() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let call_id = recording_trunked_call(&mut sm);
+        sm.calls[0].segment_start = Instant::now() - Duration::from_secs(2);
+        sm.calls[0].state = CallState::Idle;
+        assert!(sm.on_source_change(call_id, 2002).is_empty());
     }
 
     #[test]

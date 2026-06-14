@@ -510,6 +510,11 @@ pub mod ffi {
             messages: Vec<TrTrunkMessage>,
         );
         fn event_notifier_notify_squelch(notifier: &EventNotifier, rec: i32, muted: bool, pwr: f64);
+        fn event_notifier_notify_source_change(
+            notifier: &EventNotifier,
+            rust_call_id: u64,
+            src_id: i64,
+        );
         fn event_notifier_notify_signals_detected(
             notifier: &EventNotifier,
             source_num: i32,
@@ -566,6 +571,13 @@ pub enum GrEvent {
         muted: bool,
         pwr_db: f64,
     },
+    /// In-band P25 source (unit) change decoded by op25 on the voice channel,
+    /// keyed by the recorder's `rust_call_id`. Drives per-speaker transmission
+    /// boundaries in the state machine.
+    SourceChange {
+        rust_call_id: u64,
+        src_id: i64,
+    },
     /// Signals detected on a conventional source by the signal detector.
     SignalsDetected {
         source_num: i32,
@@ -616,6 +628,19 @@ fn event_notifier_notify_squelch(notifier: &EventNotifier, rec: i32, muted: bool
             recorder_num: rec,
             muted,
             pwr_db: pwr,
+        })
+        .is_ok()
+    {
+        notifier.1.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+fn event_notifier_notify_source_change(notifier: &EventNotifier, rust_call_id: u64, src_id: i64) {
+    if notifier
+        .0
+        .try_send(GrEvent::SourceChange {
+            rust_call_id,
+            src_id,
         })
         .is_ok()
     {

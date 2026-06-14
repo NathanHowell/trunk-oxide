@@ -754,6 +754,16 @@ impl TrunkRecorder {
                                 pwr_db,
                             );
                         }
+                        GrEvent::SourceChange {
+                            rust_call_id,
+                            src_id,
+                        } => {
+                            call_mgr.handle_source_change(
+                                self.ctx.pin_mut(),
+                                rust_call_id,
+                                src_id,
+                            );
+                        }
                         GrEvent::SignalsDetected {
                             source_center_freq,
                             signals,

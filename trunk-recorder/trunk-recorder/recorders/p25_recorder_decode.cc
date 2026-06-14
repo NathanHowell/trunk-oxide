@@ -133,6 +133,7 @@ void p25_recorder_decode::initialize(int silence_frames, bool d_soft_vocoder) {
   levels = gr::blocks::multiply_const_ss::make(1);
 
   plugin_sink = gr::blocks::plugin_wrapper_impl::make(std::bind(&p25_recorder_decode::plugin_callback_handler, this, std::placeholders::_1, std::placeholders::_2));
+  plugin_sink->set_source_id_callback(std::bind(&p25_recorder_decode::source_id_handler, this, std::placeholders::_1));
 
   connect(self(), 0, slicer, 0);
   connect(slicer, 0, op25_frame_assembler, 0);
@@ -144,6 +145,19 @@ void p25_recorder_decode::initialize(int silence_frames, bool d_soft_vocoder) {
 
 void p25_recorder_decode::plugin_callback_handler(int16_t *samples, int sampleCount) {
   d_config.event_sink->audio_callback(d_recorder, samples, sampleCount);
+}
+
+void p25_recorder_decode::source_id_handler(long src_id) {
+  // Report in-band source (unit) changes up to the Rust state machine so it can
+  // cut a per-speaker transmission boundary. The op25 tag re-fires every
+  // superframe with the same src, so only forward an actual change; ignore the
+  // -1 sentinel (encrypted / no-LC frames).
+  if (src_id > 0 && src_id != d_last_notified_src) {
+    d_last_notified_src = src_id;
+    if (d_recorder) {
+      d_recorder->notify_source_change(src_id);
+    }
+  }
 }
 
 

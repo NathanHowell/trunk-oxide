@@ -33,6 +33,7 @@ namespace blocks {
 class plugin_wrapper_impl : public plugin_wrapper {
 private:
   plugin_callback d_callback;
+  source_id_callback d_source_id_callback;
 
 protected:
   std::mutex d_mutex;
@@ -50,6 +51,7 @@ public:
                    gr_vector_void_star &output_items);
 
   void flush() override;
+  void set_source_id_callback(source_id_callback cb) override;
 };
 
 } /* namespace blocks */

@@ -38,6 +38,9 @@ protected:
   const Config &d_config;
   std::shared_ptr<System> d_system;
   long d_source_id;
+  // Last in-band src reported up to the state machine, to dedup the per-superframe
+  // tag re-fires (only a *change* cuts a transmission boundary).
+  long d_last_notified_src = -1;
   gr::op25_repeater::p25_frame_assembler::sptr op25_frame_assembler;
   gr::op25_repeater::fsk4_slicer_fb::sptr slicer;
   gr::blocks::short_to_float::sptr converter;
@@ -63,6 +66,7 @@ public:
   bool delay_open;
   virtual ~p25_recorder_decode();
   void plugin_callback_handler(int16_t *samples, int sampleCount);
+  void source_id_handler(long src_id);
   double get_output_sample_rate();
   RecorderState get_state();
   gr::op25_repeater::p25_frame_assembler::sptr get_transmission_sink();

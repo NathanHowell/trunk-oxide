@@ -28,7 +28,9 @@
 #include <cstring>
 #include <fcntl.h>
 #include <gnuradio/io_signature.h>
+#include <gnuradio/tags.h>
 #include <gnuradio/thread/thread.h>
+#include <pmt/pmt.h>
 #include <stdexcept>
 #include <stdio.h>
 
@@ -55,6 +57,18 @@ int plugin_wrapper_impl::work(int noutput_items, gr_vector_const_void_star &inpu
 
 int plugin_wrapper_impl::dowork(int noutput_items, gr_vector_const_void_star &input_items, gr_vector_void_star &output_items) {
 
+  // Forward op25's in-band "src_id" tags (LDU1 LCW source for Phase 1,
+  // get_ptt_src_id() for Phase 2 TDMA) to the optional source-id side-channel.
+  // Only the P25 decode path wires this; for other recorders the assembler
+  // emits no such tag and the callback is unset, so this is a cheap no-op.
+  if (d_source_id_callback != nullptr) {
+    std::vector<gr::tag_t> tags;
+    get_tags_in_window(tags, 0, 0, noutput_items, pmt::intern("src_id"));
+    for (const auto &tag : tags) {
+      d_source_id_callback(pmt::to_long(tag.value));
+    }
+  }
+
   if (d_callback != nullptr) {
     d_callback((int16_t *)input_items[0], noutput_items);
   } else {
@@ -66,6 +80,10 @@ int plugin_wrapper_impl::dowork(int noutput_items, gr_vector_const_void_star &in
 
 void plugin_wrapper_impl::flush() {
   std::lock_guard<std::mutex> guard(d_mutex);
+}
+
+void plugin_wrapper_impl::set_source_id_callback(source_id_callback cb) {
+  d_source_id_callback = std::move(cb);
 }
 
 } /* namespace blocks */

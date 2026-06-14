@@ -33,6 +33,12 @@ namespace blocks {
 
 typedef std::function<void(int16_t *samples, int sampleCount)> plugin_callback;
 
+// Optional side-channel for the P25 in-band source (unit) ID decoded by op25
+// and emitted as a "src_id" stream tag on the audio. Only p25_recorder_decode
+// wires this (to cut per-speaker transmission boundaries); other recorders
+// leave it unset and pay nothing.
+typedef std::function<void(long src_id)> source_id_callback;
+
 /*!
  * \brief Wrapps the plugin functions into a single block.
  * \ingroup audio_blk
@@ -48,6 +54,7 @@ public:
   typedef std::shared_ptr<plugin_wrapper> sptr;
 
   virtual void flush() = 0;
+  virtual void set_source_id_callback(source_id_callback cb) = 0;
 };
 
 } /* namespace blocks */

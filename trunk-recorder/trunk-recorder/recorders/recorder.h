@@ -54,10 +54,25 @@ public:
 
   uint64_t get_rust_call_id() const { return rust_call_id; }
 
+  // In-band P25 source (unit) change, decoded by op25 on the voice channel and
+  // reported by the decode block. Wired (like the squelch callback) to the
+  // Rust EventNotifier so the state machine can cut per-speaker transmission
+  // boundaries. Concrete on the base — every recorder type inherits it; only
+  // the P25 decode path actually calls notify_source_change().
+  void set_source_change_callback(std::function<void(uint64_t, long)> cb) {
+    source_change_callback = std::move(cb);
+  }
+  void notify_source_change(long src_id) {
+    if (source_change_callback) {
+      source_change_callback(rust_call_id, src_id);
+    }
+  }
+
 protected:
   Recorder_Type  type;
   int autotune_offset = 0;
   uint64_t rust_call_id = 0;
+  std::function<void(uint64_t, long)> source_change_callback;
 };
 
 typedef std::shared_ptr<Recorder> Recorder_sptr;

@@ -176,10 +176,49 @@ fn main() {
     println!("cargo:rerun-if-changed=src/lib.rs");
     println!("cargo:rerun-if-changed=cpp/bridge.h");
     println!("cargo:rerun-if-changed=cpp/bridge.cpp");
-    println!(
-        "cargo:rerun-if-changed={}",
-        trunk_recorder_dir.join("CMakeLists.txt").display()
-    );
+
+    // Watch the vendored trunk-recorder C++ source tree so that edits to any
+    // .cc/.h (e.g. gr_blocks, recorders, op25) re-invoke cmake. Without this,
+    // cargo considers the build script up-to-date and links the stale static
+    // lib — invisibly dropping C++ changes, especially in the Docker build
+    // where the cargo target dir is a persistent cache mount.
+    emit_rerun_for_sources(&trunk_recorder_dir);
+}
+
+/// Recursively emit `cargo:rerun-if-changed` for every C/C++ source and header
+/// (and CMake file) under `dir`, skipping the cmake `build/` output dir and any
+/// `.git` directory.
+fn emit_rerun_for_sources(dir: &std::path::Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_dir() {
+            let name = entry.file_name();
+            if name == "build" || name == ".git" {
+                continue;
+            }
+            emit_rerun_for_sources(&path);
+        } else {
+            let is_source = path
+                .extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|ext| {
+                    matches!(
+                        ext,
+                        "cc" | "cpp" | "cxx" | "c" | "h" | "hh" | "hpp" | "hxx" | "cmake"
+                    )
+                })
+                || path.file_name().and_then(|n| n.to_str()) == Some("CMakeLists.txt");
+            if is_source {
+                println!("cargo:rerun-if-changed={}", path.display());
+            }
+        }
+    }
 }
 
 /// Compute the `GNURADIO_VERSION` hex value using trunk-recorder's encoding:

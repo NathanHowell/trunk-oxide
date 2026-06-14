@@ -411,6 +411,12 @@ impl CallManager {
                     }
                     self.exec_conclude_call(call_id, reason);
                 }
+                Effect::RotateTransmission { call_id, source_id } => {
+                    // Soft boundary: advance to the next logical transmission on
+                    // the same (still-running) recorder. No C++ recorder call —
+                    // unlike ConventionalRestart, which rotates the WAV.
+                    self.state.on_transmission_rotated(call_id, source_id);
+                }
                 Effect::EmitCallsActive => {
                     let infos: Vec<ffi::TrCallInfo> = self
                         .state
@@ -691,6 +697,30 @@ impl CallManager {
         let span = self.call_spans.remove(&call_id);
         if let Some(s) = &span {
             s.record("stop_reason", reason.as_str());
+        }
+
+        // Logical (soft) transmission boundary: the in-band source changed
+        // mid-call. End this transmission on the wire WITHOUT stopping the C++
+        // recorder — the audio stream is continuous and `RotateTransmission`
+        // opens the next transmission on the same recorder. No recorder
+        // metrics/transmission_list here (the recorder is still running); the
+        // segment timing carries the boundary. This is the seam where
+        // "end the transmission" is separated from "stop the recorder".
+        if reason == CallEndReason::SourceChange {
+            if let Some(view) = self.state.get_call_view(call_id) {
+                let final_freq = view.freq();
+                let rec_num = view.recorder().map_or(-1, |r| r.0);
+                let recording_length = view.segment_start().elapsed().as_secs_f64();
+                let segments = self.build_proto_segments_final(call_id, final_freq, rec_num);
+                if let Some(s) = &span {
+                    s.record("recording_length", recording_length);
+                    s.record("segments", u64::try_from(segments.len()).unwrap_or(u64::MAX));
+                }
+                let mut data = self.build_call_data(call_id);
+                data.length = recording_length;
+                self.bridge.call_end(&data, &segments, false);
+            }
+            return;
         }
 
         // Captured under the view borrow below, applied after it drops (the
@@ -1055,6 +1085,21 @@ impl CallManager {
         let effects = self
             .state
             .on_squelch(RecorderNum(recorder_num), muted, pwr_db);
+        self.process_effects(effects, &mut ctx);
+    }
+
+    /// An in-band P25 source (unit) change decoded by op25 on the voice channel,
+    /// keyed by the recorder's `rust_call_id`. Cuts a per-speaker transmission
+    /// boundary (see [`TrunkStateMachine::on_source_change`]).
+    pub fn handle_source_change(
+        &mut self,
+        mut ctx: Pin<&mut TrContext>,
+        rust_call_id: u64,
+        src_id: i64,
+    ) {
+        let effects = self
+            .state
+            .on_source_change(CallId::from_u64(rust_call_id), src_id);
         self.process_effects(effects, &mut ctx);
     }
 

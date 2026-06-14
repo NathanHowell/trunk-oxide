@@ -623,10 +623,16 @@ void tr_context_wire_event_notifiers(TrContext &ctx) {
         for (auto &rec : recs) {
             auto notifier = bridge->make_notifier();
             int rec_num = rec->get_num();
+            auto sq_notifier = std::make_shared<rust::Box<EventNotifier>>(std::move(notifier));
             rec->set_squelch_callback(
-                [notifier = std::make_shared<rust::Box<EventNotifier>>(std::move(notifier)),
-                 rec_num](bool muted, double pwr_db) {
-                    event_notifier_notify_squelch(**notifier, rec_num, muted, pwr_db);
+                [sq_notifier, rec_num](bool muted, double pwr_db) {
+                    event_notifier_notify_squelch(**sq_notifier, rec_num, muted, pwr_db);
+                });
+            auto sc_notifier =
+                std::make_shared<rust::Box<EventNotifier>>(bridge->make_notifier());
+            rec->set_source_change_callback(
+                [sc_notifier](uint64_t rust_call_id, long src_id) {
+                    event_notifier_notify_source_change(**sc_notifier, rust_call_id, src_id);
                 });
         }
     }
@@ -795,6 +801,12 @@ std::unique_ptr<TrCall> tr_create_conventional_call(
         [notifier = std::make_shared<rust::Box<EventNotifier>>(std::move(notifier)),
          rec_num](bool muted, double pwr_db) {
             event_notifier_notify_squelch(**notifier, rec_num, muted, pwr_db);
+        });
+    auto sc_notifier =
+        std::make_shared<rust::Box<EventNotifier>>(ctx.impl->event_bridge->make_notifier());
+    rec->set_source_change_callback(
+        [sc_notifier](uint64_t rust_call_id, long src_id) {
+            event_notifier_notify_source_change(**sc_notifier, rust_call_id, src_id);
         });
 
     return std::make_unique<TrCall>(call);

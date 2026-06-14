@@ -6,7 +6,7 @@ use std::time::Instant;
 
 use cxx::UniquePtr;
 use opentelemetry::KeyValue;
-use opentelemetry::metrics::{Counter, Gauge};
+use opentelemetry::metrics::{Counter, Gauge, Histogram};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use trunk_recorder_sys::SystemInfo;
 use trunk_recorder_sys::ffi::{
@@ -90,6 +90,10 @@ pub struct CallManager {
     /// (the cause of P25 audio clipping), typically driven by frequency error.
     voice_frame_errors: Counter<u64>,
     voice_frame_spikes: Counter<u64>,
+    /// Per-call FLL frequency error (Hz) at recorder stop, bucketed by source.
+    /// Distribution (not last value) so the per-dongle median = clock bias and
+    /// the spread = decode margin, both trendable over time to watch TCXO drift.
+    freq_error_hz: Histogram<f64>,
     recorder_denied: Counter<u64>,
     control_channel_messages: Counter<u64>,
     active_calls_gauge: Gauge<u64>,
@@ -153,6 +157,14 @@ impl CallManager {
             voice_frame_spikes: meter
                 .u64_counter("trunk.oxide.voice_frame_spikes")
                 .with_description("op25-reported voice codeword spikes, summed per call")
+                .build(),
+            freq_error_hz: meter
+                .f64_histogram("trunk.oxide.freq_error_hz")
+                .with_description("Per-call FLL frequency error (Hz) at recorder stop, by source")
+                .with_boundaries(vec![
+                    -1000.0, -500.0, -300.0, -200.0, -150.0, -100.0, -60.0, -30.0, 0.0, 30.0,
+                    60.0, 100.0, 150.0, 200.0, 300.0, 500.0, 1000.0,
+                ])
                 .build(),
             recorder_denied: meter
                 .u64_counter("trunk.oxide.recorder_denied")
@@ -775,6 +787,17 @@ impl CallManager {
                         .add(u64::try_from(tx_errors).unwrap_or(0), &voice_attrs);
                     self.voice_frame_spikes
                         .add(u64::try_from(tx_spikes).unwrap_or(0), &voice_attrs);
+
+                    // Per-source clock-error distribution: median = TCXO bias,
+                    // spread = decode margin; both trendable to watch drift.
+                    let source = i64::from(self.find_source(view.freq().as_hz()).unwrap_or(-1));
+                    self.freq_error_hz.record(
+                        f64::from(metrics.freq_error),
+                        &[
+                            KeyValue::new("source", source),
+                            KeyValue::new("short_name", view.short_name().to_string()),
+                        ],
+                    );
                 }
             } else {
                 // A call in a should-conclude state but with no recorder tracked

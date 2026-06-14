@@ -7,6 +7,7 @@ use std::time::Instant;
 use cxx::UniquePtr;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Gauge};
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 use trunk_recorder_sys::SystemInfo;
 use trunk_recorder_sys::ffi::{
     self, TrCall, TrCallData, TrCallDataStatus, TrContext, TrMessageType, TrRecorderConfig,
@@ -20,13 +21,25 @@ use trunk_oxide_grpc::proto::SystemType as ProtoSystemType;
 use crate::ConventionalMetricsSnapshot;
 
 use crate::call_state::{
-    CallId, CallState, CallView, Effect, Effects, Freq, MessageType, RecorderNum, RecordingResult,
-    RejectReason, Talkgroup, TrunkMessage, TrunkStateMachine, UnitEventType,
+    CallEndReason, CallId, CallState, CallView, Effect, Effects, Freq, MessageType, RecorderNum,
+    RecordingResult, RejectReason, Talkgroup, TrunkMessage, TrunkStateMachine, UnitEventType,
 };
 
 pub use crate::call_state::{
     CallManagerConfig, ConventionalChannel, SystemPolicy, TalkgroupPolicy,
 };
+
+/// Serialize a span's trace context to a W3C `traceparent` string via the global
+/// propagator. Empty when tracing is disabled (no exporter/propagator), which is
+/// the correct "no parent" signal for the consumer.
+fn traceparent_of(span: &tracing::Span) -> String {
+    let cx = span.context();
+    let mut carrier = HashMap::<String, String>::new();
+    opentelemetry::global::get_text_map_propagator(|prop| {
+        prop.inject_context(&cx, &mut carrier);
+    });
+    carrier.remove("traceparent").unwrap_or_default()
+}
 
 use trunk_oxide_grpc::AudioMeta;
 
@@ -60,6 +73,12 @@ pub struct CallManager {
     bridge: Arc<EventBridge>,
     /// C++ call handles, keyed by CallId.
     handles: HashMap<CallId, UniquePtr<TrCall>>,
+    /// Recorder-side tracing spans, opened at `EmitCallStart` and closed at
+    /// conclude. Held (not entered) so each span's lifetime tracks the call's
+    /// real duration; its context is serialized into the CallStart event so the
+    /// downstream (discord) call span parents to it, and its stop_reason /
+    /// recording_length / segments are recorded at close.
+    call_spans: HashMap<CallId, tracing::Span>,
     /// Per-source frequency coverage, indexed by source position.
     source_ranges: Vec<RangeInclusive<f64>>,
     /// Per-source configured ppm correction, indexed by source position.
@@ -111,6 +130,7 @@ impl CallManager {
             state: TrunkStateMachine::new(config),
             bridge,
             handles: HashMap::new(),
+            call_spans: HashMap::new(),
             source_ranges,
             source_ppms,
             calls_started: meter
@@ -289,19 +309,48 @@ impl CallManager {
                     }
                 }
                 Effect::EmitCallStart { call_id } => {
-                    if let Some(view) = self.state.get_call_view(call_id) {
+                    // Open the recorder-side call span here (held in `call_spans`,
+                    // closed at conclude) and serialize its context into the
+                    // CallStart event so discord parents its call span to ours.
+                    let started = self.state.get_call_view(call_id).map(|view| {
                         self.calls_started
                             .add(1, &[KeyValue::new("sys_num", i64::from(view.sys_num()))]);
+                        let span = tracing::info_span!(
+                            "call",
+                            short_name = %view.short_name(),
+                            talkgroup = view.talkgroup(),
+                            sys_num = view.sys_num(),
+                            freq = %view.freq(),
+                            tdma = view.phase2_tdma(),
+                            slot = view.tdma_slot(),
+                            call_num = view.call_num(),
+                            is_conventional = view.is_conventional(),
+                            // Recorded at conclude (see exec_conclude_call).
+                            stop_reason = tracing::field::Empty,
+                            recording_length = tracing::field::Empty,
+                            segments = tracing::field::Empty,
+                            elapsed = tracing::field::Empty,
+                        );
+                        let traceparent = traceparent_of(&span);
                         let info = self.build_call_info_from_view(&view);
-                        self.bridge.call_start(&info);
+                        (span, traceparent, info)
+                    });
+                    if let Some((span, traceparent, info)) = started {
+                        self.bridge.call_start(&info, traceparent);
+                        self.call_spans.insert(call_id, span);
                     }
                 }
-                Effect::EmitCallEnd { call_id } => {
+                Effect::EmitCallEnd { call_id, reason } => {
                     if let Some(view) = self.state.get_call_view(call_id) {
-                        self.calls_ended
-                            .add(1, &[KeyValue::new("sys_num", i64::from(view.sys_num()))]);
+                        self.calls_ended.add(
+                            1,
+                            &[
+                                KeyValue::new("sys_num", i64::from(view.sys_num())),
+                                KeyValue::new("reason", reason.as_str()),
+                            ],
+                        );
                     }
-                    self.exec_conclude_call(call_id);
+                    self.exec_conclude_call(call_id, reason);
                 }
                 Effect::EmitCallsActive => {
                     let infos: Vec<ffi::TrCallInfo> = self
@@ -577,7 +626,14 @@ impl CallManager {
         self.state.on_recorder_stopped(call_id);
     }
 
-    fn exec_conclude_call(&mut self, call_id: CallId) {
+    fn exec_conclude_call(&mut self, call_id: CallId, reason: CallEndReason) {
+        // Take ownership of the call span so it closes (and is exported) on every
+        // exit path of this function; record the stop reason up front.
+        let span = self.call_spans.remove(&call_id);
+        if let Some(s) = &span {
+            s.record("stop_reason", reason.as_str());
+        }
+
         let view = match self.state.get_call_view(call_id) {
             Some(v) => v,
             None => return,
@@ -644,6 +700,14 @@ impl CallManager {
                         segments = segments.len(),
                         "concluding recorded call"
                     );
+
+                    // Surface the call's outcome on its span (parent of the
+                    // downstream discord/transcribe spans).
+                    if let Some(s) = &span {
+                        s.record("recording_length", recording_length);
+                        s.record("segments", u64::try_from(segments.len()).unwrap_or(u64::MAX));
+                        s.record("elapsed", elapsed);
+                    }
 
                     if is_conventional {
                         self.update_conv_metric(view.talkgroup(), view.freq(), |m| {

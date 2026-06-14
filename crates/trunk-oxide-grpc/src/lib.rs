@@ -324,6 +324,9 @@ impl EventBridge {
             talkgroup_tag: meta.map_or_else(String::new, |m| m.tag.clone()),
             talkgroup_group: meta.map_or_else(String::new, |m| m.group.clone()),
             call_state: info.call_state,
+            // Populated only by `call_start` (the recorder-side call span's
+            // context); empty for CallsActive/Signal snapshots.
+            traceparent: String::new(),
         }
     }
 
@@ -401,11 +404,11 @@ impl EventBridge {
         }
     }
 
-    pub fn call_start(&self, info: &TrCallInfo) {
+    pub fn call_start(&self, info: &TrCallInfo, traceparent: String) {
+        let mut call = self.call_info_from(info);
+        call.traceparent = traceparent;
         self.send_event(proto::plugin_event::Event::CallStart(
-            proto::CallStartEvent {
-                call: Some(self.call_info_from(info)),
-            },
+            proto::CallStartEvent { call: Some(call) },
         ));
     }
 

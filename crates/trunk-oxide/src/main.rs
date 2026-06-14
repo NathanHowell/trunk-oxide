@@ -154,6 +154,13 @@ fn main() -> Result<()> {
         .with_service_name(env!("CARGO_PKG_NAME"))
         .build();
 
+    // W3C trace-context propagation: lets the per-call span's context be
+    // serialized into the CallStart event so trunk-discord parents its own call
+    // span (and the downstream transcribe span) to the recorder's trace.
+    opentelemetry::global::set_text_map_propagator(
+        opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+    );
+
     let tracer_provider = if std::env::var("OTEL_EXPORTER_OTLP_ENDPOINT").is_ok() {
         let exporter = opentelemetry_otlp::SpanExporter::builder()
             .with_http()

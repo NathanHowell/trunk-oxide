@@ -108,6 +108,11 @@ message CallInfo {
   string talkgroup_tag = 24;       // e.g. "Law Dispatch"
   CallState call_state = 25;
   string talkgroup_group = 26;     // e.g. "County Sheriff"
+  // W3C traceparent of the recorder-side call span (set only on CallStart;
+  // empty in CallsActive/Signal). Lets the consumer parent its own call span to
+  // the recorder's trace — the EventBridge is one server stream multiplexing all
+  // calls, so per-call context can't ride gRPC metadata and travels here.
+  string traceparent = 27;
 }
 
 // ── Call state ──

@@ -555,6 +555,41 @@ pub(crate) struct MultiSiteResult {
 
 // ── Effect enum ──
 
+/// Why a call ended — carried on [`Effect::EmitCallEnd`] so the executor can
+/// label the call span and the `calls_ended` metric. The trunked-cut-short
+/// suspect is [`CallEndReason::GrantTimeout`] (an active recording concluded
+/// only because grant-updates went stale for `call_timeout`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CallEndReason {
+    /// Recording-state call ended because no grant-update arrived within
+    /// `call_timeout` (the likely cause of fragmented/cut-short trunked calls).
+    GrantTimeout,
+    /// An already-idle call aged out of the table after `call_timeout`.
+    IdleTimeout,
+    /// Superseded by an overlapping grant (e.g. multisite re-grant).
+    Superseded,
+    /// Recorder write/keepalive timeout expired the call.
+    WriteTimeout,
+    /// Conventional per-transmission boundary (squelch close / retune).
+    Conventional,
+    /// Process shutdown drained all calls.
+    Shutdown,
+}
+
+impl CallEndReason {
+    /// Low-cardinality label for spans and metrics.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::GrantTimeout => "grant_timeout",
+            Self::IdleTimeout => "idle_timeout",
+            Self::Superseded => "superseded",
+            Self::WriteTimeout => "write_timeout",
+            Self::Conventional => "conventional",
+            Self::Shutdown => "shutdown",
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) enum Effect {
     // ── Recorder lifecycle ──
@@ -584,6 +619,7 @@ pub(crate) enum Effect {
     },
     EmitCallEnd {
         call_id: CallId,
+        reason: CallEndReason,
     },
     EmitCallsActive,
     EmitSignal {
@@ -1068,7 +1104,10 @@ impl TrunkStateMachine {
                 let orig = &mut self.calls[orig_idx];
                 orig.state = CallState::Rejected(RejectReason::Superseded);
                 let orig_id = orig.id;
-                effects.push(Effect::EmitCallEnd { call_id: orig_id });
+                effects.push(Effect::EmitCallEnd {
+                    call_id: orig_id,
+                    reason: CallEndReason::Superseded,
+                });
                 effects.push(Effect::RemoveCall { call_id: orig_id });
             }
         } else if multisite.is_duplicate {
@@ -1416,13 +1455,19 @@ impl TrunkStateMachine {
 
             match entry.state {
                 CallState::Recording => {
-                    effects.push(Effect::EmitCallEnd { call_id: entry.id });
+                    effects.push(Effect::EmitCallEnd {
+                        call_id: entry.id,
+                        reason: CallEndReason::GrantTimeout,
+                    });
                     effects.push(Effect::EmitSetupRecorder { call_id: entry.id });
                     effects.push(Effect::RemoveCall { call_id: entry.id });
                     ended_call = true;
                 }
                 CallState::Idle | CallState::Disabled | CallState::Rejected(_) => {
-                    effects.push(Effect::EmitCallEnd { call_id: entry.id });
+                    effects.push(Effect::EmitCallEnd {
+                        call_id: entry.id,
+                        reason: CallEndReason::IdleTimeout,
+                    });
                     effects.push(Effect::RemoveCall { call_id: entry.id });
                     ended_call = true;
                 }
@@ -1538,7 +1583,10 @@ impl TrunkStateMachine {
         entry.squelch_closed_at = None;
 
         let mut effects = Effects::new();
-        effects.push(Effect::EmitCallEnd { call_id });
+        effects.push(Effect::EmitCallEnd {
+            call_id,
+            reason: CallEndReason::Conventional,
+        });
         effects.push(Effect::ConventionalRestart { call_id });
         effects.push(Effect::EmitSetupRecorder { call_id });
         effects.push(Effect::EnableRecorder { call_id });
@@ -1569,7 +1617,10 @@ impl TrunkStateMachine {
 
             // Conclude the current call if any audio was captured.
             if !entry.segments.is_empty() || entry.state == CallState::Recording {
-                effects.push(Effect::EmitCallEnd { call_id });
+                effects.push(Effect::EmitCallEnd {
+                    call_id,
+                    reason: CallEndReason::Conventional,
+                });
             }
 
             // Restart opens a fresh WAV file for the next detection cycle.
@@ -1811,7 +1862,10 @@ impl TrunkStateMachine {
                 entry.state,
                 CallState::Recording | CallState::Idle | CallState::Disabled
             ) {
-                effects.push(Effect::EmitCallEnd { call_id: entry.id });
+                effects.push(Effect::EmitCallEnd {
+                    call_id: entry.id,
+                    reason: CallEndReason::Shutdown,
+                });
             }
             effects.push(Effect::RemoveCall { call_id: entry.id });
         }
@@ -1856,7 +1910,10 @@ impl TrunkStateMachine {
         if let Some(entry) = self.get_call(call_id)
             && matches!(entry.state, CallState::Recording | CallState::Idle)
         {
-            effects.push(Effect::EmitCallEnd { call_id });
+            effects.push(Effect::EmitCallEnd {
+                call_id,
+                reason: CallEndReason::WriteTimeout,
+            });
         }
         effects.push(Effect::EmitSetupRecorder { call_id });
         effects.push(Effect::RemoveCall { call_id });

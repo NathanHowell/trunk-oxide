@@ -85,6 +85,11 @@ pub struct CallManager {
     source_ppms: Vec<f64>,
     calls_started: Counter<u64>,
     calls_ended: Counter<u64>,
+    /// Errored / spiked voice codewords reported by the op25 (P25) decoder,
+    /// summed per call. High rates — especially on TDMA — indicate decode loss
+    /// (the cause of P25 audio clipping), typically driven by frequency error.
+    voice_frame_errors: Counter<u64>,
+    voice_frame_spikes: Counter<u64>,
     recorder_denied: Counter<u64>,
     control_channel_messages: Counter<u64>,
     active_calls_gauge: Gauge<u64>,
@@ -140,6 +145,14 @@ impl CallManager {
             calls_ended: meter
                 .u64_counter("trunk.oxide.calls_ended")
                 .with_description("Total calls ended")
+                .build(),
+            voice_frame_errors: meter
+                .u64_counter("trunk.oxide.voice_frame_errors")
+                .with_description("op25-reported errored voice codewords, summed per call")
+                .build(),
+            voice_frame_spikes: meter
+                .u64_counter("trunk.oxide.voice_frame_spikes")
+                .with_description("op25-reported voice codeword spikes, summed per call")
                 .build(),
             recorder_denied: meter
                 .u64_counter("trunk.oxide.recorder_denied")
@@ -330,6 +343,9 @@ impl CallManager {
                             recording_length = tracing::field::Empty,
                             segments = tracing::field::Empty,
                             elapsed = tracing::field::Empty,
+                            voice_errors = tracing::field::Empty,
+                            voice_spikes = tracing::field::Empty,
+                            voice_samples = tracing::field::Empty,
                         );
                         let traceparent = traceparent_of(&span);
                         let info = self.build_call_info_from_view(&view);
@@ -716,6 +732,16 @@ impl CallManager {
                     }
 
                     let handle = self.handles.get(&call_id).unwrap();
+                    // Sum op25 decode-quality counters across the call's
+                    // transmissions to expose P25 audio loss (clipping).
+                    let (mut tx_errors, mut tx_spikes, mut tx_samples) = (0i64, 0i64, 0i64);
+                    let mut tally = |list: &[ffi::TrTransmission]| {
+                        for t in list {
+                            tx_errors += t.error_count;
+                            tx_spikes += t.spike_count;
+                            tx_samples += t.sample_count;
+                        }
+                    };
                     if metrics.is_dmr {
                         for slot in 0..2i32 {
                             let mut data = self.build_call_data(call_id);
@@ -724,6 +750,7 @@ impl CallManager {
                             data.freq_error = metrics.freq_error;
                             data.transmission_list =
                                 ffi::call_get_dmr_transmission_list(handle, slot);
+                            tally(&data.transmission_list);
                             self.bridge.call_end(&data, &segments, is_conventional);
                         }
                     } else {
@@ -731,8 +758,23 @@ impl CallManager {
                         data.length = recording_length;
                         data.freq_error = metrics.freq_error;
                         data.transmission_list = ffi::call_get_transmission_list(handle);
+                        tally(&data.transmission_list);
                         self.bridge.call_end(&data, &segments, is_conventional);
                     }
+
+                    if let Some(s) = &span {
+                        s.record("voice_errors", tx_errors);
+                        s.record("voice_spikes", tx_spikes);
+                        s.record("voice_samples", tx_samples);
+                    }
+                    let voice_attrs = [
+                        KeyValue::new("short_name", view.short_name().to_string()),
+                        KeyValue::new("tdma", view.phase2_tdma()),
+                    ];
+                    self.voice_frame_errors
+                        .add(u64::try_from(tx_errors).unwrap_or(0), &voice_attrs);
+                    self.voice_frame_spikes
+                        .add(u64::try_from(tx_spikes).unwrap_or(0), &voice_attrs);
                 }
             } else {
                 // A call in a should-conclude state but with no recorder tracked

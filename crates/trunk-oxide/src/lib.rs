@@ -337,23 +337,6 @@ impl TrunkRecorderBuilder {
             // otherwise the configured gain.
             let gain = calibrated_gains.get(&idx).copied().unwrap_or(src.gain);
 
-            // rtl-sdr applies INTEGER ppm (rtlsdr_set_freq_correction truncates),
-            // so a fractional ppm is silently dropped and a sub-1-ppm offset
-            // (e.g. our ~150 Hz / ~0.2 ppm clock bias) cannot be corrected via
-            // ppm at all. Warn loudly instead of letting the config no-op — the
-            // fix is a Hz-precise tune_offset correction, not ppm.
-            if src.device.contains("rtl") && src.ppm.fract().abs() > 1e-9 {
-                let dropped_hz = src.ppm.fract().abs() * src.center / 1e6;
-                tracing::warn!(
-                    device = %src.device,
-                    ppm = src.ppm,
-                    truncated_ppm = src.ppm.trunc(),
-                    dropped_hz,
-                    "rtl-sdr applies integer ppm only — the fractional part is dropped; \
-                     a sub-1-ppm offset can't be corrected via ppm (use a tune_offset Hz correction)"
-                );
-            }
-
             ffi::tr_add_source_from_config(
                 ctx.pin_mut(),
                 &ffi::TrSourceConfig {
@@ -364,7 +347,15 @@ impl TrunkRecorderBuilder {
                     error: src.error,
                     gain,
                     agc: src.agc,
-                    ppm: src.ppm,
+                    // Hybrid clock correction: the hardware knob is integer-ppm
+                    // only (rtl-sdr truncates), so it takes the *coarse* rounded
+                    // ppm here — a whole-dongle correction (incl. control
+                    // channel) for free. The fractional remainder (and any
+                    // real-time adaptive delta) is applied in software as a
+                    // per-recorder tune offset in
+                    // CallManager::build_recorder_config_from_view, so sub-ppm
+                    // precision works. Total = round(ppm) + (ppm - round(ppm)).
+                    ppm: src.ppm.round(),
                     antenna: src.antenna.clone(),
                     silence_frames: src.silence_frames,
                     signal_detector_threshold: src.signal_detector_threshold.unwrap_or(0.0).into(),

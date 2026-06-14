@@ -1063,10 +1063,24 @@ impl CallManager {
             .get(&view.sys_num())
             .map_or_else(Vec::new, |id| id.xor_mask.clone());
 
+        // Software half of the hybrid clock correction: the fractional ppm the
+        // integer hardware knob can't apply, as a per-recorder mixer offset.
+        // (Real-time adaptive deltas will add to this term.) The hardware took
+        // round(ppm); we apply the remainder so the total equals the configured
+        // ppm at full precision. Only the physical tune shifts — the displayed
+        // call frequency stays view.freq().
+        let true_freq = view.freq().as_hz();
+        let frac_ppm = self
+            .find_source(true_freq)
+            .and_then(|i| usize::try_from(i).ok())
+            .and_then(|i| self.source_ppms.get(i))
+            .map_or(0.0, |&ppm| ppm - ppm.round());
+        let tune_freq = true_freq * (1.0 + frac_ppm / 1e6);
+
         TrRecorderConfig {
             talkgroup: view.talkgroup(),
             call_num: view.call_num(),
-            freq: view.freq().as_hz(),
+            freq: tune_freq,
             short_name: view.short_name().to_owned(),
             temp_dir: self.state.config.temp_dir.clone(),
             phase2_tdma: view.phase2_tdma(),

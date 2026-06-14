@@ -22,6 +22,14 @@ pub struct SourceConfig {
     pub rate: f64,
     #[serde(default)]
     pub error: f64,
+    /// Clock-error correction in parts-per-million. Applied hybrid: the rounded
+    /// (integer) part goes to the rtl-sdr hardware knob — a coarse whole-dongle
+    /// LO correction — and the fractional remainder is applied in software as a
+    /// per-recorder mixer offset (`tune × frac_ppm/1e6`), so sub-ppm values
+    /// work despite the hardware being integer-only. Real-time adaptive deltas
+    /// (future) ride the same software path. Set to the measured `freq_error` as
+    /// ppm for the source; verify via the `trunk.oxide.freq_error_hz{source}`
+    /// histogram (should center on 0). Displayed call frequency is unaffected.
     #[serde(default)]
     pub ppm: f64,
     #[serde(default)]

@@ -310,7 +310,7 @@ async fn main() -> Result<()> {
         whisperer,
         Arc::clone(&discord_client),
         aggregator,
-        config.audio.buffer_duration_ms,
+        config.audio.max_segment_ms,
         fallback_channel_id,
         channel_lookup,
         config.audio.tone_detection,

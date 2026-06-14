@@ -26,10 +26,10 @@ pub enum CallEffect {
     EditEmbed { embed: EmbedData },
     /// Edit the existing embed, but coalesced/debounced by the executor.
     ///
-    /// Used for the high-frequency transcript stream (one result per ~3s audio
-    /// segment, often bursting as the whisper backlog drains). The executor
-    /// keeps only the latest and flushes at most every couple of seconds, so
-    /// transcript churn stops hammering the per-channel edit rate-limit bucket.
+    /// Used for the transcript stream (one result per PTT transmission, often
+    /// bursting as the transcription backlog drains). The executor keeps only
+    /// the latest and flushes at most every couple of seconds, so transcript
+    /// churn stops hammering the per-channel edit rate-limit bucket.
     /// Always carries the *full* current embed, so a later prompt `EditEmbed`
     /// (e.g. finalization) supersedes any pending throttled edit.
     EditEmbedThrottled { embed: EmbedData },

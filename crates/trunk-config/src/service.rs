@@ -22,8 +22,13 @@ fn default_whisperer_socket() -> String {
 
 #[derive(Debug, Deserialize)]
 pub struct AudioConfig {
-    #[serde(default = "default_buffer_duration_ms")]
-    pub buffer_duration_ms: u64,
+    /// Safety cap on how much audio a single transcription request may carry.
+    /// Audio is normally transcribed one request per PTT transmission (flushed
+    /// at each squelch/PTT boundary and at call end); this only force-flushes a
+    /// sub-segment for a pathologically long transmission, to bound memory and
+    /// decode latency. Not the normal segmentation unit.
+    #[serde(default = "default_max_segment_ms")]
+    pub max_segment_ms: u64,
     #[serde(default = "default_tone_detection")]
     pub tone_detection: bool,
     #[serde(default = "default_tone_detection_duration_s")]
@@ -42,7 +47,7 @@ pub struct AudioConfig {
 impl Default for AudioConfig {
     fn default() -> Self {
         Self {
-            buffer_duration_ms: default_buffer_duration_ms(),
+            max_segment_ms: default_max_segment_ms(),
             tone_detection: default_tone_detection(),
             tone_detection_duration_s: default_tone_detection_duration_s(),
             audio_attachment: default_audio_attachment(),
@@ -52,8 +57,8 @@ impl Default for AudioConfig {
     }
 }
 
-const fn default_buffer_duration_ms() -> u64 {
-    5000
+const fn default_max_segment_ms() -> u64 {
+    120_000
 }
 const fn default_tone_detection() -> bool {
     true

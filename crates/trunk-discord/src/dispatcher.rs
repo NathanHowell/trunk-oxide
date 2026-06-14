@@ -100,7 +100,7 @@ impl DispatchPump {
         whisperer: TranscriberConnection,
         discord: Arc<DiscordClient>,
         aggregator: Arc<Aggregator>,
-        buffer_duration_ms: u64,
+        max_segment_ms: u64,
         channel_id: ChannelId,
         channel_lookup: ChannelLookup,
         tone_detection: bool,
@@ -123,7 +123,7 @@ impl DispatchPump {
                 discord,
                 aggregator,
                 config: CallHandlerConfig {
-                    buffer_duration_ms,
+                    max_segment_ms,
                     tone_detection,
                     tone_detection_duration_s,
                     audio_attachment,

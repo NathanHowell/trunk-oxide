@@ -341,6 +341,9 @@ pub struct CallManagerConfig {
     pub default_mode: DefaultMode,
     pub temp_dir: String,
     pub systems: HashMap<i32, SystemPolicy>,
+    /// Enable the per-source adaptive frequency-correction loop (tracks TCXO
+    /// drift by nudging the software tune offset toward zero FLL freq_error).
+    pub adaptive_freq_correction: bool,
 }
 
 pub(crate) struct SystemIdentity {
@@ -1947,6 +1950,7 @@ mod tests {
             default_mode: DefaultMode::Digital,
             temp_dir: String::new(),
             systems,
+            adaptive_freq_correction: false,
         }
     }
 

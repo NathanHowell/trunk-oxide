@@ -83,8 +83,15 @@ pub struct CallManager {
     source_ranges: Vec<RangeInclusive<f64>>,
     /// Per-source configured ppm correction, indexed by source position.
     source_ppms: Vec<f64>,
-    /// Per-source software Hz tune correction, indexed by source position.
+    /// Per-source software Hz tune correction, indexed by source position. When
+    /// the adaptive loop is on, this is mutated at runtime to track clock drift.
     source_freq_corrections_hz: Vec<f64>,
+    /// Whether the adaptive frequency-correction loop is enabled.
+    adaptive_freq_correction: bool,
+    /// Per-source EMA of FLL `freq_error` (Hz), the adaptive loop's smoothed input.
+    source_freq_error_ema: Vec<f64>,
+    /// Live per-source tune correction (Hz), so the loop is observable.
+    freq_correction_gauge: Gauge<f64>,
     calls_started: Counter<u64>,
     calls_ended: Counter<u64>,
     /// Errored / spiked voice codewords reported by the op25 (P25) decoder,
@@ -137,6 +144,8 @@ impl CallManager {
             }
         }
 
+        let adaptive_freq_correction = config.adaptive_freq_correction;
+        let source_count = source_ranges.len();
         let meter = opentelemetry::global::meter("trunk-oxide");
         Self {
             state: TrunkStateMachine::new(config),
@@ -146,6 +155,12 @@ impl CallManager {
             source_ranges,
             source_ppms,
             source_freq_corrections_hz,
+            adaptive_freq_correction,
+            source_freq_error_ema: vec![0.0; source_count],
+            freq_correction_gauge: meter
+                .f64_gauge("trunk.oxide.freq_correction_hz")
+                .with_description("Live per-source software tune correction (Hz)")
+                .build(),
             calls_started: meter
                 .u64_counter("trunk.oxide.calls_started")
                 .with_description("Total calls started")
@@ -678,6 +693,10 @@ impl CallManager {
             s.record("stop_reason", reason.as_str());
         }
 
+        // Captured under the view borrow below, applied after it drops (the
+        // adaptive update needs &mut self).
+        let mut adaptive_input: Option<(usize, f64)> = None;
+
         let view = match self.state.get_call_view(call_id) {
             Some(v) => v,
             None => return,
@@ -814,6 +833,9 @@ impl CallManager {
                             KeyValue::new("short_name", view.short_name().to_string()),
                         ],
                     );
+                    if let Ok(idx) = usize::try_from(source) {
+                        adaptive_input = Some((idx, f64::from(metrics.freq_error)));
+                    }
                 }
             } else {
                 // A call in a should-conclude state but with no recorder tracked
@@ -840,6 +862,52 @@ impl CallManager {
             let data = self.build_call_data(call_id);
             self.bridge.call_end(&data, &segments, is_conventional);
         }
+
+        // Adaptive frequency correction (view borrow is dropped by here).
+        if self.adaptive_freq_correction
+            && let Some((source_idx, freq_error_hz)) = adaptive_input
+        {
+            self.update_adaptive_correction(source_idx, freq_error_hz);
+        }
+    }
+
+    /// Nudge a source's software tune correction toward whatever zeroes the FLL
+    /// `freq_error`, tracking TCXO drift. Slow EMA + small gain + deadband so it
+    /// follows thermal/aging drift without chasing per-call noise; clamped per
+    /// step and in total. Empirically d(freq_error)/d(correction) > 0, so a
+    /// negative residual calls for a larger correction (hence `-= gain*ema`).
+    fn update_adaptive_correction(&mut self, source_idx: usize, freq_error_hz: f64) {
+        const ALPHA: f64 = 0.2; // EMA smoothing (~10-call memory)
+        const GAIN: f64 = 0.3; // fraction of the smoothed error applied per step
+        const DEADBAND_HZ: f64 = 30.0; // don't chase residuals inside the noise
+        const MAX_STEP_HZ: f64 = 50.0; // cap a single update
+        const MAX_CORRECTION_HZ: f64 = 5000.0; // sanity bound on total correction
+
+        let ema_val = {
+            let Some(ema) = self.source_freq_error_ema.get_mut(source_idx) else {
+                return;
+            };
+            *ema = ALPHA.mul_add(freq_error_hz, (1.0 - ALPHA) * *ema);
+            *ema
+        };
+        if ema_val.abs() <= DEADBAND_HZ {
+            return;
+        }
+        let new_corr = {
+            let Some(corr) = self.source_freq_corrections_hz.get_mut(source_idx) else {
+                return;
+            };
+            let step = (-GAIN * ema_val).clamp(-MAX_STEP_HZ, MAX_STEP_HZ);
+            *corr = (*corr + step).clamp(-MAX_CORRECTION_HZ, MAX_CORRECTION_HZ);
+            *corr
+        };
+        self.freq_correction_gauge.record(
+            new_corr,
+            &[KeyValue::new(
+                "source",
+                i64::try_from(source_idx).unwrap_or(-1),
+            )],
+        );
     }
 
     // ── Public API (delegates to state machine + processes effects) ──

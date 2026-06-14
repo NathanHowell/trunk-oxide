@@ -572,6 +572,7 @@ impl TrunkRecorderBuilder {
             default_mode: rec.map_or(DefaultMode::default(), |r| r.default_mode),
             temp_dir,
             systems: system_policies,
+            adaptive_freq_correction: rec.is_some_and(|r| r.adaptive_freq_correction),
         };
 
         Ok(Self {

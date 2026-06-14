@@ -40,6 +40,13 @@ pub struct RecorderConfig {
     pub new_call_from_update: bool,
     #[serde(default)]
     pub default_mode: DefaultMode,
+    /// Auto-track each source's clock drift: nudge the per-source software tune
+    /// offset (the Hz `freq_correction_hz`) toward whatever zeroes the measured
+    /// FLL `freq_error`, so the correction follows TCXO temp/aging drift without
+    /// manual re-trimming. `freq_correction_hz` is the starting point. Off by
+    /// default; the loop is slow and disruption-free (software offset only).
+    #[serde(default)]
+    pub adaptive_freq_correction: bool,
     #[serde(default)]
     pub debug: DebugRecorderConfig,
 }

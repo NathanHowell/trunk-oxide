@@ -71,12 +71,45 @@ services:
       retries: 3
       start_period: 30s
 
+  # Downloads the Parakeet ONNX export into the parakeet-models volume, mirroring
+  # fetch-whisper-model. Defaults to the English CTC 0.6b model (punctuation +
+  # capitalization); override MODEL_REPO/MODEL_ONNX to swap. The files land flat
+  # in /models (model.onnx + model.onnx_data + tokenizer.json) with no vocab.txt,
+  # so trunk-parakeet auto-detects the HuggingFace format.
+  fetch-parakeet-model:
+    profiles: ["parakeet"]
+    image: debian:trixie-slim
+    volumes:
+      - parakeet-models:/models
+    environment:
+      - MODEL_REPO=onnx-community/parakeet-ctc-0.6b-ONNX
+      - MODEL_ONNX=onnx/model.onnx
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        if [ -f /models/model.onnx ] && [ -f /models/tokenizer.json ]; then
+          echo "Model already present"
+          exit 0
+        fi
+        apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates
+        base="https://huggingface.co/$$MODEL_REPO/resolve/main"
+        # model.onnx + its external weights (model.onnx_data, referenced by
+        # basename, so both must sit next to each other) + tokenizer.json.
+        curl -fSL -o /models/model.onnx.tmp        "$$base/$$MODEL_ONNX"
+        curl -fSL -o /models/model.onnx_data.tmp   "$${base}/$${MODEL_ONNX}_data"
+        curl -fSL -o /models/tokenizer.json.tmp    "$$base/tokenizer.json"
+        mv /models/model.onnx.tmp      /models/model.onnx
+        mv /models/model.onnx_data.tmp /models/model.onnx_data
+        mv /models/tokenizer.json.tmp  /models/tokenizer.json
+
   # Drop-in alternative to trunk-whisperer: serves the same Transcriber gRPC
   # service on the same `whisperer-socket`. Enable with `--profile parakeet`
   # and disable trunk-whisperer (only one backend may own the socket at a
   # time). trunk-discord's config is unchanged — it just connects to the
-  # socket, backend-agnostic. Populate ./parakeet-models with an ONNX export
-  # (NeMo TDT: encoder/decoder + vocab.txt, or HF: model.onnx + tokenizer.json).
+  # socket, backend-agnostic. The model is fetched into the parakeet-models
+  # volume by fetch-parakeet-model.
   trunk-parakeet:
     profiles: ["parakeet"]
     build:
@@ -86,7 +119,10 @@ services:
     volumes:
       - whisperer-socket:/run/service
       - ./config-parakeet.toml:/etc/trunk-parakeet/config.toml:ro
-      - ./parakeet-models:/models:ro
+      - parakeet-models:/models:ro
+    depends_on:
+      fetch-parakeet-model:
+        condition: service_completed_successfully
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
       - OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://victoriametrics:8428/opentelemetry/api/v1/push
@@ -153,4 +189,5 @@ volumes:
   whisperer-socket:
   discord-socket:
   whisper-models:
+  parakeet-models:
   victoriametrics-data:

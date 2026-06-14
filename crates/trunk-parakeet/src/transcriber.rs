@@ -74,7 +74,9 @@ impl ParakeetTranscriber {
             max_concurrent: config.max_concurrent,
             transcription_duration: meter
                 .f64_histogram("trunk.parakeet.transcription_duration_seconds")
-                .with_description("Time spent decoding audio in parakeet (after acquiring a permit)")
+                .with_description(
+                    "Time spent decoding audio in parakeet (after acquiring a permit)",
+                )
                 .build(),
             queue_wait_duration: meter
                 .f64_histogram("trunk.parakeet.queue_wait_seconds")

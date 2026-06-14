@@ -574,10 +574,7 @@ pub enum GrEvent {
     /// In-band P25 source (unit) change decoded by op25 on the voice channel,
     /// keyed by the recorder's `rust_call_id`. Drives per-speaker transmission
     /// boundaries in the state machine.
-    SourceChange {
-        rust_call_id: u64,
-        src_id: i64,
-    },
+    SourceChange { rust_call_id: u64, src_id: i64 },
     /// Signals detected on a conventional source by the signal detector.
     SignalsDetected {
         source_num: i32,

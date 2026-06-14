@@ -348,9 +348,7 @@ impl DispatchPump {
                             tracing::debug!(?e, "failed to parent call span to recorder trace");
                         }
                     }
-                    tokio::spawn(
-                        run_call(ctx, call, rx, key, dead_call_tx).instrument(span),
-                    );
+                    tokio::spawn(run_call(ctx, call, rx, key, dead_call_tx).instrument(span));
                 }
 
                 DispatchEffect::Log { message } => {

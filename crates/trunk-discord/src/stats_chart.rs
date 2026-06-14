@@ -309,8 +309,8 @@ fn render(panels: &[Panel], start: i64, end: i64) -> Result<Vec<u8>> {
             .map_err(|e| anyhow::anyhow!("chart present: {e}"))?;
     }
 
-    let img = image::RgbImage::from_raw(WIDTH, HEIGHT, buf)
-        .context("chart buffer size mismatch")?;
+    let img =
+        image::RgbImage::from_raw(WIDTH, HEIGHT, buf).context("chart buffer size mismatch")?;
     let mut png = Vec::new();
     image::DynamicImage::ImageRgb8(img)
         .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
@@ -416,7 +416,10 @@ mod tests {
     fn parses_vm_matrix_response() {
         let results = parse_response(SAMPLE).expect("parse");
         assert_eq!(results.len(), 2);
-        assert_eq!(results[0].metric.get("talkgroup").map(String::as_str), Some("1"));
+        assert_eq!(
+            results[0].metric.get("talkgroup").map(String::as_str),
+            Some("1")
+        );
 
         // NaN value is dropped; the two valid points survive.
         let points = parse_points(&results[0].values);
@@ -454,7 +457,11 @@ mod tests {
         let png = render(&panels, 0, 180).expect("render");
         // PNG magic number — proves we produced a real image, font path included.
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
-        assert!(png.len() > 1000, "png suspiciously small: {} bytes", png.len());
+        assert!(
+            png.len() > 1000,
+            "png suspiciously small: {} bytes",
+            png.len()
+        );
 
         // Best-effort artifact for eyeballing; ignore write failures.
         let _ = std::fs::write("/tmp/stats_chart_test.png", &png);

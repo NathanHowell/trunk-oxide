@@ -181,8 +181,8 @@ impl CallManager {
                 .f64_histogram("trunk.oxide.freq_error_hz")
                 .with_description("Per-call FLL frequency error (Hz) at recorder stop, by source")
                 .with_boundaries(vec![
-                    -1000.0, -500.0, -300.0, -200.0, -150.0, -100.0, -60.0, -30.0, 0.0, 30.0,
-                    60.0, 100.0, 150.0, 200.0, 300.0, 500.0, 1000.0,
+                    -1000.0, -500.0, -300.0, -200.0, -150.0, -100.0, -60.0, -30.0, 0.0, 30.0, 60.0,
+                    100.0, 150.0, 200.0, 300.0, 500.0, 1000.0,
                 ])
                 .build(),
             recorder_denied: meter
@@ -714,7 +714,10 @@ impl CallManager {
                 let segments = self.build_proto_segments_final(call_id, final_freq, rec_num);
                 if let Some(s) = &span {
                     s.record("recording_length", recording_length);
-                    s.record("segments", u64::try_from(segments.len()).unwrap_or(u64::MAX));
+                    s.record(
+                        "segments",
+                        u64::try_from(segments.len()).unwrap_or(u64::MAX),
+                    );
                 }
                 let mut data = self.build_call_data(call_id);
                 data.length = recording_length;
@@ -798,7 +801,10 @@ impl CallManager {
                     // downstream discord/transcribe spans).
                     if let Some(s) = &span {
                         s.record("recording_length", recording_length);
-                        s.record("segments", u64::try_from(segments.len()).unwrap_or(u64::MAX));
+                        s.record(
+                            "segments",
+                            u64::try_from(segments.len()).unwrap_or(u64::MAX),
+                        );
                         s.record("elapsed", elapsed);
                     }
 
@@ -1369,9 +1375,7 @@ impl CallManager {
         // always-on conventional channels a transmission is concluded while
         // still in Recording with no prior pushed segment, so this is the one
         // segment that represents the keyed transmission.
-        if view.is_trunked()
-            || !view.segments().is_empty()
-            || view.state() == CallState::Recording
+        if view.is_trunked() || !view.segments().is_empty() || view.state() == CallState::Recording
         {
             segments.push(Self::make_proto_segment(
                 final_freq.as_hz(),

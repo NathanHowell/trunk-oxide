@@ -738,12 +738,11 @@ impl CallHandler {
         // bound memory and decode latency. `max_segment_ms` defaults to 2 min,
         // far above any real transmission.
         let buffer_len = self.audio_buffer.len();
-        let audio_drain: Vec<f32> =
-            if buffer_len >= buffer_threshold(self.config.max_segment_ms) {
-                self.audio_buffer.drain(..).collect()
-            } else {
-                Vec::new()
-            };
+        let audio_drain: Vec<f32> = if buffer_len >= buffer_threshold(self.config.max_segment_ms) {
+            self.audio_buffer.drain(..).collect()
+        } else {
+            Vec::new()
+        };
 
         let effects = self.state.on_audio_processed(buffer_len, audio_drain);
         self.process_effects(effects).await?;

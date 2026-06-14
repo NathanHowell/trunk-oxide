@@ -206,7 +206,11 @@ impl CallState {
     /// `Transcribe` effect (carrying the drained chunk) when the buffer exceeds
     /// the configured threshold; the handler applies the per-chunk silence gate
     /// and, if the chunk is kept, reports it via [`Self::on_transcription_enqueued`].
-    pub fn on_audio_processed(&mut self, buffer_len: usize, audio_drain: Vec<f32>) -> Vec<CallEffect> {
+    pub fn on_audio_processed(
+        &mut self,
+        buffer_len: usize,
+        audio_drain: Vec<f32>,
+    ) -> Vec<CallEffect> {
         if buffer_len >= self.config.buffer_threshold {
             vec![CallEffect::Transcribe { audio: audio_drain }]
         } else {
@@ -824,7 +828,10 @@ mod tests {
         let mut s = make_state();
         s.on_start();
         let effects = s.on_transcription_enqueued();
-        assert!(effects.is_empty(), "pending work alone must not post an embed");
+        assert!(
+            effects.is_empty(),
+            "pending work alone must not post an embed"
+        );
         assert!(!s.has_embed);
     }
 
@@ -862,7 +869,10 @@ mod tests {
         // segment leaves the existing " ..." gap marker on the text.
         s.on_transcription("");
         assert!(!s.wants_transcribing_indicator());
-        assert_eq!(s.build_embed().description.as_deref(), Some("hello world ..."));
+        assert_eq!(
+            s.build_embed().description.as_deref(),
+            Some("hello world ...")
+        );
     }
 
     #[test]

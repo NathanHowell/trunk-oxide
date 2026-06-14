@@ -73,9 +73,11 @@ services:
 
   # Downloads the Parakeet ONNX export into the parakeet-models volume, mirroring
   # fetch-whisper-model. Defaults to the English CTC 0.6b model (punctuation +
-  # capitalization); override MODEL_REPO/MODEL_ONNX to swap. The files land flat
-  # in /models (model.onnx + model.onnx_data + tokenizer.json) with no vocab.txt,
-  # so trunk-parakeet auto-detects the HuggingFace format.
+  # capitalization), int8 quantized (~583 MB). Override MODEL_REPO/MODEL_ONNX to
+  # swap models or precision (e.g. onnx/model.onnx for full fp32). Files land
+  # flat in /models with their real basenames (the .onnx references its weights
+  # .onnx_data by basename, and find_model_file matches by name) and no
+  # vocab.txt, so trunk-parakeet auto-detects the HuggingFace format.
   fetch-parakeet-model:
     profiles: ["parakeet"]
     image: debian:trixie-slim
@@ -83,25 +85,26 @@ services:
       - parakeet-models:/models
     environment:
       - MODEL_REPO=onnx-community/parakeet-ctc-0.6b-ONNX
-      - MODEL_ONNX=onnx/model.onnx
+      - MODEL_ONNX=onnx/model_int8.onnx
     command:
       - bash
       - -c
       - |
         set -e
-        if [ -f /models/model.onnx ] && [ -f /models/tokenizer.json ]; then
+        onnx="$$(basename "$$MODEL_ONNX")"
+        if [ -f "/models/$$onnx" ] && [ -f /models/tokenizer.json ]; then
           echo "Model already present"
           exit 0
         fi
         apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates
         base="https://huggingface.co/$$MODEL_REPO/resolve/main"
-        # model.onnx + its external weights (model.onnx_data, referenced by
-        # basename, so both must sit next to each other) + tokenizer.json.
-        curl -fSL -o /models/model.onnx.tmp        "$$base/$$MODEL_ONNX"
-        curl -fSL -o /models/model.onnx_data.tmp   "$${base}/$${MODEL_ONNX}_data"
+        # The .onnx graph + its external weights (<onnx>_data, referenced by
+        # basename, so both must keep their names and sit together) + tokenizer.
+        curl -fSL -o "/models/$$onnx.tmp"          "$$base/$$MODEL_ONNX"
+        curl -fSL -o "/models/$${onnx}_data.tmp"   "$${base}/$${MODEL_ONNX}_data"
         curl -fSL -o /models/tokenizer.json.tmp    "$$base/tokenizer.json"
-        mv /models/model.onnx.tmp      /models/model.onnx
-        mv /models/model.onnx_data.tmp /models/model.onnx_data
+        mv "/models/$$onnx.tmp"        "/models/$$onnx"
+        mv "/models/$${onnx}_data.tmp" "/models/$${onnx}_data"
         mv /models/tokenizer.json.tmp  /models/tokenizer.json
 
   # Drop-in alternative to trunk-whisperer: serves the same Transcriber gRPC

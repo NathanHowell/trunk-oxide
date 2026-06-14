@@ -30,6 +30,7 @@ services:
       start_period: 30s
 
   fetch-whisper-model:
+    profiles: ["whisper"]
     image: debian:trixie-slim
     volumes:
       - whisper-models:/models
@@ -49,6 +50,7 @@ services:
         mv "$$model.tmp" "$$model"
 
   trunk-whisperer:
+    profiles: ["whisper"]
     build:
       context: .
       dockerfile: Dockerfile.whisperer
@@ -147,11 +149,19 @@ services:
       - whisperer-socket:/run/trunk-whisperer
       - discord-socket:/run/service
       - ./config-discord.toml:/etc/trunk-discord/config.toml:ro
+    # The transcriber backend is selected by profile (whisper | parakeet).
+    # required: false means discord waits for whichever one the active profile
+    # started and ignores the other instead of failing — both serve the same
+    # Transcriber gRPC on the shared whisperer-socket, so discord is unchanged.
     depends_on:
       trunk-oxide:
         condition: service_healthy
       trunk-whisperer:
         condition: service_healthy
+        required: false
+      trunk-parakeet:
+        condition: service_healthy
+        required: false
     secrets:
       - discord_token
     command: ["--discord-token", "@/run/secrets/discord_token"]

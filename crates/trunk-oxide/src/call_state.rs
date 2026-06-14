@@ -526,20 +526,43 @@ impl CallEntry {
         }
     }
 
+    /// End the current keyed transmission *without* emitting a boundary: push
+    /// the in-progress segment, reset `segment_start`, and transition Recording
+    /// → Idle. Shared by the conventional squelch-debounce finalize and the
+    /// trunked TDULC PTT-end — both close the transmission in place and leave a
+    /// later trigger (squelch open / grant) to resume or conclude the call.
+    fn close_segment_and_idle(&mut self) {
+        let rec_num = self.recorder.unwrap_or(RecorderNum(-1));
+        self.segments.push(CallSegment {
+            freq: self.freq,
+            start: self.segment_start,
+            rec_num,
+        });
+        self.segment_start = Instant::now();
+        self.state = CallState::Idle;
+        self.idle_since = Some(Instant::now());
+    }
+
+    /// Rotation bookkeeping shared by a trunked soft boundary
+    /// ([`Effect::RotateTransmission`]) and a conventional recorder recycle
+    /// ([`Effect::ConventionalRestart`]): start a fresh logical `call_num` /
+    /// `start_time` and clear the segment list. Recorder ownership and state
+    /// transition are the caller's job (they differ by [`RecorderPolicy`]).
+    fn rotate_bookkeeping(&mut self) {
+        self.call_num = next_call_num();
+        self.start_time = SystemTime::now();
+        self.segments.clear();
+        self.segment_start = Instant::now();
+    }
+
     /// If a squelch close is pending debounce, finalize it now: push the
     /// in-progress segment and transition to Idle.
     pub(crate) fn finalize_squelch_debounce(&mut self) {
         if self.squelch_closed_at.take().is_some()
             && self.state == CallState::Recording
-            && let Some(rec_num) = self.recorder
+            && self.recorder.is_some()
         {
-            self.segments.push(CallSegment {
-                freq: self.freq,
-                start: self.segment_start,
-                rec_num,
-            });
-            self.state = CallState::Idle;
-            self.idle_since = Some(Instant::now());
+            self.close_segment_and_idle();
         }
     }
 
@@ -609,6 +632,42 @@ impl CallEndReason {
             Self::Conventional => "conventional",
             Self::SourceChange => "source_change",
             Self::Shutdown => "shutdown",
+        }
+    }
+}
+
+/// Recorder-ownership policy for a transmission boundary (`cut_transmission`).
+///
+/// The unified call model: a `Call` owns one recorder lifecycle (and one
+/// downstream/Discord embed); inside it lives an ordered list of
+/// `Transmission`s (one continuously-keyed speaker each). `cut_transmission`
+/// always ends the current transmission on the wire (`EmitCallEnd`) and rotates
+/// the per-transmission bookkeeping; the policy is the *only* thing that differs
+/// between trunked and conventional — whether the recorder spans the whole call
+/// or is recycled per transmission. This is what the old `ConventionalRestart`
+/// effect really encoded (recorder recycle), NOT a WAV rotation — this headless
+/// build has no WAV; `call_restart` resets the sink accumulators.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum RecorderPolicy {
+    /// Recorder spans the entire call (trunked per-speaker boundary). The cut is
+    /// a *logical* boundary: the recorder keeps running, audio is continuous,
+    /// the source is re-routed, and the next transmission opens eagerly on the
+    /// same recorder (`rust_call_id` unchanged → audio routing + Discord
+    /// coalescing carry across).
+    Span { source_id: i64 },
+    /// Recorder recycles per transmission (conventional keyed transmission). The
+    /// cut stops the recorder, reads its metrics, and restarts it with a fresh
+    /// `rec_num`; no eager `EmitCallStart` — the next squelch open begins the
+    /// next transmission as its own `CallStart`.
+    Recycle,
+}
+
+impl RecorderPolicy {
+    /// The `EmitCallEnd` reason carried by a cut under this policy.
+    const fn end_reason(self) -> CallEndReason {
+        match self {
+            Self::Span { .. } => CallEndReason::SourceChange,
+            Self::Recycle => CallEndReason::Conventional,
         }
     }
 }
@@ -1202,16 +1261,12 @@ impl TrunkStateMachine {
                 continue;
             }
 
-            // Close current segment, transition to Idle
-            let rec_num = entry.recorder.unwrap_or(RecorderNum(-1));
-            entry.segments.push(CallSegment {
-                freq: entry.freq,
-                start: entry.segment_start,
-                rec_num,
-            });
-            entry.segment_start = Instant::now();
-            entry.state = CallState::Idle;
-            entry.idle_since = Some(Instant::now());
+            // Close current segment, transition to Idle. No boundary is emitted
+            // (cf. `cut_transmission`): a later grant resumes the same call,
+            // merging across the PTT gap into one transmission. Routing TDULC
+            // through `cut_transmission` would change that semantics, so it
+            // stays a plain in-place close (see per-speaker-boundaries note).
+            entry.close_segment_and_idle();
 
             tracing::trace!(
                 short_name = %entry.short_name,
@@ -1296,23 +1351,44 @@ impl TrunkStateMachine {
             source,
             "in-band source change: cutting per-speaker transmission boundary"
         );
+        self.cut_transmission(call_id, RecorderPolicy::Span { source_id: source })
+    }
+
+    /// Cut a transmission boundary: end the current transmission on the wire and
+    /// open the next, the single verb shared by trunked per-speaker boundaries
+    /// ([`RecorderPolicy::Span`]) and conventional keyed transmissions
+    /// ([`RecorderPolicy::Recycle`]). The two source types differ ONLY by the
+    /// policy threaded here; everything else is identical.
+    ///
+    /// Effect ordering is the load-bearing coalescing contract — `EmitCallEnd`
+    /// MUST precede the rotate effect (the executor reads the old
+    /// `call_num`/segments while concluding, before the rotate advances
+    /// bookkeeping) and any `EmitCallStart`. Reordering corrupts the downstream
+    /// embed with no compile error.
+    fn cut_transmission(&mut self, call_id: CallId, policy: RecorderPolicy) -> Effects {
+        let mut effects = Effects::new();
         effects.push(Effect::EmitCallEnd {
             call_id,
-            reason: CallEndReason::SourceChange,
+            reason: policy.end_reason(),
         });
-        effects.push(Effect::RotateTransmission {
-            call_id,
-            source_id: source,
-        });
-        effects.push(Effect::SetSource {
-            call_id,
-            source_id: source,
-        });
-        effects.push(Effect::EmitSignal {
-            call_id,
-            source_id: source,
-        });
-        effects.push(Effect::EmitCallStart { call_id });
+        match policy {
+            RecorderPolicy::Span { source_id } => {
+                // Recorder keeps running: rotate bookkeeping only, re-route the
+                // source, and open the next transmission eagerly.
+                effects.push(Effect::RotateTransmission { call_id, source_id });
+                effects.push(Effect::SetSource { call_id, source_id });
+                effects.push(Effect::EmitSignal { call_id, source_id });
+                effects.push(Effect::EmitCallStart { call_id });
+            }
+            RecorderPolicy::Recycle => {
+                // Recorder recycles: stop → read metrics → restart, reconfigure,
+                // re-enable. No eager EmitCallStart — the next squelch open
+                // begins the next transmission as its own CallStart.
+                effects.push(Effect::ConventionalRestart { call_id });
+                effects.push(Effect::EmitSetupRecorder { call_id });
+                effects.push(Effect::EnableRecorder { call_id });
+            }
+        }
         effects
     }
 
@@ -1323,10 +1399,9 @@ impl TrunkStateMachine {
     /// untouched.
     pub(crate) fn on_transmission_rotated(&mut self, call_id: CallId, source_id: i64) {
         if let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) {
-            entry.call_num = next_call_num();
-            entry.start_time = SystemTime::now();
-            entry.segments.clear();
-            entry.segment_start = Instant::now();
+            entry.rotate_bookkeeping();
+            // Recorder spans the call (RecorderPolicy::Span): stays Recording,
+            // recorder untouched; just carry the new speaker's source id.
             entry.current_source_id = source_id;
         }
     }
@@ -1695,15 +1770,7 @@ impl TrunkStateMachine {
         // directly while the entry is still Recording.
         entry.squelch_closed_at = None;
 
-        let mut effects = Effects::new();
-        effects.push(Effect::EmitCallEnd {
-            call_id,
-            reason: CallEndReason::Conventional,
-        });
-        effects.push(Effect::ConventionalRestart { call_id });
-        effects.push(Effect::EmitSetupRecorder { call_id });
-        effects.push(Effect::EnableRecorder { call_id });
-        effects
+        self.cut_transmission(call_id, RecorderPolicy::Recycle)
     }
 
     // ── Conventional callbacks from executor ──
@@ -1758,11 +1825,10 @@ impl TrunkStateMachine {
         recorder: Option<RecorderNum>,
     ) {
         if let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) {
-            entry.call_num = next_call_num();
-            entry.start_time = SystemTime::now();
+            entry.rotate_bookkeeping();
+            // Recorder recycles (RecorderPolicy::Recycle): adopt the freshly
+            // assigned recorder and re-arm to await the next keyed transmission.
             entry.recorder = recorder;
-            entry.segments.clear();
-            entry.segment_start = Instant::now();
             entry.last_update = Instant::now();
             entry.idle_since = None;
             entry.squelch_closed_at = None;
@@ -2260,6 +2326,49 @@ mod tests {
         assert!(sm.on_source_change(call_id, 2002).is_empty());
         // Unknown source (encrypted / no-LC) must not cut a boundary.
         assert!(sm.on_source_change(call_id, -1).is_empty());
+    }
+
+    #[test]
+    fn cut_transmission_policies_emit_exact_vectors() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let call_id = recording_trunked_call(&mut sm);
+
+        // Span (trunked per-speaker): logical boundary on a running recorder.
+        let span = sm.cut_transmission(call_id, RecorderPolicy::Span { source_id: 42 });
+        assert!(matches!(
+            span.as_ref(),
+            [
+                Effect::EmitCallEnd {
+                    reason: CallEndReason::SourceChange,
+                    ..
+                },
+                Effect::RotateTransmission { source_id: 42, .. },
+                Effect::SetSource { source_id: 42, .. },
+                Effect::EmitSignal { source_id: 42, .. },
+                Effect::EmitCallStart { .. },
+            ]
+        ));
+
+        // Recycle (conventional): stop/restart the recorder, no eager CallStart.
+        let recycle = sm.cut_transmission(call_id, RecorderPolicy::Recycle);
+        assert!(matches!(
+            recycle.as_ref(),
+            [
+                Effect::EmitCallEnd {
+                    reason: CallEndReason::Conventional,
+                    ..
+                },
+                Effect::ConventionalRestart { .. },
+                Effect::EmitSetupRecorder { .. },
+                Effect::EnableRecorder { .. },
+            ]
+        ));
+        assert!(
+            !recycle
+                .iter()
+                .any(|e| matches!(e, Effect::EmitCallStart { .. })),
+            "Recycle must not eagerly start the next transmission"
+        );
     }
 
     #[test]

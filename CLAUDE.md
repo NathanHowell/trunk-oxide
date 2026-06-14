@@ -27,16 +27,17 @@ cargo test -p trunk-config
 cargo fmt
 ```
 
-## Workspace Structure (10 crates)
+## Workspace Structure (11 crates)
 
 - **trunk-oxide** — Main binary. Loads TOML config, spawns a dedicated OS thread for C++ FFI (TrContext is !Send), runs tokio for gRPC/timers/signals.
 - **trunk-recorder-sys** — cxx bridge to libtrunk-recorder.so. build.rs probes gnuradio/osmosdr/uhd via pkg-config and generates compatibility stubs.
-- **trunk-oxide-proto** / **trunk-whisperer-proto** — Protobuf definitions compiled with tonic-prost-build.
+- **trunk-oxide-proto** / **trunk-transcriber-proto** — Protobuf definitions compiled with tonic-prost-build. `trunk-transcriber-proto` defines a generic `Transcriber` gRPC service implemented by both speech-to-text backends.
 - **trunk-oxide-grpc** — EventBridge: central hub that receives C++ events and serves them over gRPC (Unix socket).
 - **trunk-config** — TOML config parser with CSV overlay support for talkgroups/channels.
 - **trunk-database** — SQLite storage with hourly rotating database files and schema versioning via SHA256.
 - **trunk-discord** — Discord bot that subscribes to gRPC events, posts call embeds, manages threads, encodes OGG audio.
-- **trunk-whisperer** — Speech-to-text service using whisper-rs (whisper.cpp FFI). Optional CUDA feature.
+- **trunk-whisperer** — Speech-to-text service using whisper-rs (whisper.cpp FFI). Optional CUDA feature. Serves `Transcriber`.
+- **trunk-parakeet** — Speech-to-text service using parakeet-rs (NVIDIA Parakeet ASR via ONNX Runtime). Drop-in replacement for trunk-whisperer — serves the same `Transcriber` gRPC service on the same Unix socket; backends are swapped at the container/image level, not via trunk-discord config.
 - **trunk-solver** — Z3 SMT solver for optimal SDR device frequency/sample-rate/gain assignment.
 
 ## Architecture

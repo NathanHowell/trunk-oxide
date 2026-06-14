@@ -5,8 +5,9 @@ members = [
     "crates/trunk-oxide-proto",
     "crates/trunk-oxide-grpc",
     "crates/trunk-oxide",
-    "crates/trunk-whisperer-proto",
+    "crates/trunk-transcriber-proto",
     "crates/trunk-whisperer",
+    "crates/trunk-parakeet",
     "crates/trunk-database",
     "crates/trunk-config",
     "crates/trunk-discord",
@@ -17,8 +18,9 @@ default-members = [
     "crates/trunk-oxide-proto",
     "crates/trunk-oxide-grpc",
     "crates/trunk-database",
-    "crates/trunk-whisperer-proto",
+    "crates/trunk-transcriber-proto",
     "crates/trunk-whisperer",
+    "crates/trunk-parakeet",
     "crates/trunk-config",
     "crates/trunk-discord",
     "crates/trunk-solver",
@@ -49,7 +51,7 @@ trunk-recorder-sys = { path = "crates/trunk-recorder-sys" }
 trunk-oxide = { path = "crates/trunk-oxide" }
 trunk-oxide-proto = { path = "crates/trunk-oxide-proto" }
 trunk-oxide-grpc = { path = "crates/trunk-oxide-grpc" }
-trunk-whisperer-proto = { path = "crates/trunk-whisperer-proto" }
+trunk-transcriber-proto = { path = "crates/trunk-transcriber-proto" }
 trunk-config = { path = "crates/trunk-config" }
 trunk-database = { path = "crates/trunk-database" }
 audiopus = "0.2"
@@ -88,6 +90,7 @@ tracing-opentelemetry = "0.32"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 pid1 = "0.1"
 whisper-rs = "0.15"
+parakeet-rs = { git = "https://github.com/altunenes/parakeet-rs.git", rev = "5a412a9ffa7bf3f3e17f723741e2b8ae63b51655" }
 clap = { version = "4", features = ["derive"] }
 argfile = "0.2"
 wild = "2"

@@ -20,7 +20,7 @@ use crate::call_handler::{AttachQueue, CallHandler, CallHandlerConfig, CallMessa
 use crate::channel_manager::ChannelLookup;
 use crate::discord::DiscordClient;
 use crate::dispatcher_state::{CallKey, DispatchEffect, DispatcherState};
-use crate::grpc_whisperer::WhispererConnection;
+use crate::grpc_transcriber::TranscriberConnection;
 use crate::metrics::Metrics;
 
 /// How often to check for stuck calls.
@@ -61,7 +61,7 @@ struct ActiveCall {
 
 /// Shared resources accessed by the pump and spawned tasks.
 pub struct DispatchContext {
-    whisperer: WhispererConnection,
+    whisperer: TranscriberConnection,
     discord: Arc<DiscordClient>,
     aggregator: Arc<Aggregator>,
     config: CallHandlerConfig,
@@ -97,7 +97,7 @@ pub struct DispatchPump {
 impl DispatchPump {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
-        whisperer: WhispererConnection,
+        whisperer: TranscriberConnection,
         discord: Arc<DiscordClient>,
         aggregator: Arc<Aggregator>,
         buffer_duration_ms: u64,

@@ -7,7 +7,7 @@ mod discord;
 mod dispatcher;
 mod dispatcher_state;
 mod grpc_oxide;
-mod grpc_whisperer;
+mod grpc_transcriber;
 mod metrics;
 mod ogg_encoder;
 mod resampler;
@@ -271,14 +271,14 @@ async fn main() -> Result<()> {
         .expect("missing [oxide] section in config");
     let fallback_channel_id = ChannelId::from(discord_config.channel_id.get());
 
-    let whisperer = grpc_whisperer::WhispererConnection::connect(
+    let whisperer = grpc_transcriber::TranscriberConnection::connect(
         whisperer_config.socket_path.clone(),
         Duration::from_secs_f64(config.audio.transcription_timeout_s),
     )
     .await?;
     tracing::info!(
         path = %whisperer_config.socket_path,
-        "connected to trunk-whisperer"
+        "connected to transcriber"
     );
 
     let hour = chrono::Utc::now().format("%Y-%m-%dT%H").to_string();

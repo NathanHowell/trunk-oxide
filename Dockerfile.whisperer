@@ -15,11 +15,12 @@ WORKDIR /build
 # Copy workspace manifests and lockfile first for dependency caching
 COPY Cargo.toml Cargo.lock ./
 COPY crates/trunk-whisperer/Cargo.toml crates/trunk-whisperer/Cargo.toml
-COPY crates/trunk-whisperer-proto/Cargo.toml crates/trunk-whisperer-proto/Cargo.toml
-COPY crates/trunk-whisperer-proto/build.rs crates/trunk-whisperer-proto/build.rs
-COPY crates/trunk-whisperer-proto/proto crates/trunk-whisperer-proto/proto
+COPY crates/trunk-transcriber-proto/Cargo.toml crates/trunk-transcriber-proto/Cargo.toml
+COPY crates/trunk-transcriber-proto/build.rs crates/trunk-transcriber-proto/build.rs
+COPY crates/trunk-transcriber-proto/proto crates/trunk-transcriber-proto/proto
 
 # Stub workspace members that trunk-whisperer doesn't depend on
+COPY crates/trunk-parakeet/Cargo.toml crates/trunk-parakeet/Cargo.toml
 COPY crates/trunk-oxide-grpc/Cargo.toml crates/trunk-oxide-grpc/Cargo.toml
 COPY crates/trunk-oxide-proto/Cargo.toml crates/trunk-oxide-proto/Cargo.toml
 COPY crates/trunk-recorder-sys/Cargo.toml crates/trunk-recorder-sys/Cargo.toml
@@ -32,8 +33,10 @@ COPY crates/trunk-config/Cargo.toml crates/trunk-config/Cargo.toml
 # Create stub sources so cargo can resolve the workspace and cache dependencies
 RUN mkdir -p crates/trunk-whisperer/src \
     && echo "fn main() {}" > crates/trunk-whisperer/src/main.rs \
-    && mkdir -p crates/trunk-whisperer-proto/src \
-    && echo "" > crates/trunk-whisperer-proto/src/lib.rs \
+    && mkdir -p crates/trunk-transcriber-proto/src \
+    && echo "" > crates/trunk-transcriber-proto/src/lib.rs \
+    && mkdir -p crates/trunk-parakeet/src \
+    && echo "fn main() {}" > crates/trunk-parakeet/src/main.rs \
     && mkdir -p crates/trunk-oxide-grpc/src \
     && echo "" > crates/trunk-oxide-grpc/src/lib.rs \
     && mkdir -p crates/trunk-oxide-proto/src \
@@ -55,10 +58,10 @@ RUN cargo build --release -p trunk-whisperer || true
 
 # Copy real sources and rebuild
 COPY crates/trunk-whisperer/src crates/trunk-whisperer/src
-COPY crates/trunk-whisperer-proto/src crates/trunk-whisperer-proto/src
+COPY crates/trunk-transcriber-proto/src crates/trunk-transcriber-proto/src
 
 # Touch sources to invalidate the stub build artifacts
-RUN touch crates/trunk-whisperer/src/main.rs crates/trunk-whisperer-proto/src/lib.rs
+RUN touch crates/trunk-whisperer/src/main.rs crates/trunk-transcriber-proto/src/lib.rs
 
 RUN cargo build --release -p trunk-whisperer
 

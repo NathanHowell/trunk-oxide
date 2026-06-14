@@ -15,7 +15,7 @@ use trunk_database::Database;
 
 use crate::call_state::{CallEffect, CallState, CallStateConfig, EmbedData, SILENCE_RMS_THRESHOLD};
 use crate::discord::{DiscordClient, TRANSCRIBING_EMOJI};
-use crate::grpc_whisperer::WhispererConnection;
+use crate::grpc_transcriber::TranscriberConnection;
 use crate::metrics::Metrics;
 use crate::ogg_encoder::OggOpusEncoder;
 use crate::resampler::Resampler;
@@ -199,7 +199,7 @@ pub struct CallHandler {
     job_tx: Option<mpsc::UnboundedSender<TranscribeJob>>,
     /// Receiver half handed to the worker in [`CallHandler::run`].
     job_rx: Option<mpsc::UnboundedReceiver<TranscribeJob>>,
-    whisperer: WhispererConnection,
+    whisperer: TranscriberConnection,
     discord: Arc<DiscordClient>,
     config: CallHandlerConfig,
     audio_buffer: Vec<f32>,
@@ -251,7 +251,7 @@ impl CallHandler {
     pub fn new(
         call_info: &proto::CallInfo,
         rx: mpsc::Receiver<CallMessage>,
-        whisperer: WhispererConnection,
+        whisperer: TranscriberConnection,
         discord: Arc<DiscordClient>,
         config: CallHandlerConfig,
         post_channel: ChannelId,
@@ -342,7 +342,7 @@ impl CallHandler {
         // the handler dropped (note_stuck) and orphaning the embed.
         //
         // Instrumenting the worker with the current ("call") span keeps W3C
-        // trace-context propagation working: `WhispererConnection::transcribe`
+        // trace-context propagation working: `TranscriberConnection::transcribe`
         // reads `Span::current()` to parent the whisperer's transcribe span.
         let mut rx = self.rx.take().expect("rx taken once");
         let job_rx = self.job_rx.take().expect("job_rx taken once");
@@ -941,7 +941,7 @@ impl CallHandler {
 /// receiving results; that exit closes the result channel, which ends the
 /// handler's phase-2 drain.
 async fn transcription_worker(
-    whisperer: WhispererConnection,
+    whisperer: TranscriberConnection,
     metrics: Arc<Metrics>,
     identity: TranscribeIdentity,
     mut job_rx: mpsc::UnboundedReceiver<TranscribeJob>,
@@ -964,7 +964,7 @@ async fn transcription_worker(
 /// metrics. A timeout or RPC error yields an empty transcript (treated like
 /// silence downstream); timeouts are counted separately.
 async fn transcribe_one(
-    whisperer: &WhispererConnection,
+    whisperer: &TranscriberConnection,
     metrics: &Metrics,
     identity: &TranscribeIdentity,
     audio: Vec<f32>,

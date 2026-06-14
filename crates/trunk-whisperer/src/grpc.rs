@@ -4,7 +4,7 @@ use tonic::{Request, Response, Status};
 use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
-use crate::proto::whisperer_server::Whisperer;
+use crate::proto::transcriber_server::Transcriber as TranscriberService;
 use crate::proto::{TranscribeRequest, TranscribeResponse};
 use crate::transcriber::Transcriber;
 
@@ -35,7 +35,7 @@ impl opentelemetry::propagation::Extractor for MetadataExtractor<'_> {
 }
 
 #[tonic::async_trait]
-impl Whisperer for WhispererService {
+impl TranscriberService for WhispererService {
     async fn transcribe(
         &self,
         request: Request<TranscribeRequest>,

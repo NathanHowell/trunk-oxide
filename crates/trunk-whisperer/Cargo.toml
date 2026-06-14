@@ -12,7 +12,7 @@ default = []
 cuda = ["whisper-rs/cuda"]
 
 [dependencies]
-trunk-whisperer-proto.workspace = true
+trunk-transcriber-proto.workspace = true
 tonic.workspace = true
 tonic-health.workspace = true
 tonic-prost.workspace = true

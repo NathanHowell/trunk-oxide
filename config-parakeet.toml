@@ -1,0 +1,13 @@
+[grpc]
+listen_path = "/run/service/grpc.sock"
+
+[parakeet]
+# Directory holding the ONNX export. Auto-detected as NeMo TDT (vocab.txt
+# present) or HuggingFace (model.onnx + tokenizer.json) format.
+model_dir = "/models"
+# Execution provider. Only "cpu" is wired up today.
+provider = "cpu"
+# Priority-admission permits. Decode serializes on one model instance, so leave
+# at 1 to keep priority ordering exact; raise only to allow more in-flight
+# backpressure headroom.
+max_concurrent = 1

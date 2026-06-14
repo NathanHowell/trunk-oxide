@@ -71,6 +71,33 @@ services:
       retries: 3
       start_period: 30s
 
+  # Drop-in alternative to trunk-whisperer: serves the same Transcriber gRPC
+  # service on the same `whisperer-socket`. Enable with `--profile parakeet`
+  # and disable trunk-whisperer (only one backend may own the socket at a
+  # time). trunk-discord's config is unchanged — it just connects to the
+  # socket, backend-agnostic. Populate ./parakeet-models with an ONNX export
+  # (NeMo TDT: encoder/decoder + vocab.txt, or HF: model.onnx + tokenizer.json).
+  trunk-parakeet:
+    profiles: ["parakeet"]
+    build:
+      context: .
+      dockerfile: Dockerfile.parakeet
+    user: "0:0"
+    volumes:
+      - whisperer-socket:/run/service
+      - ./config-parakeet.toml:/etc/trunk-parakeet/config.toml:ro
+      - ./parakeet-models:/models:ro
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
+      - OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://victoriametrics:8428/opentelemetry/api/v1/push
+      - RUST_LOG=info
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr", "unix:///run/service/grpc.sock"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+
   trunk-discord:
     build:
       context: .

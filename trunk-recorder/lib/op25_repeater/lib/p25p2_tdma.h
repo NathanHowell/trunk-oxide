@@ -64,6 +64,11 @@ public:
 	void reset_call_terminated();
 	long get_ptt_src_id();
 	long get_ptt_grp_id();
+	// Voice codeword errors accumulated since the last reset, so the frame
+	// assembler can tag a per-call error_count for Phase 2 (mirrors Phase 1's
+	// Rx_Status). Phase 1 emits this already; Phase 2 did not.
+	inline long get_voice_err_accum() const { return d_voice_err_accum; }
+	inline void reset_voice_err_accum() { d_voice_err_accum = 0; }
 private:
 	p25p2_sync sync;
 	p25p2_duid duid;
@@ -78,6 +83,7 @@ private:
 	mbe_tone tone_mp;
 	mbe_errs errs_mp;
 	int mbe_err_cnt;
+	long d_voice_err_accum;
 	bool tone_frame;
 	software_imbe_decoder software_decoder;
 	imbe_vocoder vocoder;

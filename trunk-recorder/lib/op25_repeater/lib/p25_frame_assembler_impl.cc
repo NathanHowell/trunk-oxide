@@ -263,14 +263,23 @@ p25_frame_assembler_impl::general_work (int noutput_items,
               BOOST_LOG_TRIVIAL(info) << "P25 Frame Assembler: TDU was not at the end of the data. TDU: " << terminate_call.second << " Amount: " << amt_produce << " nitems_written(0): " << nitems_written(0);  
             }
             add_item_tag(0, nitems_written(0), pmt::intern("terminate"), pmt::from_long(1), d_tag_src );
-            
-            Rx_Status status = p1fdma.get_rx_status();
-            
-            // If something was recorded, send the number of Errors and Spikes that were counted during that period
-            if (status.total_len > 0 ) {
-              add_item_tag(0, nitems_written(0), pmt::intern("spike_count"), pmt::from_long(status.spike_count), d_tag_src);
-              add_item_tag(0, nitems_written(0), pmt::intern("error_count"), pmt::from_long(status.error_count), d_tag_src);
-              p1fdma.reset_rx_status();
+
+            // Tag per-call decode-error counts. Phase 1 reads them from p1fdma's
+            // Rx_Status; Phase 2 (which previously emitted nothing — leaving
+            // voice_frame_errors stuck at 0 for TDMA) reads the codeword errors
+            // accumulated in p2tdma.
+            if (d_do_phase2_tdma) {
+              add_item_tag(0, nitems_written(0), pmt::intern("spike_count"), pmt::from_long(0), d_tag_src);
+              add_item_tag(0, nitems_written(0), pmt::intern("error_count"), pmt::from_long(p2tdma.get_voice_err_accum()), d_tag_src);
+              p2tdma.reset_voice_err_accum();
+            } else {
+              Rx_Status status = p1fdma.get_rx_status();
+              // If something was recorded, send the Errors and Spikes counted during that period
+              if (status.total_len > 0 ) {
+                add_item_tag(0, nitems_written(0), pmt::intern("spike_count"), pmt::from_long(status.spike_count), d_tag_src);
+                add_item_tag(0, nitems_written(0), pmt::intern("error_count"), pmt::from_long(status.error_count), d_tag_src);
+                p1fdma.reset_rx_status();
+              }
             }
             if (silence_frame_count > 0) {
               std::fill(out, out + noutput_items, 0);

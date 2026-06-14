@@ -105,6 +105,7 @@ p25p2_tdma::p25p2_tdma(const op25_audio& udp, log_ts& logger, int slotid, int de
 	d_slotid(slotid),
 	d_tdma_slot_first_4v(-1),
 	mbe_err_cnt(0),
+	d_voice_err_accum(0),
 	tone_frame(false),
 	d_msg_queue(queue),
 	output_queue_decode(qptr),
@@ -709,6 +710,9 @@ void p25p2_tdma::handle_voice_frame(const uint8_t dibits[], int slot, int voice_
 
 	// Deinterleave and figure out frame type:
 	errs = vf.process_vcw(&errs_mp, dibits, b, u);
+	// Accumulate per-codeword errors so the frame assembler can tag a per-call
+	// error_count for Phase 2 (Phase 1 already does this via Rx_Status).
+	d_voice_err_accum += (long)errs;
 	if (d_debug >= 9) {
 		char log_str[40];
 		vf.pack_cw(p_cw, u);

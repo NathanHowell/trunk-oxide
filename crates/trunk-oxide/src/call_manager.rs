@@ -184,10 +184,22 @@ impl CallManager {
 
     /// Find the first source whose frequency range covers `freq_hz`.
     fn find_source(&self, freq_hz: f64) -> Option<i32> {
-        self.source_ranges
+        let found = self
+            .source_ranges
             .iter()
             .position(|r| r.contains(&freq_hz))
-            .map(|i| i as i32)
+            .map(|i| i as i32);
+        if found.is_none() {
+            // No source's center±rate/2 covers this freq — it falls in a gap
+            // between dongles. Such a call gets no per-source ppm correction (and
+            // is recorded by whichever dongle trunk-recorder assigned at the
+            // edge). Surface it so coverage gaps are visible rather than silent.
+            tracing::warn!(
+                freq_mhz = freq_hz / 1e6,
+                "freq not covered by any source range (gap between dongles); no ppm correction applied"
+            );
+        }
+        found
     }
 
     /// Suggested per-source ppm correction that would pull the FLL frequency

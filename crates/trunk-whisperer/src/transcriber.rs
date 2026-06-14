@@ -174,13 +174,18 @@ impl Transcriber {
         let elapsed = start.elapsed().as_secs_f64();
         self.transcription_duration.record(elapsed, &attrs);
 
+        // Throughput/errors carry priority_bucket (like queue_wait above) so the
+        // served rate can be split per tier — pairing with the wait histogram to
+        // confirm high-priority calls are both waited-on less and served at least
+        // proportionally. Decode duration stays on `attrs` (no bucket): decode
+        // cost is priority-independent, so the extra cardinality buys nothing.
         match result {
             Ok(text) => {
-                self.transcriptions_completed.add(1, &attrs);
+                self.transcriptions_completed.add(1, &wait_attrs);
                 Ok(text)
             }
             Err(e) => {
-                self.transcription_errors.add(1, &attrs);
+                self.transcription_errors.add(1, &wait_attrs);
                 Err(e)
             }
         }

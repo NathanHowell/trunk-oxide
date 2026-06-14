@@ -64,11 +64,15 @@ public:
 	void reset_call_terminated();
 	long get_ptt_src_id();
 	long get_ptt_grp_id();
-	// Voice codeword errors accumulated since the last reset, so the frame
-	// assembler can tag a per-call error_count for Phase 2 (mirrors Phase 1's
-	// Rx_Status). Phase 1 emits this already; Phase 2 did not.
+	// Per-call Phase-2 decode-quality counters, tagged by the frame assembler so
+	// they reach voice_frame_errors / voice_frame_spikes (Phase 1 already does
+	// this via Rx_Status; Phase 2 did not). err_accum = codeword bit errors
+	// (FEC-corrected, like Phase 1's error_count). mute_frames = voice frames
+	// emitted as SILENCE (>3 frame-repeats, or ER over threshold) — the audible
+	// gaps, i.e. the actual clipping signal.
 	inline long get_voice_err_accum() const { return d_voice_err_accum; }
-	inline void reset_voice_err_accum() { d_voice_err_accum = 0; }
+	inline long get_voice_mute_frames() const { return d_voice_mute_frames; }
+	inline void reset_voice_counters() { d_voice_err_accum = 0; d_voice_mute_frames = 0; }
 private:
 	p25p2_sync sync;
 	p25p2_duid duid;
@@ -84,6 +88,7 @@ private:
 	mbe_errs errs_mp;
 	int mbe_err_cnt;
 	long d_voice_err_accum;
+	long d_voice_mute_frames;
 	bool tone_frame;
 	software_imbe_decoder software_decoder;
 	imbe_vocoder vocoder;

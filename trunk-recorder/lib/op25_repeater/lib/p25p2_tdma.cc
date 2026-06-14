@@ -106,6 +106,7 @@ p25p2_tdma::p25p2_tdma(const op25_audio& udp, log_ts& logger, int slotid, int de
 	d_tdma_slot_first_4v(-1),
 	mbe_err_cnt(0),
 	d_voice_err_accum(0),
+	d_voice_mute_frames(0),
 	tone_frame(false),
 	d_msg_queue(queue),
 	output_queue_decode(qptr),
@@ -795,6 +796,11 @@ void p25p2_tdma::handle_voice_frame(const uint8_t dibits[], int slot, int voice_
 			} else {
 				vocoder.decode_tap(samples_buf, cur_mp.L, cur_mp.w0, &cur_mp.Vl[1], &cur_mp.Ml[1]);
 			}
+		} else {
+			// This voice frame is emitted as silence (too many frame-repeats, or
+			// error rate over threshold) — an audible gap. Count it: this is the
+			// Phase-2 clipping signal.
+			d_voice_mute_frames++;
 		}
 	}
 

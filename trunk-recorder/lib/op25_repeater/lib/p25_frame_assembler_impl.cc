@@ -269,9 +269,11 @@ p25_frame_assembler_impl::general_work (int noutput_items,
             // voice_frame_errors stuck at 0 for TDMA) reads the codeword errors
             // accumulated in p2tdma.
             if (d_do_phase2_tdma) {
-              add_item_tag(0, nitems_written(0), pmt::intern("spike_count"), pmt::from_long(0), d_tag_src);
+              // Phase 2: error_count = codeword bit errors (FEC-corrected),
+              // spike_count = muted/silenced voice frames (the audible clipping).
+              add_item_tag(0, nitems_written(0), pmt::intern("spike_count"), pmt::from_long(p2tdma.get_voice_mute_frames()), d_tag_src);
               add_item_tag(0, nitems_written(0), pmt::intern("error_count"), pmt::from_long(p2tdma.get_voice_err_accum()), d_tag_src);
-              p2tdma.reset_voice_err_accum();
+              p2tdma.reset_voice_counters();
             } else {
               Rx_Status status = p1fdma.get_rx_status();
               // If something was recorded, send the Errors and Spikes counted during that period

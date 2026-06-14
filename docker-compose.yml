@@ -74,40 +74,39 @@ services:
       start_period: 30s
 
   # Downloads the Parakeet ONNX export into the parakeet-models volume, mirroring
-  # fetch-whisper-model. Defaults to the English CTC 0.6b model (punctuation +
-  # capitalization), int8 quantized (~583 MB). Override MODEL_REPO/MODEL_ONNX to
-  # swap models or precision (e.g. onnx/model.onnx for full fp32). Files land
-  # flat in /models with their real basenames (the .onnx references its weights
-  # .onnx_data by basename, and find_model_file matches by name) and no
-  # vocab.txt, so trunk-parakeet auto-detects the HuggingFace format.
+  # fetch-whisper-model. Defaults to the English TDT 0.6b v2 model, int8 quantized
+  # (~630 MB, self-contained — no external .onnx.data). TDT is used (not CTC)
+  # because parakeet-rs only detokenizes the TDT path correctly; the CTC export's
+  # tokenizer.json has no detokenizer, so tokenizers.decode() space-joins every
+  # subword ("m or ning"). The presence of vocab.txt makes trunk-parakeet
+  # auto-detect the NeMo TDT format. MODEL_FILES is a space-separated list of
+  # repo-relative paths fetched verbatim into /models; override it (and
+  # MODEL_REPO) to swap models/precision, e.g. the fp32 set:
+  #   encoder-model.onnx encoder-model.onnx.data decoder_joint-model.onnx vocab.txt
   fetch-parakeet-model:
     profiles: ["parakeet"]
     image: debian:trixie-slim
     volumes:
       - parakeet-models:/models
     environment:
-      - MODEL_REPO=onnx-community/parakeet-ctc-0.6b-ONNX
-      - MODEL_ONNX=onnx/model_int8.onnx
+      - MODEL_REPO=istupakov/parakeet-tdt-0.6b-v2-onnx
+      - MODEL_FILES=encoder-model.int8.onnx decoder_joint-model.int8.onnx vocab.txt
     command:
       - bash
       - -c
       - |
         set -e
-        onnx="$$(basename "$$MODEL_ONNX")"
-        if [ -f "/models/$$onnx" ] && [ -f /models/tokenizer.json ]; then
+        if [ -f /models/vocab.txt ] && [ -f /models/encoder-model.int8.onnx ]; then
           echo "Model already present"
           exit 0
         fi
         apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates
         base="https://huggingface.co/$$MODEL_REPO/resolve/main"
-        # The .onnx graph + its external weights (<onnx>_data, referenced by
-        # basename, so both must keep their names and sit together) + tokenizer.
-        curl -fSL -o "/models/$$onnx.tmp"          "$$base/$$MODEL_ONNX"
-        curl -fSL -o "/models/$${onnx}_data.tmp"   "$${base}/$${MODEL_ONNX}_data"
-        curl -fSL -o /models/tokenizer.json.tmp    "$$base/tokenizer.json"
-        mv "/models/$$onnx.tmp"        "/models/$$onnx"
-        mv "/models/$${onnx}_data.tmp" "/models/$${onnx}_data"
-        mv /models/tokenizer.json.tmp  /models/tokenizer.json
+        for f in $$MODEL_FILES; do
+          echo "downloading $$f"
+          curl -fSL --create-dirs -o "/models/$$f.tmp" "$$base/$$f"
+          mv "/models/$$f.tmp" "/models/$$f"
+        done
 
   # Drop-in alternative to trunk-whisperer: serves the same Transcriber gRPC
   # service on the same `whisperer-socket`. Enable with `--profile parakeet`
@@ -140,6 +139,7 @@ services:
       start_period: 30s
 
   trunk-discord:
+    restart: unless-stopped
     build:
       context: .
       dockerfile: Dockerfile.discord
@@ -149,19 +149,14 @@ services:
       - whisperer-socket:/run/trunk-whisperer
       - discord-socket:/run/service
       - ./config-discord.toml:/etc/trunk-discord/config.toml:ro
-    # The transcriber backend is selected by profile (whisper | parakeet).
-    # required: false means discord waits for whichever one the active profile
-    # started and ignores the other instead of failing — both serve the same
-    # Transcriber gRPC on the shared whisperer-socket, so discord is unchanged.
+    # The transcriber backend is selected by profile (whisper | parakeet), so
+    # discord can't statically depend on a specific one (podman-compose chokes
+    # on a cross-profile depends_on and leaves discord in "Created"). Instead it
+    # depends only on trunk-oxide and relies on restart: unless-stopped to retry
+    # until the active transcriber binds the shared whisperer-socket.
     depends_on:
       trunk-oxide:
         condition: service_healthy
-      trunk-whisperer:
-        condition: service_healthy
-        required: false
-      trunk-parakeet:
-        condition: service_healthy
-        required: false
     secrets:
       - discord_token
     command: ["--discord-token", "@/run/secrets/discord_token"]

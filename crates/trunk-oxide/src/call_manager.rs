@@ -67,6 +67,42 @@ fn format_recorder_state(state: i32) -> &'static str {
     }
 }
 
+/// op25 decode-quality counters (errored / spiked voice codewords and total
+/// samples) summed from a recorder's transmission list. The headless sink
+/// accumulates these for the whole recording, so for a `Span` boundary — where
+/// the recorder runs continuously across per-speaker transmissions — they are
+/// cumulative; we snapshot at each boundary and report the delta so each
+/// per-speaker CallEnd carries only its own slice and the slices still sum to
+/// the call total.
+#[derive(Default, Clone, Copy)]
+struct VoiceCounters {
+    errors: i64,
+    spikes: i64,
+    samples: i64,
+}
+
+impl VoiceCounters {
+    fn from_transmissions(list: &[ffi::TrTransmission]) -> Self {
+        let mut c = Self::default();
+        for t in list {
+            c.errors += t.error_count;
+            c.spikes += t.spike_count;
+            c.samples += t.sample_count;
+        }
+        c
+    }
+
+    /// This transmission's slice since the prior snapshot (clamped at 0 so a
+    /// recorder restart that zeroed the cumulative counters can't go negative).
+    fn since(self, prior: Self) -> Self {
+        Self {
+            errors: (self.errors - prior.errors).max(0),
+            spikes: (self.spikes - prior.spikes).max(0),
+            samples: (self.samples - prior.samples).max(0),
+        }
+    }
+}
+
 /// Executor: processes effects from the state machine against real FFI/bridge.
 pub struct CallManager {
     state: TrunkStateMachine,
@@ -79,6 +115,10 @@ pub struct CallManager {
     /// downstream (discord) call span parents to it, and its stop_reason /
     /// recording_length / segments are recorded at close.
     call_spans: HashMap<CallId, tracing::Span>,
+    /// Cumulative op25 decode counters already attributed to earlier per-speaker
+    /// (`Span`) transmissions of a call, keyed by CallId. Lets each per-speaker
+    /// CallEnd report only its own delta; removed when the call concludes.
+    voice_snapshots: HashMap<CallId, VoiceCounters>,
     /// Per-source frequency coverage, indexed by source position.
     source_ranges: Vec<RangeInclusive<f64>>,
     /// Per-source configured ppm correction, indexed by source position.
@@ -152,6 +192,7 @@ impl CallManager {
             bridge,
             handles: HashMap::new(),
             call_spans: HashMap::new(),
+            voice_snapshots: HashMap::new(),
             source_ranges,
             source_ppms,
             source_freq_corrections_hz,
@@ -541,6 +582,7 @@ impl CallManager {
                 }
                 Effect::RemoveCall { call_id } => {
                     self.handles.remove(&call_id);
+                    self.voice_snapshots.remove(&call_id);
                     self.state.remove_call(call_id);
                     // Unregister audio meta last: the write lock waits for any
                     // in-flight audio_stream() read lock, ensuring the final
@@ -702,11 +744,13 @@ impl CallManager {
         // Logical (soft) transmission boundary: the in-band source changed
         // mid-call. End this transmission on the wire WITHOUT stopping the C++
         // recorder — the audio stream is continuous and `RotateTransmission`
-        // opens the next transmission on the same recorder. No recorder
-        // metrics/transmission_list here (the recorder is still running); the
-        // segment timing carries the boundary. This is the seam where
-        // "end the transmission" is separated from "stop the recorder".
+        // opens the next transmission on the same recorder. The recorder is NOT
+        // stopped, but its op25 decode counters are cumulative and readable
+        // mid-recording, so we attribute this speaker's *delta* to the boundary
+        // (see `voice_snapshots`). This is the seam where "end the transmission"
+        // is separated from "stop the recorder".
         if reason == CallEndReason::SourceChange {
+            let mut new_snapshot: Option<VoiceCounters> = None;
             if let Some(view) = self.state.get_call_view(call_id) {
                 let final_freq = view.freq();
                 let rec_num = view.recorder().map_or(-1, |r| r.0);
@@ -718,16 +762,54 @@ impl CallManager {
                 // is Idle, which `segment_start().elapsed()` would miss.
                 let recording_length = view.recording_duration().as_secs_f64();
                 let segments = self.build_proto_segments_final(call_id, final_freq, rec_num);
+
+                // Per-speaker op25 decode metrics: read the recorder's cumulative
+                // counters (cheap lock-free atomics; valid mid-recording) and
+                // subtract what earlier per-speaker transmissions already claimed.
+                let delta =
+                    self.handles
+                        .get(&call_id)
+                        .map_or_else(VoiceCounters::default, |handle| {
+                            let cumulative = VoiceCounters::from_transmissions(
+                                &ffi::call_get_transmission_list(handle),
+                            );
+                            new_snapshot = Some(cumulative);
+                            cumulative.since(
+                                self.voice_snapshots
+                                    .get(&call_id)
+                                    .copied()
+                                    .unwrap_or_default(),
+                            )
+                        });
+
                 if let Some(s) = &span {
                     s.record("recording_length", recording_length);
                     s.record(
                         "segments",
                         u64::try_from(segments.len()).unwrap_or(u64::MAX),
                     );
+                    s.record("voice_errors", delta.errors);
+                    s.record("voice_spikes", delta.spikes);
+                    s.record("voice_samples", delta.samples);
                 }
+                let voice_attrs = [
+                    KeyValue::new("short_name", view.short_name().to_string()),
+                    KeyValue::new("tdma", view.phase2_tdma()),
+                ];
+                self.voice_frame_errors
+                    .add(u64::try_from(delta.errors).unwrap_or(0), &voice_attrs);
+                self.voice_frame_spikes
+                    .add(u64::try_from(delta.spikes).unwrap_or(0), &voice_attrs);
+
                 let mut data = self.build_call_data(call_id);
                 data.length = recording_length;
+                data.error_count = delta.errors;
+                data.spike_count = delta.spikes;
                 self.bridge.call_end(&data, &segments, false);
+            }
+            // Advance the snapshot AFTER the view borrow drops (needs &mut self).
+            if let Some(cumulative) = new_snapshot {
+                self.voice_snapshots.insert(call_id, cumulative);
             }
             return;
         }
@@ -851,19 +933,35 @@ impl CallManager {
                         self.bridge.call_end(&data, &segments, is_conventional);
                     }
 
+                    // Subtract whatever earlier per-speaker (Span) boundaries of
+                    // this call already attributed, so this final CallEnd carries
+                    // only the last speaker's slice and the per-speaker slices
+                    // sum to the call total (not N×). For a single-speaker call
+                    // the snapshot is zero, so the delta is the full tally.
+                    let prior = self
+                        .voice_snapshots
+                        .get(&call_id)
+                        .copied()
+                        .unwrap_or_default();
+                    let delta = VoiceCounters {
+                        errors: tx_errors,
+                        spikes: tx_spikes,
+                        samples: tx_samples,
+                    }
+                    .since(prior);
                     if let Some(s) = &span {
-                        s.record("voice_errors", tx_errors);
-                        s.record("voice_spikes", tx_spikes);
-                        s.record("voice_samples", tx_samples);
+                        s.record("voice_errors", delta.errors);
+                        s.record("voice_spikes", delta.spikes);
+                        s.record("voice_samples", delta.samples);
                     }
                     let voice_attrs = [
                         KeyValue::new("short_name", view.short_name().to_string()),
                         KeyValue::new("tdma", view.phase2_tdma()),
                     ];
                     self.voice_frame_errors
-                        .add(u64::try_from(tx_errors).unwrap_or(0), &voice_attrs);
+                        .add(u64::try_from(delta.errors).unwrap_or(0), &voice_attrs);
                     self.voice_frame_spikes
-                        .add(u64::try_from(tx_spikes).unwrap_or(0), &voice_attrs);
+                        .add(u64::try_from(delta.spikes).unwrap_or(0), &voice_attrs);
 
                     // Per-source clock-error distribution: median = TCXO bias,
                     // spread = decode margin; both trendable to watch drift.
@@ -911,6 +1009,11 @@ impl CallManager {
         {
             self.update_adaptive_correction(source_idx, freq_error_hz);
         }
+
+        // The call is fully concluded here (the SourceChange soft-boundary path
+        // returns earlier and intentionally keeps its snapshot). Drop it so the
+        // map doesn't grow without bound.
+        self.voice_snapshots.remove(&call_id);
     }
 
     /// Nudge a source's software tune correction toward whatever zeroes the FLL
@@ -1446,5 +1549,86 @@ fn build_ffi_message_from_view(view: &CallView<'_>) -> TrTrunkMessage {
         },
         meta: String::new(),
         opcode: 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{VoiceCounters, ffi};
+
+    fn tx(error_count: i64, spike_count: i64, sample_count: i64) -> ffi::TrTransmission {
+        ffi::TrTransmission {
+            source: 0,
+            talkgroup: 0,
+            slot: 0,
+            color_code: 0,
+            start_time: 0,
+            stop_time: 0,
+            sample_count,
+            spike_count,
+            error_count,
+            freq: 0.0,
+        }
+    }
+
+    #[test]
+    fn voice_counters_sum_transmission_list() {
+        let c = VoiceCounters::from_transmissions(&[tx(3, 1, 100), tx(2, 4, 50)]);
+        assert_eq!((c.errors, c.spikes, c.samples), (5, 5, 150));
+    }
+
+    #[test]
+    fn per_speaker_deltas_sum_to_call_total() {
+        // The recorder spans the whole call, so its counters are cumulative.
+        // Three per-speaker boundaries snapshot the running total; each speaker's
+        // reported slice is the delta since the prior snapshot, and the slices
+        // must sum back to the final cumulative total (no double counting).
+        let snapshots = [
+            VoiceCounters::default(), // before speaker A
+            VoiceCounters {
+                errors: 4,
+                spikes: 2,
+                samples: 80,
+            }, // after A
+            VoiceCounters {
+                errors: 7,
+                spikes: 5,
+                samples: 130,
+            }, // after B
+        ];
+        let total = VoiceCounters {
+            errors: 10,
+            spikes: 6,
+            samples: 200,
+        }; // at final stop
+
+        let a = snapshots[1].since(snapshots[0]);
+        let b = snapshots[2].since(snapshots[1]);
+        let c = total.since(snapshots[2]); // last speaker's slice at final stop
+
+        assert_eq!((a.errors, a.spikes, a.samples), (4, 2, 80));
+        assert_eq!((b.errors, b.spikes, b.samples), (3, 3, 50));
+        assert_eq!((c.errors, c.spikes, c.samples), (3, 1, 70));
+        assert_eq!(a.errors + b.errors + c.errors, total.errors);
+        assert_eq!(a.spikes + b.spikes + c.spikes, total.spikes);
+        assert_eq!(a.samples + b.samples + c.samples, total.samples);
+    }
+
+    #[test]
+    fn since_clamps_when_counters_reset() {
+        // A recorder restart (e.g. ConventionalRestart) zeroes the cumulative
+        // counters; a stale higher snapshot must not produce a negative delta.
+        let after_reset = VoiceCounters {
+            errors: 1,
+            spikes: 0,
+            samples: 10,
+        };
+        let stale = VoiceCounters {
+            errors: 9,
+            spikes: 9,
+            samples: 999,
+        };
+        let d = after_reset.since(stale);
+        assert_eq!((d.errors, d.spikes, d.samples), (0, 0, 0));
     }
 }

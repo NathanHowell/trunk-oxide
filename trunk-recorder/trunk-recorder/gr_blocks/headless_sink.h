@@ -34,6 +34,11 @@ private:
   std::chrono::time_point<std::chrono::system_clock> d_start_time;
   std::atomic<std::chrono::time_point<std::chrono::steady_clock>> d_stop_time;
   std::atomic<long> d_sample_count;
+  // op25 emits per-period decode-error/spike counts as stream tags on the audio
+  // (Phase 1 only; Phase 2 TDMA does not tag these). Accumulate them across the
+  // recording so the Transmission carries real decode-quality counts, not 0.
+  std::atomic<long> d_error_count;
+  std::atomic<long> d_spike_count;
   long d_talkgroup;
   double d_freq;
 

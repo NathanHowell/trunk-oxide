@@ -14,6 +14,8 @@
 
 #include <cstring>
 #include <gnuradio/io_signature.h>
+#include <gnuradio/tags.h>
+#include <pmt/pmt.h>
 
 namespace gr {
 namespace blocks {
@@ -33,6 +35,8 @@ headless_sink::headless_sink(int n_channels, unsigned int sample_rate, int /*bit
       d_start_time(),
       d_stop_time(std::chrono::steady_clock::now()),
       d_sample_count(0),
+      d_error_count(0),
+      d_spike_count(0),
       d_talkgroup(0),
       d_freq(0.0) {}
 
@@ -41,6 +45,8 @@ bool headless_sink::start_recording(const RecorderConfig &config) {
   d_start_time = std::chrono::system_clock::now();
   d_stop_time = std::chrono::steady_clock::now();
   d_sample_count = 0;
+  d_error_count = 0;
+  d_spike_count = 0;
   d_last_write_time = std::chrono::steady_clock::now();
   d_talkgroup = config.talkgroup;
   d_freq = config.freq;
@@ -91,8 +97,8 @@ std::vector<Transmission> headless_sink::get_transmission_list() {
   t.source = 0;
   t.slot = 0;
   t.color_code = 0;
-  t.spike_count = 0;
-  t.error_count = 0;
+  t.spike_count = d_spike_count.load();
+  t.error_count = d_error_count.load();
   t.filename[0] = '\0';
 
   return {t};
@@ -110,6 +116,20 @@ int headless_sink::work(int noutput_items,
     auto now = std::chrono::steady_clock::now();
     d_last_write_time = now;
     d_stop_time = now;
+
+    // Accumulate op25's per-period decode-error/spike stream tags (Phase 1
+    // emits these on the audio at each TDU; Phase 2 TDMA does not). Each tag is
+    // the count for that period, so summing gives the recording total.
+    std::vector<gr::tag_t> tags;
+    get_tags_in_window(tags, 0, 0, noutput_items, pmt::intern("error_count"));
+    for (const auto &tag : tags) {
+      d_error_count.fetch_add(pmt::to_long(tag.value));
+    }
+    tags.clear();
+    get_tags_in_window(tags, 0, 0, noutput_items, pmt::intern("spike_count"));
+    for (const auto &tag : tags) {
+      d_spike_count.fetch_add(pmt::to_long(tag.value));
+    }
   }
 
   // Consume all samples (discard audio data).

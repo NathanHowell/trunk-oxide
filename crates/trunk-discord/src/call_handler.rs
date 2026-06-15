@@ -75,6 +75,10 @@ pub struct AttachJob {
     pub message_id: MessageId,
     pub ogg_data: Vec<u8>,
     pub filename: String,
+    /// Per-channel identity for the `attach_audio` metric labels (the attach now
+    /// rides the per-channel edit bucket, so attribute it like the embed edits).
+    pub short_name: String,
+    pub talkgroup: i64,
 }
 
 /// Shared, bounded background uploader for audio attachments.
@@ -133,7 +137,11 @@ impl AttachQueue {
             }
             metrics.discord_api_duration.record(
                 start.elapsed().as_secs_f64(),
-                &[KeyValue::new("operation", "attach_audio")],
+                &[
+                    KeyValue::new("operation", "attach_audio"),
+                    KeyValue::new("short_name", job.short_name),
+                    KeyValue::new("talkgroup", job.talkgroup),
+                ],
             );
             inflight.fetch_sub(1, Ordering::Relaxed);
         });
@@ -513,10 +521,9 @@ impl CallHandler {
                         .discord
                         .send_embed(self.post_channel, serenity_embed)
                         .await?;
-                    self.metrics.discord_api_duration.record(
-                        start.elapsed().as_secs_f64(),
-                        &[KeyValue::new("operation", "send_embed")],
-                    );
+                    self.metrics
+                        .discord_api_duration
+                        .record(start.elapsed().as_secs_f64(), &self.api_labels("send_embed"));
                     self.embed_message_id = Some(msg_id);
                     self.mark_embed_edited();
                 }
@@ -527,10 +534,9 @@ impl CallHandler {
                         self.discord
                             .edit_embed(self.post_channel, msg_id, serenity_embed)
                             .await?;
-                        self.metrics.discord_api_duration.record(
-                            start.elapsed().as_secs_f64(),
-                            &[KeyValue::new("operation", "edit_embed")],
-                        );
+                        self.metrics
+                            .discord_api_duration
+                            .record(start.elapsed().as_secs_f64(), &self.api_labels("edit_embed"));
                         self.mark_embed_edited();
                     }
                 }
@@ -555,7 +561,7 @@ impl CallHandler {
                         }
                         self.metrics.discord_api_duration.record(
                             start.elapsed().as_secs_f64(),
-                            &[KeyValue::new("operation", "delete_embed")],
+                            &self.api_labels("delete_embed"),
                         );
                     }
                 }
@@ -571,6 +577,8 @@ impl CallHandler {
                             message_id: msg_id,
                             ogg_data,
                             filename,
+                            short_name: self.short_name.clone(),
+                            talkgroup: self.talkgroup,
                         });
                     }
                 }
@@ -610,6 +618,18 @@ impl CallHandler {
         Ok(())
     }
 
+    /// Label set for a `discord_api_duration` sample. Carries the per-channel
+    /// identity (`short_name` + `talkgroup`, one Discord channel per talkgroup)
+    /// alongside the operation, so a single hot channel saturating the per-channel
+    /// edit bucket is visible rather than hidden in the aggregate.
+    fn api_labels(&self, operation: &'static str) -> [KeyValue; 3] {
+        [
+            KeyValue::new("operation", operation),
+            KeyValue::new("short_name", self.short_name.clone()),
+            KeyValue::new("talkgroup", self.talkgroup),
+        ]
+    }
+
     /// Note that the embed was just edited (or created): drop any pending
     /// throttled edit it supersedes and reset the debounce window.
     fn mark_embed_edited(&mut self) {
@@ -634,10 +654,9 @@ impl CallHandler {
         {
             tracing::warn!(error = %e, "failed to flush throttled embed edit");
         }
-        self.metrics.discord_api_duration.record(
-            start.elapsed().as_secs_f64(),
-            &[KeyValue::new("operation", "edit_embed")],
-        );
+        self.metrics
+            .discord_api_duration
+            .record(start.elapsed().as_secs_f64(), &self.api_labels("edit_embed"));
         self.last_embed_edit = Instant::now();
     }
 

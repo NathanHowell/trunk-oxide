@@ -17,7 +17,8 @@ use proto::types::{SysNum, Talkgroup};
 use trunk_database::Database;
 
 use crate::aggregator::Aggregator;
-use crate::call_handler::{AttachQueue, CallHandler, CallHandlerConfig, CallMessage};
+use crate::call_handler::{CallHandler, CallHandlerConfig, CallMessage};
+use crate::channel_writer::ChannelWriters;
 use crate::channel_manager::ChannelLookup;
 use crate::discord::DiscordClient;
 use crate::dispatcher_state::{CallKey, DispatchEffect, DispatcherState};
@@ -71,7 +72,7 @@ pub struct DispatchContext {
     db: Arc<Mutex<Database>>,
     db_path: PathBuf,
     metrics: Arc<Metrics>,
-    attach_queue: Arc<AttachQueue>,
+    writers: Arc<ChannelWriters>,
 }
 
 /// Single-owner pump loop. Owns `DispatcherState` directly — no Mutex.
@@ -114,7 +115,7 @@ impl DispatchPump {
         heartbeat: Arc<AtomicU64>,
     ) -> Self {
         let (dead_call_tx, dead_call_rx) = mpsc::channel(64);
-        let attach_queue = Arc::new(AttachQueue::new(Arc::clone(&discord), Arc::clone(&metrics)));
+        let writers = Arc::new(ChannelWriters::new(Arc::clone(&discord), Arc::clone(&metrics)));
 
         Self {
             state: DispatcherState::new(coalesce_timeout_ms),
@@ -134,7 +135,7 @@ impl DispatchPump {
                 db,
                 db_path,
                 metrics,
-                attach_queue,
+                writers,
             }),
             dead_call_tx,
             dead_call_rx,
@@ -428,7 +429,7 @@ async fn run_call(
         Arc::clone(&ctx.db),
         call_row_id,
         Arc::clone(&ctx.metrics),
-        Arc::clone(&ctx.attach_queue),
+        &ctx.writers,
     ) {
         Ok(h) => h,
         Err(e) => {

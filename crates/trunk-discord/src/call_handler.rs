@@ -1,33 +1,22 @@
-use std::collections::HashMap;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
-use std::time::{Duration, Instant};
+use std::sync::Arc;
 
 use anyhow::Result;
-use opentelemetry::KeyValue;
 use proto::types::CallRowId;
-use serenity::all::{CreateEmbed, CreateEmbedFooter};
 use serenity::model::id::{ChannelId, MessageId};
-use tokio::sync::{Mutex, Semaphore, mpsc};
+use tokio::sync::{Mutex, mpsc};
 use tracing::Instrument;
 use trunk_oxide_proto as proto;
 
 use trunk_database::Database;
 
-use crate::call_state::{CallEffect, CallState, CallStateConfig, EmbedData, SILENCE_RMS_THRESHOLD};
-use crate::discord::{AttachMode, DiscordClient, TRANSCRIBING_EMOJI};
+use crate::call_state::{CallEffect, CallState, CallStateConfig, SILENCE_RMS_THRESHOLD};
+use crate::channel_writer::{ChannelWriterHandle, ChannelWriters, WriteIdentity};
+use crate::discord::{DiscordClient, TRANSCRIBING_EMOJI};
 use crate::grpc_transcriber::TranscriberConnection;
 use crate::metrics::Metrics;
 use crate::ogg_encoder::OggOpusEncoder;
 use crate::resampler::Resampler;
 use crate::tone_detect::{DetectedTone, NotchFilter, ToneDetector};
-
-/// Minimum spacing between throttled (transcript-stream) embed edits. The
-/// executor coalesces bursts into at most one edit per window, keeping
-/// high-frequency transcript churn off the per-channel edit rate-limit bucket
-/// while prompt edits (first content, finalization, events) still go straight
-/// through.
-const EMBED_DEBOUNCE: Duration = Duration::from_secs(2);
 
 /// Keeps the `unfinalized_handlers` gauge incremented for as long as a handler's
 /// embed is grey (started but not finalized). [`Self::finalized`] decrements it
@@ -60,178 +49,6 @@ impl UnfinalizedGuard {
 impl Drop for UnfinalizedGuard {
     fn drop(&mut self) {
         self.finalized();
-    }
-}
-
-/// Max concurrent background audio uploads across all handlers.
-const ATTACH_CONCURRENCY: usize = 4;
-/// Max queued+running uploads before new ones are dropped (bounds OGG bytes
-/// held in memory under sustained overload).
-const ATTACH_QUEUE_CAPACITY: usize = 128;
-
-/// A deferred audio attachment: the embed is already green; this only uploads
-/// the OGG file onto it.
-pub struct AttachJob {
-    pub channel: ChannelId,
-    pub message_id: MessageId,
-    pub ogg_data: Vec<u8>,
-    pub filename: String,
-    /// Per-channel identity for the `attach_audio` metric labels (the attach now
-    /// rides the per-channel edit bucket, so attribute it like the embed edits).
-    pub short_name: String,
-    pub talkgroup: i64,
-}
-
-/// Edit-bucket congestion (EWMA of recent `edit_embed` latency, in seconds)
-/// above which a channel's audio attaches fall back to a reply, and below which
-/// they return to inline embed edits. The gap between the two is hysteresis:
-/// without it a channel hovering at the threshold would flap paths every upload.
-/// Tuned from observed VM latencies — a healthy channel's edits sit ~0.2 s,
-/// while a saturated one runs tens of seconds with uploads timing out at 180 s.
-const ATTACH_REPLY_ENTER_SECS: f64 = 4.0;
-const ATTACH_REPLY_EXIT_SECS: f64 = 1.5;
-/// Weight of the newest sample in the per-channel edit-latency EWMA.
-const EDIT_LATENCY_EWMA_ALPHA: f64 = 0.3;
-
-/// Per-channel edit-bucket congestion estimate.
-#[derive(Default)]
-struct ChannelHealth {
-    /// EWMA of recent `edit_embed` latency, seconds. 0.0 = no samples yet.
-    edit_latency_ewma: f64,
-    /// Whether attaches on this channel currently fall back to a reply.
-    reply_mode: bool,
-}
-
-/// Shared per-channel edit-bucket congestion, written by the call handlers (each
-/// `edit_embed` they make) and read by the [`AttachQueue`] to pick an attach
-/// path. Keyed by Discord channel — the unit Discord rate-limits.
-///
-/// Using the *transcript* edit latency as the signal is deliberate: those edits
-/// ride the edit bucket no matter which path an attach takes, so the gauge does
-/// not collapse to "healthy" the instant uploads move to the reply bucket (a
-/// path-derived signal would, and the decision would flap). Hysteresis
-/// ([`ATTACH_REPLY_ENTER_SECS`] / [`ATTACH_REPLY_EXIT_SECS`]) holds the choice
-/// steady while a channel's EWMA sits between the thresholds.
-struct BucketHealth {
-    channels: StdMutex<HashMap<ChannelId, ChannelHealth>>,
-}
-
-impl BucketHealth {
-    fn new() -> Self {
-        Self {
-            channels: StdMutex::new(HashMap::new()),
-        }
-    }
-
-    /// Fold an observed `edit_embed` latency into the channel's EWMA and update
-    /// its reply-mode latch with hysteresis.
-    fn note_edit_latency(&self, channel: ChannelId, secs: f64) {
-        let mut map = self.channels.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let h = map.entry(channel).or_default();
-        h.edit_latency_ewma = if h.edit_latency_ewma == 0.0 {
-            secs
-        } else {
-            EDIT_LATENCY_EWMA_ALPHA * secs + (1.0 - EDIT_LATENCY_EWMA_ALPHA) * h.edit_latency_ewma
-        };
-        if h.edit_latency_ewma >= ATTACH_REPLY_ENTER_SECS {
-            h.reply_mode = true;
-        } else if h.edit_latency_ewma <= ATTACH_REPLY_EXIT_SECS {
-            h.reply_mode = false;
-        }
-    }
-
-    /// Attach path for this channel: a reply while the edit bucket is congested,
-    /// an inline embed edit otherwise. Channels with no samples start on Edit.
-    fn attach_mode(&self, channel: ChannelId) -> AttachMode {
-        let map = self.channels.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        match map.get(&channel) {
-            Some(h) if h.reply_mode => AttachMode::Reply,
-            _ => AttachMode::Edit,
-        }
-    }
-}
-
-/// Shared, bounded background uploader for audio attachments.
-///
-/// A Discord file attach re-uploads the OGG — slow, and on the [`AttachMode::Edit`]
-/// path it shares the per-channel edit bucket. Running it inline in `finalize`
-/// blocked handlers for the whole upload and piled them up. This runs uploads
-/// off the handler entirely, capping concurrency (a permit per upload) and total
-/// queued bytes (drops, with a metric, when saturated — graceful degradation
-/// rather than blocking a handler or growing memory). The embed is already green
-/// by the time a job is submitted, so a dropped or slow upload only affects
-/// whether the audio file appears, never the embed. The path (edit vs reply) is
-/// chosen per-channel from [`BucketHealth`] so a hot channel sheds its uploads
-/// onto the independent message-create bucket instead of stalling on edits.
-pub struct AttachQueue {
-    discord: Arc<DiscordClient>,
-    metrics: Arc<Metrics>,
-    permits: Arc<Semaphore>,
-    inflight: Arc<AtomicUsize>,
-    health: Arc<BucketHealth>,
-}
-
-impl AttachQueue {
-    pub fn new(discord: Arc<DiscordClient>, metrics: Arc<Metrics>) -> Self {
-        Self {
-            discord,
-            metrics,
-            permits: Arc::new(Semaphore::new(ATTACH_CONCURRENCY)),
-            inflight: Arc::new(AtomicUsize::new(0)),
-            health: Arc::new(BucketHealth::new()),
-        }
-    }
-
-    /// Record an observed `edit_embed` latency for a channel, feeding the
-    /// per-channel attach-path decision. Called by handlers after each edit.
-    pub fn note_edit_latency(&self, channel: ChannelId, secs: f64) {
-        self.health.note_edit_latency(channel, secs);
-    }
-
-    /// Enqueue an attachment for background upload. Never blocks; drops (with a
-    /// metric) if the backlog is saturated.
-    pub fn submit(&self, job: AttachJob) {
-        if self.inflight.load(Ordering::Relaxed) >= ATTACH_QUEUE_CAPACITY {
-            self.metrics.attach_dropped.add(1, &[]);
-            tracing::warn!(channel = %job.channel, "audio attach dropped: upload backlog saturated");
-            return;
-        }
-        // Decide the path at submit time from current per-channel congestion.
-        let mode = self.health.attach_mode(job.channel);
-        let path = match mode {
-            AttachMode::Edit => "edit",
-            AttachMode::Reply => "reply",
-        };
-        self.inflight.fetch_add(1, Ordering::Relaxed);
-        let discord = Arc::clone(&self.discord);
-        let metrics = Arc::clone(&self.metrics);
-        let permits = Arc::clone(&self.permits);
-        let inflight = Arc::clone(&self.inflight);
-        tokio::spawn(async move {
-            // Cap concurrency. The semaphore is never closed, so an error here
-            // means shutdown — just release the slot and bail.
-            let Ok(_permit) = permits.acquire_owned().await else {
-                inflight.fetch_sub(1, Ordering::Relaxed);
-                return;
-            };
-            let start = std::time::Instant::now();
-            if let Err(e) = discord
-                .attach_file(job.channel, job.message_id, job.ogg_data, &job.filename, mode)
-                .await
-            {
-                tracing::warn!(error = %e, "failed to attach audio (background)");
-            }
-            metrics.discord_api_duration.record(
-                start.elapsed().as_secs_f64(),
-                &[
-                    KeyValue::new("operation", "attach_audio"),
-                    KeyValue::new("path", path),
-                    KeyValue::new("short_name", job.short_name),
-                    KeyValue::new("talkgroup", job.talkgroup),
-                ],
-            );
-            inflight.fetch_sub(1, Ordering::Relaxed);
-        });
     }
 }
 
@@ -322,12 +139,11 @@ pub struct CallHandler {
 
     embed_message_id: Option<MessageId>,
 
-    /// Latest throttled (transcript-stream) embed awaiting a coalesced flush.
-    /// Holds the full embed, so it is simply dropped when a prompt edit
-    /// supersedes it. See [`EMBED_DEBOUNCE`].
-    dirty_embed: Option<EmbedData>,
-    /// When the embed was last actually edited — debounce reference point.
-    last_embed_edit: Instant,
+    /// Per-channel serialized writer for this call's embed: send/edit/delete and
+    /// the audio attach all go through it. Coalescing of transcript-stream edits
+    /// lives in the writer (per-channel, latest-wins), so the handler just fires
+    /// edits and never debounces or blocks on Discord I/O.
+    writer: ChannelWriterHandle,
     /// Whether the in-flight-transcription reaction is currently on the embed.
     /// Reconciled against [`CallState::wants_transcribing_indicator`].
     indicator_shown: bool,
@@ -350,9 +166,6 @@ pub struct CallHandler {
     db: Arc<Mutex<Database>>,
     call_row_id: Option<CallRowId>,
 
-    /// Shared background uploader for the OGG attachment (off the critical path).
-    attach_queue: Arc<AttachQueue>,
-
     // Identity for transcription attribution (whisperer metric labels + span).
     short_name: String,
     is_conventional: bool,
@@ -373,7 +186,7 @@ impl CallHandler {
         db: Arc<Mutex<Database>>,
         call_row_id: Option<CallRowId>,
         metrics: Arc<Metrics>,
-        attach_queue: Arc<AttachQueue>,
+        writers: &ChannelWriters,
     ) -> Result<Self> {
         let detect_ctcss = config.tone_detection && call_info.is_conventional;
         let tone_detector = if config.tone_detection {
@@ -404,6 +217,14 @@ impl CallHandler {
 
         let (job_tx, job_rx) = mpsc::unbounded_channel();
 
+        let writer = writers.handle(
+            post_channel,
+            WriteIdentity {
+                short_name: Arc::from(call_info.short_name.as_str()),
+                talkgroup: call_info.talkgroup,
+            },
+        );
+
         Ok(Self {
             state,
             rx: Some(rx),
@@ -419,13 +240,11 @@ impl CallHandler {
             post_channel,
             ogg_encoder,
             embed_message_id: None,
-            dirty_embed: None,
-            last_embed_edit: Instant::now(),
+            writer,
             indicator_shown: false,
             metrics,
             db,
             call_row_id,
-            attach_queue,
             short_name: call_info.short_name.clone(),
             is_conventional: call_info.is_conventional,
             talkgroup: call_info.talkgroup,
@@ -486,12 +305,8 @@ impl CallHandler {
         // embed turned green, DB written — the instant the dispatcher ends it
         // (`finalize_now`), independent of how far behind transcription is. This
         // is the fix: audio attachment no longer waits on the whisper backlog.
-        // Debounce timer for coalesced (transcript-stream) embed edits. Fires
-        // every window so a pending throttled edit can't sit unshown when the
-        // transcript stream goes quiet. The first tick is immediate, skip it.
-        let mut flush_interval = tokio::time::interval(EMBED_DEBOUNCE);
-        flush_interval.tick().await;
-
+        // Transcript-stream edits are coalesced per-channel inside the writer, so
+        // there is no debounce timer here: the handler just fires each edit.
         let mut results_open = true;
         loop {
             tokio::select! {
@@ -520,38 +335,26 @@ impl CallHandler {
                         }
                     }
                 }
-                _ = flush_interval.tick() => {
-                    self.maybe_flush_dirty_embed().await;
-                }
             }
         }
 
-        // Embed is now finalized (green + audio, or deleted-as-empty): no longer
-        // a grey embed. Phase 2 below is late-transcript drain, not a leak.
+        // The finalizing (green) embed edit has been enqueued to the writer: the
+        // handler's work is done, so this is no longer a grey-embed leak even
+        // though the edit may still be in the writer's queue. Phase 2 is
+        // late-transcript drain.
         unfinalized.finalized();
 
-        // ── Phase 2: the embed is already final (green + audio attached). Keep
-        // applying late transcription results as best-effort (debounced) edits
-        // so the transcript fills in. `finalize_now` dropped the worker's input,
-        // so the worker drains its queued jobs, emits their results, and exits —
-        // closing this channel. That closure (not a timer) is what ends the
-        // handler: it lives exactly as long as there is transcription in flight.
-        loop {
-            tokio::select! {
-                r = result_rx.recv() => {
-                    match r {
-                        Some(r) => self.apply_transcript(r).await,
-                        None => break,
-                    }
-                }
-                _ = flush_interval.tick() => {
-                    self.maybe_flush_dirty_embed().await;
-                }
-            }
+        // ── Phase 2: the embed is already finalized (its green edit + audio
+        // attach are enqueued). Keep applying late transcription results as
+        // best-effort edits so the transcript fills in. `finalize_now` dropped
+        // the worker's input, so the worker drains its queued jobs, emits their
+        // results, and exits — closing this channel. That closure (not a timer)
+        // is what ends the handler: it lives exactly as long as there is
+        // transcription in flight. Each edit is fire-and-forget into the writer,
+        // which coalesces and flushes the latest even after the handler exits.
+        while let Some(r) = result_rx.recv().await {
+            self.apply_transcript(r).await;
         }
-
-        // Push any final coalesced transcript edit that hasn't been flushed.
-        self.flush_dirty_embed().await;
 
         // Safety net: if any results were lost (e.g. the worker task died),
         // clear the in-flight count and drop a stale ⏳ reaction.
@@ -602,73 +405,33 @@ impl CallHandler {
         while let Some(effect) = queue.pop_front() {
             match effect {
                 CallEffect::SendEmbed { embed } => {
-                    let serenity_embed = embed_data_to_serenity(&embed);
-                    let start = std::time::Instant::now();
-                    let msg_id = self
-                        .discord
-                        .send_embed(self.post_channel, serenity_embed)
-                        .await?;
-                    self.metrics
-                        .discord_api_duration
-                        .record(start.elapsed().as_secs_f64(), &self.api_labels("send_embed"));
+                    // The one writer call the handler awaits: it needs the new
+                    // message id for subsequent edits/attach. Sends ride the fast
+                    // create bucket, so this is brief.
+                    let msg_id = self.writer.send_embed(embed).await?;
                     self.embed_message_id = Some(msg_id);
-                    self.mark_embed_edited();
                 }
-                CallEffect::EditEmbed { embed } => {
+                // Prompt and throttled edits are identical now: the writer
+                // coalesces per-channel (latest-wins per message) and paces
+                // itself to the edit bucket, so there is no debounce here.
+                CallEffect::EditEmbed { embed } | CallEffect::EditEmbedThrottled { embed } => {
                     if let Some(msg_id) = self.embed_message_id {
-                        let serenity_embed = embed_data_to_serenity(&embed);
-                        let start = std::time::Instant::now();
-                        self.discord
-                            .edit_embed(self.post_channel, msg_id, serenity_embed)
-                            .await?;
-                        let elapsed = start.elapsed().as_secs_f64();
-                        self.metrics
-                            .discord_api_duration
-                            .record(elapsed, &self.api_labels("edit_embed"));
-                        self.attach_queue.note_edit_latency(self.post_channel, elapsed);
-                        self.mark_embed_edited();
-                    }
-                }
-                CallEffect::EditEmbedThrottled { embed } => {
-                    // Coalesce the transcript stream: keep only the latest embed
-                    // and flush at most once per debounce window. A pending
-                    // throttled edit is superseded (dropped) by any prompt edit
-                    // above, since all carry the full current embed.
-                    self.dirty_embed = Some(embed);
-                    if self.embed_message_id.is_some()
-                        && self.last_embed_edit.elapsed() >= EMBED_DEBOUNCE
-                    {
-                        self.flush_dirty_embed().await;
+                        self.writer.edit_embed(msg_id, embed);
                     }
                 }
                 CallEffect::DeleteEmbed => {
                     if let Some(msg_id) = self.embed_message_id {
-                        let start = std::time::Instant::now();
-                        if let Err(e) = self.discord.delete_message(self.post_channel, msg_id).await
-                        {
-                            tracing::warn!(error = %e, "failed to delete empty call embed");
-                        }
-                        self.metrics.discord_api_duration.record(
-                            start.elapsed().as_secs_f64(),
-                            &self.api_labels("delete_embed"),
-                        );
+                        self.writer.delete_embed(msg_id);
                     }
                 }
                 CallEffect::AttachAudio { ogg_data, filename } => {
-                    // The green embed edit already ran (just above, in this same
-                    // on_end batch). Hand the slow OGG upload to the shared
-                    // background worker so finalize returns promptly — the
-                    // handler never blocks on the upload, and a late transcript
-                    // edit can't be clobbered by it (the upload omits the embed).
+                    // The green embed edit was already enqueued (just above, in
+                    // this same on_end batch). Hand the OGG to the writer's
+                    // create lane, which posts it as a reply on the independent
+                    // message-create bucket — concurrent with, and never stalled
+                    // by, the edit lane. Never blocks; sheds if the lane is full.
                     if let Some(msg_id) = self.embed_message_id {
-                        self.attach_queue.submit(AttachJob {
-                            channel: self.post_channel,
-                            message_id: msg_id,
-                            ogg_data,
-                            filename,
-                            short_name: self.short_name.clone(),
-                            talkgroup: self.talkgroup,
-                        });
+                        self.writer.attach(msg_id, ogg_data, filename);
                     }
                 }
                 CallEffect::Transcribe { audio } => {
@@ -705,59 +468,6 @@ impl CallHandler {
         // rate-limit bucket from the edits above.
         self.reconcile_indicator().await;
         Ok(())
-    }
-
-    /// Label set for a `discord_api_duration` sample. Carries the per-channel
-    /// identity (`short_name` + `talkgroup`, one Discord channel per talkgroup)
-    /// alongside the operation, so a single hot channel saturating the per-channel
-    /// edit bucket is visible rather than hidden in the aggregate.
-    fn api_labels(&self, operation: &'static str) -> [KeyValue; 3] {
-        [
-            KeyValue::new("operation", operation),
-            KeyValue::new("short_name", self.short_name.clone()),
-            KeyValue::new("talkgroup", self.talkgroup),
-        ]
-    }
-
-    /// Note that the embed was just edited (or created): drop any pending
-    /// throttled edit it supersedes and reset the debounce window.
-    fn mark_embed_edited(&mut self) {
-        self.dirty_embed = None;
-        self.last_embed_edit = Instant::now();
-    }
-
-    /// Flush a pending throttled embed edit, if any, to Discord now.
-    async fn flush_dirty_embed(&mut self) {
-        let Some(embed) = self.dirty_embed.take() else {
-            return;
-        };
-        let Some(msg_id) = self.embed_message_id else {
-            return;
-        };
-        let serenity_embed = embed_data_to_serenity(&embed);
-        let start = std::time::Instant::now();
-        if let Err(e) = self
-            .discord
-            .edit_embed(self.post_channel, msg_id, serenity_embed)
-            .await
-        {
-            tracing::warn!(error = %e, "failed to flush throttled embed edit");
-        }
-        let elapsed = start.elapsed().as_secs_f64();
-        self.metrics
-            .discord_api_duration
-            .record(elapsed, &self.api_labels("edit_embed"));
-        self.attach_queue.note_edit_latency(self.post_channel, elapsed);
-        self.last_embed_edit = Instant::now();
-    }
-
-    /// Flush a pending throttled edit only once the debounce window has elapsed.
-    /// Driven by the run loop's debounce timer so a final transcript burst
-    /// doesn't sit unshown.
-    async fn maybe_flush_dirty_embed(&mut self) {
-        if self.dirty_embed.is_some() && self.last_embed_edit.elapsed() >= EMBED_DEBOUNCE {
-            self.flush_dirty_embed().await;
-        }
     }
 
     /// Reconcile the ⏳ reaction against whether transcription is in flight.
@@ -1227,71 +937,4 @@ fn decode_audio(bytes: &[u8]) -> Vec<f32> {
             f32::from(sample) / 32768.0
         })
         .collect()
-}
-
-/// Convert pure [`EmbedData`] to a serenity [`CreateEmbed`].
-fn embed_data_to_serenity(data: &EmbedData) -> CreateEmbed {
-    let mut embed = CreateEmbed::new()
-        .title(&data.title)
-        .colour(data.colour)
-        .footer(CreateEmbedFooter::new(&data.footer));
-
-    if let Some(desc) = &data.description {
-        embed = embed.description(desc);
-    }
-
-    for field in &data.fields {
-        embed = embed.field(&field.name, &field.value, field.inline);
-    }
-
-    embed
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn attach_mode_starts_on_edit_for_unknown_channel() {
-        let health = BucketHealth::new();
-        assert_eq!(health.attach_mode(ChannelId::new(1)), AttachMode::Edit);
-    }
-
-    #[test]
-    fn attach_mode_falls_back_to_reply_when_edits_are_slow() {
-        let health = BucketHealth::new();
-        let ch = ChannelId::new(1);
-        // A single very-slow edit (above the enter threshold) flips to reply.
-        health.note_edit_latency(ch, ATTACH_REPLY_ENTER_SECS + 1.0);
-        assert_eq!(health.attach_mode(ch), AttachMode::Reply);
-    }
-
-    #[test]
-    fn attach_mode_has_hysteresis() {
-        let health = BucketHealth::new();
-        let ch = ChannelId::new(1);
-        health.note_edit_latency(ch, 5.0);
-        assert_eq!(health.attach_mode(ch), AttachMode::Reply);
-        // A sample between the exit and enter thresholds must NOT flip back —
-        // that is the anti-flap latch.
-        health.note_edit_latency(ch, (ATTACH_REPLY_ENTER_SECS + ATTACH_REPLY_EXIT_SECS) / 2.0);
-        assert_eq!(health.attach_mode(ch), AttachMode::Reply);
-        // Sustained healthy edits eventually pull the EWMA below the exit
-        // threshold and return the channel to inline edits.
-        for _ in 0..20 {
-            health.note_edit_latency(ch, 0.2);
-        }
-        assert_eq!(health.attach_mode(ch), AttachMode::Edit);
-    }
-
-    #[test]
-    fn channels_are_tracked_independently() {
-        let health = BucketHealth::new();
-        let hot = ChannelId::new(1);
-        let calm = ChannelId::new(2);
-        health.note_edit_latency(hot, 10.0);
-        health.note_edit_latency(calm, 0.2);
-        assert_eq!(health.attach_mode(hot), AttachMode::Reply);
-        assert_eq!(health.attach_mode(calm), AttachMode::Edit);
-    }
 }

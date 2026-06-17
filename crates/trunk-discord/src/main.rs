@@ -3,6 +3,7 @@ mod aggregator_state;
 mod call_handler;
 mod call_state;
 mod channel_manager;
+mod channel_writer;
 mod discord;
 mod dispatcher;
 mod dispatcher_state;

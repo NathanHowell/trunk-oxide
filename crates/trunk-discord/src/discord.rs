@@ -3,11 +3,33 @@ use std::time::Duration;
 
 use anyhow::Result;
 use serenity::all::{
-    AutoArchiveDuration, ChannelType, CreateAttachment, CreateChannel, CreateEmbed, CreateMessage,
-    CreateThread, EditAttachments, EditMessage, GuildChannel, ReactionType,
+    AutoArchiveDuration, ChannelType, CreateAttachment, CreateChannel, CreateEmbed,
+    CreateEmbedFooter, CreateMessage, CreateThread, EditAttachments, EditMessage, GuildChannel,
+    ReactionType,
 };
 use serenity::http::Http;
 use serenity::model::id::{ChannelId, GuildId, MessageId};
+
+use crate::call_state::EmbedData;
+
+/// Convert pure [`EmbedData`] to a serenity [`CreateEmbed`]. Shared by the
+/// per-channel writer and any other embed sender.
+pub(crate) fn embed_data_to_serenity(data: &EmbedData) -> CreateEmbed {
+    let mut embed = CreateEmbed::new()
+        .title(&data.title)
+        .colour(data.colour)
+        .footer(CreateEmbedFooter::new(&data.footer));
+
+    if let Some(desc) = &data.description {
+        embed = embed.description(desc);
+    }
+
+    for field in &data.fields {
+        embed = embed.field(&field.name, &field.value, field.inline);
+    }
+
+    embed
+}
 
 /// Hard cap on a grey-critical Discord HTTP call (embed create/edit, reactions).
 /// Discord rate-limits message edits per-channel and serenity sleeps on 429s
@@ -26,23 +48,6 @@ const DISCORD_API_TIMEOUT: Duration = Duration::from_secs(45);
 // `from_mins` is not stable on our MSRV (1.94); keep `from_secs`.
 #[allow(clippy::duration_suboptimal_units)]
 const DISCORD_ATTACH_TIMEOUT: Duration = Duration::from_secs(180);
-
-/// How the call audio is attached to its embed.
-///
-/// [`AttachMode::Edit`] puts the OGG inline on the embed (the nicer UX) via
-/// `edit_message`, but that shares the per-channel *edit* rate-limit bucket with
-/// the transcript edits — on a hot channel the bucket saturates and the upload
-/// stalls in serenity's 429 queue until it times out, so the audio never lands.
-/// [`AttachMode::Reply`] posts the audio as a separate reply on the per-channel
-/// *message-create* bucket, which is independent of (and far more generous than)
-/// the edit bucket, at the cost of the audio appearing as a reply rather than
-/// inline. The uploader chooses per-channel from observed edit-bucket congestion
-/// (see [`crate::call_handler::AttachQueue`]).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum AttachMode {
-    Edit,
-    Reply,
-}
 
 /// Emoji used as the in-flight transcription indicator. A reaction lives in a
 /// different per-channel rate-limit bucket than message edits, so toggling it
@@ -78,6 +83,15 @@ impl DiscordClient {
     pub fn new(config: &trunk_config::DiscordConfig) -> Self {
         Self {
             http: Http::new(&config.bot_token),
+        }
+    }
+
+    /// Construct a client with a dummy token for tests that never make a real
+    /// request (no network until a method is actually awaited).
+    #[cfg(test)]
+    pub(crate) fn for_test() -> Self {
+        Self {
+            http: Http::new("test"),
         }
     }
 
@@ -127,52 +141,35 @@ impl DiscordClient {
         Ok(())
     }
 
-    /// Attach the call audio to its embed, via [`AttachMode::Edit`] (inline on
-    /// the embed) or [`AttachMode::Reply`] (a separate reply message). See
-    /// [`AttachMode`] for why the uploader picks between them per-channel.
+    /// Post the call audio as a *reply* to its embed message.
     ///
-    /// For [`AttachMode::Edit`], `EditAttachments::new()` starts from an empty
-    /// set and `.add` supplies the OGG; the embed is left untouched (only fields
-    /// set on [`EditMessage`] are sent). For [`AttachMode::Reply`], referencing
-    /// the embed message keeps the audio visually tied to it even when other
-    /// calls' embeds land in between. Carries the longer [`DISCORD_ATTACH_TIMEOUT`]
-    /// purely as a backstop.
+    /// A reply is a `POST` on the per-channel **message-create** bucket, which is
+    /// independent of (and far more generous than) the per-channel **edit**
+    /// bucket that the transcript edits ride. Keeping audio off the edit bucket
+    /// is what lets it upload promptly even while a hot channel's edits are
+    /// backed up — the per-channel writer runs this lane concurrently with the
+    /// edit lane for exactly that reason. Referencing the embed message keeps the
+    /// audio visually tied to its call when other embeds interleave. Carries the
+    /// longer [`DISCORD_ATTACH_TIMEOUT`] purely as a backstop.
     pub async fn attach_file(
         &self,
         channel_id: ChannelId,
         message_id: MessageId,
         file_data: Vec<u8>,
         filename: &str,
-        mode: AttachMode,
     ) -> Result<()> {
         let attachment = CreateAttachment::bytes(file_data, filename.to_owned());
-        match mode {
-            AttachMode::Edit => {
-                with_timeout_for(
-                    "attach_audio",
-                    DISCORD_ATTACH_TIMEOUT,
-                    channel_id.edit_message(
-                        &self.http,
-                        message_id,
-                        EditMessage::new().attachments(EditAttachments::new().add(attachment)),
-                    ),
-                )
-                .await?;
-            }
-            AttachMode::Reply => {
-                with_timeout_for(
-                    "attach_audio",
-                    DISCORD_ATTACH_TIMEOUT,
-                    channel_id.send_message(
-                        &self.http,
-                        CreateMessage::new()
-                            .reference_message((channel_id, message_id))
-                            .add_file(attachment),
-                    ),
-                )
-                .await?;
-            }
-        }
+        with_timeout_for(
+            "attach_audio",
+            DISCORD_ATTACH_TIMEOUT,
+            channel_id.send_message(
+                &self.http,
+                CreateMessage::new()
+                    .reference_message((channel_id, message_id))
+                    .add_file(attachment),
+            ),
+        )
+        .await?;
         Ok(())
     }
 

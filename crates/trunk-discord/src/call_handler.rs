@@ -1,5 +1,6 @@
-use std::sync::Arc;
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -14,7 +15,7 @@ use trunk_oxide_proto as proto;
 use trunk_database::Database;
 
 use crate::call_state::{CallEffect, CallState, CallStateConfig, EmbedData, SILENCE_RMS_THRESHOLD};
-use crate::discord::{DiscordClient, TRANSCRIBING_EMOJI};
+use crate::discord::{AttachMode, DiscordClient, TRANSCRIBING_EMOJI};
 use crate::grpc_transcriber::TranscriberConnection;
 use crate::metrics::Metrics;
 use crate::ogg_encoder::OggOpusEncoder;
@@ -81,21 +82,93 @@ pub struct AttachJob {
     pub talkgroup: i64,
 }
 
+/// Edit-bucket congestion (EWMA of recent `edit_embed` latency, in seconds)
+/// above which a channel's audio attaches fall back to a reply, and below which
+/// they return to inline embed edits. The gap between the two is hysteresis:
+/// without it a channel hovering at the threshold would flap paths every upload.
+/// Tuned from observed VM latencies — a healthy channel's edits sit ~0.2 s,
+/// while a saturated one runs tens of seconds with uploads timing out at 180 s.
+const ATTACH_REPLY_ENTER_SECS: f64 = 4.0;
+const ATTACH_REPLY_EXIT_SECS: f64 = 1.5;
+/// Weight of the newest sample in the per-channel edit-latency EWMA.
+const EDIT_LATENCY_EWMA_ALPHA: f64 = 0.3;
+
+/// Per-channel edit-bucket congestion estimate.
+#[derive(Default)]
+struct ChannelHealth {
+    /// EWMA of recent `edit_embed` latency, seconds. 0.0 = no samples yet.
+    edit_latency_ewma: f64,
+    /// Whether attaches on this channel currently fall back to a reply.
+    reply_mode: bool,
+}
+
+/// Shared per-channel edit-bucket congestion, written by the call handlers (each
+/// `edit_embed` they make) and read by the [`AttachQueue`] to pick an attach
+/// path. Keyed by Discord channel — the unit Discord rate-limits.
+///
+/// Using the *transcript* edit latency as the signal is deliberate: those edits
+/// ride the edit bucket no matter which path an attach takes, so the gauge does
+/// not collapse to "healthy" the instant uploads move to the reply bucket (a
+/// path-derived signal would, and the decision would flap). Hysteresis
+/// ([`ATTACH_REPLY_ENTER_SECS`] / [`ATTACH_REPLY_EXIT_SECS`]) holds the choice
+/// steady while a channel's EWMA sits between the thresholds.
+struct BucketHealth {
+    channels: StdMutex<HashMap<ChannelId, ChannelHealth>>,
+}
+
+impl BucketHealth {
+    fn new() -> Self {
+        Self {
+            channels: StdMutex::new(HashMap::new()),
+        }
+    }
+
+    /// Fold an observed `edit_embed` latency into the channel's EWMA and update
+    /// its reply-mode latch with hysteresis.
+    fn note_edit_latency(&self, channel: ChannelId, secs: f64) {
+        let mut map = self.channels.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let h = map.entry(channel).or_default();
+        h.edit_latency_ewma = if h.edit_latency_ewma == 0.0 {
+            secs
+        } else {
+            EDIT_LATENCY_EWMA_ALPHA * secs + (1.0 - EDIT_LATENCY_EWMA_ALPHA) * h.edit_latency_ewma
+        };
+        if h.edit_latency_ewma >= ATTACH_REPLY_ENTER_SECS {
+            h.reply_mode = true;
+        } else if h.edit_latency_ewma <= ATTACH_REPLY_EXIT_SECS {
+            h.reply_mode = false;
+        }
+    }
+
+    /// Attach path for this channel: a reply while the edit bucket is congested,
+    /// an inline embed edit otherwise. Channels with no samples start on Edit.
+    fn attach_mode(&self, channel: ChannelId) -> AttachMode {
+        let map = self.channels.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        match map.get(&channel) {
+            Some(h) if h.reply_mode => AttachMode::Reply,
+            _ => AttachMode::Edit,
+        }
+    }
+}
+
 /// Shared, bounded background uploader for audio attachments.
 ///
-/// A Discord file attach is `edit_message` with the OGG re-uploaded — slow
-/// (observed p90 ~160s) and sharing the per-channel edit bucket. Running it
-/// inline in `finalize` blocked handlers for the whole upload and piled them up.
-/// This runs uploads off the handler entirely, capping concurrency (a permit
-/// per upload) and total queued bytes (drops, with a metric, when saturated —
-/// graceful degradation rather than blocking a handler or growing memory).
-/// The embed is already green by the time a job is submitted, so a dropped or
-/// slow upload only affects whether the audio file appears, never the embed.
+/// A Discord file attach re-uploads the OGG — slow, and on the [`AttachMode::Edit`]
+/// path it shares the per-channel edit bucket. Running it inline in `finalize`
+/// blocked handlers for the whole upload and piled them up. This runs uploads
+/// off the handler entirely, capping concurrency (a permit per upload) and total
+/// queued bytes (drops, with a metric, when saturated — graceful degradation
+/// rather than blocking a handler or growing memory). The embed is already green
+/// by the time a job is submitted, so a dropped or slow upload only affects
+/// whether the audio file appears, never the embed. The path (edit vs reply) is
+/// chosen per-channel from [`BucketHealth`] so a hot channel sheds its uploads
+/// onto the independent message-create bucket instead of stalling on edits.
 pub struct AttachQueue {
     discord: Arc<DiscordClient>,
     metrics: Arc<Metrics>,
     permits: Arc<Semaphore>,
     inflight: Arc<AtomicUsize>,
+    health: Arc<BucketHealth>,
 }
 
 impl AttachQueue {
@@ -105,7 +178,14 @@ impl AttachQueue {
             metrics,
             permits: Arc::new(Semaphore::new(ATTACH_CONCURRENCY)),
             inflight: Arc::new(AtomicUsize::new(0)),
+            health: Arc::new(BucketHealth::new()),
         }
+    }
+
+    /// Record an observed `edit_embed` latency for a channel, feeding the
+    /// per-channel attach-path decision. Called by handlers after each edit.
+    pub fn note_edit_latency(&self, channel: ChannelId, secs: f64) {
+        self.health.note_edit_latency(channel, secs);
     }
 
     /// Enqueue an attachment for background upload. Never blocks; drops (with a
@@ -116,6 +196,12 @@ impl AttachQueue {
             tracing::warn!(channel = %job.channel, "audio attach dropped: upload backlog saturated");
             return;
         }
+        // Decide the path at submit time from current per-channel congestion.
+        let mode = self.health.attach_mode(job.channel);
+        let path = match mode {
+            AttachMode::Edit => "edit",
+            AttachMode::Reply => "reply",
+        };
         self.inflight.fetch_add(1, Ordering::Relaxed);
         let discord = Arc::clone(&self.discord);
         let metrics = Arc::clone(&self.metrics);
@@ -130,7 +216,7 @@ impl AttachQueue {
             };
             let start = std::time::Instant::now();
             if let Err(e) = discord
-                .attach_file(job.channel, job.message_id, job.ogg_data, &job.filename)
+                .attach_file(job.channel, job.message_id, job.ogg_data, &job.filename, mode)
                 .await
             {
                 tracing::warn!(error = %e, "failed to attach audio (background)");
@@ -139,6 +225,7 @@ impl AttachQueue {
                 start.elapsed().as_secs_f64(),
                 &[
                     KeyValue::new("operation", "attach_audio"),
+                    KeyValue::new("path", path),
                     KeyValue::new("short_name", job.short_name),
                     KeyValue::new("talkgroup", job.talkgroup),
                 ],
@@ -534,9 +621,11 @@ impl CallHandler {
                         self.discord
                             .edit_embed(self.post_channel, msg_id, serenity_embed)
                             .await?;
+                        let elapsed = start.elapsed().as_secs_f64();
                         self.metrics
                             .discord_api_duration
-                            .record(start.elapsed().as_secs_f64(), &self.api_labels("edit_embed"));
+                            .record(elapsed, &self.api_labels("edit_embed"));
+                        self.attach_queue.note_edit_latency(self.post_channel, elapsed);
                         self.mark_embed_edited();
                     }
                 }
@@ -654,9 +743,11 @@ impl CallHandler {
         {
             tracing::warn!(error = %e, "failed to flush throttled embed edit");
         }
+        let elapsed = start.elapsed().as_secs_f64();
         self.metrics
             .discord_api_duration
-            .record(start.elapsed().as_secs_f64(), &self.api_labels("edit_embed"));
+            .record(elapsed, &self.api_labels("edit_embed"));
+        self.attach_queue.note_edit_latency(self.post_channel, elapsed);
         self.last_embed_edit = Instant::now();
     }
 
@@ -1154,4 +1245,53 @@ fn embed_data_to_serenity(data: &EmbedData) -> CreateEmbed {
     }
 
     embed
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attach_mode_starts_on_edit_for_unknown_channel() {
+        let health = BucketHealth::new();
+        assert_eq!(health.attach_mode(ChannelId::new(1)), AttachMode::Edit);
+    }
+
+    #[test]
+    fn attach_mode_falls_back_to_reply_when_edits_are_slow() {
+        let health = BucketHealth::new();
+        let ch = ChannelId::new(1);
+        // A single very-slow edit (above the enter threshold) flips to reply.
+        health.note_edit_latency(ch, ATTACH_REPLY_ENTER_SECS + 1.0);
+        assert_eq!(health.attach_mode(ch), AttachMode::Reply);
+    }
+
+    #[test]
+    fn attach_mode_has_hysteresis() {
+        let health = BucketHealth::new();
+        let ch = ChannelId::new(1);
+        health.note_edit_latency(ch, 5.0);
+        assert_eq!(health.attach_mode(ch), AttachMode::Reply);
+        // A sample between the exit and enter thresholds must NOT flip back —
+        // that is the anti-flap latch.
+        health.note_edit_latency(ch, (ATTACH_REPLY_ENTER_SECS + ATTACH_REPLY_EXIT_SECS) / 2.0);
+        assert_eq!(health.attach_mode(ch), AttachMode::Reply);
+        // Sustained healthy edits eventually pull the EWMA below the exit
+        // threshold and return the channel to inline edits.
+        for _ in 0..20 {
+            health.note_edit_latency(ch, 0.2);
+        }
+        assert_eq!(health.attach_mode(ch), AttachMode::Edit);
+    }
+
+    #[test]
+    fn channels_are_tracked_independently() {
+        let health = BucketHealth::new();
+        let hot = ChannelId::new(1);
+        let calm = ChannelId::new(2);
+        health.note_edit_latency(hot, 10.0);
+        health.note_edit_latency(calm, 0.2);
+        assert_eq!(health.attach_mode(hot), AttachMode::Reply);
+        assert_eq!(health.attach_mode(calm), AttachMode::Edit);
+    }
 }

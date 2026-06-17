@@ -18,15 +18,31 @@ use serenity::model::id::{ChannelId, GuildId, MessageId};
 /// keep going, so the grey→green transition is never held hostage by the bucket.
 const DISCORD_API_TIMEOUT: Duration = Duration::from_secs(45);
 
-/// Longer cap for audio attachment. The audio rides an `edit_message` on the
-/// embed (per-channel *edit* bucket), so keep a generous backstop: it is safe to
-/// wait long because in `on_end` the green embed edit runs *before* the attach,
-/// so the embed is already finalized (not grey) by the time we get here — the
-/// attach is purely best-effort and post-transition, so a generous bound only
-/// delays the audio file appearing, never the grey→green flip.
+/// Longer cap for audio attachment, whichever path it takes. Safe to wait long
+/// because in `on_end` the green embed edit runs *before* the attach, so the
+/// embed is already finalized (not grey) by the time we get here — the attach is
+/// purely best-effort and post-transition, so a generous bound only delays the
+/// audio file appearing, never the grey→green flip.
 // `from_mins` is not stable on our MSRV (1.94); keep `from_secs`.
 #[allow(clippy::duration_suboptimal_units)]
 const DISCORD_ATTACH_TIMEOUT: Duration = Duration::from_secs(180);
+
+/// How the call audio is attached to its embed.
+///
+/// [`AttachMode::Edit`] puts the OGG inline on the embed (the nicer UX) via
+/// `edit_message`, but that shares the per-channel *edit* rate-limit bucket with
+/// the transcript edits — on a hot channel the bucket saturates and the upload
+/// stalls in serenity's 429 queue until it times out, so the audio never lands.
+/// [`AttachMode::Reply`] posts the audio as a separate reply on the per-channel
+/// *message-create* bucket, which is independent of (and far more generous than)
+/// the edit bucket, at the cost of the audio appearing as a reply rather than
+/// inline. The uploader chooses per-channel from observed edit-bucket congestion
+/// (see [`crate::call_handler::AttachQueue`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AttachMode {
+    Edit,
+    Reply,
+}
 
 /// Emoji used as the in-flight transcription indicator. A reaction lives in a
 /// different per-channel rate-limit bucket than message edits, so toggling it
@@ -111,38 +127,52 @@ impl DiscordClient {
         Ok(())
     }
 
-    /// Attach the call audio by editing it onto its embed message.
+    /// Attach the call audio to its embed, via [`AttachMode::Edit`] (inline on
+    /// the embed) or [`AttachMode::Reply`] (a separate reply message). See
+    /// [`AttachMode`] for why the uploader picks between them per-channel.
     ///
-    /// This rides an `edit_message` on the embed, which shares the per-channel
-    /// *edit* rate-limit bucket with the transcript edits, so the audio appears
-    /// inline on the embed itself rather than as a separate reply. We previously
-    /// posted it as a standalone reply on the *message-create* bucket to dodge a
-    /// saturated edit bucket (429 tails of 180+ s on hot channels); VM metrics
-    /// now show the edit bucket sitting at sub-second latency with no slow tail,
-    /// so the inline UX is worth folding the attach back onto it. The per-channel
-    /// labels on `discord_api_duration` (operation=`attach_audio`/`edit_embed`)
-    /// exist so a hot-channel regression is visible. `EditAttachments::new()`
-    /// starts from an empty set and `.add` supplies the OGG; the embed is left
-    /// untouched (only fields set on [`EditMessage`] are sent). Carries the
-    /// longer [`DISCORD_ATTACH_TIMEOUT`] purely as a backstop.
+    /// For [`AttachMode::Edit`], `EditAttachments::new()` starts from an empty
+    /// set and `.add` supplies the OGG; the embed is left untouched (only fields
+    /// set on [`EditMessage`] are sent). For [`AttachMode::Reply`], referencing
+    /// the embed message keeps the audio visually tied to it even when other
+    /// calls' embeds land in between. Carries the longer [`DISCORD_ATTACH_TIMEOUT`]
+    /// purely as a backstop.
     pub async fn attach_file(
         &self,
         channel_id: ChannelId,
         message_id: MessageId,
         file_data: Vec<u8>,
         filename: &str,
+        mode: AttachMode,
     ) -> Result<()> {
         let attachment = CreateAttachment::bytes(file_data, filename.to_owned());
-        with_timeout_for(
-            "attach_audio",
-            DISCORD_ATTACH_TIMEOUT,
-            channel_id.edit_message(
-                &self.http,
-                message_id,
-                EditMessage::new().attachments(EditAttachments::new().add(attachment)),
-            ),
-        )
-        .await?;
+        match mode {
+            AttachMode::Edit => {
+                with_timeout_for(
+                    "attach_audio",
+                    DISCORD_ATTACH_TIMEOUT,
+                    channel_id.edit_message(
+                        &self.http,
+                        message_id,
+                        EditMessage::new().attachments(EditAttachments::new().add(attachment)),
+                    ),
+                )
+                .await?;
+            }
+            AttachMode::Reply => {
+                with_timeout_for(
+                    "attach_audio",
+                    DISCORD_ATTACH_TIMEOUT,
+                    channel_id.send_message(
+                        &self.http,
+                        CreateMessage::new()
+                            .reference_message((channel_id, message_id))
+                            .add_file(attachment),
+                    ),
+                )
+                .await?;
+            }
+        }
         Ok(())
     }
 

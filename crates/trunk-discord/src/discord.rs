@@ -173,35 +173,6 @@ impl DiscordClient {
         Ok(())
     }
 
-    /// Attach the call audio *inline* on its embed message (a `PATCH` on the
-    /// per-channel **edit** bucket). `EditAttachments::new()` starts from an empty
-    /// set and `.add` supplies the OGG; the embed body is left untouched (only
-    /// fields set on [`EditMessage`] are sent, so a later transcript edit that
-    /// sets only `.embed(...)` keeps the file). The nicer UX, but it competes
-    /// with transcript edits on the same bucket — the per-channel writer only
-    /// uses it while that channel's edit lane is measured to be calm, else it
-    /// falls back to [`Self::attach_file`].
-    pub async fn attach_file_inline(
-        &self,
-        channel_id: ChannelId,
-        message_id: MessageId,
-        file_data: Vec<u8>,
-        filename: &str,
-    ) -> Result<()> {
-        let attachment = CreateAttachment::bytes(file_data, filename.to_owned());
-        with_timeout_for(
-            "attach_audio",
-            DISCORD_ATTACH_TIMEOUT,
-            channel_id.edit_message(
-                &self.http,
-                message_id,
-                EditMessage::new().attachments(EditAttachments::new().add(attachment)),
-            ),
-        )
-        .await?;
-        Ok(())
-    }
-
     /// Post an embed carrying an inline image attachment (the stats chart).
     /// The embed should reference the image via `attachment://{filename}`.
     /// Lives in the summary thread — a separate per-channel rate bucket from

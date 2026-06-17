@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "trunk_oxide",
+  "project_id": "20ee17b1-d7db-4cfb-b0a5-17c7de551d17"
+}

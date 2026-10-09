@@ -27,7 +27,7 @@ cargo test -p trunk-config
 cargo fmt
 ```
 
-## Workspace Structure (11 crates)
+## Workspace Structure (12 crates)
 
 - **trunk-oxide** — Main binary. Loads TOML config, spawns a dedicated OS thread for C++ FFI (TrContext is !Send), runs tokio for gRPC/timers/signals.
 - **trunk-recorder-sys** — cxx bridge to libtrunk-recorder.so. build.rs probes gnuradio/osmosdr/uhd via pkg-config and generates compatibility stubs.
@@ -38,6 +38,7 @@ cargo fmt
 - **trunk-discord** — Discord bot that subscribes to gRPC events, posts call embeds, manages threads, encodes OGG audio.
 - **trunk-whisperer** — Speech-to-text service using whisper-rs (whisper.cpp FFI). Optional CUDA feature. Serves `Transcriber`.
 - **trunk-parakeet** — Speech-to-text service using parakeet-rs (NVIDIA Parakeet ASR via ONNX Runtime). Drop-in replacement for trunk-whisperer — serves the same `Transcriber` gRPC service on the same Unix socket; backends are swapped at the container/image level, not via trunk-discord config.
+- **trunk-whistle** — Speech-to-text service using Cactus Whistle (16.9 MB CPU-only model) via the prebuilt `libneedle.a` C engine (FFI in `needle.rs`, the only `allow(unsafe_code)` outside the sys crates). Same `Transcriber` gRPC service/socket as the other two backends. Not in `default-members`: building needs `NEEDLE_LIB_DIR` (+ libc++ ≥ 21 static libs); use `Dockerfile.whistle` / `--profile whistle`.
 - **trunk-solver** — Z3 SMT solver for optimal SDR device frequency/sample-rate/gain assignment.
 
 ## Architecture

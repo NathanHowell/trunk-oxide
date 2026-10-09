@@ -8,6 +8,7 @@ members = [
     "crates/trunk-transcriber-proto",
     "crates/trunk-whisperer",
     "crates/trunk-parakeet",
+    "crates/trunk-whistle",
     "crates/trunk-database",
     "crates/trunk-config",
     "crates/trunk-discord",

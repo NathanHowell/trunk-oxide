@@ -1,0 +1,57 @@
+# trunk-whistle: standalone gRPC speech-to-text service (Cactus Whistle ASR)
+# Drop-in replacement for trunk-whisperer / trunk-parakeet — serves the same
+# Transcriber gRPC service on the same Unix socket. Swap the container, leave
+# trunk-discord's config unchanged.
+#
+# Whistle is a 16.9 MB CPU-only model run by Cactus's C++ "needle" engine. The
+# engine ships prebuilt as libneedle.a (+ needle.h) per platform; we fetch the
+# linux-x86_64 archive at a pinned Hugging Face revision and link it statically
+# into the Rust binary (build.rs reads NEEDLE_LIB_DIR). Nothing C++ is
+# needed at runtime beyond glibc: the archive is built against LLVM libc++, which
+# we link statically (libc++-NN-dev/libc++abi-NN-dev), so distroless/cc suffices.
+#
+# Requires BuildKit (default in modern Docker / `docker buildx`).
+
+FROM rust:trixie AS builder
+
+# libneedle.a needs a recent libc++ (it references std::__1::__hash_memory, which
+# the unversioned libc++-dev -> LLVM 19 lacks), so pin the versioned LLVM 22
+# packages. Their static archives live in /usr/lib/llvm-22/lib, which build.rs
+# is pointed at via LIBCXX_LIB_DIR.
+ARG LLVM_VER=22
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libc++-${LLVM_VER}-dev \
+    libc++abi-${LLVM_VER}-dev \
+    libprotobuf-dev \
+    protobuf-compiler \
+    ca-certificates curl \
+    && rm -rf /var/lib/apt/lists/*
+ENV LIBCXX_LIB_DIR=/usr/lib/llvm-${LLVM_VER}/lib
+
+# Pinned Cactus-Compute/needle3 revision. Bump deliberately: the archive isn't
+# versioned independently of the repo.
+ARG NEEDLE_REV=2ae11323dc000f5e70c49f7403efa6af12ba9e67
+RUN mkdir -p /opt/needle \
+    && curl -fSL -o /opt/needle/libneedle.a \
+       "https://huggingface.co/Cactus-Compute/needle3/resolve/${NEEDLE_REV}/linux-x86_64/libneedle.a"
+ENV NEEDLE_LIB_DIR=/opt/needle
+
+WORKDIR /build
+
+COPY . .
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry \
+    --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git \
+    --mount=type=cache,target=/build/target,id=target-whistle \
+    cargo build --release -p trunk-whistle \
+    && cp target/release/trunk-whistle /usr/local/bin/trunk-whistle
+
+# Runtime — distroless for minimal attack surface
+FROM ghcr.io/grpc-ecosystem/grpc-health-probe:v0.4.45 AS health-probe
+
+FROM gcr.io/distroless/cc-debian13:nonroot
+
+COPY --from=health-probe /ko-app/grpc-health-probe /usr/local/bin/grpc_health_probe
+COPY --from=builder /usr/local/bin/trunk-whistle /usr/local/bin/trunk-whistle
+
+ENTRYPOINT ["/usr/local/bin/trunk-whistle"]

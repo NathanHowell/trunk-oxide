@@ -138,6 +138,57 @@ services:
       retries: 3
       start_period: 30s
 
+  # Downloads the Whistle weights (single 16.9 MB .cact file) into the
+  # whistle-models volume, mirroring fetch-parakeet-model. MODEL_REV pins the
+  # Hugging Face revision of Cactus-Compute/whistle.
+  fetch-whistle-model:
+    profiles: ["whistle"]
+    image: debian:trixie-slim
+    volumes:
+      - whistle-models:/models
+    environment:
+      - MODEL_REV=b358ddadd89b7a713b5aa131f23032d3cca1b251
+    command:
+      - bash
+      - -c
+      - |
+        set -e
+        if [ -f /models/whistle.cact ]; then
+          echo "Model already present"
+          exit 0
+        fi
+        apt-get update -qq && apt-get install -y -qq --no-install-recommends curl ca-certificates
+        curl -fSL -o /models/whistle.cact.tmp "https://huggingface.co/Cactus-Compute/whistle/resolve/$$MODEL_REV/whistle.cact"
+        mv /models/whistle.cact.tmp /models/whistle.cact
+
+  # Drop-in alternative to trunk-whisperer / trunk-parakeet: serves the same
+  # Transcriber gRPC service on the same `whisperer-socket`. Enable with
+  # `--profile whistle` and disable the other transcribers (only one backend
+  # may own the socket at a time). trunk-discord's config is unchanged.
+  trunk-whistle:
+    profiles: ["whistle"]
+    build:
+      context: .
+      dockerfile: Dockerfile.whistle
+    user: "0:0"
+    volumes:
+      - whisperer-socket:/run/service
+      - ./config-whistle.toml:/etc/trunk-whistle/config.toml:ro
+      - whistle-models:/models:ro
+    depends_on:
+      fetch-whistle-model:
+        condition: service_completed_successfully
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
+      - OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://victoriametrics:8428/opentelemetry/api/v1/push
+      - RUST_LOG=info
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr", "unix:///run/service/grpc.sock"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 30s
+
   trunk-discord:
     restart: unless-stopped
     build:
@@ -149,7 +200,7 @@ services:
       - whisperer-socket:/run/trunk-whisperer
       - discord-socket:/run/service
       - ./config-discord.toml:/etc/trunk-discord/config.toml:ro
-    # The transcriber backend is selected by profile (whisper | parakeet), so
+    # The transcriber backend is selected by profile (whisper | parakeet | whistle), so
     # discord can't statically depend on a specific one (podman-compose chokes
     # on a cross-profile depends_on and leaves discord in "Created"). Instead it
     # depends only on trunk-oxide and relies on restart: unless-stopped to retry
@@ -198,4 +249,5 @@ volumes:
   discord-socket:
   whisper-models:
   parakeet-models:
+  whistle-models:
   victoriametrics-data:

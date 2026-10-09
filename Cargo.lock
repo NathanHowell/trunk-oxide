@@ -3841,6 +3841,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "trunk-whistle"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argfile",
+ "clap",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "pid1",
+ "prost",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "toml",
+ "tonic",
+ "tonic-health",
+ "tonic-prost",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "trunk-transcriber-proto",
+ "wild",
+]
+
+[[package]]
 name = "try-lock"
 version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"

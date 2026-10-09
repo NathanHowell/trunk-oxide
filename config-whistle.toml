@@ -1,0 +1,20 @@
+# trunk-whistle: standalone gRPC speech-to-text service (Cactus Whistle ASR)
+# Drop-in replacement for trunk-whisperer / trunk-parakeet — serves the same
+# Transcriber gRPC service on the same Unix socket.
+[grpc]
+listen_path = "/run/service/grpc.sock"
+
+[whistle]
+# whistle.cact weights (16.9 MB, fetched by the fetch-whistle-model service).
+model_path = "/models/whistle.cact"
+# Whistle handles en/de/fr/es/it/nl/pl. Pinned to English because language
+# auto-detection can misfire on short, noisy radio transmissions. Comment out
+# to auto-detect.
+language = "en"
+# Optional decode biasing toward domain words (unit names, streets, codes).
+# keywords = ["Siobhan"]
+keywords = []
+# Priority-admission permits. The engine holds one process-global, non-thread-
+# safe model, so decode is serialized regardless; leave at 1 to keep priority
+# ordering exact.
+max_concurrent = 1

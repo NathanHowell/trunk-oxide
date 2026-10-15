@@ -169,15 +169,15 @@ namespace gr {
         std::pair<bool,long> terminated = d_sync->get_terminated(slot_id);
         if ((src_id != -1) && (src_id != 0)) {
             BOOST_LOG_TRIVIAL(debug) << "DMR Frame Assembler - sending src: " << src_id;
-            add_item_tag(0, nitems_written(0), pmt::intern("src_id"), pmt::from_long(src_id), pmt::intern(name()));
+            add_item_tag(slot_id, nitems_written(slot_id), pmt::intern("src_id"), pmt::from_long(src_id), pmt::intern(name()));
           }
           if (dst_id != -1) {
             BOOST_LOG_TRIVIAL(debug) << "DMR Frame Assembler - sending dst: " << dst_id;
-            add_item_tag(0, nitems_written(0), pmt::intern("grp_id"), pmt::from_long(dst_id), pmt::intern(name()));
+            add_item_tag(slot_id, nitems_written(slot_id), pmt::intern("grp_id"), pmt::from_long(dst_id), pmt::intern(name()));
           }
           if (cc != 0) {
             BOOST_LOG_TRIVIAL(debug) << "DMR Frame Assembler - sending cc: " << cc;
-            add_item_tag(0, nitems_written(0), pmt::intern("cc"), pmt::from_long(cc), pmt::intern(name()));
+            add_item_tag(slot_id, nitems_written(slot_id), pmt::intern("cc"), pmt::from_long(cc), pmt::intern(name()));
           }
           /*
         if (terminated) {

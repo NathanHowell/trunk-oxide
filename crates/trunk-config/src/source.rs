@@ -80,6 +80,13 @@ pub struct SourceConfig {
     pub analog_recorders: i32,
     #[serde(default)]
     pub sigmf_recorders: i32,
+    /// Route this source's P25 voice recorders through one shared
+    /// fast-convolution channelizer (a single forward FFT per block for all
+    /// recorders) instead of a private frequency-translating filter per
+    /// recorder. Much cheaper with several recorders. Analog, DMR, SigMF and
+    /// control-channel decoders are unaffected.
+    #[serde(default)]
+    pub shared_channelizer: bool,
     #[serde(default)]
     pub enabled: Option<bool>,
     /// Named gain stages, e.g. `{ "IF" = 20.0, "LNA" = 15.0 }`.

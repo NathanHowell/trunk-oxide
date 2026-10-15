@@ -175,6 +175,11 @@ void Source::set_iq_source(std::string iq_file, bool repeat, double center, doub
   attached_selector = false;
   next_selector_port = 0;
 
+  recorder_selector = gr::blocks::selector::make(sizeof(gr_complex), 0, 0);
+
+  // Same signal detector as the hardware ctor; conventional recorders attach it.
+  signal_detector = signal_detector_cvf::make(rate, 1024, 0, -45, 0.9, true, 0.8, 0.01, 0.0, 50000, "");
+
   iq_file_source::sptr iq_file_src;
   iq_file_src = iq_file_source::make(iq_file, this->rate, repeat);
 
@@ -230,6 +235,22 @@ void Source::attach_selector(gr::top_block_sptr tb) {
   }
 }
 
+void Source::attach_channelizer(gr::top_block_sptr tb) {
+  if (!channelizer && channelizer_factory) {
+    channelizer = shared_channelizer::make(channelizer_factory(rate));
+    tb->connect(source_block, 0, channelizer, 0);
+    BOOST_LOG_TRIVIAL(info) << "Source " << src_num << ": shared channelizer attached, channel rate " << channelizer->out_rate() << " Hz";
+  }
+}
+
+void Source::channelizer_set_enabled(unsigned int port, bool enabled) {
+  channelizer->set_port_enabled(port, enabled);
+}
+
+void Source::channelizer_set_offset(unsigned int port, double offset_hz) {
+  channelizer->set_port_offset(port, offset_hz);
+}
+
 void Source::attach_detector(gr::top_block_sptr tb) {
   if (!attached_detector) {
     attached_detector = true;
@@ -282,10 +303,18 @@ double Source::get_rate() {
 }
 
 bool Source::got_samples() {
-  if (attached_selector) {
-    return recorder_selector->got_samples();
+  if (!attached_selector && !channelizer) {
+    return true;
   }
-  return true;
+  // Query both (each call resets its flag); the source is alive if either block ran.
+  bool got = false;
+  if (attached_selector) {
+    got = recorder_selector->got_samples() || got;
+  }
+  if (channelizer) {
+    got = channelizer->got_samples() || got;
+  }
+  return got;
 }
 
 std::string Source::get_driver() {
@@ -465,16 +494,26 @@ void Source::create_analog_recorders(gr::top_block_sptr tb, int r) {
 void Source::create_digital_recorders(gr::top_block_sptr tb, int r) {
 
   if (r > 0) {
-    attach_selector(tb);
+    if (channelizer_factory) {
+      attach_channelizer(tb);
+    } else {
+      attach_selector(tb);
+    }
   }
   max_digital_recorders = r;
 
   for (int i = 0; i < max_digital_recorders; i++) {
     p25_recorder_sptr log = make_p25_recorder(shared_from_this(), P25);
     digital_recorders.push_back(log);
-    log->set_selector_port(next_selector_port);
-    tb->connect(recorder_selector, next_selector_port, log, 0);
-    next_selector_port++;
+    if (channelizer) {
+      log->set_selector_port(next_channelizer_port);
+      tb->connect(channelizer, next_channelizer_port, log, 0);
+      next_channelizer_port++;
+    } else {
+      log->set_selector_port(next_selector_port);
+      tb->connect(recorder_selector, next_selector_port, log, 0);
+      next_selector_port++;
+    }
   }
 }
 
@@ -538,13 +577,23 @@ p25_recorder_sptr Source::create_digital_conventional_recorder(gr::top_block_spt
   // Not adding it to the vector of digital_recorders. We don't want it to be available for trunk recording.
   // Conventional recorders are tracked seperately in digital_conv_recorders
   attach_detector(tb);
-  attach_selector(tb);
+  if (channelizer_factory) {
+    attach_channelizer(tb);
+  } else {
+    attach_selector(tb);
+  }
 
   p25_recorder_sptr log = make_p25_recorder(shared_from_this(), P25C);
   digital_conv_recorders.push_back(log);
-  log->set_selector_port(next_selector_port);
-  tb->connect(recorder_selector, next_selector_port, log, 0);
-  next_selector_port++;
+  if (channelizer) {
+    log->set_selector_port(next_channelizer_port);
+    tb->connect(channelizer, next_channelizer_port, log, 0);
+    next_channelizer_port++;
+  } else {
+    log->set_selector_port(next_selector_port);
+    tb->connect(recorder_selector, next_selector_port, log, 0);
+    next_selector_port++;
+  }
   return log;
 }
 

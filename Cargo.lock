@@ -3639,6 +3639,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "trunk-channelizer"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "num-complex",
+ "rayon",
+ "rustfft",
+]
+
+[[package]]
 name = "trunk-config"
 version = "0.1.0"
 dependencies = [
@@ -3783,12 +3793,15 @@ dependencies = [
 name = "trunk-recorder-sys"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "cmake",
  "cxx",
  "cxx-build",
+ "num-complex",
  "pkg-config",
  "tokio",
  "tracing",
+ "trunk-channelizer",
 ]
 
 [[package]]

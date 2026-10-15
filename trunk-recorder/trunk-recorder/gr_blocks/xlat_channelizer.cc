@@ -2,9 +2,9 @@
 #include <cmath>
 #include <stdexcept>
 
-xlat_channelizer::sptr xlat_channelizer::make(double input_rate, int samples_per_symbol, double symbol_rate, double bandwidth, double center_freq, bool use_squelch, double excess_bw) {
+xlat_channelizer::sptr xlat_channelizer::make(double input_rate, int samples_per_symbol, double symbol_rate, double bandwidth, double center_freq, bool use_squelch, double excess_bw, double shared_rate) {
 
-  return gnuradio::get_initial_sptr(new xlat_channelizer(input_rate, samples_per_symbol, symbol_rate, bandwidth, center_freq, use_squelch, excess_bw));
+  return gnuradio::get_initial_sptr(new xlat_channelizer(input_rate, samples_per_symbol, symbol_rate, bandwidth, center_freq, use_squelch, excess_bw, shared_rate));
 }
 
 const int xlat_channelizer::smartnet_samples_per_symbol;
@@ -42,7 +42,7 @@ xlat_channelizer::DecimSettings xlat_channelizer::get_decim(long speed) {
   return decim_settings;
 }
 
-xlat_channelizer::xlat_channelizer(double input_rate, int samples_per_symbol, double symbol_rate, double bandwidth, double center_freq, bool use_squelch, double excess_bw=0.2)
+xlat_channelizer::xlat_channelizer(double input_rate, int samples_per_symbol, double symbol_rate, double bandwidth, double center_freq, bool use_squelch, double excess_bw, double shared_rate)
     : gr::hier_block2("xlat_channelizer_ccf",
                       gr::io_signature::make(1, 1, sizeof(gr_complex)),
                       gr::io_signature::make(1, 1, sizeof(gr_complex))),
@@ -51,29 +51,37 @@ xlat_channelizer::xlat_channelizer(double input_rate, int samples_per_symbol, do
       d_bandwidth(bandwidth),
       d_samples_per_symbol(samples_per_symbol),
       d_symbol_rate(symbol_rate),
-      d_use_squelch(use_squelch) {
+      d_use_squelch(use_squelch),
+      d_shared(shared_rate > 0.0) {
 
   long channel_rate = d_symbol_rate * d_samples_per_symbol;
   // long if_rate = 12500;
 
   const float pi = M_PI;
 
-  int initial_decim = floor(input_rate / 96000);
-  initial_rate = double(input_rate) / double(initial_decim);
-  int decim = floor(initial_rate / channel_rate);
-  double resampled_rate = double(initial_rate) / double(decim);
+  double resampled_rate;
+  int decim = 1;
+  if (d_shared) {
+    // shared_channelizer already delivered this channel at shared_rate.
+    initial_rate = shared_rate;
+    resampled_rate = shared_rate;
+    BOOST_LOG_TRIVIAL(info) << "\t Xlating Channelizer (shared) - input rate: " << shared_rate;
+  } else {
+    int initial_decim = floor(input_rate / 96000);
+    initial_rate = double(input_rate) / double(initial_decim);
+    decim = floor(initial_rate / channel_rate);
+    resampled_rate = double(initial_rate) / double(decim);
 
+    std::vector<gr_complex> if_coeffs;
+    if_coeffs = gr::filter::firdes::complex_band_pass_2(1, input_rate, -24000, 24000, 12000, 10);
 
-  std::vector<gr_complex> if_coeffs;
-  if_coeffs = gr::filter::firdes::complex_band_pass_2(1, input_rate, -24000, 24000, 12000, 10);
+    freq_xlat = make_freq_xlating_fft_filter(initial_decim, if_coeffs, 0, input_rate); // inital_lpf_taps, 0, input_rate);
 
-  freq_xlat = make_freq_xlating_fft_filter(initial_decim, if_coeffs, 0, input_rate); // inital_lpf_taps, 0, input_rate);
+    std::vector<float> channel_lpf_taps = gr::filter::firdes::low_pass_2(1.0, initial_rate, d_bandwidth / 2, d_bandwidth / 4, 60);
+    channel_lpf = gr::filter::fft_filter_ccf::make(decim, channel_lpf_taps);
 
-  std::vector<float> channel_lpf_taps = gr::filter::firdes::low_pass_2(1.0, initial_rate, d_bandwidth / 2, d_bandwidth / 4, 60);
-  channel_lpf = gr::filter::fft_filter_ccf::make(decim, channel_lpf_taps);
-
-  // BOOST_LOG_TRIVIAL(info) << "\t Xlating Channelizer single-stage decimator - Decim: " << decimation << " Resampled Rate: " << resampled_rate << " Lowpass Taps: " << if_coeffs.size();
-  BOOST_LOG_TRIVIAL(info) << "\t Xlating Channelizer decimator - freq_xlating taps: " << if_coeffs.size() << " Decim: " << decim << " Resampled Rate: " << resampled_rate << " Lowpass Taps: " << channel_lpf_taps.size();
+    BOOST_LOG_TRIVIAL(info) << "\t Xlating Channelizer decimator - freq_xlating taps: " << if_coeffs.size() << " Decim: " << decim << " Resampled Rate: " << resampled_rate << " Lowpass Taps: " << channel_lpf_taps.size();
+  }
   // ARB Resampler
   double arb_rate = channel_rate / resampled_rate;
 
@@ -138,28 +146,35 @@ xlat_channelizer::xlat_channelizer(double input_rate, int samples_per_symbol, do
   fll_band_edge = gr::digital::fll_band_edge_cc::make(d_samples_per_symbol, excess_bw, 2 * d_samples_per_symbol + 1, fll_loop_bw_legacy);
 #endif
 
-  connect(self(), 0, freq_xlat, 0);
-  connect(freq_xlat, 0, channel_lpf, 0);
+  // "head" is whatever block delivers the single channel at initial_rate.
+  gr::basic_block_sptr head;
+  if (d_shared) {
+    head = self();
+  } else {
+    connect(self(), 0, freq_xlat, 0);
+    connect(freq_xlat, 0, channel_lpf, 0);
+    head = channel_lpf;
+  }
   if (d_use_squelch) {
     BOOST_LOG_TRIVIAL(info) << "Conventional - with Squelch";
     if (arb_rate == 1.0) {
-      connect(channel_lpf, 0, squelch, 0);
+      connect(head, 0, squelch, 0);
     } else {
-      connect(channel_lpf, 0, arb_resampler, 0);
+      connect(head, 0, arb_resampler, 0);
       connect(arb_resampler, 0, squelch, 0);
     }
     connect(squelch, 0, rms_agc, 0);
   } else {
     if (arb_rate == 1.0) {
-      connect(channel_lpf, 0, rms_agc, 0);
+      connect(head, 0, rms_agc, 0);
     } else {
-      connect(channel_lpf, 0, arb_resampler, 0);
+      connect(head, 0, arb_resampler, 0);
       connect(arb_resampler, 0, rms_agc, 0);
     }
   }
 
   // Tap the power probe off the channel filter output (before resampling/squelch)
-  connect(channel_lpf, 0, pwr_probe, 0);
+  connect(head, 0, pwr_probe, 0);
 
   connect(rms_agc, 0, fll_band_edge, 0);
   connect(fll_band_edge, 0, self(), 0);
@@ -184,6 +199,13 @@ double xlat_channelizer::get_pwr() {
 }
 
 void xlat_channelizer::tune_offset(double f) {
+  if (d_shared) {
+    // f is (source centre - channel); the channelizer wants channel - centre.
+    if (tune_hook) {
+      tune_hook(-f);
+    }
+    return;
+  }
 
   float freq = static_cast<float>(f);
 
@@ -191,6 +213,9 @@ void xlat_channelizer::tune_offset(double f) {
 }
 
 void xlat_channelizer::set_max_dev(double max_dev) {
+  if (d_shared) {
+    return; // channel filter lives in the shared channelizer
+  }
   std::vector<float> channel_lpf_taps = gr::filter::firdes::low_pass_2(1.0, initial_rate, max_dev, d_bandwidth / 2, 60);
   channel_lpf->set_taps(channel_lpf_taps);
 }

@@ -264,6 +264,7 @@ pub mod ffi {
         pub digital_recorders: i32,
         pub analog_recorders: i32,
         pub sigmf_recorders: i32,
+        pub shared_channelizer: bool,
     }
 
     /// Minimal device parameters needed to open a source standalone for
@@ -489,6 +490,27 @@ pub mod ffi {
             alias: &str,
             source: &str,
             talkgroup_id: i64,
+        );
+    }
+
+    // ── Shared FFT channelizer engine (called from the GR thread / control threads) ──
+
+    extern "Rust" {
+        type SharedChannelizerHandle;
+
+        fn shared_channelizer_new(sample_rate: f64) -> Result<Box<SharedChannelizerHandle>>;
+        fn hop(self: &SharedChannelizerHandle) -> usize;
+        fn out_per_block(self: &SharedChannelizerHandle) -> usize;
+        fn out_rate(self: &SharedChannelizerHandle) -> f64;
+        fn set_channel(self: &SharedChannelizerHandle, port: u32, offset_hz: f64);
+        fn clear_channel(self: &SharedChannelizerHandle, port: u32);
+        /// `input`: `hop` interleaved IQ samples. `output`: slot-major
+        /// `out_per_block` IQ samples per port. `active[p]` = 1 if port p has output.
+        fn process(
+            self: &SharedChannelizerHandle,
+            input: &[f32],
+            output: &mut [f32],
+            active: &mut [u8],
         );
     }
 
@@ -752,6 +774,61 @@ impl EventHandlerBox {
 #[allow(clippy::boxed_local)]
 fn drop_event_handler_box(_handler: Box<EventHandlerBox>) {
     // Box is dropped automatically
+}
+
+// ── Shared FFT channelizer ──
+
+/// Rust half of the C++ `channelizer_backend` (see bridge.cpp).
+pub struct SharedChannelizerHandle(trunk_channelizer::SharedChannelizer);
+
+fn shared_channelizer_new(sample_rate: f64) -> Result<Box<SharedChannelizerHandle>, String> {
+    let cfg = trunk_channelizer::Config::p25(sample_rate).map_err(|e| e.to_string())?;
+    let inner = trunk_channelizer::SharedChannelizer::new(cfg).map_err(|e| e.to_string())?;
+    Ok(Box::new(SharedChannelizerHandle(inner)))
+}
+
+impl SharedChannelizerHandle {
+    fn hop(&self) -> usize {
+        self.0.config().hop()
+    }
+
+    fn out_per_block(&self) -> usize {
+        self.0.config().out_per_block()
+    }
+
+    fn out_rate(&self) -> f64 {
+        self.0.config().out_rate()
+    }
+
+    fn set_channel(&self, port: u32, offset_hz: f64) {
+        self.0.set_slot(port as usize, offset_hz);
+    }
+
+    fn clear_channel(&self, port: u32) {
+        self.0.clear_slot(port as usize);
+    }
+
+    fn process(&self, input: &[f32], output: &mut [f32], active: &mut [u8]) {
+        let mut flags = vec![false; active.len()];
+        self.0.process(as_complex(input), as_complex_mut(output), &mut flags);
+        for (a, f) in active.iter_mut().zip(flags) {
+            *a = u8::from(f);
+        }
+    }
+}
+
+/// Reinterpret interleaved `[re, im, re, im, ..]` floats as complex samples.
+fn as_complex(s: &[f32]) -> &[num_complex::Complex32] {
+    assert!(s.len() % 2 == 0, "interleaved IQ must have even length");
+    // SAFETY: Complex<f32> is #[repr(C)] { re: f32, im: f32 }: size 8, align 4,
+    // identical layout to two consecutive f32s, and the length is halved.
+    unsafe { std::slice::from_raw_parts(s.as_ptr().cast(), s.len() / 2) }
+}
+
+fn as_complex_mut(s: &mut [f32]) -> &mut [num_complex::Complex32] {
+    assert!(s.len() % 2 == 0, "interleaved IQ must have even length");
+    // SAFETY: as above; exclusive borrow carries over.
+    unsafe { std::slice::from_raw_parts_mut(s.as_mut_ptr().cast(), s.len() / 2) }
 }
 
 // ── Boost.Log → tracing bridge ──

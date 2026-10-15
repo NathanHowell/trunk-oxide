@@ -330,13 +330,47 @@ void tr_config_set_debug_recorder(TrContext &ctx, bool enabled, rust::Str addres
     ctx.impl->trunk_ctx.config.debug_recorder_port = port;
 }
 
+// ── Shared channelizer backend (DSP in Rust: trunk-channelizer) ──
+
+namespace {
+class RustChannelizerBackend : public channelizer_backend {
+public:
+    explicit RustChannelizerBackend(double sample_rate)
+        : h_(shared_channelizer_new(sample_rate)),
+          hop_(h_->hop()),
+          opb_(h_->out_per_block()),
+          rate_(h_->out_rate()) {}
+
+    size_t hop() const override { return hop_; }
+    size_t out_per_block() const override { return opb_; }
+    double out_rate() const override { return rate_; }
+    void set_channel(unsigned port, double offset_hz) override { h_->set_channel(port, offset_hz); }
+    void clear_channel(unsigned port) override { h_->clear_channel(port); }
+    void process(const gr_complex *in, size_t nports, gr_complex *out, uint8_t *active) override {
+        h_->process(rust::Slice<const float>(reinterpret_cast<const float *>(in), 2 * hop_),
+                    rust::Slice<float>(reinterpret_cast<float *>(out), 2 * nports * opb_),
+                    rust::Slice<uint8_t>(active, nports));
+    }
+
+private:
+    rust::Box<SharedChannelizerHandle> h_;
+    size_t hop_;
+    size_t opb_;
+    double rate_;
+};
+} // namespace
+
 // ── Source builder implementations ──
 
 int32_t tr_add_source_from_config(TrContext &ctx, const TrSourceConfig &cfg) {
     std::string drv(cfg.driver.data(), cfg.driver.size());
     std::string dev(cfg.device.data(), cfg.device.size());
-    auto source = std::make_shared<Source>(cfg.center, cfg.rate, cfg.error, drv, dev,
-                                           ctx.impl->trunk_ctx.config);
+    // "iqfile": `device` is the path to a gr_complex IQ file, looped forever.
+    // Used for hardware-free testing (tests/generate_test_iq.py).
+    auto source = (drv == "iqfile")
+        ? std::make_shared<Source>(dev, true, cfg.center, cfg.rate, ctx.impl->trunk_ctx.config)
+        : std::make_shared<Source>(cfg.center, cfg.rate, cfg.error, drv, dev,
+                                   ctx.impl->trunk_ctx.config);
     source->init_shared();
 
     if (cfg.agc) source->set_gain_mode(true);
@@ -351,6 +385,11 @@ int32_t tr_add_source_from_config(TrContext &ctx, const TrSourceConfig &cfg) {
     }
 
     auto &tb = ctx.impl->trunk_ctx.tb;
+    if (cfg.shared_channelizer) {
+        source->set_channelizer_factory([](double rate) -> std::shared_ptr<channelizer_backend> {
+            return std::make_shared<RustChannelizerBackend>(rate);
+        });
+    }
     if (cfg.digital_recorders > 0) source->create_digital_recorders(tb, cfg.digital_recorders);
     if (cfg.analog_recorders > 0) source->create_analog_recorders(tb, cfg.analog_recorders);
     if (cfg.sigmf_recorders > 0) source->create_sigmf_recorders(tb, cfg.sigmf_recorders);

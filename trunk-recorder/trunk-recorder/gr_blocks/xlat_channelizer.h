@@ -2,6 +2,7 @@
 #define XLAT_CHANNELIZER_H
 
 #include <boost/log/trivial.hpp>
+#include <functional>
 #include <iomanip>
 
 #include "./rms_agc.h"
@@ -28,8 +29,11 @@ class xlat_channelizer : public gr::hier_block2 {
 public:
   typedef std::shared_ptr<xlat_channelizer> sptr;
 
-  static sptr make(double input_rate, int samples_per_symbol, double symbol_rate, double bandwidth, double center_freq, bool use_squelch, double excess_bw=default_excess_bw);
-  xlat_channelizer(double input_rate, int samples_per_symbol, double symbol_rate, double bandwidth, double center_freq, bool use_squelch, double excess_bw);
+  // shared_rate > 0 selects "shared" mode: the input is already a single channel
+  // produced by shared_channelizer at that rate (so freq_xlat + channel_lpf are
+  // omitted), and tune_offset() is forwarded to the tune hook instead.
+  static sptr make(double input_rate, int samples_per_symbol, double symbol_rate, double bandwidth, double center_freq, bool use_squelch, double excess_bw=default_excess_bw, double shared_rate=0.0);
+  xlat_channelizer(double input_rate, int samples_per_symbol, double symbol_rate, double bandwidth, double center_freq, bool use_squelch, double excess_bw, double shared_rate);
 
   struct DecimSettings {
     long decim;
@@ -54,6 +58,10 @@ public:
     squelch->set_squelch_callback(std::move(cb));
   }
   void tune_offset(double f);
+  bool is_shared() const { return d_shared; }
+  // Shared mode only: called with the channel's offset from the source centre
+  // (Hz, positive = above centre) whenever tune_offset() is called.
+  void set_tune_hook(std::function<void(double)> hook) { tune_hook = std::move(hook); }
   void set_samples_per_symbol(int samples_per_symbol);
   void set_squelch_db(double squelch_db);
   void set_analog_squelch(bool analog_squelch);
@@ -71,6 +79,8 @@ private:
   double d_symbol_rate;
 
   bool d_use_squelch;
+  bool d_shared = false;
+  std::function<void(double)> tune_hook;
   long symbol_rate;
   double initial_rate;
   double squelch_db;

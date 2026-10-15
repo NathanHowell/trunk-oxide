@@ -1,0 +1,19 @@
+[package]
+name = "trunk-channelizer"
+description = "Shared overlap-save FFT channelizer (Borgerding / ka9q-radio style) on rustfft. wxt.1 spike."
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+num-complex = { workspace = true }
+rayon = "1"
+rustfft = { workspace = true }
+anyhow = { workspace = true }
+
+[features]
+# Comparison-only FFTW backend (unsafe FFI to libfftw3f); used by the bench.
+fftw = []
+
+[lints]
+workspace = true

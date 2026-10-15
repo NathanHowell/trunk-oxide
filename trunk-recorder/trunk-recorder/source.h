@@ -1,8 +1,10 @@
 #ifndef SOURCE_H
 #define SOURCE_H
+#include <functional>
 #include <memory>
 #include "./global_structs.h"
 #include "./gr_blocks/selector.h"
+#include "./gr_blocks/shared_channelizer.h"
 #include "./gr_blocks/signal_detector_cvf.h"
 #include "recorders/analog_recorder.h"
 #include "recorders/debug_recorder.h"
@@ -71,6 +73,11 @@ class Source : public std::enable_shared_from_this<Source> {
   std::string antenna;
   gr::basic_block_sptr source_block;
   gr::blocks::selector::sptr recorder_selector;
+  // Optional shared FFT channelizer feeding the P25 recorders (see
+  // gr_blocks/shared_channelizer.h). Created lazily when a factory is set.
+  shared_channelizer::sptr channelizer;
+  std::function<std::shared_ptr<channelizer_backend>(double)> channelizer_factory;
+  unsigned int next_channelizer_port = 0;
   signal_detector_cvf::sptr signal_detector;
 
   void add_gain_stage(std::string stage_name, double value);
@@ -131,6 +138,12 @@ public:
   void set_detection_callback(std::function<void(std::vector<Detected_Signal>)> cb);
   void set_power_callback(std::function<void(const float*, unsigned, double)> cb);
   void set_selector_port_enabled(unsigned int port, bool enabled);
+  // Shared channelizer: set before create_*_recorders() to route P25 recorders through it.
+  void set_channelizer_factory(std::function<std::shared_ptr<channelizer_backend>(double)> f) { channelizer_factory = std::move(f); }
+  shared_channelizer::sptr get_channelizer() const { return channelizer; }
+  void attach_channelizer(gr::top_block_sptr tb);
+  void channelizer_set_enabled(unsigned int port, bool enabled);
+  void channelizer_set_offset(unsigned int port, double offset_hz);
   bool is_selector_port_enabled(unsigned int port);
   void create_debug_recorder(gr::top_block_sptr tb, int source_num);
   void create_sigmf_recorders(gr::top_block_sptr tb, int r);

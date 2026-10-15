@@ -42,7 +42,13 @@ void p25_recorder_impl::initialize(const std::shared_ptr<Source> &src) {
 
   starttime = std::chrono::steady_clock::now();
 
-  prefilter = xlat_channelizer::make(input_rate, channelizer::phase1_samples_per_symbol, channelizer::phase1_symbol_rate, xlat_channelizer::channel_bandwidth, center_freq, conventional);
+  if (auto chz = source->get_channelizer()) {
+    // Input is one channel already extracted by the source's shared channelizer.
+    prefilter = xlat_channelizer::make(input_rate, channelizer::phase1_samples_per_symbol, channelizer::phase1_symbol_rate, xlat_channelizer::channel_bandwidth, center_freq, conventional, xlat_channelizer::default_excess_bw, chz->out_rate());
+    prefilter->set_tune_hook([this](double offset_hz) { source->channelizer_set_offset(selector_port, offset_hz); });
+  } else {
+    prefilter = xlat_channelizer::make(input_rate, channelizer::phase1_samples_per_symbol, channelizer::phase1_symbol_rate, xlat_channelizer::channel_bandwidth, center_freq, conventional);
+  }
 
   modulation_selector = gr::blocks::selector::make(sizeof(gr_complex), 0, 0);
   qpsk_demod = make_p25_recorder_qpsk_demod();
@@ -169,7 +175,11 @@ RecorderState p25_recorder_impl::get_state() const {
 }
 
 void p25_recorder_impl::set_enabled(bool enabled) {
-  source->set_selector_port_enabled(selector_port, enabled);
+  if (prefilter->is_shared()) {
+    source->channelizer_set_enabled(selector_port, enabled);
+  } else {
+    source->set_selector_port_enabled(selector_port, enabled);
+  }
 }
 
 double p25_recorder_impl::get_pwr() const {

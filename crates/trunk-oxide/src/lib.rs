@@ -369,6 +369,7 @@ impl TrunkRecorderBuilder {
                     digital_recorders: src.digital_recorders,
                     analog_recorders: src.analog_recorders,
                     sigmf_recorders: src.sigmf_recorders,
+                    shared_channelizer: src.shared_channelizer,
                 },
             )?;
             let half_rate = src.rate / 2.0;

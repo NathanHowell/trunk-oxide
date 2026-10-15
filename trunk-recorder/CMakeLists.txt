@@ -258,6 +258,7 @@ list(APPEND trunk_recorder_sources
   trunk-recorder/gr_blocks/decoder_wrapper_impl.cc
   trunk-recorder/gr_blocks/plugin_wrapper_impl.cc
   trunk-recorder/gr_blocks/selector_impl.cc
+  trunk-recorder/gr_blocks/shared_channelizer.cc
   trunk-recorder/gr_blocks/callback_pwr_squelch_cc.cc
   trunk-recorder/gr_blocks/callback_ctcss_squelch_ff.cc
   trunk-recorder/gr_blocks/wavfile_gr3.8.cc

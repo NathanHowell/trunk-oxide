@@ -68,11 +68,24 @@ public:
     }
   }
 
+  // In-band P25 encryption parameters (ALGID / KeyID) decoded from the ESS on
+  // the voice channel, reported by the decode block when a call is encrypted
+  // (and we hold no key). Wired like the source-change callback.
+  void set_crypto_callback(std::function<void(uint64_t, unsigned, unsigned)> cb) {
+    crypto_callback = std::move(cb);
+  }
+  void notify_crypto(unsigned algid, unsigned keyid) {
+    if (crypto_callback) {
+      crypto_callback(rust_call_id, algid, keyid);
+    }
+  }
+
 protected:
   Recorder_Type  type;
   int autotune_offset = 0;
   uint64_t rust_call_id = 0;
   std::function<void(uint64_t, long)> source_change_callback;
+  std::function<void(uint64_t, unsigned, unsigned)> crypto_callback;
 };
 
 typedef std::shared_ptr<Recorder> Recorder_sptr;

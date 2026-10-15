@@ -634,6 +634,12 @@ void tr_context_wire_event_notifiers(TrContext &ctx) {
                 [sc_notifier](uint64_t rust_call_id, long src_id) {
                     event_notifier_notify_source_change(**sc_notifier, rust_call_id, src_id);
                 });
+            auto cr_notifier =
+                std::make_shared<rust::Box<EventNotifier>>(bridge->make_notifier());
+            rec->set_crypto_callback(
+                [cr_notifier](uint64_t rust_call_id, unsigned algid, unsigned keyid) {
+                    event_notifier_notify_crypto(**cr_notifier, rust_call_id, algid, keyid);
+                });
         }
     }
 
@@ -807,6 +813,12 @@ std::unique_ptr<TrCall> tr_create_conventional_call(
     rec->set_source_change_callback(
         [sc_notifier](uint64_t rust_call_id, long src_id) {
             event_notifier_notify_source_change(**sc_notifier, rust_call_id, src_id);
+        });
+    auto cr_notifier =
+        std::make_shared<rust::Box<EventNotifier>>(ctx.impl->event_bridge->make_notifier());
+    rec->set_crypto_callback(
+        [cr_notifier](uint64_t rust_call_id, unsigned algid, unsigned keyid) {
+            event_notifier_notify_crypto(**cr_notifier, rust_call_id, algid, keyid);
         });
 
     return std::make_unique<TrCall>(call);

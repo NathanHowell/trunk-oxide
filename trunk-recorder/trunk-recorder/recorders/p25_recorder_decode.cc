@@ -48,6 +48,7 @@ void p25_recorder_decode::start(const RecorderConfig &config) {
     std::lock_guard<std::mutex> lock(d_state_mutex);
     d_source_id = -1;
   }
+  d_last_notified_crypto = ~0u;
 
   if (config.phase2_tdma) {
     wav_sink->start_recording(config, config.tdma_slot);
@@ -120,6 +121,20 @@ void p25_recorder_decode::initialize(int silence_frames, bool d_soft_vocoder) {
     if (msg->type() != -3) return; // Only M_P25_JSON_DATA
     try {
       auto j = nlohmann::json::parse(msg->to_string());
+      // ESS crypto parameters ({"encrypted","algid","keyid"}, no "type"). Clear
+      // (0x80) voice is reported too by P25p2; only forward real encryption,
+      // and only on change.
+      if (j.contains("algid") && j.contains("keyid") && !j.contains("type")) {
+        unsigned algid = j["algid"].get<unsigned>();
+        unsigned keyid = j["keyid"].get<unsigned>();
+        if (j.value("encrypted", 0) != 0 && algid != 0x80 && d_recorder) {
+          uint32_t packed = ((algid & 0xFFFF) << 16) | (keyid & 0xFFFF);
+          if (d_last_notified_crypto.exchange(packed) != packed) {
+            d_recorder->notify_crypto(algid, keyid);
+          }
+        }
+        return;
+      }
       if (!j.contains("type")) return;
       std::string t = j["type"];
       if (t == "motorola_alias_p1" || t == "motorola_alias_p2" ||

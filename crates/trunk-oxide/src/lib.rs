@@ -764,6 +764,13 @@ impl TrunkRecorder {
                                 src_id,
                             );
                         }
+                        GrEvent::Crypto {
+                            rust_call_id,
+                            alg_id,
+                            key_id,
+                        } => {
+                            call_mgr.handle_crypto(rust_call_id, alg_id, key_id);
+                        }
                         GrEvent::SignalsDetected {
                             source_center_freq,
                             signals,

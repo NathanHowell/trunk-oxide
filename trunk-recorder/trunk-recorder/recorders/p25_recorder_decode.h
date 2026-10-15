@@ -7,6 +7,7 @@
 #include <gnuradio/blocks/short_to_float.h>
 #include <gnuradio/hier_block2.h>
 #include <gnuradio/io_signature.h>
+#include <atomic>
 #include <mutex>
 
 #include <op25_repeater/fsk4_slicer_fb.h>
@@ -41,6 +42,9 @@ protected:
   // Last in-band src reported up to the state machine, to dedup the per-superframe
   // tag re-fires (only a *change* cuts a transmission boundary).
   long d_last_notified_src = -1;
+  // Last (algid << 16 | keyid) reported, to dedup the per-superframe ESS
+  // re-fires; ~0 = none yet. Reset per call in start().
+  std::atomic<uint32_t> d_last_notified_crypto{~0u};
   gr::op25_repeater::p25_frame_assembler::sptr op25_frame_assembler;
   gr::op25_repeater::fsk4_slicer_fb::sptr slicer;
   gr::blocks::short_to_float::sptr converter;

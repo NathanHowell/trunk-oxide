@@ -442,13 +442,23 @@ impl CallManager {
                 }
                 Effect::EmitCallEnd { call_id, reason } => {
                     if let Some(view) = self.state.get_call_view(call_id) {
-                        self.calls_ended.add(
-                            1,
-                            &[
-                                KeyValue::new("sys_num", i64::from(view.sys_num())),
-                                KeyValue::new("reason", reason.as_str()),
-                            ],
-                        );
+                        let mut attrs = vec![
+                            KeyValue::new("sys_num", i64::from(view.sys_num())),
+                            KeyValue::new("reason", reason.as_str()),
+                            KeyValue::new("encrypted", view.encrypted()),
+                        ];
+                        // Rejected calls (never recorded) still count here; label why.
+                        if let Some(r) = view.reject_reason() {
+                            attrs.push(KeyValue::new("reject_reason", r.as_str()));
+                        }
+                        // Only encrypted calls carry an ALGID, keeping the extra
+                        // series bounded to the handful of P25 algorithms in use.
+                        // A call rejected at the grant has none of its own, so fall
+                        // back to the last ALGID seen on its talkgroup.
+                        if let Some(alg) = self.state.alg_id_for(call_id) {
+                            attrs.push(KeyValue::new("algid", format!("0x{alg:02x}")));
+                        }
+                        self.calls_ended.add(1, &attrs);
                     }
                     self.exec_conclude_call(call_id, reason);
                 }
@@ -1216,6 +1226,18 @@ impl CallManager {
             .state
             .on_source_change(CallId::from_u64(rust_call_id), src_id);
         self.process_effects(effects, &mut ctx);
+    }
+
+    /// P25 encryption parameters (ESS `ALGID` / `KeyID`) decoded by op25 for an
+    /// encrypted call, keyed by the recorder's `rust_call_id`. Stored on the
+    /// call so the `calls_ended` metric can facet by algorithm.
+    pub fn handle_crypto(&mut self, rust_call_id: u64, alg_id: u32, key_id: u32) {
+        // ALGID is 8 bits and KeyID 16 on the wire; the decoder already masks.
+        self.state.on_crypto(
+            CallId::from_u64(rust_call_id),
+            u8::try_from(alg_id & 0xFF).unwrap_or(0),
+            u16::try_from(key_id & 0xFFFF).unwrap_or(0),
+        );
     }
 
     pub fn handle_signals_detected(

@@ -56,6 +56,12 @@ impl<'a> CallView<'a> {
     pub(crate) fn encrypted(&self) -> bool {
         self.0.encrypted
     }
+    pub(crate) fn reject_reason(&self) -> Option<RejectReason> {
+        match self.0.state {
+            CallState::Rejected(r) => Some(r),
+            _ => None,
+        }
+    }
     pub(crate) fn is_analog(&self) -> bool {
         self.0.is_analog
     }
@@ -257,6 +263,21 @@ impl std::fmt::Display for CallState {
     }
 }
 
+impl RejectReason {
+    /// Low-cardinality label for metrics.
+    pub(crate) const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnknownTg => "unknown_tg",
+            Self::IgnoredTg => "ignored_tg",
+            Self::NoSource => "no_source",
+            Self::NoRecorder => "no_recorder",
+            Self::Encrypted => "encrypted",
+            Self::Duplicate => "duplicate",
+            Self::Superseded => "superseded",
+        }
+    }
+}
+
 impl std::fmt::Display for RejectReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -451,6 +472,12 @@ pub(crate) struct CallEntry {
     pub(crate) freq: Freq,
     pub(crate) state: CallState,
     pub(crate) encrypted: bool,
+    /// P25 encryption algorithm ID (ESS `ALGID`, e.g. `0x84` AES-256) as decoded
+    /// from the voice channel. `None` until the decoder reports one (only
+    /// encrypted calls we hold no key for).
+    pub(crate) alg_id: Option<u8>,
+    /// P25 encryption key ID (ESS `KeyID`), reported together with `alg_id`.
+    pub(crate) key_id: Option<u16>,
     pub(crate) is_analog: bool,
     pub(crate) current_source_id: i64,
     pub(crate) signal: Option<f64>,
@@ -490,6 +517,8 @@ impl Default for CallEntry {
             freq: Freq::from_hz(0.0),
             state: CallState::Idle,
             encrypted: false,
+            alg_id: None,
+            key_id: None,
             is_analog: false,
             current_source_id: 0,
             signal: None,
@@ -899,6 +928,11 @@ pub(crate) struct TrunkStateMachine {
     pub(crate) config: CallManagerConfig,
     pub(crate) patch_tables: HashMap<i32, PatchTable>,
     pub(crate) system_identities: HashMap<i32, SystemIdentity>,
+    /// Last ESS `ALGID` seen per `(sys_num, talkgroup)`. Encrypted talkgroups use
+    /// a fixed algorithm, so a call we never recorded (rejected from the grant)
+    /// can still be labelled with what an earlier recorded call on the same
+    /// talkgroup revealed.
+    known_alg_ids: HashMap<(i32, i64), u8>,
 }
 
 impl TrunkStateMachine {
@@ -931,6 +965,7 @@ impl TrunkStateMachine {
             config,
             patch_tables,
             system_identities,
+            known_alg_ids: HashMap::new(),
         }
     }
 
@@ -1334,6 +1369,30 @@ impl TrunkStateMachine {
             source_id: source,
         });
         true
+    }
+
+    /// Record the P25 encryption parameters (ESS `ALGID` / `KeyID`) decoded by
+    /// op25 on the voice channel (carried as `rust_call_id` → [`CallId`]). The
+    /// ESS is authoritative, so this also marks the call encrypted. Unknown
+    /// calls are ignored.
+    pub(crate) fn on_crypto(&mut self, call_id: CallId, alg_id: u8, key_id: u16) {
+        if let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) {
+            entry.encrypted = true;
+            entry.alg_id = Some(alg_id);
+            entry.key_id = Some(key_id);
+            self.known_alg_ids
+                .insert((entry.sys_num, entry.talkgroup), alg_id);
+        }
+    }
+
+    /// The call's own decoded `ALGID`, else the last one seen on its talkgroup.
+    pub(crate) fn alg_id_for(&self, call_id: CallId) -> Option<u8> {
+        let entry = self.calls.iter().find(|e| e.id == call_id)?;
+        entry.alg_id.or_else(|| {
+            self.known_alg_ids
+                .get(&(entry.sys_num, entry.talkgroup))
+                .copied()
+        })
     }
 
     /// Handle an in-band source (unit) change decoded by op25 on the voice
@@ -2335,6 +2394,35 @@ mod tests {
             },
         );
         call_id
+    }
+
+    #[test]
+    fn crypto_records_algid_and_marks_encrypted() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let call_id = recording_trunked_call(&mut sm);
+        assert_eq!(sm.calls[0].alg_id, None);
+
+        sm.on_crypto(call_id, 0x84, 0x1234);
+        assert!(sm.calls[0].encrypted);
+        assert_eq!(sm.calls[0].alg_id, Some(0x84));
+        assert_eq!(sm.calls[0].key_id, Some(0x1234));
+
+        // Unknown call ids are ignored.
+        sm.on_crypto(CallId::from_u64(u64::MAX), 0xAA, 1);
+        assert_eq!(sm.calls[0].alg_id, Some(0x84));
+        assert_eq!(sm.alg_id_for(call_id), Some(0x84));
+
+        // A later call on the same talkgroup that never decoded an ESS (e.g.
+        // rejected at the grant) is labelled from the talkgroup cache.
+        let (sys, tg) = (sm.calls[0].sys_num, sm.calls[0].talkgroup);
+        sm.calls.push(CallEntry {
+            sys_num: sys,
+            talkgroup: tg,
+            ..CallEntry::default()
+        });
+        let other = sm.calls[1].id;
+        assert_eq!(sm.calls[1].alg_id, None);
+        assert_eq!(sm.alg_id_for(other), Some(0x84));
     }
 
     #[test]

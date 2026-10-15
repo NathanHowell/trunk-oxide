@@ -143,11 +143,25 @@ pub struct CallManager {
     /// Distribution (not last value) so the per-dongle median = clock bias and
     /// the spread = decode margin, both trendable over time to watch TCXO drift.
     freq_error_hz: Histogram<f64>,
+    /// 1 Hz samples of the recorder's channel power probe (dB, uncalibrated,
+    /// relative to full scale) while a trunked call is carrying audio.
+    signal_power_db: Histogram<f64>,
+    /// Same probe while the call is still up but no audio has been written for
+    /// a while: the carrier has usually dropped, so this approximates the
+    /// channel noise floor (TDMA's idle slot keeps the carrier, so it reads high).
+    noise_floor_db: Histogram<f64>,
     recorder_denied: Counter<u64>,
     control_channel_messages: Counter<u64>,
     active_calls_gauge: Gauge<u64>,
     conv_metrics: Arc<Mutex<ConventionalMetricsSnapshot>>,
 }
+
+/// Bucket edges for the recorder power histograms (dB re full scale, 3 dB steps).
+const POWER_DB_BOUNDARIES: [f64; 27] = [
+    -90.0, -87.0, -84.0, -81.0, -78.0, -75.0, -72.0, -69.0, -66.0, -63.0, -60.0, -57.0, -54.0,
+    -51.0, -48.0, -45.0, -42.0, -39.0, -36.0, -33.0, -30.0, -27.0, -24.0, -21.0, -18.0, -12.0,
+    -6.0,
+];
 
 impl CallManager {
     pub fn new(
@@ -225,6 +239,16 @@ impl CallManager {
                     -1000.0, -500.0, -300.0, -200.0, -150.0, -100.0, -60.0, -30.0, 0.0, 30.0, 60.0,
                     100.0, 150.0, 200.0, 300.0, 500.0, 1000.0,
                 ])
+                .build(),
+            signal_power_db: meter
+                .f64_histogram("trunk.oxide.signal_power_db")
+                .with_description("Recorder channel power (dB re full scale) while audio flows")
+                .with_boundaries(POWER_DB_BOUNDARIES.to_vec())
+                .build(),
+            noise_floor_db: meter
+                .f64_histogram("trunk.oxide.noise_floor_db")
+                .with_description("Recorder channel power (dB re full scale) with no audio")
+                .with_boundaries(POWER_DB_BOUNDARIES.to_vec())
                 .build(),
             recorder_denied: meter
                 .u64_counter("trunk.oxide.recorder_denied")
@@ -1111,6 +1135,33 @@ impl CallManager {
                 let since_write = ffi::call_recorder_since_last_write_secs(handle);
                 if since_write > timeout {
                     timed_out_ids.push(view.id());
+                }
+
+                // Channel power at 1 Hz (the tick rate), split by whether audio
+                // is flowing. The window between the two (0.5-1 s) is skipped
+                // so a sample is clearly one or the other.
+                let hist = if since_write < 0.5 {
+                    Some(&self.signal_power_db)
+                } else if since_write >= 1.0 {
+                    Some(&self.noise_floor_db)
+                } else {
+                    None
+                };
+                if let Some(hist) = hist
+                    && let Some(pwr_db) =
+                        trunk_recorder_sys::signal_from_ffi(ffi::call_get_pwr_db(handle))
+                {
+                    hist.record(
+                        pwr_db,
+                        &[
+                            KeyValue::new("short_name", view.short_name().to_string()),
+                            KeyValue::new("tdma", view.phase2_tdma()),
+                            KeyValue::new(
+                                "source",
+                                i64::from(self.find_source(view.freq().as_hz()).unwrap_or(-1)),
+                            ),
+                        ],
+                    );
                 }
             }
         }

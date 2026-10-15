@@ -1,7 +1,7 @@
 #![allow(unsafe_code)]
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 #[cxx::bridge(namespace = "trunk_oxide")]
 pub mod ffi {
@@ -498,7 +498,10 @@ pub mod ffi {
     extern "Rust" {
         type SharedChannelizerHandle;
 
-        fn shared_channelizer_new(sample_rate: f64) -> Result<Box<SharedChannelizerHandle>>;
+        fn shared_channelizer_new(
+            sample_rate: f64,
+            source: i32,
+        ) -> Result<Box<SharedChannelizerHandle>>;
         fn hop(self: &SharedChannelizerHandle) -> usize;
         fn out_per_block(self: &SharedChannelizerHandle) -> usize;
         fn out_rate(self: &SharedChannelizerHandle) -> f64;
@@ -779,12 +782,51 @@ fn drop_event_handler_box(_handler: Box<EventHandlerBox>) {
 // ── Shared FFT channelizer ──
 
 /// Rust half of the C++ `channelizer_backend` (see bridge.cpp).
-pub struct SharedChannelizerHandle(trunk_channelizer::SharedChannelizer);
+pub struct SharedChannelizerHandle(Arc<trunk_channelizer::SharedChannelizer>);
 
-fn shared_channelizer_new(sample_rate: f64) -> Result<Box<SharedChannelizerHandle>, String> {
+/// Live channelizers by source index, so the Rust side can read their
+/// counters without a trip through C++. Weak: the GR block owns the engine.
+static CHANNELIZERS: Mutex<Vec<(i32, Weak<trunk_channelizer::SharedChannelizer>)>> =
+    Mutex::new(Vec::new());
+
+fn shared_channelizer_new(
+    sample_rate: f64,
+    source: i32,
+) -> Result<Box<SharedChannelizerHandle>, String> {
     let cfg = trunk_channelizer::Config::p25(sample_rate).map_err(|e| e.to_string())?;
-    let inner = trunk_channelizer::SharedChannelizer::new(cfg).map_err(|e| e.to_string())?;
+    let inner =
+        Arc::new(trunk_channelizer::SharedChannelizer::new(cfg).map_err(|e| e.to_string())?);
+    let mut reg = CHANNELIZERS.lock().unwrap_or_else(PoisonError::into_inner);
+    reg.retain(|(s, w)| *s != source && w.strong_count() > 0);
+    reg.push((source, Arc::downgrade(&inner)));
     Ok(Box::new(SharedChannelizerHandle(inner)))
+}
+
+pub use trunk_channelizer::Counters as ChannelizerCounters;
+
+/// One source's shared-channelizer counters (see [`channelizer_stats`]).
+#[derive(Clone, Copy, Debug)]
+pub struct ChannelizerStats {
+    pub source: i32,
+    pub counters: ChannelizerCounters,
+    /// Real-time duration of one block; a block slower than this is an overrun.
+    pub block_budget_ns: u64,
+}
+
+/// Counters for every live shared channelizer. `max_ns` is the longest block
+/// since the previous call (it is reset by reading).
+pub fn channelizer_stats() -> Vec<ChannelizerStats> {
+    let reg = CHANNELIZERS.lock().unwrap_or_else(PoisonError::into_inner);
+    reg.iter()
+        .filter_map(|(source, w)| {
+            let c = w.upgrade()?;
+            Some(ChannelizerStats {
+                source: *source,
+                counters: c.take_counters(),
+                block_budget_ns: c.block_budget_ns(),
+            })
+        })
+        .collect()
 }
 
 impl SharedChannelizerHandle {
@@ -810,7 +852,8 @@ impl SharedChannelizerHandle {
 
     fn process(&self, input: &[f32], output: &mut [f32], active: &mut [u8]) {
         let mut flags = vec![false; active.len()];
-        self.0.process(as_complex(input), as_complex_mut(output), &mut flags);
+        self.0
+            .process(as_complex(input), as_complex_mut(output), &mut flags);
         for (a, f) in active.iter_mut().zip(flags) {
             *a = u8::from(f);
         }

@@ -335,8 +335,8 @@ void tr_config_set_debug_recorder(TrContext &ctx, bool enabled, rust::Str addres
 namespace {
 class RustChannelizerBackend : public channelizer_backend {
 public:
-    explicit RustChannelizerBackend(double sample_rate)
-        : h_(shared_channelizer_new(sample_rate)),
+    RustChannelizerBackend(double sample_rate, int32_t source)
+        : h_(shared_channelizer_new(sample_rate, source)),
           hop_(h_->hop()),
           opb_(h_->out_per_block()),
           rate_(h_->out_rate()) {}
@@ -385,16 +385,16 @@ int32_t tr_add_source_from_config(TrContext &ctx, const TrSourceConfig &cfg) {
     }
 
     auto &tb = ctx.impl->trunk_ctx.tb;
+    int32_t idx = static_cast<int32_t>(ctx.impl->trunk_ctx.sources.size());
     if (cfg.shared_channelizer) {
-        source->set_channelizer_factory([](double rate) -> std::shared_ptr<channelizer_backend> {
-            return std::make_shared<RustChannelizerBackend>(rate);
+        source->set_channelizer_factory([idx](double rate) -> std::shared_ptr<channelizer_backend> {
+            return std::make_shared<RustChannelizerBackend>(rate, idx);
         });
     }
     if (cfg.digital_recorders > 0) source->create_digital_recorders(tb, cfg.digital_recorders);
     if (cfg.analog_recorders > 0) source->create_analog_recorders(tb, cfg.analog_recorders);
     if (cfg.sigmf_recorders > 0) source->create_sigmf_recorders(tb, cfg.sigmf_recorders);
 
-    int32_t idx = static_cast<int32_t>(ctx.impl->trunk_ctx.sources.size());
     ctx.impl->trunk_ctx.sources.push_back(source);
     return idx;
 }

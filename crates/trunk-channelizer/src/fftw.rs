@@ -28,7 +28,13 @@ const FFTW_ESTIMATE: c_uint = 1 << 6;
 unsafe extern "C" {
     fn fftwf_malloc(n: usize) -> *mut c_void;
     fn fftwf_free(p: *mut c_void);
-    fn fftwf_plan_dft_1d(n: c_int, input: *mut Complex32, output: *mut Complex32, sign: c_int, flags: c_uint) -> RawPlan;
+    fn fftwf_plan_dft_1d(
+        n: c_int,
+        input: *mut Complex32,
+        output: *mut Complex32,
+        sign: c_int,
+        flags: c_uint,
+    ) -> RawPlan;
     fn fftwf_execute_dft(plan: RawPlan, input: *mut Complex32, output: *mut Complex32);
     fn fftwf_destroy_plan(plan: RawPlan);
 }
@@ -120,7 +126,9 @@ unsafe impl Sync for Plan {}
 
 impl Plan {
     pub fn new(n: usize, dir: Direction, effort: Effort) -> Result<Self> {
-        let Ok(n_int) = c_int::try_from(n) else { bail!("FFT size {n} too large") };
+        let Ok(n_int) = c_int::try_from(n) else {
+            bail!("FFT size {n} too large")
+        };
         if n == 0 {
             bail!("FFT size must be > 0");
         }
@@ -130,7 +138,9 @@ impl Plan {
         };
         let scratch = AlignedBuf::new(n);
         let p = scratch.ptr.as_ptr();
-        let _guard = PLAN_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = PLAN_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // SAFETY: `scratch` is valid, aligned memory of n elements; in-place plan (in == out).
         let raw = unsafe { fftwf_plan_dft_1d(n_int, p, p, sign, effort.flags()) };
         if raw.is_null() {
@@ -159,7 +169,9 @@ impl Plan {
 
 impl Drop for Plan {
     fn drop(&mut self) {
-        let _guard = PLAN_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _guard = PLAN_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         // SAFETY: plan created by fftwf_plan_dft_1d, destroyed once, under the planner lock.
         unsafe { fftwf_destroy_plan(self.raw) };
     }

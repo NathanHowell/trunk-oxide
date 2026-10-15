@@ -39,7 +39,11 @@ pub fn lowpass_taps(rate: f64, cutoff_hz: f64, transition_hz: f64, atten_db: f64
     let mut taps: Vec<f64> = (0..n)
         .map(|i| {
             let x = i as f64 - mid;
-            let sinc = if x == 0.0 { wc / PI } else { (wc * x).sin() / (PI * x) };
+            let sinc = if x == 0.0 {
+                wc / PI
+            } else {
+                (wc * x).sin() / (PI * x)
+            };
             let r = x / mid.max(1.0);
             sinc * i0(beta * (1.0 - r * r).max(0.0).sqrt()) / denom
         })

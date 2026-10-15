@@ -44,8 +44,20 @@ impl Config {
     /// the host resamples the remainder).
     pub fn p25(sample_rate: f64) -> Result<Self> {
         let decim = (sample_rate / 24_000.0).floor() as usize;
-        ensure!(decim >= 2, "sample rate {sample_rate} too low for a 24 kS/s channel");
-        Ok(Self { sample_rate, decim, k: 256, overlap_out: 64, cutoff_hz: 6_250.0, transition_hz: 3_125.0, atten_db: 60.0, threads: 0 })
+        ensure!(
+            decim >= 2,
+            "sample rate {sample_rate} too low for a 24 kS/s channel"
+        );
+        Ok(Self {
+            sample_rate,
+            decim,
+            k: 256,
+            overlap_out: 64,
+            cutoff_hz: 6_250.0,
+            transition_hz: 3_125.0,
+            atten_db: 60.0,
+            threads: 0,
+        })
     }
 
     pub const fn fft_size(&self) -> usize {
@@ -124,13 +136,26 @@ pub struct Channelizer {
 
 impl Channelizer {
     pub fn new(cfg: Config) -> Result<Self> {
-        ensure!(cfg.decim >= 2 && cfg.k >= 8 && cfg.overlap_out < cfg.k, "bad geometry");
+        ensure!(
+            cfg.decim >= 2 && cfg.k >= 8 && cfg.overlap_out < cfg.k,
+            "bad geometry"
+        );
         let n = cfg.fft_size();
-        let taps = lowpass_taps(cfg.out_rate(), cfg.cutoff_hz, cfg.transition_hz, cfg.atten_db);
+        let taps = lowpass_taps(
+            cfg.out_rate(),
+            cfg.cutoff_hz,
+            cfg.transition_hz,
+            cfg.atten_db,
+        );
         // Overlap-save constraint: circular convolution of length K is exact
         // for outputs m >= L-1, so L-1 <= overlap_out.
         if taps.len() > cfg.overlap_out + 1 {
-            bail!("channel filter has {} taps but overlap_out={} allows at most {}", taps.len(), cfg.overlap_out, cfg.overlap_out + 1);
+            bail!(
+                "channel filter has {} taps but overlap_out={} allows at most {}",
+                taps.len(),
+                cfg.overlap_out,
+                cfg.overlap_out + 1
+            );
         }
 
         let fwd = Plan::new(n, Direction::Forward);
@@ -149,13 +174,26 @@ impl Channelizer {
         let h = hb.iter().map(|c| c * scale).collect();
 
         let pool = if cfg.threads > 0 {
-            Some(rayon::ThreadPoolBuilder::new().num_threads(cfg.threads).thread_name(|i| format!("chan-{i}")).build()?)
+            Some(
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(cfg.threads)
+                    .thread_name(|i| format!("chan-{i}"))
+                    .build()?,
+            )
         } else {
             None
         };
         let overlap = cfg.decim * cfg.overlap_out;
         Ok(Self {
-            shared: Shared { n, k: cfg.k, overlap_out: cfg.overlap_out, decim: cfg.decim, out_rate: cfg.out_rate(), inv, h },
+            shared: Shared {
+                n,
+                k: cfg.k,
+                overlap_out: cfg.overlap_out,
+                decim: cfg.decim,
+                out_rate: cfg.out_rate(),
+                inv,
+                h,
+            },
             fwd_scratch: fwd.scratch(),
             fwd,
             frame: vec![Complex32::ZERO; n],
@@ -183,7 +221,11 @@ impl Channelizer {
 
     fn place(&self, freq_hz: f64) -> Result<(usize, f64)> {
         let half = self.cfg.sample_rate / 2.0;
-        ensure!(freq_hz.abs() + self.cfg.out_rate() / 2.0 <= half, "channel at {freq_hz} Hz (+/-{} Hz) falls outside the +/-{half} Hz passband", self.cfg.out_rate() / 2.0);
+        ensure!(
+            freq_hz.abs() + self.cfg.out_rate() / 2.0 <= half,
+            "channel at {freq_hz} Hz (+/-{} Hz) falls outside the +/-{half} Hz passband",
+            self.cfg.out_rate() / 2.0
+        );
         let df = self.bin_hz();
         let b = (freq_hz / df).round();
         let bin0 = (b as i64).rem_euclid(self.shared.n as i64) as usize;
@@ -219,7 +261,9 @@ impl Channelizer {
     /// Retune in place. Costs nothing and cannot glitch other channels.
     pub fn retune(&mut self, id: ChannelId, freq_hz: f64) -> Result<()> {
         let (bin0, resid_hz) = self.place(freq_hz)?;
-        let Some(c) = self.channels.iter_mut().find(|c| c.id == id) else { bail!("unknown channel {id:?}") };
+        let Some(c) = self.channels.iter_mut().find(|c| c.id == id) else {
+            bail!("unknown channel {id:?}")
+        };
         c.freq_hz = freq_hz;
         c.bin0 = bin0;
         c.resid_hz = resid_hz;
@@ -228,18 +272,27 @@ impl Channelizer {
 
     /// Baseband output of the last block for one channel.
     pub fn output(&self, id: ChannelId) -> Option<&[Complex32]> {
-        self.channels.iter().find(|c| c.id == id).map(|c| c.out.as_slice())
+        self.channels
+            .iter()
+            .find(|c| c.id == id)
+            .map(|c| c.out.as_slice())
     }
 
     pub fn outputs(&self) -> impl Iterator<Item = (ChannelId, f64, &[Complex32])> {
-        self.channels.iter().map(|c| (c.id, c.freq_hz, c.out.as_slice()))
+        self.channels
+            .iter()
+            .map(|c| (c.id, c.freq_hz, c.out.as_slice()))
     }
 
     /// Consume exactly [`Config::hop`] new input samples and update every
     /// channel's output buffer.
     pub fn process_block(&mut self, new: &[Complex32]) -> BlockStats {
         let hop = self.cfg.hop();
-        assert_eq!(new.len(), hop, "process_block needs exactly hop={hop} samples");
+        assert_eq!(
+            new.len(),
+            hop,
+            "process_block needs exactly hop={hop} samples"
+        );
         let overlap = self.history.len();
 
         let t0 = Instant::now();
@@ -258,10 +311,20 @@ impl Channelizer {
         let spec: &[Complex32] = &self.frame;
         let shared = &self.shared;
         match &self.pool {
-            Some(pool) => pool.install(|| self.channels.par_iter_mut().for_each(|c| extract(shared, spec, frame_start, c))),
-            None => self.channels.iter_mut().for_each(|c| extract(shared, spec, frame_start, c)),
+            Some(pool) => pool.install(|| {
+                self.channels
+                    .par_iter_mut()
+                    .for_each(|c| extract(shared, spec, frame_start, c))
+            }),
+            None => self
+                .channels
+                .iter_mut()
+                .for_each(|c| extract(shared, spec, frame_start, c)),
         }
-        BlockStats { forward, channels: t1.elapsed() }
+        BlockStats {
+            forward,
+            channels: t1.elapsed(),
+        }
     }
 }
 
@@ -294,7 +357,8 @@ fn extract(s: &Shared, spec: &[Complex32], frame_start: u64, c: &mut Channel) {
     // (frame-local mixer vs global mixer); the residual offset contributes
     // exp(-j2pi*resid*g/out_rate).
     let bin_phase = (c.bin0 as u64 * frame_start) % n as u64;
-    let phase0 = -TAU * (bin_phase as f64 / n as f64 + c.resid_hz * c.out_index as f64 / s.out_rate);
+    let phase0 =
+        -TAU * (bin_phase as f64 / n as f64 + c.resid_hz * c.out_index as f64 / s.out_rate);
     let (sin0, cos0) = phase0.sin_cos();
     let mut rot = Complex32::new(cos0 as f32, sin0 as f32);
     let step = -TAU * c.resid_hz / s.out_rate;

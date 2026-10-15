@@ -150,11 +150,39 @@ pub struct CallManager {
     /// a while: the carrier has usually dropped, so this approximates the
     /// channel noise floor (TDMA's idle slot keeps the carrier, so it reads high).
     noise_floor_db: Histogram<f64>,
+    /// Shared-channelizer health, polled from the engine at the 1 Hz tick.
+    chz_blocks: Counter<u64>,
+    chz_rejected: Counter<u64>,
+    chz_overruns: Counter<u64>,
+    /// Per-second mean / worst block DSP time (µs), `stat` = "mean" | "max".
+    chz_block_time_us: Histogram<f64>,
+    chz_active: Gauge<u64>,
+    /// Counters seen at the previous poll, by source, for delta computation.
+    chz_prev: HashMap<i32, trunk_recorder_sys::ChannelizerCounters>,
+    /// Cumulative overruns per source as of the last poll.
+    chz_overruns_total: HashMap<i32, u64>,
+    /// Per-call channelizer context, for the call span (see `exec_conclude_call`).
+    call_chz: HashMap<CallId, CallChz>,
     recorder_denied: Counter<u64>,
     control_channel_messages: Counter<u64>,
     active_calls_gauge: Gauge<u64>,
     conv_metrics: Arc<Mutex<ConventionalMetricsSnapshot>>,
 }
+
+/// Channelizer state captured for one call, recorded on its span at the end.
+#[derive(Clone, Copy, Debug)]
+struct CallChz {
+    source: i32,
+    /// Source's cumulative overruns when the call was first sampled.
+    overruns_at_start: u64,
+    /// Worst block DSP time (ns) seen on the source while the call ran.
+    max_ns: u64,
+}
+
+/// Bucket edges for the block-time histogram (µs); the budget is ~8000.
+const BLOCK_TIME_US_BOUNDARIES: [f64; 12] = [
+    10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 6000.0, 8000.0, 16000.0,
+];
 
 /// Bucket edges for the recorder power histograms (dB re full scale, 3 dB steps).
 const POWER_DB_BOUNDARIES: [f64; 27] = [
@@ -250,6 +278,33 @@ impl CallManager {
                 .with_description("Recorder channel power (dB re full scale) with no audio")
                 .with_boundaries(POWER_DB_BOUNDARIES.to_vec())
                 .build(),
+            chz_blocks: meter
+                .u64_counter("trunk.oxide.channelizer.blocks")
+                .with_description("Blocks processed by the shared channelizer")
+                .build(),
+            chz_rejected: meter
+                .u64_counter("trunk.oxide.channelizer.rejected")
+                .with_description("Channel assignments rejected (outside the source passband)")
+                .build(),
+            chz_overruns: meter
+                .u64_counter("trunk.oxide.channelizer.overruns")
+                .with_description(
+                    "Blocks whose DSP took longer than the block's real-time duration",
+                )
+                .build(),
+            chz_block_time_us: meter
+                .f64_histogram("trunk.oxide.channelizer.block_time_us")
+                .with_description("Shared-channelizer block DSP time per second (mean and max)")
+                .with_unit("us")
+                .with_boundaries(BLOCK_TIME_US_BOUNDARIES.to_vec())
+                .build(),
+            chz_active: meter
+                .u64_gauge("trunk.oxide.channelizer.active_channels")
+                .with_description("Channels currently enabled on the shared channelizer")
+                .build(),
+            chz_prev: HashMap::new(),
+            chz_overruns_total: HashMap::new(),
+            call_chz: HashMap::new(),
             recorder_denied: meter
                 .u64_counter("trunk.oxide.recorder_denied")
                 .with_description("Calls denied a recorder")
@@ -448,6 +503,8 @@ impl CallManager {
                             is_conventional = view.is_conventional(),
                             // Recorded at conclude (see exec_conclude_call).
                             stop_reason = tracing::field::Empty,
+                            channelizer_overruns = tracing::field::Empty,
+                            channelizer_max_block_us = tracing::field::Empty,
                             recording_length = tracing::field::Empty,
                             segments = tracing::field::Empty,
                             elapsed = tracing::field::Empty,
@@ -773,7 +830,16 @@ impl CallManager {
         let span = self.call_spans.remove(&call_id);
         if let Some(s) = &span {
             s.record("stop_reason", reason.as_str());
+            if let Some(c) = self.call_chz.get(&call_id) {
+                let now = self.chz_overruns_total.get(&c.source).copied().unwrap_or(0);
+                s.record(
+                    "channelizer_overruns",
+                    now.saturating_sub(c.overruns_at_start),
+                );
+                s.record("channelizer_max_block_us", c.max_ns / 1000);
+            }
         }
+        self.call_chz.remove(&call_id);
 
         // Logical (soft) transmission boundary: the in-band source changed
         // mid-call. End this transmission on the wire WITHOUT stopping the C++
@@ -1121,7 +1187,73 @@ impl CallManager {
         self.process_effects(effects, &mut ctx);
     }
 
+    /// Read every shared channelizer's counters (called at the 1 Hz tick),
+    /// export the deltas as metrics, and fold the interval's worst block into
+    /// each in-flight call on that source.
+    fn poll_channelizers(&mut self) {
+        let stats = trunk_recorder_sys::channelizer_stats();
+        let mut worst: HashMap<i32, u64> = HashMap::new();
+        for st in stats {
+            let attrs = [KeyValue::new("source", i64::from(st.source))];
+            let prev = self
+                .chz_prev
+                .insert(st.source, st.counters)
+                .unwrap_or_default();
+            let blocks = st.counters.blocks.saturating_sub(prev.blocks);
+            self.chz_blocks.add(blocks, &attrs);
+            self.chz_rejected
+                .add(st.counters.rejected.saturating_sub(prev.rejected), &attrs);
+            self.chz_overruns
+                .add(st.counters.overruns.saturating_sub(prev.overruns), &attrs);
+            self.chz_active.record(st.counters.active, &attrs);
+            if blocks > 0 {
+                let busy = st.counters.busy_ns.saturating_sub(prev.busy_ns);
+                #[allow(clippy::cast_precision_loss)]
+                let (mean_us, max_us) = (
+                    busy as f64 / blocks as f64 / 1e3,
+                    st.counters.max_ns as f64 / 1e3,
+                );
+                let stat = |v: &'static str| {
+                    [
+                        KeyValue::new("source", i64::from(st.source)),
+                        KeyValue::new("stat", v),
+                    ]
+                };
+                self.chz_block_time_us.record(mean_us, &stat("mean"));
+                self.chz_block_time_us.record(max_us, &stat("max"));
+            }
+            self.chz_overruns_total
+                .insert(st.source, st.counters.overruns);
+            worst.insert(st.source, st.counters.max_ns);
+        }
+
+        // Attribute the channelizer's worst block to calls running on it.
+        if worst.is_empty() {
+            return;
+        }
+        let running: Vec<_> = self
+            .state
+            .iter_calls()
+            .filter(|v| !v.is_conventional() && v.state() == CallState::Recording)
+            .filter_map(|v| {
+                let src = self.find_source(v.freq().as_hz())?;
+                worst.contains_key(&src).then_some((v.id(), src))
+            })
+            .collect();
+        for (id, src) in running {
+            let max = worst.get(&src).copied().unwrap_or(0);
+            let total = self.chz_overruns_total.get(&src).copied().unwrap_or(0);
+            let e = self.call_chz.entry(id).or_insert(CallChz {
+                source: src,
+                overruns_at_start: total,
+                max_ns: 0,
+            });
+            e.max_ns = e.max_ns.max(max);
+        }
+    }
+
     pub fn tick(&mut self, mut ctx: Pin<&mut TrContext>) {
+        self.poll_channelizers();
         // First, check recorder write times for recording calls (needs FFI).
         // The state machine can't check this, so we do it here.
         let timeout = self.state.config.call_timeout;

@@ -805,6 +805,10 @@ impl CallManager {
                 let voice_attrs = [
                     KeyValue::new("short_name", view.short_name().to_string()),
                     KeyValue::new("tdma", view.phase2_tdma()),
+                    KeyValue::new(
+                        "source",
+                        i64::from(self.find_source(view.freq().as_hz()).unwrap_or(-1)),
+                    ),
                 ];
                 self.voice_frame_errors
                     .add(u64::try_from(delta.errors).unwrap_or(0), &voice_attrs);
@@ -967,6 +971,10 @@ impl CallManager {
                     let voice_attrs = [
                         KeyValue::new("short_name", view.short_name().to_string()),
                         KeyValue::new("tdma", view.phase2_tdma()),
+                        KeyValue::new(
+                            "source",
+                            i64::from(self.find_source(view.freq().as_hz()).unwrap_or(-1)),
+                        ),
                     ];
                     self.voice_frame_errors
                         .add(u64::try_from(delta.errors).unwrap_or(0), &voice_attrs);

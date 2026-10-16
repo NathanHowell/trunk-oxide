@@ -196,7 +196,10 @@ impl CallHandler {
         writers: &ChannelWriters,
     ) -> Result<Self> {
         let detect_ctcss = config.tone_detection && call_info.is_conventional;
-        let tone_detector = if config.tone_detection {
+        // Conventional channels only. On trunked P25 the detector's DTMF
+        // matcher false-fires on speech and then strips up to the detection
+        // window (median ~1.7 s) from the start of the transcription audio.
+        let tone_detector = if config.tone_detection && call_info.is_conventional {
             Some(if detect_ctcss {
                 ToneDetector::with_ctcss(16000, config.tone_detection_duration_s, true)
             } else {

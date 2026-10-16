@@ -152,6 +152,11 @@ pub struct CallManager {
     /// terminator position (ms at 8 kHz). Tests whether end-of-call clipping
     /// coincides with audio landing behind the terminator tag.
     terminator_events: Counter<u64>,
+    /// Seconds since the recorder last wrote audio, sampled when a call is
+    /// concluded, by stop reason. A grant-timeout stop with audio still flowing
+    /// (age near 0) cut a live transmission; idle-timeout stops sit at the
+    /// call timeout by construction.
+    call_stop_audio_age: Histogram<f64>,
     terminator_after_ms: Histogram<f64>,
     /// Per-call FLL frequency error (Hz) at recorder stop, bucketed by source.
     /// Distribution (not last value) so the per-dongle median = clock bias and
@@ -273,6 +278,12 @@ impl CallManager {
             voice_frame_spikes: meter
                 .u64_counter("trunk.oxide.voice_frame_spikes")
                 .with_description("op25-reported voice codeword spikes, summed per call")
+                .build(),
+            call_stop_audio_age: meter
+                .f64_histogram("trunk.oxide.call_stop_audio_age_seconds")
+                .with_description("Seconds since audio last flowed when a call was concluded")
+                .with_unit("s")
+                .with_boundaries(vec![0.1, 0.25, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 6.0])
                 .build(),
             terminator_events: meter
                 .u64_counter("trunk.oxide.terminator_events")
@@ -537,6 +548,7 @@ impl CallManager {
                             voice_errors = tracing::field::Empty,
                             voice_spikes = tracing::field::Empty,
                             term_events = tracing::field::Empty,
+                            stop_audio_age_s = tracing::field::Empty,
                             after_term_ms = tracing::field::Empty,
                             voice_samples = tracing::field::Empty,
                         );
@@ -856,7 +868,26 @@ impl CallManager {
         // Take ownership of the call span so it closes (and is exported) on every
         // exit path of this function; record the stop reason up front.
         let span = self.call_spans.remove(&call_id);
+        // How stale the audio was at the moment we concluded the call.
+        let audio_age = self
+            .handles
+            .get(&call_id)
+            .map(|h| ffi::call_recorder_since_last_write_secs(h));
+        if let (Some(age), Some(view)) = (audio_age, self.state.get_call_view(call_id)) {
+            self.call_stop_audio_age.record(
+                age,
+                &[
+                    KeyValue::new("reason", reason.as_str()),
+                    KeyValue::new("short_name", view.short_name().to_string()),
+                    KeyValue::new("tdma", view.phase2_tdma()),
+                    KeyValue::new("is_conventional", view.is_conventional()),
+                ],
+            );
+        }
         if let Some(s) = &span {
+            if let Some(age) = audio_age {
+                s.record("stop_audio_age_s", age);
+            }
             s.record("stop_reason", reason.as_str());
             if let Some(c) = self.call_chz.get(&call_id) {
                 let now = self.chz_overruns_total.get(&c.source).copied().unwrap_or(0);

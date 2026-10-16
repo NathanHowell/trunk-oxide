@@ -34,6 +34,7 @@ headless_sink::headless_sink(int n_channels, unsigned int sample_rate, int /*bit
       d_last_write_time(std::chrono::steady_clock::now()),
       d_start_time(),
       d_stop_time(std::chrono::steady_clock::now()),
+      d_last_voice_time(std::chrono::steady_clock::now()),
       d_sample_count(0),
       d_error_count(0),
       d_spike_count(0),
@@ -52,6 +53,7 @@ bool headless_sink::start_recording(const RecorderConfig &config) {
   d_term_events = 0;
   d_after_term_samples = 0;
   d_last_write_time = std::chrono::steady_clock::now();
+  d_last_voice_time = d_last_write_time.load();
   d_talkgroup = config.talkgroup;
   d_freq = config.freq;
   return true;
@@ -76,6 +78,10 @@ RecorderState headless_sink::get_state() {
 
 std::chrono::time_point<std::chrono::system_clock> headless_sink::get_start_time() {
   return d_start_time;
+}
+
+std::chrono::time_point<std::chrono::steady_clock> headless_sink::get_last_voice_time() {
+  return d_last_voice_time;
 }
 
 std::chrono::time_point<std::chrono::steady_clock> headless_sink::get_stop_time() {
@@ -111,7 +117,7 @@ std::vector<Transmission> headless_sink::get_transmission_list() {
 }
 
 int headless_sink::work(int noutput_items,
-                        gr_vector_const_void_star & /*input_items*/,
+                        gr_vector_const_void_star &input_items,
                         gr_vector_void_star & /*output_items*/) {
   if (d_state == REC_IDLE) {
     d_state = REC_RECORDING;
@@ -122,6 +128,16 @@ int headless_sink::work(int noutput_items,
     auto now = std::chrono::steady_clock::now();
     d_last_write_time = now;
     d_stop_time = now;
+
+    // Voice = any sample clearly above digital silence (about -66 dBFS).
+    constexpr int16_t kVoiceThreshold = 16;
+    const auto *pcm = static_cast<const int16_t *>(input_items[0]);
+    for (int i = 0; i < noutput_items; i++) {
+      if (pcm[i] >= kVoiceThreshold || pcm[i] <= -kVoiceThreshold) {
+        d_last_voice_time = now;
+        break;
+      }
+    }
 
     // Accumulate op25's per-period decode-error/spike stream tags (Phase 1
     // emits these on the audio at each TDU; Phase 2 TDMA does not). Each tag is

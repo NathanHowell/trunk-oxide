@@ -449,6 +449,8 @@ pub mod ffi {
 
         // ── Phase C: Call Management — call-level recorder accessors ──
         fn call_recorder_since_last_write_secs(call: &TrCall) -> f64;
+        /// Like `since_last_write`, but only counts blocks with non-silent audio.
+        fn call_recorder_since_last_voice_secs(call: &TrCall) -> f64;
 
         // ── Phase C: Call Management — conclude recording (recorder mechanics) ──
         fn call_stop_recording(call: Pin<&mut TrCall>) -> TrStopRecordingResult;

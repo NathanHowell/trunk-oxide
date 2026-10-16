@@ -33,6 +33,10 @@ private:
   std::atomic<std::chrono::time_point<std::chrono::steady_clock>> d_last_write_time;
   std::chrono::time_point<std::chrono::system_clock> d_start_time;
   std::atomic<std::chrono::time_point<std::chrono::steady_clock>> d_stop_time;
+  // Last time a work() block carried non-silent audio. d_last_write_time moves
+  // with every block, including the decoder's zero padding, so it cannot tell
+  // "samples are flowing" from "someone is talking".
+  std::atomic<std::chrono::time_point<std::chrono::steady_clock>> d_last_voice_time;
   std::atomic<long> d_sample_count;
   // op25 emits per-call decode-error/spike counts as stream tags on the audio
   // (both Phase 1 via Rx_Status and Phase 2 via p2tdma's codeword-error accum).
@@ -66,6 +70,7 @@ public:
   std::chrono::time_point<std::chrono::system_clock> get_start_time();
   std::chrono::time_point<std::chrono::steady_clock> get_stop_time();
   std::chrono::time_point<std::chrono::steady_clock> get_last_write_time();
+  std::chrono::time_point<std::chrono::steady_clock> get_last_voice_time();
 
   std::vector<Transmission> get_transmission_list();
 

@@ -167,6 +167,14 @@ std::chrono::duration<double> p25_recorder_impl::since_last_write() const {
   }
 }
 
+std::chrono::duration<double> p25_recorder_impl::since_last_voice() const {
+  if (qpsk_mod) {
+    return qpsk_p25_decode->since_last_voice();
+  } else {
+    return fsk4_p25_decode->since_last_voice();
+  }
+}
+
 RecorderState p25_recorder_impl::get_state() const {
   if (qpsk_mod) {
     return qpsk_p25_decode->get_state();

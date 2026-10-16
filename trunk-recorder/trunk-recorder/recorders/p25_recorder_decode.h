@@ -62,6 +62,7 @@ public:
   void set_system(const std::shared_ptr<System> &sys);
   void start(const RecorderConfig &config);
   std::chrono::duration<double> since_last_write();
+  std::chrono::duration<double> since_last_voice();
   void stop();
   void flush_plugin();
   void reset();

@@ -162,5 +162,6 @@ double call_get_pwr_db(const TrCall &call);
 
 // ── Call — recorder timing ──
 double call_recorder_since_last_write_secs(const TrCall &call);
+double call_recorder_since_last_voice_secs(const TrCall &call);
 
 } // namespace trunk_oxide

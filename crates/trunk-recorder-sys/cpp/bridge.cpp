@@ -1014,6 +1014,14 @@ double call_recorder_since_last_write_secs(const TrCall &call) {
     return recorder->since_last_write().count();
 }
 
+double call_recorder_since_last_voice_secs(const TrCall &call) {
+    auto recorder = call.ptr->get_recorder();
+    if (!recorder) {
+        return 1e9;
+    }
+    return recorder->since_last_voice().count();
+}
+
 // ── GR block performance metrics ──
 
 static TrGrBlockMetrics collect_block_metrics(const gr::block_sptr &blk) {

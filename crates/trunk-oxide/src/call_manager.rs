@@ -157,6 +157,10 @@ pub struct CallManager {
     /// (age near 0) cut a live transmission; idle-timeout stops sit at the
     /// call timeout by construction.
     call_stop_audio_age: Histogram<f64>,
+    /// Same, but counting only blocks with non-silent audio: the decoder pads
+    /// with zeros while nobody is talking, which keeps `call_stop_audio_age`
+    /// near 0. A grant-timeout stop with a small *voice* age cut speech.
+    call_stop_voice_age: Histogram<f64>,
     terminator_after_ms: Histogram<f64>,
     /// Per-call FLL frequency error (Hz) at recorder stop, bucketed by source.
     /// Distribution (not last value) so the per-dongle median = clock bias and
@@ -282,6 +286,14 @@ impl CallManager {
             call_stop_audio_age: meter
                 .f64_histogram("trunk.oxide.call_stop_audio_age_seconds")
                 .with_description("Seconds since audio last flowed when a call was concluded")
+                .with_unit("s")
+                .with_boundaries(vec![0.1, 0.25, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 6.0])
+                .build(),
+            call_stop_voice_age: meter
+                .f64_histogram("trunk.oxide.call_stop_voice_age_seconds")
+                .with_description(
+                    "Seconds since non-silent audio last flowed when a call was concluded",
+                )
                 .with_unit("s")
                 .with_boundaries(vec![0.1, 0.25, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 6.0])
                 .build(),
@@ -549,6 +561,7 @@ impl CallManager {
                             voice_spikes = tracing::field::Empty,
                             term_events = tracing::field::Empty,
                             stop_audio_age_s = tracing::field::Empty,
+                            stop_voice_age_s = tracing::field::Empty,
                             after_term_ms = tracing::field::Empty,
                             voice_samples = tracing::field::Empty,
                         );
@@ -873,20 +886,28 @@ impl CallManager {
             .handles
             .get(&call_id)
             .map(|h| ffi::call_recorder_since_last_write_secs(h));
-        if let (Some(age), Some(view)) = (audio_age, self.state.get_call_view(call_id)) {
-            self.call_stop_audio_age.record(
-                age,
-                &[
-                    KeyValue::new("reason", reason.as_str()),
-                    KeyValue::new("short_name", view.short_name().to_string()),
-                    KeyValue::new("tdma", view.phase2_tdma()),
-                    KeyValue::new("is_conventional", view.is_conventional()),
-                ],
-            );
+        let voice_age = self
+            .handles
+            .get(&call_id)
+            .map(|h| ffi::call_recorder_since_last_voice_secs(h));
+        if let (Some(age), Some(voice), Some(view)) =
+            (audio_age, voice_age, self.state.get_call_view(call_id))
+        {
+            let labels = [
+                KeyValue::new("reason", reason.as_str()),
+                KeyValue::new("short_name", view.short_name().to_string()),
+                KeyValue::new("tdma", view.phase2_tdma()),
+                KeyValue::new("is_conventional", view.is_conventional()),
+            ];
+            self.call_stop_audio_age.record(age, &labels);
+            self.call_stop_voice_age.record(voice, &labels);
         }
         if let Some(s) = &span {
             if let Some(age) = audio_age {
                 s.record("stop_audio_age_s", age);
+            }
+            if let Some(age) = voice_age {
+                s.record("stop_voice_age_s", age);
             }
             s.record("stop_reason", reason.as_str());
             if let Some(c) = self.call_chz.get(&call_id) {

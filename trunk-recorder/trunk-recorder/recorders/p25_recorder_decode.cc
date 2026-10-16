@@ -86,6 +86,10 @@ std::chrono::duration<double> p25_recorder_decode::since_last_write() {
   return std::chrono::steady_clock::now() - wav_sink->get_last_write_time();
 }
 
+std::chrono::duration<double> p25_recorder_decode::since_last_voice() {
+  return std::chrono::steady_clock::now() - wav_sink->get_last_voice_time();
+}
+
 void p25_recorder_decode::switch_tdma(bool phase2_tdma) {
   op25_frame_assembler->set_phase2_tdma(phase2_tdma);
 }

@@ -44,6 +44,10 @@ public:
   virtual RecorderState get_state() const = 0;
   virtual void set_enabled(bool enabled) = 0;
   virtual std::chrono::duration<double> since_last_write() const = 0;
+  /// Time since the recorder last wrote non-silent audio (since_last_write()
+  /// also advances on the decoder's silence padding). Defaults to
+  /// since_last_write() for recorders that cannot tell.
+  virtual std::chrono::duration<double> since_last_voice() const { return since_last_write(); }
   virtual void set_system(const std::shared_ptr<System> &) = 0;
   virtual void set_squelch_callback(std::function<void(bool, double)> cb) = 0;
   virtual void flush_audio() = 0;

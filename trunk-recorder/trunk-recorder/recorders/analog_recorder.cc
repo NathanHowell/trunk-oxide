@@ -213,6 +213,10 @@ std::chrono::duration<double> analog_recorder::since_last_write() const {
   return std::chrono::steady_clock::now() - wav_sink->get_stop_time();
 }
 
+std::chrono::duration<double> analog_recorder::since_last_voice() const {
+  return std::chrono::steady_clock::now() - wav_sink->get_last_voice_time();
+}
+
 int analog_recorder::get_num() {
   return rec_num;
 }

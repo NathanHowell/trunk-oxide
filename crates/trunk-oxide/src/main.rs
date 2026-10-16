@@ -370,6 +370,37 @@ fn main() -> Result<()> {
             })
             .build();
 
+        // Configured channelizer mode per source (value 1; the mode is the label),
+        // so audio/RF metrics can be split by path across restarts and config flips.
+        let channelizer_modes: Vec<(i64, &'static str)> = config
+            .source
+            .iter()
+            .enumerate()
+            .map(|(idx, src)| {
+                let mode = match src.channelizer {
+                    trunk_config::ChannelizerMode::Legacy => "legacy",
+                    trunk_config::ChannelizerMode::Shadow => "shadow",
+                    trunk_config::ChannelizerMode::Shared => "shared",
+                };
+                (i64::try_from(idx).unwrap_or(i64::MAX), mode)
+            })
+            .collect();
+        let _channelizer_mode = meter
+            .u64_observable_gauge("trunk.oxide.channelizer.mode")
+            .with_description("Configured channelizer mode per source (1 for the active mode)")
+            .with_callback(move |observer| {
+                for (source, mode) in &channelizer_modes {
+                    observer.observe(
+                        1,
+                        &[
+                            KeyValue::new("source.id", *source),
+                            KeyValue::new("mode", *mode),
+                        ],
+                    );
+                }
+            })
+            .build();
+
         // ── Shadow channelizer (legacy vs shared) comparison ──
         let _shadow_polls = meter
             .u64_observable_counter("channelizer.shadow.polls")

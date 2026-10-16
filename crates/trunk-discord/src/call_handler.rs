@@ -681,6 +681,9 @@ impl CallHandler {
         }
         let peak_rms = peak_window_rms(&audio);
         let kept = peak_rms >= SILENCE_RMS_THRESHOLD;
+        self.metrics
+            .audio_peak_rms
+            .record(peak_rms, &self.labels());
 
         // Shape metrics cover every segment, including gated ones: a "silent"
         // segment is exactly where a clipped lead-in or tail would hide.

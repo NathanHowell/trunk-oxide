@@ -1,7 +1,6 @@
 CREATE TABLE IF NOT EXISTS calls (
     id INTEGER PRIMARY KEY,
     talkgroup INTEGER NOT NULL,
-    sys_num INTEGER NOT NULL,
     freq REAL NOT NULL,
     encrypted INTEGER NOT NULL,
     emergency INTEGER NOT NULL,

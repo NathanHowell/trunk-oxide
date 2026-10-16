@@ -13,7 +13,7 @@ use tracing::Instrument;
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use trunk_oxide_proto as proto;
 
-use proto::types::{SysNum, Talkgroup};
+use proto::types::Talkgroup;
 use trunk_database::Database;
 
 use crate::aggregator::Aggregator;
@@ -197,7 +197,7 @@ impl DispatchPump {
     fn note_stuck(&mut self, key: &CallKey) {
         tracing::error!(
             talkgroup = key.talkgroup.0,
-            sys_num = key.sys_num.0,
+            system = %key.system,
             "call handler stuck (bounded send timed out); dropping it"
         );
         self.ctx.metrics.calls_dropped_stuck.add(1, &[]);
@@ -327,14 +327,14 @@ impl DispatchPump {
                     // events buffer in the channel while the post channel
                     // resolves off the pump loop (inside the spawned task).
                     let (tx, rx) = mpsc::channel(1024);
-                    self.calls.insert(key, ActiveCall { tx });
+                    self.calls.insert(key.clone(), ActiveCall { tx });
 
                     let ctx = Arc::clone(&self.ctx);
                     let dead_call_tx = self.dead_call_tx.clone();
                     let span = tracing::info_span!(
                         "call",
                         talkgroup = call.talkgroup,
-                        sys_num = call.sys_num,
+                        system = %call.short_name,
                         freq = call.freq,
                         encrypted = call.encrypted,
                     );
@@ -470,7 +470,6 @@ impl DispatchContext {
     ) -> Option<proto::types::CallRowId> {
         let record = trunk_database::CallRecord {
             talkgroup: Talkgroup(call.talkgroup),
-            sys_num: SysNum(call.sys_num),
             freq: proto::types::Freq(call.freq),
             encrypted: call.encrypted,
             emergency: call.emergency,

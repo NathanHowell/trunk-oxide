@@ -53,9 +53,8 @@ impl FormatEmbed for proto::SetupConfigEvent {
         for sys in &self.systems {
             let _ = writeln!(
                 text,
-                "System: {} ({}) - type: {}",
+                "System: {} - type: {}",
                 sys.short_name,
-                sys.sys_num,
                 format_system_type(sys.system_type)
             );
         }
@@ -69,9 +68,8 @@ impl FormatEmbed for proto::SetupSystemsEvent {
         for sys in &self.systems {
             let _ = writeln!(
                 text,
-                "{} (sys_num={}, type={})",
+                "{} (type={})",
                 sys.short_name,
-                sys.sys_num,
                 format_system_type(sys.system_type)
             );
         }
@@ -103,9 +101,8 @@ impl FormatEmbed for proto::SetupSystemEvent {
             || "(no data)".to_string(),
             |sys| {
                 format!(
-                    "{} (sys_num={}, type={})",
+                    "{} (type={})",
                     sys.short_name,
-                    sys.sys_num,
                     format_system_type(sys.system_type)
                 )
             },
@@ -480,7 +477,6 @@ mod tests {
         let event = proto::SetupConfigEvent {
             systems: vec![proto::SystemInfo {
                 short_name: "smco".into(),
-                sys_num: 1,
                 system_type: 0,
                 ..Default::default()
             }],
@@ -501,7 +497,6 @@ mod tests {
         let event1 = proto::SetupSystemEvent {
             system: Some(proto::SystemInfo {
                 short_name: "smco".into(),
-                sys_num: 1,
                 system_type: 0,
                 ..Default::default()
             }),
@@ -509,7 +504,6 @@ mod tests {
         let event2 = proto::SetupSystemEvent {
             system: Some(proto::SystemInfo {
                 short_name: "svrcs".into(),
-                sys_num: 2,
                 system_type: 0,
                 ..Default::default()
             }),

@@ -27,10 +27,13 @@ message StreamMessage {
 
 message AudioSample {
   int64 talkgroup = 1;
-  int32 sys_num = 2;
+  reserved 2; // was sys_num: unstable across restarts, use short_name
   double freq = 3;
   bytes samples = 4; // int16 PCM, little-endian
   int32 sample_rate = 5;
+  // Stable system identity. sys_num is assigned at startup and is not stable
+  // across restarts, so consumers should key on this.
+  string short_name = 6;
 }
 
 // ── Events ──
@@ -84,7 +87,7 @@ message SignalEvent {
 message CallInfo {
   int64 talkgroup = 1;
   int64 call_num = 2;
-  int32 sys_num = 3;
+  reserved 3; // was sys_num: unstable across restarts, use short_name
   double freq = 4;
   optional double signal = 5;
   optional double noise = 6;
@@ -145,7 +148,7 @@ enum SystemType {
 // ── System info ──
 
 message SystemInfo {
-  int32 sys_num = 1;
+  reserved 1; // was sys_num: unstable across restarts, use short_name
   uint64 sys_id = 2;
   string short_name = 3;
   SystemType system_type = 4;
@@ -223,7 +226,7 @@ message CallData {
   int32 priority = 22;
   bool mode = 23;
   bool duplex = 24;
-  int32 sys_num = 25;
+  reserved 25; // was sys_num: unstable across restarts, use short_name
   string short_name = 26;
   string audio_type = 27;
   int32 tdma_slot = 28;
@@ -310,7 +313,7 @@ message TrunkMessage {
   int32 tdma_slot = 10;
   bool phase2_tdma = 11;
   int64 source = 12;
-  int32 sys_num = 13;
+  reserved 13; // was sys_num: unstable across restarts, use short_name
   uint64 sys_id = 14;
   int32 rfss = 15;
   int32 site_id = 16;

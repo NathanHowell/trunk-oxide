@@ -40,7 +40,6 @@ mod tests {
             tdma_slot: 0,
             phase2_tdma: false,
             source: -1,
-            sys_num: 1,
             sys_id: 0,
             rfss: 1,
             site_id: 1,
@@ -72,7 +71,6 @@ mod tests {
             tdma_slot: 0,
             phase2_tdma: false,
             source: 12345,
-            sys_num: 2,
             sys_id: 0x1234,
             rfss: 1,
             site_id: 1,
@@ -105,7 +103,6 @@ mod tests {
                 tdma_slot: 0,
                 phase2_tdma: false,
                 source: -1,
-                sys_num: 1,
                 sys_id: 0,
                 rfss: 1,
                 site_id: 1,
@@ -124,7 +121,6 @@ mod tests {
         let event = TrunkMessageEvent {
             messages: msgs,
             system: Some(SystemInfo {
-                sys_num: 1,
                 sys_id: 0,
                 short_name: "smco".to_string(),
                 system_type: SystemType::P25 as i32,
@@ -163,7 +159,6 @@ mod tests {
                         call: Some(CallInfo {
                             talkgroup: 1001,
                             call_num: 42,
-                            sys_num: 1,
                             freq: 772_406_250.0,
                             ..Default::default()
                         }),
@@ -178,7 +173,6 @@ mod tests {
                         call: Some(CallInfo {
                             talkgroup: 1001,
                             call_num: 1,
-                            sys_num: 1,
                             freq: 772_406_250.0,
                             short_name: "smco".to_string(),
                             ..Default::default()
@@ -191,7 +185,6 @@ mod tests {
                 PluginEvent {
                     event: Some(plugin_event::Event::SystemRates(SystemRatesEvent {
                         systems: vec![SystemInfo {
-                            sys_num: 1,
                             short_name: "smco".to_string(),
                             decode_rate: 42,
                             ..Default::default()
@@ -219,7 +212,6 @@ mod tests {
                     talkgroup: 1001,
                     freq: 772_406_250.0,
                     message_type: MessageType::Grant as i32,
-                    sys_num: 1,
                     patch_data: Some(PatchData::default()),
                     ..Default::default()
                 },
@@ -250,7 +242,6 @@ mod tests {
                     message_type: MessageType::Grant as i32,
                     talkgroup: 1001,
                     source: -1,
-                    sys_num: 1,
                     sys_id: 0x1234,
                     nac: 0x5AB,
                     wacn: 0xBEEF0,
@@ -313,7 +304,6 @@ mod tests {
             let event = TrunkMessageEvent {
                 messages: vec![msg.clone()],
                 system: Some(SystemInfo {
-                    sys_num: 1,
                     short_name: "test".to_string(),
                     ..Default::default()
                 }),
@@ -342,7 +332,6 @@ mod tests {
                 freq: 770_000_000.0 + i as f64 * 500_000.0,
                 talkgroup: 1000 + i,
                 source: if i % 2 == 0 { -1 } else { 10000 + i },
-                sys_num: 1,
                 sys_id: 0x1234,
                 rfss: 1,
                 site_id: 1,
@@ -364,7 +353,6 @@ mod tests {
         let event = TrunkMessageEvent {
             messages,
             system: Some(SystemInfo {
-                sys_num: 1,
                 sys_id: 0x1234,
                 short_name: "smco".to_string(),
                 system_type: SystemType::P25 as i32,

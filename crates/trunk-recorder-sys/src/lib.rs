@@ -383,6 +383,7 @@ pub mod ffi {
         // Accessor wrappers are free functions defined in bridge.h/bridge.cpp.
         type TrCall;
         type TrSystem;
+        fn tr_system_short_name(sys: &TrSystem) -> String;
 
         // ── Opaque lifecycle type ──
         type TrContext;

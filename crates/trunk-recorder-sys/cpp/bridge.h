@@ -50,6 +50,8 @@ struct TrSystem final {
     explicit TrSystem(const std::shared_ptr<System> &p) : ptr(p) {}
 };
 
+rust::String tr_system_short_name(const TrSystem &sys);
+
 // ── Opaque lifecycle type (pimpl) ──
 struct TrContextImpl;
 struct TrContext {

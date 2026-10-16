@@ -497,7 +497,7 @@ impl CallManager {
                 call_id.as_u64(),
                 AudioMeta {
                     talkgroup: view.talkgroup(),
-                    sys_num: view.sys_num(),
+                    short_name: Arc::from(view.short_name()),
                     freq: view.freq().as_hz(),
                     sample_rate: if view.is_analog() { 16_000 } else { 8_000 },
                 },

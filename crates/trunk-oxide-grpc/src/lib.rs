@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::ReceiverStream;
@@ -27,7 +27,6 @@ pub struct TalkgroupMeta {
 
 fn system_info_from(info: &SystemInfo) -> proto::SystemInfo {
     proto::SystemInfo {
-        sys_num: info.sys_num,
         sys_id: info.sys_id,
         short_name: info.short_name.clone(),
         system_type: info.system_type,
@@ -73,7 +72,6 @@ fn convert_call_data(cd: &TrCallData) -> proto::CallData {
         priority: cd.priority,
         mode: cd.mode,
         duplex: cd.duplex,
-        sys_num: cd.sys_num,
         short_name: cd.short_name.clone(),
         audio_type: cd.audio_type.clone(),
         tdma_slot: cd.tdma_slot,
@@ -163,7 +161,6 @@ fn convert_trunk_messages(messages: &[TrTrunkMessage]) -> Vec<proto::TrunkMessag
             tdma_slot: m.tdma_slot,
             phase2_tdma: m.phase2_tdma,
             source: m.source,
-            sys_num: m.sys_num,
             sys_id: m.sys_id,
             rfss: m.sys_rfss,
             site_id: m.sys_site_id,
@@ -240,10 +237,10 @@ impl Default for GrpcConfig {
 
 /// Audio metadata registered by Rust for each active call, keyed by `CallId`.
 /// This avoids FFI round-trips in the hot audio callback path.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct AudioMeta {
     pub talkgroup: i64,
-    pub sys_num: i32,
+    pub short_name: Arc<str>,
     pub freq: f64,
     pub sample_rate: i32,
 }
@@ -257,8 +254,8 @@ pub struct EventBridge {
     tx: broadcast::Sender<proto::StreamMessage>,
     /// (`short_name`, `talkgroup_id`) → metadata from config CSVs
     talkgroups: HashMap<(String, i64), TalkgroupMeta>,
-    /// (`sys_num`, `radio_id`) → OTA-discovered alias
-    unit_aliases: RwLock<HashMap<(i32, i64), String>>,
+    /// (`short_name`, `radio_id`) → OTA-discovered alias
+    unit_aliases: RwLock<HashMap<(String, i64), String>>,
     /// `rust_call_id` → audio metadata (set by Rust, read by GR audio callback)
     audio_meta: RwLock<HashMap<u64, AudioMeta>>,
 }
@@ -292,7 +289,6 @@ impl EventBridge {
         proto::CallInfo {
             talkgroup: info.talkgroup,
             call_num: info.call_num,
-            sys_num: info.sys_num,
             freq: info.freq,
             signal: trunk_recorder_sys::signal_from_ffi(info.signal),
             noise: trunk_recorder_sys::signal_from_ffi(info.noise),
@@ -330,11 +326,11 @@ impl EventBridge {
         }
     }
 
-    fn unit_alias(&self, sys_num: i32, unit_id: i64) -> String {
+    fn unit_alias(&self, short_name: &str, unit_id: i64) -> String {
         self.unit_aliases
             .read()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .get(&(sys_num, unit_id))
+            .get(&(short_name.to_string(), unit_id))
             .cloned()
             .unwrap_or_default()
     }
@@ -356,7 +352,7 @@ impl EventBridge {
             signaling_type: String::new(),
             signal_type: proto::SignalType::Normal as i32,
             call: Some(self.call_info_from(info)),
-            unit_alias: self.unit_alias(info.sys_num, unit_id),
+            unit_alias: self.unit_alias(&info.short_name, unit_id),
         }));
     }
 
@@ -384,17 +380,17 @@ impl EventBridge {
         let meta = {
             let guard = self.audio_meta.read().unwrap();
             match guard.get(&rust_call_id) {
-                Some(&m) => m,
+                Some(m) => m.clone(),
                 None => return,
             }
         };
         let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
         let msg = proto::AudioSample {
             talkgroup: meta.talkgroup,
-            sys_num: meta.sys_num,
             freq: meta.freq,
             samples: bytes,
             sample_rate: meta.sample_rate,
+            short_name: meta.short_name.to_string(),
         };
         let stream_msg = proto::StreamMessage {
             message: Some(proto::stream_message::Message::Audio(msg)),
@@ -492,7 +488,7 @@ impl EventBridge {
             system: Some(system_info_from(info)),
             source_id,
             talkgroup,
-            source_alias: self.unit_alias(info.sys_num, source_id),
+            source_alias: self.unit_alias(&info.short_name, source_id),
         }));
     }
 
@@ -504,11 +500,11 @@ impl EventBridge {
         source: &str,
         talkgroup_id: i64,
     ) {
-        let _ = system;
+        let short_name = trunk_recorder_sys::ffi::tr_system_short_name(system);
         self.unit_aliases
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .insert((0, radio_id), alias.to_string());
+            .insert((short_name, radio_id), alias.to_string());
         self.send_event(proto::plugin_event::Event::UnitAlias(
             proto::UnitAliasEvent {
                 radio_id,

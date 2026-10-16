@@ -405,6 +405,10 @@ int32_t tr_add_source_from_config(TrContext &ctx, const TrSourceConfig &cfg) {
     return idx;
 }
 
+rust::String tr_system_short_name(const TrSystem &sys) {
+    return rust::String(sys.ptr->get_short_name());
+}
+
 int32_t tr_add_system_from_config(TrContext &ctx, const TrSystemConfig &cfg) {
     int32_t sys_idx = static_cast<int32_t>(ctx.impl->trunk_ctx.systems.size());
     auto sys = System::make(sys_idx);

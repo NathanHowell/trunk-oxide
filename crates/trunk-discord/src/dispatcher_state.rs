@@ -1,17 +1,20 @@
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use chrono::Utc;
-use proto::types::{SysNum, Talkgroup};
+use proto::types::Talkgroup;
 use trunk_oxide_proto as proto;
 
 use crate::aggregator::AggregatorMessage;
 
 // ── Keys ─────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Copy, Hash, Eq, PartialEq)]
+/// Identifies a live call. The system is identified by `short_name` (stable),
+/// not `sys_num`, which is assigned at startup and changes across restarts.
+#[derive(Debug, Clone, Hash, Eq, PartialEq)]
 pub struct CallKey {
-    pub sys_num: SysNum,
+    pub system: Arc<str>,
     pub talkgroup: Talkgroup,
 }
 
@@ -100,7 +103,7 @@ impl DispatcherState {
         }
 
         let key = CallKey {
-            sys_num: SysNum(sample.sys_num),
+            system: Arc::from(sample.short_name.as_str()),
             talkgroup: Talkgroup(sample.talkgroup),
         };
 
@@ -174,13 +177,13 @@ impl DispatcherState {
         }
 
         let key = CallKey {
-            sys_num: SysNum(call.sys_num),
+            system: Arc::from(call.short_name.as_str()),
             talkgroup: Talkgroup(call.talkgroup),
         };
 
         // Check if this talkgroup is coalescing (between PTTs)
         if self.coalescing_calls.remove(&key).is_some() {
-            self.active_calls.insert(key, Instant::now());
+            self.active_calls.insert(key.clone(), Instant::now());
             effects.push(DispatchEffect::CoalesceResume { key, call });
             return effects;
         }
@@ -196,17 +199,17 @@ impl DispatcherState {
             effects.push(DispatchEffect::Log {
                 message: format!(
                     "overlapping call_start for tg {} sys {}: finalizing previous handler",
-                    key.talkgroup.0, key.sys_num.0
+                    key.talkgroup.0, key.system
                 ),
             });
             effects.push(DispatchEffect::EndCall {
-                key,
+                key: key.clone(),
                 call_data: None,
             });
         }
 
         // Normal path: register as active immediately, then resolve channel
-        self.active_calls.insert(key, Instant::now());
+        self.active_calls.insert(key.clone(), Instant::now());
         effects.push(DispatchEffect::ResolveChannel { key, call });
 
         effects
@@ -224,7 +227,7 @@ impl DispatcherState {
         };
 
         let key = CallKey {
-            sys_num: SysNum(call_data.sys_num),
+            system: Arc::from(call_data.short_name.as_str()),
             talkgroup: Talkgroup(call_data.talkgroup),
         };
 
@@ -241,7 +244,7 @@ impl DispatcherState {
         // free-running recorder restart loop emitted CallStarts during dead air
         // that would have kept the handler alive forever; that loop is gone.)
         if !self.coalesce_timeout.is_zero() {
-            self.coalescing_calls.insert(key, Instant::now());
+            self.coalescing_calls.insert(key.clone(), Instant::now());
             return vec![DispatchEffect::PttEnd {
                 key,
                 call_data: event.call_data.map(Box::new),
@@ -258,7 +261,7 @@ impl DispatcherState {
     fn on_signal(&self, event: proto::SignalEvent) -> Vec<DispatchEffect> {
         if let Some(call) = &event.call {
             let key = CallKey {
-                sys_num: SysNum(call.sys_num),
+                system: Arc::from(call.short_name.as_str()),
                 talkgroup: Talkgroup(call.talkgroup),
             };
             if self.active_calls.contains_key(&key) {
@@ -276,7 +279,7 @@ impl DispatcherState {
             && let Some(system) = &event.system
         {
             let key = CallKey {
-                sys_num: SysNum(system.sys_num),
+                system: Arc::from(system.short_name.as_str()),
                 talkgroup: Talkgroup(event.talkgroup),
             };
             if self.active_calls.contains_key(&key) {
@@ -297,7 +300,7 @@ impl DispatcherState {
         for (key, started_at) in &self.active_calls {
             let age = now.duration_since(*started_at);
             if age > MAX_CALL_AGE {
-                reap_keys.push((*key, age));
+                reap_keys.push((key.clone(), age));
             }
         }
 
@@ -307,7 +310,7 @@ impl DispatcherState {
             effects.push(DispatchEffect::Log {
                 message: format!(
                     "reaping stuck call sys_num={} tg={} age={}s",
-                    key.sys_num.0,
+                    key.system,
                     key.talkgroup.0,
                     age.as_secs()
                 ),
@@ -328,7 +331,7 @@ impl DispatcherState {
         let mut effects = Vec::new();
         self.coalescing_calls.retain(|key, entered_at| {
             if now.duration_since(*entered_at) > self.coalesce_timeout {
-                effects.push(DispatchEffect::CoalesceTimeout { key: *key });
+                effects.push(DispatchEffect::CoalesceTimeout { key: key.clone() });
                 false
             } else {
                 true
@@ -407,14 +410,13 @@ fn format_unit_event(event: &proto::UnitEvent) -> String {
 mod tests {
     use super::*;
 
-    fn make_call_start(sys_num: i32, talkgroup: i64) -> proto::PluginEvent {
+    fn make_call_start(system: &str, talkgroup: i64) -> proto::PluginEvent {
         proto::PluginEvent {
             event: Some(proto::plugin_event::Event::CallStart(
                 proto::CallStartEvent {
                     call: Some(proto::CallInfo {
-                        sys_num,
                         talkgroup,
-                        short_name: "smco".into(),
+                        short_name: system.into(),
                         freq: 851_125_000.0,
                         ..Default::default()
                     }),
@@ -423,11 +425,11 @@ mod tests {
         }
     }
 
-    fn make_call_end(sys_num: i32, talkgroup: i64) -> proto::PluginEvent {
+    fn make_call_end(system: &str, talkgroup: i64) -> proto::PluginEvent {
         proto::PluginEvent {
             event: Some(proto::plugin_event::Event::CallEnd(proto::CallEndEvent {
                 call_data: Some(proto::CallData {
-                    sys_num,
+                    short_name: system.into(),
                     talkgroup,
                     length: 5.0,
                     ..Default::default()
@@ -442,13 +444,13 @@ mod tests {
     fn audio_for_active_call_routes() {
         let mut s = DispatcherState::new(0);
         let key = CallKey {
-            sys_num: SysNum(1),
+            system: Arc::from("smco"),
             talkgroup: Talkgroup(12345),
         };
         s.active_calls.insert(key, Instant::now());
 
         let sample = proto::AudioSample {
-            sys_num: 1,
+            short_name: "smco".into(),
             talkgroup: 12345,
             samples: vec![1, 2, 3, 4],
             sample_rate: 16000,
@@ -463,7 +465,7 @@ mod tests {
     fn audio_for_unknown_call_dropped() {
         let s = DispatcherState::new(0);
         let sample = proto::AudioSample {
-            sys_num: 1,
+            short_name: "smco".into(),
             talkgroup: 12345,
             samples: vec![1, 2],
             sample_rate: 16000,
@@ -477,7 +479,7 @@ mod tests {
     fn audio_with_zero_sample_rate_logs() {
         let s = DispatcherState::new(0);
         let sample = proto::AudioSample {
-            sys_num: 1,
+            short_name: "smco".into(),
             talkgroup: 12345,
             samples: vec![1, 2],
             sample_rate: 0,
@@ -493,7 +495,7 @@ mod tests {
     #[test]
     fn call_start_emits_resolve_channel() {
         let mut s = DispatcherState::new(0);
-        let effects = s.on_event(make_call_start(1, 12345));
+        let effects = s.on_event(make_call_start("smco", 12345));
         assert!(
             effects
                 .iter()
@@ -501,7 +503,7 @@ mod tests {
         );
         // Active immediately so audio can buffer during resolution
         let key = CallKey {
-            sys_num: SysNum(1),
+            system: Arc::from("smco"),
             talkgroup: Talkgroup(12345),
         };
         assert!(s.is_active(&key));
@@ -512,7 +514,7 @@ mod tests {
         let mut s = DispatcherState::new(0);
         // A fresh call_start registers the call as active immediately (so audio
         // can buffer) and asks the executor to resolve a channel + run a handler.
-        let effects = s.on_event(make_call_start(1, 12345));
+        let effects = s.on_event(make_call_start("smco", 12345));
         assert!(
             effects
                 .iter()
@@ -520,7 +522,7 @@ mod tests {
         );
 
         let key = CallKey {
-            sys_num: SysNum(1),
+            system: Arc::from("smco"),
             talkgroup: Talkgroup(12345),
         };
         assert!(s.is_active(&key));
@@ -529,9 +531,9 @@ mod tests {
     #[test]
     fn channel_resolution_failed_removes_active() {
         let mut s = DispatcherState::new(0);
-        s.on_event(make_call_start(1, 12345));
+        s.on_event(make_call_start("smco", 12345));
         let key = CallKey {
-            sys_num: SysNum(1),
+            system: Arc::from("smco"),
             talkgroup: Talkgroup(12345),
         };
         assert!(s.is_active(&key));
@@ -543,12 +545,12 @@ mod tests {
     fn call_end_for_active_call_removes() {
         let mut s = DispatcherState::new(0);
         // Simulate full lifecycle: start → resolve → end
-        s.on_event(make_call_start(1, 12345));
+        s.on_event(make_call_start("smco", 12345));
 
-        let effects = s.on_event(make_call_end(1, 12345));
+        let effects = s.on_event(make_call_end("smco", 12345));
 
         let key = CallKey {
-            sys_num: SysNum(1),
+            system: Arc::from("smco"),
             talkgroup: Talkgroup(12345),
         };
         assert!(!s.is_active(&key));
@@ -562,7 +564,7 @@ mod tests {
     #[test]
     fn call_end_for_unknown_call_no_effect() {
         let mut s = DispatcherState::new(0);
-        let effects = s.on_event(make_call_end(1, 99999));
+        let effects = s.on_event(make_call_end("smco", 99999));
         assert!(
             !effects
                 .iter()
@@ -574,12 +576,12 @@ mod tests {
     fn overlapping_call_start_finalizes_previous_handler() {
         let mut s = DispatcherState::new(0);
         // First call_start for the talkgroup, resolved into an active handler.
-        s.on_event(make_call_start(1, 12345));
+        s.on_event(make_call_start("smco", 12345));
 
         // Second call_start arrives before the first ended (overlap). It must
         // end the previous handler before resolving the new one, otherwise the
         // first embed is orphaned grey when its sender is overwritten.
-        let effects = s.on_event(make_call_start(1, 12345));
+        let effects = s.on_event(make_call_start("smco", 12345));
         assert!(
             effects
                 .iter()
@@ -595,7 +597,7 @@ mod tests {
 
         // The talkgroup is still active (now owned by the new call).
         let key = CallKey {
-            sys_num: SysNum(1),
+            system: Arc::from("smco"),
             talkgroup: Talkgroup(12345),
         };
         assert!(s.is_active(&key));
@@ -606,11 +608,11 @@ mod tests {
         // A call_start that resumes a coalescing call must NOT emit EndCall —
         // it resumes the same handler rather than replacing it.
         let mut s = DispatcherState::new(5000);
-        s.on_event(make_call_start(1, 12345));
+        s.on_event(make_call_start("smco", 12345));
         // End moves it to coalescing (between PTTs).
-        s.on_event(make_call_end(1, 12345));
+        s.on_event(make_call_end("smco", 12345));
 
-        let effects = s.on_event(make_call_start(1, 12345));
+        let effects = s.on_event(make_call_start("smco", 12345));
         assert!(
             effects
                 .iter()
@@ -630,13 +632,13 @@ mod tests {
     #[test]
     fn signal_during_active_call_routes_to_call() {
         let mut s = DispatcherState::new(0);
-        s.on_event(make_call_start(1, 12345));
+        s.on_event(make_call_start("smco", 12345));
 
         let event = proto::PluginEvent {
             event: Some(proto::plugin_event::Event::Signal(proto::SignalEvent {
                 call: Some(proto::CallInfo {
-                    sys_num: 1,
                     talkgroup: 12345,
+                    short_name: "smco".into(),
                     ..Default::default()
                 }),
                 signal_type: 0,
@@ -658,7 +660,6 @@ mod tests {
         let event = proto::PluginEvent {
             event: Some(proto::plugin_event::Event::Signal(proto::SignalEvent {
                 call: Some(proto::CallInfo {
-                    sys_num: 1,
                     talkgroup: 99999,
                     ..Default::default()
                 }),
@@ -678,13 +679,13 @@ mod tests {
     #[test]
     fn unit_during_active_call_routes_to_call() {
         let mut s = DispatcherState::new(0);
-        s.on_event(make_call_start(1, 12345));
+        s.on_event(make_call_start("smco", 12345));
 
         let event = proto::PluginEvent {
             event: Some(proto::plugin_event::Event::Unit(proto::UnitEvent {
                 talkgroup: 12345,
                 system: Some(proto::SystemInfo {
-                    sys_num: 1,
+                    short_name: "smco".into(),
                     ..Default::default()
                 }),
                 source_id: 100,
@@ -706,7 +707,6 @@ mod tests {
             event: Some(proto::plugin_event::Event::Unit(proto::UnitEvent {
                 talkgroup: 0,
                 system: Some(proto::SystemInfo {
-                    sys_num: 1,
                     ..Default::default()
                 }),
                 ..Default::default()
@@ -726,11 +726,13 @@ mod tests {
     fn reap_removes_old_calls() {
         let mut s = DispatcherState::new(0);
         let key = CallKey {
-            sys_num: SysNum(1),
+            system: Arc::from("smco"),
             talkgroup: Talkgroup(12345),
         };
-        s.active_calls
-            .insert(key, Instant::now() - std::time::Duration::from_secs(700));
+        s.active_calls.insert(
+            key.clone(),
+            Instant::now() - std::time::Duration::from_secs(700),
+        );
 
         let effects = s.on_reap_tick();
         assert!(
@@ -745,10 +747,10 @@ mod tests {
     fn reap_keeps_fresh_calls() {
         let mut s = DispatcherState::new(0);
         let key = CallKey {
-            sys_num: SysNum(1),
+            system: Arc::from("smco"),
             talkgroup: Talkgroup(12345),
         };
-        s.active_calls.insert(key, Instant::now());
+        s.active_calls.insert(key.clone(), Instant::now());
 
         let effects = s.on_reap_tick();
         assert!(effects.is_empty());
@@ -778,15 +780,15 @@ mod tests {
     #[test]
     fn coalesce_off_call_end_emits_end_call() {
         let mut s = DispatcherState::new(0);
-        s.on_event(make_call_start(1, 12345));
-        let effects = s.on_event(make_call_end(1, 12345));
+        s.on_event(make_call_start("smco", 12345));
+        let effects = s.on_event(make_call_end("smco", 12345));
         assert!(
             effects
                 .iter()
                 .any(|e| matches!(e, DispatchEffect::EndCall { .. }))
         );
         let key = CallKey {
-            sys_num: SysNum(1),
+            system: Arc::from("smco"),
             talkgroup: Talkgroup(12345),
         };
         assert!(!s.is_coalescing(&key));
@@ -795,8 +797,8 @@ mod tests {
     #[test]
     fn coalesce_on_call_end_emits_ptt_end() {
         let mut s = DispatcherState::new(10_000);
-        s.on_event(make_call_start(1, 12345));
-        let effects = s.on_event(make_call_end(1, 12345));
+        s.on_event(make_call_start("smco", 12345));
+        let effects = s.on_event(make_call_end("smco", 12345));
         assert!(
             effects
                 .iter()
@@ -808,7 +810,7 @@ mod tests {
                 .any(|e| matches!(e, DispatchEffect::EndCall { .. }))
         );
         let key = CallKey {
-            sys_num: SysNum(1),
+            system: Arc::from("smco"),
             talkgroup: Talkgroup(12345),
         };
         assert!(!s.is_active(&key));
@@ -819,17 +821,17 @@ mod tests {
     fn coalesce_call_start_during_gap_emits_resume() {
         let mut s = DispatcherState::new(10_000);
         // Start → resolve → end (enters coalescing)
-        s.on_event(make_call_start(1, 12345));
-        s.on_event(make_call_end(1, 12345));
+        s.on_event(make_call_start("smco", 12345));
+        s.on_event(make_call_end("smco", 12345));
 
         let key = CallKey {
-            sys_num: SysNum(1),
+            system: Arc::from("smco"),
             talkgroup: Talkgroup(12345),
         };
         assert!(s.is_coalescing(&key));
 
         // New CallStart while coalescing
-        let effects = s.on_event(make_call_start(1, 12345));
+        let effects = s.on_event(make_call_start("smco", 12345));
         assert!(
             effects
                 .iter()
@@ -848,12 +850,12 @@ mod tests {
     fn coalesce_timeout_fires_on_tick() {
         let mut s = DispatcherState::new(100); // 100ms timeout
         let key = CallKey {
-            sys_num: SysNum(1),
+            system: Arc::from("smco"),
             talkgroup: Talkgroup(12345),
         };
         // Simulate an entry that's already expired
         s.coalescing_calls
-            .insert(key, Instant::now() - Duration::from_millis(200));
+            .insert(key.clone(), Instant::now() - Duration::from_millis(200));
 
         let effects = s.on_coalesce_tick();
         assert!(
@@ -868,10 +870,10 @@ mod tests {
     fn coalesce_fresh_entry_not_timed_out() {
         let mut s = DispatcherState::new(10_000);
         let key = CallKey {
-            sys_num: SysNum(1),
+            system: Arc::from("smco"),
             talkgroup: Talkgroup(12345),
         };
-        s.coalescing_calls.insert(key, Instant::now());
+        s.coalescing_calls.insert(key.clone(), Instant::now());
 
         let effects = s.on_coalesce_tick();
         assert!(effects.is_empty());
@@ -882,7 +884,7 @@ mod tests {
     fn coalesce_tick_noop_when_disabled() {
         let mut s = DispatcherState::new(0);
         let key = CallKey {
-            sys_num: SysNum(1),
+            system: Arc::from("smco"),
             talkgroup: Talkgroup(12345),
         };
         // This shouldn't happen in practice, but verify it's safe
@@ -896,13 +898,13 @@ mod tests {
     fn audio_during_coalesce_gap_not_routed() {
         let mut s = DispatcherState::new(10_000);
         let key = CallKey {
-            sys_num: SysNum(1),
+            system: Arc::from("smco"),
             talkgroup: Talkgroup(12345),
         };
         s.coalescing_calls.insert(key, Instant::now());
 
         let sample = proto::AudioSample {
-            sys_num: 1,
+            short_name: "smco".into(),
             talkgroup: 12345,
             samples: vec![1, 2],
             sample_rate: 16000,
@@ -914,11 +916,11 @@ mod tests {
 
     // ── Conventional calls coalesce like trunked ─────────────────────
 
-    fn make_conventional_call_end(sys_num: i32, talkgroup: i64) -> proto::PluginEvent {
+    fn make_conventional_call_end(system: &str, talkgroup: i64) -> proto::PluginEvent {
         proto::PluginEvent {
             event: Some(proto::plugin_event::Event::CallEnd(proto::CallEndEvent {
                 call_data: Some(proto::CallData {
-                    sys_num,
+                    short_name: system.into(),
                     talkgroup,
                     length: 5.0,
                     is_conventional: true,
@@ -931,11 +933,11 @@ mod tests {
     #[test]
     fn conventional_call_coalesces_like_trunked() {
         let mut s = DispatcherState::new(10_000); // coalescing enabled
-        s.on_event(make_call_start(1, 12345));
+        s.on_event(make_call_start("smco", 12345));
 
         // trunk-oxide now emits one CallStart/CallEnd per keyed transmission for
         // conventional channels, so CallEnd coalesces (PttEnd), not EndCall.
-        let effects = s.on_event(make_conventional_call_end(1, 12345));
+        let effects = s.on_event(make_conventional_call_end("smco", 12345));
         assert!(
             effects
                 .iter()
@@ -949,7 +951,7 @@ mod tests {
             "conventional call should not end immediately when coalescing"
         );
         let key = CallKey {
-            sys_num: SysNum(1),
+            system: Arc::from("smco"),
             talkgroup: Talkgroup(12345),
         };
         assert!(s.is_coalescing(&key));
@@ -959,10 +961,10 @@ mod tests {
     #[test]
     fn trunked_call_still_coalesces() {
         let mut s = DispatcherState::new(10_000); // coalescing enabled
-        s.on_event(make_call_start(1, 12345));
+        s.on_event(make_call_start("smco", 12345));
 
         // CallEnd for a trunked call should still coalesce
-        let effects = s.on_event(make_call_end(1, 12345));
+        let effects = s.on_event(make_call_end("smco", 12345));
         assert!(
             effects
                 .iter()
@@ -970,7 +972,7 @@ mod tests {
             "trunked call should coalesce"
         );
         let key = CallKey {
-            sys_num: SysNum(1),
+            system: Arc::from("smco"),
             talkgroup: Talkgroup(12345),
         };
         assert!(s.is_coalescing(&key));

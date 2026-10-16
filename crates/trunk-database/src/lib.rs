@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use rusqlite::Connection;
 use sha2::{Digest, Sha256};
-use trunk_oxide_proto::types::{CallRowId, Freq, SignalDb, SysNum, Talkgroup};
+use trunk_oxide_proto::types::{CallRowId, Freq, SignalDb, Talkgroup};
 
 const SCHEMA_SQL: &str = include_str!("../sql/schema.sql");
 
@@ -50,11 +50,10 @@ impl Database {
 
     pub fn insert_call(&self, call: &CallRecord) -> Result<CallRowId> {
         self.conn.execute(
-            "INSERT INTO calls (talkgroup, sys_num, freq, encrypted, emergency, start_time, tag, short_name, thread_id, embed_message_id)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            "INSERT INTO calls (talkgroup, freq, encrypted, emergency, start_time, tag, short_name, thread_id, embed_message_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
             rusqlite::params![
                 call.talkgroup.0,
-                call.sys_num.0,
                 call.freq.0,
                 call.encrypted,
                 call.emergency,
@@ -179,7 +178,6 @@ impl Database {
 
 pub struct CallRecord {
     pub talkgroup: Talkgroup,
-    pub sys_num: SysNum,
     pub freq: Freq,
     pub encrypted: bool,
     pub emergency: bool,
@@ -234,7 +232,6 @@ mod tests {
 
         let record = CallRecord {
             talkgroup: Talkgroup(1001),
-            sys_num: SysNum(1),
             freq: Freq(772_406_250.0),
             encrypted: false,
             emergency: false,

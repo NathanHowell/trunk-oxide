@@ -4,7 +4,8 @@
 //! Jaeger next to their audio-shape, decoder and channelizer attributes.
 //!
 //! Reaction emoji (anything else is ignored; the bot's own ⏳ is not mapped):
-//! ✂️ end clipped · ⏪ start clipped · 🕳️ dropouts mid-call · 📝 transcript missing the start
+//! 👍 good · 👎 bad (anything) · ✂️ end clipped · ⏪ start clipped ·
+//! 🕳️ dropouts mid-call · 📝 transcript missing the start
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, LazyLock, Mutex, PoisonError};
@@ -65,8 +66,13 @@ pub static FLAGS: LazyLock<FlagRegistry> = LazyLock::new(FlagRegistry::default);
 
 /// Map a reaction emoji to a flag reason.
 pub fn reason_for(emoji: &str) -> Option<&'static str> {
-    // Variation selectors (U+FE0F) are optional on some clients; strip them.
-    match emoji.trim_end_matches('\u{fe0f}') {
+    // Variation selectors (U+FE0F) are optional on some clients, and thumbs can
+    // carry a skin-tone modifier (U+1F3FB..U+1F3FF); strip both.
+    let base = emoji
+        .trim_end_matches(|c: char| c == '\u{fe0f}' || ('\u{1f3fb}'..='\u{1f3ff}').contains(&c));
+    match base {
+        "\u{1f44d}" => Some("good"),
+        "\u{1f44e}" => Some("bad"),
         "\u{2702}" => Some("clipped_end"),
         "\u{23ea}" => Some("clipped_start"),
         "\u{1f573}" => Some("dropout"),
@@ -157,6 +163,8 @@ mod tests {
         assert_eq!(reason_for("\u{2702}\u{fe0f}"), Some("clipped_end"));
         assert_eq!(reason_for("\u{2702}"), Some("clipped_end"));
         assert_eq!(reason_for("\u{23f3}"), None); // the bot's own ⏳
+        assert_eq!(reason_for("\u{1f44d}"), Some("good"));
+        assert_eq!(reason_for("\u{1f44e}\u{1f3fd}"), Some("bad")); // skin tone
     }
 
     #[test]

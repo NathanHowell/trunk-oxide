@@ -35,11 +35,11 @@ class smartnet_impl : public gr::hier_block2, public trunking_decoder {
         
     static sptr make(double f,
                                         double c,
-                                        long s,
+                                        const ChannelTap &tap,
                                         int sys_num);
   smartnet_impl(double f,
                double c,
-               long s,
+               const ChannelTap &tap,
                int sys_num);
 
 
@@ -62,7 +62,7 @@ class smartnet_impl : public gr::hier_block2, public trunking_decoder {
   std::shared_ptr<gr::hier_block2> as_hier_block() override { return std::dynamic_pointer_cast<gr::hier_block2>(shared_from_this()); }
 
 private:
-  void initialize(double freq, double center, long s, int sys_num);
+  void initialize(double freq, double center, const ChannelTap &tap, int sys_num);
 
   double center_freq, chan_freq;
   long input_rate;

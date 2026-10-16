@@ -4,32 +4,34 @@
 #include "smartnet_fsk2_demod.h"
 #include <boost/log/trivial.hpp>
 
-smartnet_impl::sptr smartnet_impl::make(double freq, double center, long s, int sys_num) {
-  smartnet_impl *smartnet = new smartnet_impl(freq, center, s, sys_num);
+smartnet_impl::sptr smartnet_impl::make(double freq, double center, const ChannelTap &tap, int sys_num) {
+  smartnet_impl *smartnet = new smartnet_impl(freq, center, tap, sys_num);
 
   return gnuradio::get_initial_sptr(smartnet);
 }
 
-smartnet_impl::smartnet_impl(double freq, double center, long s, int sys_num)
+smartnet_impl::smartnet_impl(double freq, double center, const ChannelTap &tap, int sys_num)
     : gr::hier_block2("smartnet_impl",
                       gr::io_signature::make(1, 1, sizeof(gr_complex)),
                       gr::io_signature::make(0, 0, sizeof(float)))
 {
-  initialize(freq, center, s, sys_num);
+  initialize(freq, center, tap, sys_num);
 }
 
 smartnet_impl::~smartnet_impl() {
 
 }
 
-void smartnet_impl::initialize(double freq, double center, long s, int sys_num) {
+void smartnet_impl::initialize(double freq, double center, const ChannelTap &tap, int sys_num) {
   chan_freq = freq;
   center_freq = center;
-  input_rate = s;
+  input_rate = static_cast<long>(tap.rate);
   this->sys_num = sys_num;
 
 
-  prefilter = xlat_channelizer::make(input_rate, xlat_channelizer::smartnet_samples_per_symbol, xlat_channelizer::smartnet_symbol_rate, xlat_channelizer::channel_bandwidth, center_freq, false, xlat_channelizer::smartnet_excess_bw);
+  prefilter = xlat_channelizer::make(xlat_channelizer::smartnet_samples_per_symbol, xlat_channelizer::smartnet_symbol_rate, xlat_channelizer::channel_bandwidth, false, tap.rate, xlat_channelizer::smartnet_excess_bw);
+  prefilter->set_tune_hook(tap.set_offset);
+  prefilter->set_filter_hook(tap.set_filter);
 
   double offset_amount = (center_freq - chan_freq);
   prefilter->tune_offset(offset_amount);

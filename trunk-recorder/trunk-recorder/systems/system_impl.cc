@@ -288,20 +288,31 @@ void System_impl::setup_decoders(gr::top_block_sptr &tb, std::vector<std::shared
       continue;
     }
 
-    std::shared_ptr<trunking_decoder> decoder;
-    if (system_type == SYS_SMARTNET) {
-      auto sn = smartnet_impl::make(freq, src->get_center(), src->get_rate(), get_sys_num());
-      if (d_msg_cb) sn->set_msg_callback(d_msg_cb);
-      tb->connect(src->get_src_block(), 0, sn, 0);
-      decoder = sn;
-    } else if (system_type == SYS_P25) {
-      auto p25 = make_p25_trunking(freq, src->get_center(), src->get_rate(), qpsk_mod, get_sys_num());
-      if (d_msg_cb) p25->set_msg_callback(d_msg_cb);
-      tb->connect(src->get_src_block(), 0, p25, 0);
-      decoder = p25;
-    } else {
+    if (system_type != SYS_SMARTNET && system_type != SYS_P25) {
       continue;
     }
+
+    // Each control channel is one more narrow channel on the source's shared
+    // channelizer, decoded in parallel with the others.
+    src->prepare_voice_input(tb, CHANNEL_PROFILE_NARROW);
+    unsigned int port = src->add_channelizer_port(CHANNEL_PROFILE_NARROW);
+    ChannelTap tap{src->get_channelizer()->out_rate(CHANNEL_PROFILE_NARROW),
+                   [src, port](double offset_hz) { src->channelizer_set_offset(port, offset_hz); },
+                   [src, port](double cutoff_hz, double transition_hz) { src->channelizer_set_filter(port, cutoff_hz, transition_hz); }};
+
+    std::shared_ptr<trunking_decoder> decoder;
+    if (system_type == SYS_SMARTNET) {
+      auto sn = smartnet_impl::make(freq, src->get_center(), tap, get_sys_num());
+      if (d_msg_cb) sn->set_msg_callback(d_msg_cb);
+      tb->connect(src->get_channelizer(), port, sn, 0);
+      decoder = sn;
+    } else {
+      auto p25 = make_p25_trunking(freq, src->get_center(), tap, qpsk_mod, get_sys_num());
+      if (d_msg_cb) p25->set_msg_callback(d_msg_cb);
+      tb->connect(src->get_channelizer(), port, p25, 0);
+      decoder = p25;
+    }
+    src->channelizer_set_enabled(port, true);
 
     BOOST_LOG_TRIVIAL(info) << "[" << short_name << "] Decoder started on control channel " << format_freq(freq);
     decoders.push_back({decoder, src, freq});

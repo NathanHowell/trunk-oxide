@@ -2,8 +2,8 @@
 #include "p25_trunking.h"
 #include <boost/log/trivial.hpp>
 
-p25_trunking_sptr make_p25_trunking(double freq, double center, long s, bool qpsk, int sys_num) {
-  return gnuradio::get_initial_sptr(new p25_trunking(freq, center, s, qpsk, sys_num));
+p25_trunking_sptr make_p25_trunking(double freq, double center, const ChannelTap &tap, bool qpsk, int sys_num) {
+  return gnuradio::get_initial_sptr(new p25_trunking(freq, center, tap, qpsk, sys_num));
 }
 
 void p25_trunking::initialize_fsk4() {
@@ -116,7 +116,7 @@ void p25_trunking::initialize_p25() {
   connect(slicer, 0, op25_frame_assembler, 0);
 }
 
-p25_trunking::p25_trunking(double f, double c, long s, bool qpsk, int sys_num)
+p25_trunking::p25_trunking(double f, double c, const ChannelTap &tap, bool qpsk, int sys_num)
     : gr::hier_block2("p25_trunking",
                       gr::io_signature::make(1, 1, sizeof(gr_complex)),
                       gr::io_signature::make(0, 0, sizeof(float))) {
@@ -124,10 +124,12 @@ p25_trunking::p25_trunking(double f, double c, long s, bool qpsk, int sys_num)
   this->sys_num = sys_num;
   chan_freq = f;
   center_freq = c;
-  input_rate = s;
+  input_rate = static_cast<long>(tap.rate);
   qpsk_mod = qpsk;
 
-  prefilter = xlat_channelizer::make(input_rate, channelizer::phase1_samples_per_symbol, channelizer::phase1_symbol_rate, xlat_channelizer::channel_bandwidth, center_freq, false);
+  prefilter = xlat_channelizer::make(channelizer::phase1_samples_per_symbol, channelizer::phase1_symbol_rate, xlat_channelizer::channel_bandwidth, false, tap.rate);
+  prefilter->set_tune_hook(tap.set_offset);
+  prefilter->set_filter_hook(tap.set_filter);
 
   initialize_p25();
 

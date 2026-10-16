@@ -59,7 +59,7 @@ sigmf_recorder_impl::sigmf_recorder_impl(const std::shared_ptr<Source> &src, Rec
   
   // Input is one channel already extracted by the source's shared channelizer.
   auto chz = source->get_channelizer();
-  prefilter = xlat_channelizer::make(input_rate, channelizer::phase1_samples_per_symbol, channelizer::phase1_symbol_rate, xlat_channelizer::channel_bandwidth, center, conventional, xlat_channelizer::default_excess_bw, chz->out_rate(CHANNEL_PROFILE_NARROW));
+  prefilter = xlat_channelizer::make(channelizer::phase1_samples_per_symbol, channelizer::phase1_symbol_rate, xlat_channelizer::channel_bandwidth, conventional, chz->out_rate(CHANNEL_PROFILE_NARROW));
   prefilter->set_tune_hook([this](double offset_hz) { source->channelizer_set_offset(channelizer_port, offset_hz); });
   prefilter->set_filter_hook([this](double cutoff_hz, double transition_hz) { source->channelizer_set_filter(channelizer_port, cutoff_hz, transition_hz); });
   // Was never connected: the prefilter (which holds the squelch) fed nothing and the

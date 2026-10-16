@@ -26,20 +26,24 @@
 #include "../formatter.h"
 #include "../global_structs.h"
 
+// Where a block takes its channel from on a shared_channelizer: the channel's
+// sample rate, and how to retune and re-filter it.
+struct ChannelTap {
+  double rate;
+  std::function<void(double)> set_offset;               // offset from source centre, Hz
+  std::function<void(double, double)> set_filter;       // cutoff, transition (Hz)
+};
+
 class xlat_channelizer : public gr::hier_block2 {
 public:
   typedef std::shared_ptr<xlat_channelizer> sptr;
 
-  // shared_rate > 0 selects "shared" mode: the input is already a single channel
-  // produced by shared_channelizer at that rate (so freq_xlat + channel_lpf are
-  // omitted), and tune_offset() is forwarded to the tune hook instead.
-  static sptr make(double input_rate, int samples_per_symbol, double symbol_rate, double bandwidth, double center_freq, bool use_squelch, double excess_bw=default_excess_bw, double shared_rate=0.0);
-  xlat_channelizer(double input_rate, int samples_per_symbol, double symbol_rate, double bandwidth, double center_freq, bool use_squelch, double excess_bw, double shared_rate);
-
-  struct DecimSettings {
-    long decim;
-    long decim2;
-  };
+  // The input is already a single channel produced by shared_channelizer at
+  // `channel_rate`; this block resamples it to the symbol-rate multiple and runs
+  // squelch, AGC and the FLL. Frequency and filter changes are forwarded to the
+  // tune and filter hooks (set before the first tune_offset()/set_max_dev()).
+  static sptr make(int samples_per_symbol, double symbol_rate, double bandwidth, bool use_squelch, double channel_rate, double excess_bw=default_excess_bw);
+  xlat_channelizer(int samples_per_symbol, double symbol_rate, double bandwidth, bool use_squelch, double channel_rate, double excess_bw);
 
   static constexpr float default_excess_bw = 0.2;
   static constexpr float smartnet_excess_bw = 0.35;
@@ -59,13 +63,12 @@ public:
     squelch->set_squelch_callback(std::move(cb));
   }
   void tune_offset(double f);
-  bool is_shared() const { return d_shared; }
-  // Shared mode only: called with the channel's offset from the source centre
-  // (Hz, positive = above centre) whenever tune_offset() is called.
+  // Called with the channel's offset from the source centre (Hz, positive =
+  // above centre) whenever tune_offset() is called.
   void set_tune_hook(std::function<void(double)> hook) { tune_hook = std::move(hook); }
-  // Shared mode only: called with (cutoff_hz, transition_hz) of this channel's
-  // own filter whenever set_max_dev() changes it. Every channel, digital or
-  // analog, takes its filter through the same hook.
+  // Called with (cutoff_hz, transition_hz) of this channel's own filter
+  // whenever set_max_dev() changes it. Every channel, digital or analog, takes
+  // its filter through the same hook.
   void set_filter_hook(std::function<void(double, double)> hook) { filter_hook = std::move(hook); }
   void set_samples_per_symbol(int samples_per_symbol);
   void set_squelch_db(double squelch_db);
@@ -74,50 +77,25 @@ public:
   bool uses_squelch() const { return d_use_squelch; }
 
 private:
-  bool double_decim;
-  long if1;
-  long if2;
-  double d_center_freq;
-  double d_input_rate;
   double d_bandwidth;
-  double d_system_channel_rate;
   int d_samples_per_symbol;
   double d_symbol_rate;
   double d_excess_bw;
 
   bool d_use_squelch;
-  bool d_shared = false;
   std::function<void(double)> tune_hook;
   std::function<void(double, double)> filter_hook;
-  long symbol_rate;
   double initial_rate;
   double squelch_db = 0.0;
-  long decim;
 
-  // gr::filter::freq_xlating_fir_filter<gr_complex, gr_complex, float>::sptr freq_xlat;
-  freq_xlating_fft_filter_sptr freq_xlat;
   std::vector<float> arb_taps;
-  std::vector<gr_complex> bandpass_filter_coeffs;
-  std::vector<float> lowpass_filter_coeffs;
-  std::vector<float> cutoff_filter_coeffs;
 
   callback_pwr_squelch_cc::sptr squelch;
   gr::digital::fll_band_edge_cc::sptr fll_band_edge;
   gr::blocks::rms_agc::sptr rms_agc;
 
-  gr::analog::sig_source_c::sptr lo;
-  gr::analog::sig_source_c::sptr bfo;
-  gr::blocks::multiply_cc::sptr mixer;
-
-  gr::filter::fft_filter_ccc::sptr bandpass_filter;
-  gr::filter::fft_filter_ccf::sptr lowpass_filter;
-  gr::filter::fft_filter_ccf::sptr channel_lpf;
-  gr::filter::fft_filter_ccf::sptr cutoff_filter;
-
   gr::filter::pfb_arb_resampler_ccf::sptr arb_resampler;
   gr::analog::probe_avg_mag_sqrd_c::sptr pwr_probe;
-
-  static DecimSettings get_decim(long speed);
 };
 
 #endif

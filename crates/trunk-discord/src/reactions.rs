@@ -20,8 +20,6 @@ use crate::metrics::Metrics;
 /// How many recent embeds to remember. A call is flagged within minutes, and a
 /// few thousand covers hours of traffic.
 const CAPACITY: usize = 4096;
-/// Transmission trace ids kept per embed.
-const MAX_TRACES: usize = 32;
 
 /// What we remember about a call's embed so a reaction can be attributed.
 #[derive(Clone, Debug)]
@@ -30,10 +28,9 @@ pub struct FlagInfo {
     pub is_conventional: bool,
     pub tdma: bool,
     pub talkgroup: i64,
-    /// Trace ids of the call's transmissions, oldest first (each shared with
-    /// trunk-oxide's call span). A coalesced embed spans several; an end clip
-    /// belongs to the last.
-    pub trace_ids: Vec<String>,
+    /// Trace id of the embed (shared with its first transmission). Later
+    /// transmissions are attached to the embed's span as OTel links.
+    pub trace_id: String,
 }
 
 #[derive(Default)]
@@ -52,20 +49,6 @@ impl FlagRegistry {
             if let Some(old) = order.pop_front() {
                 map.remove(&old);
             }
-        }
-    }
-
-    /// Add the trace id of a later transmission coalesced into the same embed.
-    pub fn push_trace(&self, message: MessageId, trace_id: String) {
-        if trace_id.is_empty() {
-            return;
-        }
-        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(info) = guard.0.get_mut(&message)
-            && info.trace_ids.len() < MAX_TRACES
-            && info.trace_ids.last() != Some(&trace_id)
-        {
-            info.trace_ids.push(trace_id);
         }
     }
 
@@ -147,9 +130,7 @@ impl EventHandler for Handler {
             short_name = %info.short_name,
             talkgroup = info.talkgroup,
             tdma = info.tdma,
-            transmissions = info.trace_ids.len(),
-            first_trace_id = info.trace_ids.first().map_or("", String::as_str),
-            last_trace_id = info.trace_ids.last().map_or("", String::as_str),
+            trace_id = %info.trace_id,
             message = %reaction.message_id,
             "call flagged by reaction"
         );
@@ -195,7 +176,7 @@ mod tests {
             is_conventional: false,
             tdma: false,
             talkgroup: 1,
-            trace_ids: Vec::new(),
+            trace_id: String::new(),
         };
         for i in 1..=(CAPACITY as u64 + 10) {
             r.register(MessageId::new(i), info.clone());

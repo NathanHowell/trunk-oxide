@@ -398,12 +398,10 @@ impl CallHandler {
                 }
             }
             CallMessage::PttStart(call_info) => {
-                // Remember this transmission's trace for reaction flagging.
-                if let Some(msg_id) = self.embed_message_id
-                    && let Some(trace_id) = call_info.traceparent.split('-').nth(1)
-                {
-                    crate::reactions::FLAGS.push_trace(msg_id, trace_id.to_string());
-                }
+                // Later transmissions coalesced into this embed are separate
+                // traces on the recorder side; link the embed's span to each so
+                // every transmission is one click away in Jaeger.
+                link_transmission(&call_info.traceparent, self.state.ptt_count());
                 let effects = self.state.on_ptt_start(call_info.as_ref());
                 if let Err(e) = self.process_effects(effects).await {
                     tracing::error!(error = %e, "PTT start handling error");
@@ -437,7 +435,7 @@ impl CallHandler {
                             is_conventional: self.is_conventional,
                             tdma: self.tdma,
                             talkgroup: self.talkgroup,
-                            trace_ids: vec![current_trace_id()],
+                            trace_id: current_trace_id(),
                         },
                     );
                 }
@@ -963,6 +961,27 @@ fn current_trace_id() -> String {
     } else {
         String::new()
     }
+}
+
+/// Link the current (embed) span to a later transmission's recorder-side call
+/// span, given its W3C `traceparent`. No-op when the traceparent is empty or
+/// invalid.
+fn link_transmission(traceparent: &str, index: u32) {
+    use opentelemetry::trace::TraceContextExt;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+    if traceparent.is_empty() {
+        return;
+    }
+    let cx = opentelemetry::global::get_text_map_propagator(|prop| {
+        let mut carrier = std::collections::HashMap::new();
+        carrier.insert("traceparent".to_string(), traceparent.to_string());
+        prop.extract(&carrier)
+    });
+    let span_context = cx.span().span_context().clone();
+    tracing::Span::current().add_link_with_attributes(
+        span_context,
+        vec![KeyValue::new("transmission", i64::from(index))],
+    );
 }
 
 fn shape_labels(short_name: &str, is_conventional: bool, tdma: bool) -> [KeyValue; 3] {

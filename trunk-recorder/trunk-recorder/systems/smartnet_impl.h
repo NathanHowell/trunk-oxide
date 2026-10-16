@@ -69,7 +69,6 @@ private:
   int sys_num;
 
 
-  //channelizer::sptr prefilter;
   xlat_channelizer::sptr prefilter;
 
   smartnet_fsk2_demod::sptr fsk2_demod;

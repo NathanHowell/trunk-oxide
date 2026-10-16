@@ -3,6 +3,8 @@
 
 #define _USE_MATH_DEFINES
 
+#include <gnuradio/filter/fft_filter_ccc.h>
+#include <gnuradio/filter/fft_filter_ccf.h>
 #include <cstdio>
 #include <iostream>
 #include <math.h>
@@ -51,7 +53,6 @@
 #include <gnuradio/msg_queue.h>
 #include <json.hpp>
 #include "../gr_blocks/rms_agc.h"
-#include "../gr_blocks/channelizer.h"
 #include "../gr_blocks/xlat_channelizer.h"
 #include "recorder.h"
 
@@ -97,7 +98,6 @@ private:
   // int num;
   RecorderState state;
 
-  //channelizer::sptr prefilter;
   xlat_channelizer::sptr prefilter;
   std::vector<float> arb_taps;
   std::vector<gr_complex> bandpass_filter_coeffs;

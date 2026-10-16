@@ -3,25 +3,16 @@
 
 #include <boost/log/trivial.hpp>
 #include <functional>
-#include <iomanip>
 #include <memory>
 
 #include "./rms_agc.h"
-#include "./freq_xlating_fft_filter.h"
 #include "./callback_pwr_squelch_cc.h"
-#include <gnuradio/blocks/copy.h>
 #include <gnuradio/digital/fll_band_edge_cc.h>
-#include <gnuradio/filter/fft_filter_ccc.h>
-#include <gnuradio/filter/fft_filter_ccf.h>
 #include <gnuradio/filter/firdes.h>
-#include <gnuradio/filter/freq_xlating_fir_filter.h>
 #include <gnuradio/filter/pfb_arb_resampler_ccf.h>
 #include <gnuradio/hier_block2.h>
 
 #include <gnuradio/analog/probe_avg_mag_sqrd_c.h>
-#include <gnuradio/analog/sig_source.h>
-#include <gnuradio/blocks/multiply.h>
-#include <gnuradio/blocks/multiply_const.h>
 
 #include "../formatter.h"
 #include "../global_structs.h"
@@ -79,15 +70,10 @@ public:
 private:
   double d_bandwidth;
   int d_samples_per_symbol;
-  double d_symbol_rate;
-  double d_excess_bw;
 
   bool d_use_squelch;
   std::function<void(double)> tune_hook;
   std::function<void(double, double)> filter_hook;
-  double initial_rate;
-  double squelch_db = 0.0;
-
   std::vector<float> arb_taps;
 
   callback_pwr_squelch_cc::sptr squelch;

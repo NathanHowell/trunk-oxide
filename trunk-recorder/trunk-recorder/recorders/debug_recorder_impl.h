@@ -3,6 +3,8 @@
 
 #define _USE_MATH_DEFINES
 
+#include <gnuradio/filter/fft_filter_ccc.h>
+#include <gnuradio/filter/fft_filter_ccf.h>
 #include <cstdio>
 #include <iostream>
 #include <math.h>
@@ -49,7 +51,6 @@
 #include <gnuradio/message.h>
 #include <gnuradio/msg_queue.h>
 
-#include "../gr_blocks/freq_xlating_fft_filter.h"
 #include "../source.h"
 #include "debug_recorder.h"
 #include "recorder.h"

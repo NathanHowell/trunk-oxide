@@ -127,7 +127,7 @@ p25_trunking::p25_trunking(double f, double c, const ChannelTap &tap, bool qpsk,
   input_rate = static_cast<long>(tap.rate);
   qpsk_mod = qpsk;
 
-  prefilter = xlat_channelizer::make(channelizer::phase1_samples_per_symbol, channelizer::phase1_symbol_rate, xlat_channelizer::channel_bandwidth, false, tap.rate);
+  prefilter = xlat_channelizer::make(xlat_channelizer::phase1_samples_per_symbol, xlat_channelizer::phase1_symbol_rate, xlat_channelizer::channel_bandwidth, false, tap.rate);
   prefilter->set_tune_hook(tap.set_offset);
   prefilter->set_filter_hook(tap.set_filter);
 

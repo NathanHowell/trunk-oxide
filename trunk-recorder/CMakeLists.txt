@@ -248,7 +248,6 @@ list(APPEND trunk_recorder_sources
   #lib/gr-latency/latency_tagger.cc
   #lib/gr-latency-manager/lib/latency_manager_impl.cc
   #lib/gr-latency-manager/lib/tag_to_msg_impl.cc
-  trunk-recorder/gr_blocks/freq_xlating_fft_filter.cc
   trunk-recorder/gr_blocks/headless_sink.cc
   trunk-recorder/gr_blocks/decoders/fsync_decode.cc
   trunk-recorder/gr_blocks/decoders/mdc_decode.cc
@@ -263,7 +262,6 @@ list(APPEND trunk_recorder_sources
   trunk-recorder/gr_blocks/callback_ctcss_squelch_ff.cc
   trunk-recorder/gr_blocks/wavfile_gr3.8.cc
   trunk-recorder/gr_blocks/rms_agc.cc
-  trunk-recorder/gr_blocks/channelizer.cc
     trunk-recorder/gr_blocks/xlat_channelizer.cc
     trunk-recorder/gr_blocks/signal_detector_cvf_impl.cc
   )

@@ -19,7 +19,6 @@
 #include <gnuradio/hier_block2.h>
 #include <gnuradio/io_signature.h>
 
-#include "../gr_blocks/freq_xlating_fft_filter.h"
 #include "recorder.h"
 
 class Source;

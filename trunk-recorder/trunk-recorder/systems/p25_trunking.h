@@ -3,6 +3,7 @@
 
 #define _USE_MATH_DEFINES
 
+#include <gnuradio/filter/fft_filter_ccc.h>
 #include <cstdio>
 #include <functional>
 #include <iostream>
@@ -48,8 +49,6 @@
 
 #include "../gr_blocks/rms_agc.h"
 //#include <op25_repeater/include/op25_repeater/rmsagc_ff.h>
-#include "../gr_blocks/freq_xlating_fft_filter.h"
-#include "../gr_blocks/channelizer.h"
 #include "../gr_blocks/xlat_channelizer.h"
 #include "trunking_decoder.h"
 
@@ -134,7 +133,6 @@ private:
   std::vector<float> cutoff_filter_coeffs;
 
 
-  //channelizer::sptr prefilter;
   xlat_channelizer::sptr prefilter;
   gr::analog::sig_source_c::sptr lo;
   gr::analog::sig_source_c::sptr bfo;

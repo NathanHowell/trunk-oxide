@@ -20,17 +20,14 @@ xlat_channelizer::xlat_channelizer(int samples_per_symbol, double symbol_rate, d
                       gr::io_signature::make(1, 1, sizeof(gr_complex))),
       d_bandwidth(bandwidth),
       d_samples_per_symbol(samples_per_symbol),
-      d_symbol_rate(symbol_rate),
-      d_excess_bw(excess_bw),
       d_use_squelch(use_squelch) {
 
-  long channel_rate = d_symbol_rate * d_samples_per_symbol;
+  long channel_rate = symbol_rate * d_samples_per_symbol;
   // long if_rate = 12500;
 
   const float pi = M_PI;
 
   // shared_channelizer already delivered this channel at channel_rate_in.
-  initial_rate = channel_rate_in;
   const double resampled_rate = channel_rate_in;
   BOOST_LOG_TRIVIAL(info) << "\t Xlating Channelizer (shared) - input rate: " << channel_rate_in;
   // ARB Resampler
@@ -71,7 +68,7 @@ xlat_channelizer::xlat_channelizer(int samples_per_symbol, double symbol_rate, d
   // the received audio is high-passed above the cutoff and then fed to a
   // reverse squelch. If the power is then BELOW a threshold, open the squelch.
 
-  squelch = callback_pwr_squelch_cc::make(squelch_db, 0.0001, 0, true);
+  squelch = callback_pwr_squelch_cc::make(0.0, 0.0001, 0, true);
 
   // Power probe: taps off the filtered signal to measure average magnitude
   // without affecting the main signal path. alpha=0.0001 for a slow average.

@@ -37,12 +37,10 @@ class Source;
 class analog_recorder;
 
 #include "../gr_blocks/callback_ctcss_squelch_ff.h"
-#include "../gr_blocks/channelizer.h"
+#include "../gr_blocks/xlat_channelizer.h"
 #include "../gr_blocks/decoder_wrapper.h"
-#include "../gr_blocks/freq_xlating_fft_filter.h"
 #include "../gr_blocks/plugin_wrapper.h"
 #include "../gr_blocks/headless_sink.h"
-#include "../gr_blocks/xlat_channelizer.h"
 #include "../systems/system.h"
 #include "../call_conventional.h"
 #include "recorder.h"
@@ -120,7 +118,6 @@ private:
   void calculate_iir_taps(float tau);
 
   /* GR blocks */
-  // channelizer::sptr prefilter;
   xlat_channelizer::sptr prefilter;
   gr::filter::iir_filter_ffd::sptr deemph;
   gr::filter::fir_filter_fff::sptr sym_filter;

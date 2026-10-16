@@ -73,7 +73,7 @@ class Source : public std::enable_shared_from_this<Source> {
   std::string antenna;
   gr::basic_block_sptr source_block;
   gr::blocks::selector::sptr recorder_selector;
-  // Optional shared FFT channelizer feeding the P25 recorders (see
+  // Optional shared FFT channelizer feeding the voice recorders, digital and analog (see
   // gr_blocks/shared_channelizer.h). Created lazily when a factory is set.
   shared_channelizer::sptr channelizer;
   std::function<std::shared_ptr<channelizer_backend>(double)> channelizer_factory;
@@ -144,6 +144,14 @@ public:
   void attach_channelizer(gr::top_block_sptr tb);
   void channelizer_set_enabled(unsigned int port, bool enabled);
   void channelizer_set_offset(unsigned int port, double offset_hz);
+  void channelizer_set_filter(unsigned int port, double cutoff_hz, double transition_hz);
+  // Wire a recorder's input to this source: through the shared channelizer
+  // (as a `profile` channel) when one is attached and supports the profile,
+  // else through the selector. Returns true if the channelizer is used. Call
+  // before constructing the recorder, which asks channelizer_supports().
+  bool prepare_voice_input(gr::top_block_sptr tb, unsigned profile);
+  bool channelizer_supports(unsigned profile) const { return channelizer && channelizer->has_profile(profile); }
+  unsigned int add_channelizer_port(unsigned profile);
   bool is_selector_port_enabled(unsigned int port);
   void create_debug_recorder(gr::top_block_sptr tb, int source_num);
   void create_sigmf_recorders(gr::top_block_sptr tb, int r);

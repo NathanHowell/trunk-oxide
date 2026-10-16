@@ -218,7 +218,12 @@ void xlat_channelizer::tune_offset(double f) {
 
 void xlat_channelizer::set_max_dev(double max_dev) {
   if (d_shared) {
-    return; // channel filter lives in the shared channelizer
+    // The channel filter lives in the shared channelizer; same spec as below
+    // (cutoff max_dev, transition bandwidth/2), applied to this channel only.
+    if (filter_hook) {
+      filter_hook(max_dev, d_bandwidth / 2);
+    }
+    return;
   }
   std::vector<float> channel_lpf_taps = gr::filter::firdes::low_pass_2(1.0, initial_rate, max_dev, d_bandwidth / 2, 60);
   channel_lpf->set_taps(channel_lpf_taps);

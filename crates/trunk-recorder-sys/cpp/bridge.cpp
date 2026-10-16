@@ -340,25 +340,28 @@ public:
     RustChannelizerBackend(double sample_rate, int32_t source)
         : h_(shared_channelizer_new(sample_rate, source)),
           hop_(h_->hop()),
-          opb_(h_->out_per_block()),
-          rate_(h_->out_rate()) {}
+          stride_(h_->max_out_per_block()),
+          profiles_(h_->profile_count()) {}
 
     size_t hop() const override { return hop_; }
-    size_t out_per_block() const override { return opb_; }
-    double out_rate() const override { return rate_; }
-    void set_channel(unsigned port, double offset_hz) override { h_->set_channel(port, offset_hz); }
+    bool has_profile(unsigned profile) const override { return profile < profiles_; }
+    size_t out_per_block(unsigned profile) const override { return h_->out_per_block(profile); }
+    size_t max_out_per_block() const override { return stride_; }
+    double out_rate(unsigned profile) const override { return h_->out_rate(profile); }
+    void set_channel(unsigned port, unsigned profile, double offset_hz) override { h_->set_channel(port, profile, offset_hz); }
+    void set_filter(unsigned port, double cutoff_hz, double transition_hz) override { h_->set_filter(port, cutoff_hz, transition_hz); }
     void clear_channel(unsigned port) override { h_->clear_channel(port); }
-    void process(const gr_complex *in, size_t nports, gr_complex *out, uint8_t *active) override {
+    void process(const gr_complex *in, size_t nports, gr_complex *out, uint32_t *produced) override {
         h_->process(rust::Slice<const float>(reinterpret_cast<const float *>(in), 2 * hop_),
-                    rust::Slice<float>(reinterpret_cast<float *>(out), 2 * nports * opb_),
-                    rust::Slice<uint8_t>(active, nports));
+                    rust::Slice<float>(reinterpret_cast<float *>(out), 2 * nports * stride_),
+                    rust::Slice<uint32_t>(produced, nports));
     }
 
 private:
     rust::Box<SharedChannelizerHandle> h_;
     size_t hop_;
-    size_t opb_;
-    double rate_;
+    size_t stride_;
+    unsigned profiles_;
 };
 } // namespace
 

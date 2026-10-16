@@ -239,7 +239,8 @@ void Source::attach_channelizer(gr::top_block_sptr tb) {
   if (!channelizer && channelizer_factory) {
     channelizer = shared_channelizer::make(channelizer_factory(rate));
     tb->connect(source_block, 0, channelizer, 0);
-    BOOST_LOG_TRIVIAL(info) << "Source " << src_num << ": shared channelizer attached, channel rate " << channelizer->out_rate() << " Hz";
+    BOOST_LOG_TRIVIAL(info) << "Source " << src_num << ": shared channelizer attached, narrow channel rate " << channelizer->out_rate(CHANNEL_PROFILE_NARROW) << " Hz"
+                            << (channelizer->has_profile(CHANNEL_PROFILE_WIDE) ? ", wide channel rate " + std::to_string(channelizer->out_rate(CHANNEL_PROFILE_WIDE)) + " Hz" : ", no wide (analog) profile at this sample rate");
   }
 }
 
@@ -249,6 +250,27 @@ void Source::channelizer_set_enabled(unsigned int port, bool enabled) {
 
 void Source::channelizer_set_offset(unsigned int port, double offset_hz) {
   channelizer->set_port_offset(port, offset_hz);
+}
+
+void Source::channelizer_set_filter(unsigned int port, double cutoff_hz, double transition_hz) {
+  channelizer->set_port_filter(port, cutoff_hz, transition_hz);
+}
+
+unsigned int Source::add_channelizer_port(unsigned profile) {
+  unsigned int port = next_channelizer_port++;
+  channelizer->set_port_profile(port, profile);
+  return port;
+}
+
+bool Source::prepare_voice_input(gr::top_block_sptr tb, unsigned profile) {
+  if (channelizer_factory) {
+    attach_channelizer(tb);
+  }
+  if (channelizer_supports(profile)) {
+    return true;
+  }
+  attach_selector(tb);
+  return false;
 }
 
 void Source::attach_detector(gr::top_block_sptr tb) {
@@ -477,17 +499,24 @@ BOOST_LOG_TRIVIAL(info) << " - Setting Signal Detector Threshold to: " << thresh
 }
 
 void Source::create_analog_recorders(gr::top_block_sptr tb, int r) {
+  bool shared = false;
   if (r > 0) {
-    attach_selector(tb);
+    shared = prepare_voice_input(tb, CHANNEL_PROFILE_WIDE);
   }
   max_analog_recorders = r;
 
   for (int i = 0; i < max_analog_recorders; i++) {
     analog_recorder_sptr log = make_analog_recorder(shared_from_this(), ANALOG);
     analog_recorders.push_back(log);
-    log->set_selector_port(next_selector_port);
-    tb->connect(recorder_selector, next_selector_port, log, 0);
-    next_selector_port++;
+    if (shared) {
+      unsigned int port = add_channelizer_port(CHANNEL_PROFILE_WIDE);
+      log->set_selector_port(port);
+      tb->connect(channelizer, port, log, 0);
+    } else {
+      log->set_selector_port(next_selector_port);
+      tb->connect(recorder_selector, next_selector_port, log, 0);
+      next_selector_port++;
+    }
   }
 }
 
@@ -506,9 +535,9 @@ void Source::create_digital_recorders(gr::top_block_sptr tb, int r) {
     p25_recorder_sptr log = make_p25_recorder(shared_from_this(), P25);
     digital_recorders.push_back(log);
     if (channelizer) {
-      log->set_selector_port(next_channelizer_port);
-      tb->connect(channelizer, next_channelizer_port, log, 0);
-      next_channelizer_port++;
+      unsigned int port = add_channelizer_port(CHANNEL_PROFILE_NARROW);
+      log->set_selector_port(port);
+      tb->connect(channelizer, port, log, 0);
     } else {
       log->set_selector_port(next_selector_port);
       tb->connect(recorder_selector, next_selector_port, log, 0);
@@ -537,13 +566,19 @@ analog_recorder_sptr Source::create_conventional_recorder(gr::top_block_sptr tb,
   // Not adding it to the vector of analog_recorders. We don't want it to be available for trunk recording.
   // Conventional recorders are tracked seperately in analog_conv_recorders
   attach_detector(tb);
-  attach_selector(tb);
+  bool shared = prepare_voice_input(tb, CHANNEL_PROFILE_WIDE);
 
   analog_recorder_sptr log = make_analog_recorder(shared_from_this(), ANALOGC, tone_freq);
   analog_conv_recorders.push_back(log);
-  log->set_selector_port(next_selector_port);
-  tb->connect(recorder_selector, next_selector_port, log, 0);
-  next_selector_port++;
+  if (shared) {
+    unsigned int port = add_channelizer_port(CHANNEL_PROFILE_WIDE);
+    log->set_selector_port(port);
+    tb->connect(channelizer, port, log, 0);
+  } else {
+    log->set_selector_port(next_selector_port);
+    tb->connect(recorder_selector, next_selector_port, log, 0);
+    next_selector_port++;
+  }
   return log;
 }
 
@@ -551,13 +586,19 @@ analog_recorder_sptr Source::create_conventional_recorder(gr::top_block_sptr tb)
   // Not adding it to the vector of analog_recorders. We don't want it to be available for trunk recording.
   // Conventional recorders are tracked seperately in analog_conv_recorders
   attach_detector(tb);
-  attach_selector(tb);
+  bool shared = prepare_voice_input(tb, CHANNEL_PROFILE_WIDE);
 
   analog_recorder_sptr log = make_analog_recorder(shared_from_this(), ANALOGC);
   analog_conv_recorders.push_back(log);
-  log->set_selector_port(next_selector_port);
-  tb->connect(recorder_selector, next_selector_port, log, 0);
-  next_selector_port++;
+  if (shared) {
+    unsigned int port = add_channelizer_port(CHANNEL_PROFILE_WIDE);
+    log->set_selector_port(port);
+    tb->connect(channelizer, port, log, 0);
+  } else {
+    log->set_selector_port(next_selector_port);
+    tb->connect(recorder_selector, next_selector_port, log, 0);
+    next_selector_port++;
+  }
   return log;
 }
 sigmf_recorder_sptr Source::create_sigmf_conventional_recorder(gr::top_block_sptr tb) {
@@ -586,9 +627,9 @@ p25_recorder_sptr Source::create_digital_conventional_recorder(gr::top_block_spt
   p25_recorder_sptr log = make_p25_recorder(shared_from_this(), P25C);
   digital_conv_recorders.push_back(log);
   if (channelizer) {
-    log->set_selector_port(next_channelizer_port);
-    tb->connect(channelizer, next_channelizer_port, log, 0);
-    next_channelizer_port++;
+    unsigned int port = add_channelizer_port(CHANNEL_PROFILE_NARROW);
+    log->set_selector_port(port);
+    tb->connect(channelizer, port, log, 0);
   } else {
     log->set_selector_port(next_selector_port);
     tb->connect(recorder_selector, next_selector_port, log, 0);

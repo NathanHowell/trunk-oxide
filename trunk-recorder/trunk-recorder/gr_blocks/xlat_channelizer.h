@@ -62,6 +62,10 @@ public:
   // Shared mode only: called with the channel's offset from the source centre
   // (Hz, positive = above centre) whenever tune_offset() is called.
   void set_tune_hook(std::function<void(double)> hook) { tune_hook = std::move(hook); }
+  // Shared mode only: called with (cutoff_hz, transition_hz) of this channel's
+  // own filter whenever set_max_dev() changes it. Every channel, digital or
+  // analog, takes its filter through the same hook.
+  void set_filter_hook(std::function<void(double, double)> hook) { filter_hook = std::move(hook); }
   void set_samples_per_symbol(int samples_per_symbol);
   void set_squelch_db(double squelch_db);
   void set_analog_squelch(bool analog_squelch);
@@ -81,6 +85,7 @@ private:
   bool d_use_squelch;
   bool d_shared = false;
   std::function<void(double)> tune_hook;
+  std::function<void(double, double)> filter_hook;
   long symbol_rate;
   double initial_rate;
   double squelch_db;

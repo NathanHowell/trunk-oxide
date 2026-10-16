@@ -505,17 +505,30 @@ pub mod ffi {
             source: i32,
         ) -> Result<Box<SharedChannelizerHandle>>;
         fn hop(self: &SharedChannelizerHandle) -> usize;
-        fn out_per_block(self: &SharedChannelizerHandle) -> usize;
-        fn out_rate(self: &SharedChannelizerHandle) -> f64;
-        fn set_channel(self: &SharedChannelizerHandle, port: u32, offset_hz: f64);
+        /// Number of channel profiles (0 = narrow digital, 1 = wide analog;
+        /// the wide one is absent when the source rate is too low).
+        fn profile_count(self: &SharedChannelizerHandle) -> u32;
+        fn out_per_block(self: &SharedChannelizerHandle, profile: u32) -> usize;
+        fn max_out_per_block(self: &SharedChannelizerHandle) -> usize;
+        fn out_rate(self: &SharedChannelizerHandle, profile: u32) -> f64;
+        /// Enable `port` as a `profile` channel at `offset_hz`, or retune it.
+        fn set_channel(self: &SharedChannelizerHandle, port: u32, profile: u32, offset_hz: f64);
+        /// Give `port` its own filter; persists while the port is disabled.
+        fn set_filter(
+            self: &SharedChannelizerHandle,
+            port: u32,
+            cutoff_hz: f64,
+            transition_hz: f64,
+        );
         fn clear_channel(self: &SharedChannelizerHandle, port: u32);
-        /// `input`: `hop` interleaved IQ samples. `output`: slot-major
-        /// `out_per_block` IQ samples per port. `active[p]` = 1 if port p has output.
+        /// `input`: `hop` interleaved IQ samples. `output`: port-major,
+        /// `max_out_per_block` IQ samples of stride per port. `produced[p]` =
+        /// samples written for port p (0 = port inactive).
         fn process(
             self: &SharedChannelizerHandle,
             input: &[f32],
             output: &mut [f32],
-            active: &mut [u8],
+            produced: &mut [u32],
         );
     }
 
@@ -795,7 +808,7 @@ fn shared_channelizer_new(
     sample_rate: f64,
     source: i32,
 ) -> Result<Box<SharedChannelizerHandle>, String> {
-    let cfg = trunk_channelizer::Config::p25(sample_rate).map_err(|e| e.to_string())?;
+    let cfg = trunk_channelizer::Config::standard(sample_rate).map_err(|e| e.to_string())?;
     let inner =
         Arc::new(trunk_channelizer::SharedChannelizer::new(cfg).map_err(|e| e.to_string())?);
     let mut reg = CHANNELIZERS.lock().unwrap_or_else(PoisonError::into_inner);
@@ -836,29 +849,38 @@ impl SharedChannelizerHandle {
         self.0.config().hop()
     }
 
-    fn out_per_block(&self) -> usize {
-        self.0.config().out_per_block()
+    fn profile_count(&self) -> u32 {
+        u32::try_from(self.0.config().profiles.len()).unwrap_or(u32::MAX)
     }
 
-    fn out_rate(&self) -> f64 {
-        self.0.config().out_rate()
+    fn out_per_block(&self, profile: u32) -> usize {
+        self.0.config().out_per_block(profile as usize)
     }
 
-    fn set_channel(&self, port: u32, offset_hz: f64) {
-        self.0.set_slot(port as usize, offset_hz);
+    fn max_out_per_block(&self) -> usize {
+        self.0.config().max_out_per_block()
+    }
+
+    fn out_rate(&self, profile: u32) -> f64 {
+        self.0.config().out_rate(profile as usize)
+    }
+
+    fn set_channel(&self, port: u32, profile: u32, offset_hz: f64) {
+        self.0.set_slot(port as usize, profile as usize, offset_hz);
+    }
+
+    fn set_filter(&self, port: u32, cutoff_hz: f64, transition_hz: f64) {
+        self.0
+            .set_slot_filter(port as usize, cutoff_hz, transition_hz);
     }
 
     fn clear_channel(&self, port: u32) {
         self.0.clear_slot(port as usize);
     }
 
-    fn process(&self, input: &[f32], output: &mut [f32], active: &mut [u8]) {
-        let mut flags = vec![false; active.len()];
+    fn process(&self, input: &[f32], output: &mut [f32], produced: &mut [u32]) {
         self.0
-            .process(as_complex(input), as_complex_mut(output), &mut flags);
-        for (a, f) in active.iter_mut().zip(flags) {
-            *a = u8::from(f);
-        }
+            .process(as_complex(input), as_complex_mut(output), produced);
     }
 }
 

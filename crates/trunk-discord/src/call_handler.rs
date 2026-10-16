@@ -398,6 +398,12 @@ impl CallHandler {
                 }
             }
             CallMessage::PttStart(call_info) => {
+                // Remember this transmission's trace for reaction flagging.
+                if let Some(msg_id) = self.embed_message_id
+                    && let Some(trace_id) = call_info.traceparent.split('-').nth(1)
+                {
+                    crate::reactions::FLAGS.push_trace(msg_id, trace_id.to_string());
+                }
                 let effects = self.state.on_ptt_start(call_info.as_ref());
                 if let Err(e) = self.process_effects(effects).await {
                     tracing::error!(error = %e, "PTT start handling error");
@@ -431,7 +437,7 @@ impl CallHandler {
                             is_conventional: self.is_conventional,
                             tdma: self.tdma,
                             talkgroup: self.talkgroup,
-                            trace_id: current_trace_id(),
+                            trace_ids: vec![current_trace_id()],
                         },
                     );
                 }

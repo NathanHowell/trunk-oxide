@@ -391,7 +391,8 @@ int32_t tr_add_source_from_config(TrContext &ctx, const TrSourceConfig &cfg) {
 
     auto &tb = ctx.impl->trunk_ctx.tb;
     int32_t idx = static_cast<int32_t>(ctx.impl->trunk_ctx.sources.size());
-    if (cfg.shared_channelizer) {
+    if (cfg.channelizer_mode != CHANNELIZER_LEGACY) {
+        source->set_channelizer_mode(cfg.channelizer_mode);
         source->set_channelizer_factory([idx](double rate) -> std::shared_ptr<channelizer_backend> {
             return std::make_shared<RustChannelizerBackend>(rate, idx);
         });
@@ -1082,6 +1083,32 @@ rust::Vec<TrSourceMetrics> tr_collect_source_metrics(const TrContext &ctx) {
             sm.blocks.push_back(collect_block_metrics(src_block));
         }
         result.push_back(std::move(sm));
+    }
+    return result;
+}
+
+rust::Vec<TrShadowMetrics> tr_collect_shadow_metrics(const TrContext &ctx) {
+    rust::Vec<TrShadowMetrics> result;
+    for (auto &source : ctx.impl->trunk_ctx.sources) {
+        for (const auto &snap : source->collect_shadow_stats()) {
+            TrShadowMetrics m;
+            m.source_id = source->get_num();
+            m.profile = rust::String(snap.profile == CHANNEL_PROFILE_WIDE ? "wide" : "narrow");
+            m.shadowed_recorders = snap.recorders;
+            m.polls = snap.stats.polls;
+            m.squelch_polls = snap.stats.squelch_polls;
+            m.squelch_disagree = snap.stats.squelch_disagree;
+            m.power_polls = snap.stats.power_polls;
+            m.power_gt_1db = snap.stats.power_gt_1db;
+            m.power_gt_3db = snap.stats.power_gt_3db;
+            m.power_abs_sum_db = snap.stats.power_abs_sum_db;
+            m.power_bias_sum_db = snap.stats.power_bias_sum_db;
+            m.power_abs_max_db = snap.stats.power_abs_max_db;
+            m.ferr_polls = snap.stats.ferr_polls;
+            m.ferr_abs_sum_hz = snap.stats.ferr_abs_sum_hz;
+            m.ferr_abs_max_hz = snap.stats.ferr_abs_max_hz;
+            result.push_back(std::move(m));
+        }
     }
     return result;
 }

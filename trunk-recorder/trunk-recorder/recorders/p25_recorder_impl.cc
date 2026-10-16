@@ -42,7 +42,7 @@ void p25_recorder_impl::initialize(const std::shared_ptr<Source> &src) {
 
   starttime = std::chrono::steady_clock::now();
 
-  if (auto chz = source->get_channelizer()) {
+  if (auto chz = source->primary_channelizer()) {
     // Input is one channel already extracted by the source's shared channelizer.
     prefilter = xlat_channelizer::make(input_rate, channelizer::phase1_samples_per_symbol, channelizer::phase1_symbol_rate, xlat_channelizer::channel_bandwidth, center_freq, conventional, xlat_channelizer::default_excess_bw, chz->out_rate(CHANNEL_PROFILE_NARROW));
     prefilter->set_tune_hook([this](double offset_hz) { source->channelizer_set_offset(selector_port, offset_hz); });

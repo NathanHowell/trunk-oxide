@@ -89,6 +89,7 @@ public:
   RecorderState get_state() const override;
   void set_squelch_callback(std::function<void(bool, double)> cb) override;
   std::vector<gr::block_sptr> get_metric_blocks() const override;
+  std::shared_ptr<xlat_channelizer> prefilter_block() const override { return prefilter; }
   std::shared_ptr<Source> get_source();
   void autotune();
 

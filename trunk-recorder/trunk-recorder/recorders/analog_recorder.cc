@@ -112,10 +112,10 @@ analog_recorder::analog_recorder(const std::shared_ptr<Source> &src, const std::
   wav_sample_rate = 16000;     // Must be an integer decimation of system_channel_rate
 
   // The Prefilter provides the initial squelch for the channel
-  if (source->channelizer_supports(CHANNEL_PROFILE_WIDE)) {
+  if (source->primary_channelizer() && source->channelizer_supports(CHANNEL_PROFILE_WIDE)) {
     // Input is one channel already extracted by the source's shared channelizer
     // (at or above 96 kS/s; the prefilter's arbitrary resampler does the rest).
-    prefilter = xlat_channelizer::make(input_rate, samp_per_sym, system_channel_rate / samp_per_sym, bandwidth, center_freq, true, xlat_channelizer::default_excess_bw, source->get_channelizer()->out_rate(CHANNEL_PROFILE_WIDE));
+    prefilter = xlat_channelizer::make(input_rate, samp_per_sym, system_channel_rate / samp_per_sym, bandwidth, center_freq, true, xlat_channelizer::default_excess_bw, source->primary_channelizer()->out_rate(CHANNEL_PROFILE_WIDE));
     prefilter->set_tune_hook([this](double offset_hz) { source->channelizer_set_offset(selector_port, offset_hz); });
     prefilter->set_filter_hook([this](double cutoff_hz, double transition_hz) { source->channelizer_set_filter(selector_port, cutoff_hz, transition_hz); });
   } else {

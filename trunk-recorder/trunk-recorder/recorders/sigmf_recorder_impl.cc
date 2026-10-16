@@ -57,9 +57,18 @@ sigmf_recorder_impl::sigmf_recorder_impl(const std::shared_ptr<Source> &src, Rec
   //initialize_prefilter();
   //initialize_prefilter_xlat();
   
-  prefilter = xlat_channelizer::make(input_rate, channelizer::phase1_samples_per_symbol, channelizer::phase1_symbol_rate, xlat_channelizer::channel_bandwidth, center, conventional);
-  set_enabled(false);
-  connect(squelch, 0, raw_sink, 0);
+  if (auto chz = source->primary_channelizer()) {
+    // Input is one channel already extracted by the source's shared channelizer.
+    prefilter = xlat_channelizer::make(input_rate, channelizer::phase1_samples_per_symbol, channelizer::phase1_symbol_rate, xlat_channelizer::channel_bandwidth, center, conventional, xlat_channelizer::default_excess_bw, chz->out_rate(CHANNEL_PROFILE_NARROW));
+    prefilter->set_tune_hook([this](double offset_hz) { source->channelizer_set_offset(selector_port, offset_hz); });
+    prefilter->set_filter_hook([this](double cutoff_hz, double transition_hz) { source->channelizer_set_filter(selector_port, cutoff_hz, transition_hz); });
+  } else {
+    prefilter = xlat_channelizer::make(input_rate, channelizer::phase1_samples_per_symbol, channelizer::phase1_symbol_rate, xlat_channelizer::channel_bandwidth, center, conventional);
+  }
+  // Was never connected: the prefilter (which holds the squelch) fed nothing and the
+  // sink read from an unset `squelch`.
+  connect(self(), 0, prefilter, 0);
+  connect(prefilter, 0, raw_sink, 0);
 }
 
 void sigmf_recorder_impl::tune_offset(double f) { prefilter->tune_offset(f); }
@@ -74,7 +83,11 @@ int sigmf_recorder_impl::get_num() const {
 }
 
 void sigmf_recorder_impl::set_enabled(bool enabled) {
-  source->set_selector_port_enabled(selector_port, enabled);
+  if (prefilter->is_shared()) {
+    source->channelizer_set_enabled(selector_port, enabled);
+  } else {
+    source->set_selector_port_enabled(selector_port, enabled);
+  }
 }
 
 int sigmf_recorder_impl::get_freq_error() const { // get frequency error from FLL and convert to Hz

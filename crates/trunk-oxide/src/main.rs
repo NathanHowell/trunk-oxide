@@ -104,6 +104,42 @@ fn observe_block_f64(
     }
 }
 
+/// Observe a u64 shadow-channelizer comparison metric per (source, profile).
+fn observe_shadow_u64(
+    snap: &std::sync::Mutex<trunk_oxide::GrMetricsSnapshot>,
+    observer: &dyn opentelemetry::metrics::AsyncInstrument<u64>,
+    extract: fn(&trunk_recorder_sys::ffi::TrShadowMetrics) -> u64,
+) {
+    let Ok(snap) = snap.lock() else { return };
+    for m in &snap.shadow {
+        observer.observe(
+            extract(m),
+            &[
+                KeyValue::new("source.id", i64::from(m.source_id)),
+                KeyValue::new("channel.profile", m.profile.to_string()),
+            ],
+        );
+    }
+}
+
+/// Observe an f64 shadow-channelizer comparison metric per (source, profile).
+fn observe_shadow_f64(
+    snap: &std::sync::Mutex<trunk_oxide::GrMetricsSnapshot>,
+    observer: &dyn opentelemetry::metrics::AsyncInstrument<f64>,
+    extract: fn(&trunk_recorder_sys::ffi::TrShadowMetrics) -> f64,
+) {
+    let Ok(snap) = snap.lock() else { return };
+    for m in &snap.shadow {
+        observer.observe(
+            extract(m),
+            &[
+                KeyValue::new("source.id", i64::from(m.source_id)),
+                KeyValue::new("channel.profile", m.profile.to_string()),
+            ],
+        );
+    }
+}
+
 /// Observe an f64 conventional-channel metric across all channels in the snapshot.
 fn observe_conv_f64(
     snap: &std::sync::Mutex<trunk_oxide::ConventionalMetricsSnapshot>,
@@ -331,6 +367,117 @@ fn main() -> Result<()> {
             .with_callback({
                 let snap = Arc::clone(&gr_metrics);
                 move |observer| observe_block_f64(&snap, observer, |b| f64::from(b.output_buf_full))
+            })
+            .build();
+
+        // ── Shadow channelizer (legacy vs shared) comparison ──
+        let _shadow_polls = meter
+            .u64_observable_counter("channelizer.shadow.polls")
+            .with_description("Poller ticks with a shadowed recorder active")
+            .with_callback({
+                let snap = Arc::clone(&gr_metrics);
+                move |observer| observe_shadow_u64(&snap, observer, |m| m.polls)
+            })
+            .build();
+
+        let _shadow_squelch_polls = meter
+            .u64_observable_counter("channelizer.shadow.squelch_polls")
+            .with_description("Ticks where squelch state of both paths was comparable")
+            .with_callback({
+                let snap = Arc::clone(&gr_metrics);
+                move |observer| observe_shadow_u64(&snap, observer, |m| m.squelch_polls)
+            })
+            .build();
+
+        let _shadow_squelch_disagree = meter
+            .u64_observable_counter("channelizer.shadow.squelch_disagree")
+            .with_description("Ticks where the legacy and shared squelch disagreed")
+            .with_callback({
+                let snap = Arc::clone(&gr_metrics);
+                move |observer| observe_shadow_u64(&snap, observer, |m| m.squelch_disagree)
+            })
+            .build();
+
+        let _shadow_power_polls = meter
+            .u64_observable_counter("channelizer.shadow.power_polls")
+            .with_description("Ticks where both paths reported a channel power")
+            .with_callback({
+                let snap = Arc::clone(&gr_metrics);
+                move |observer| observe_shadow_u64(&snap, observer, |m| m.power_polls)
+            })
+            .build();
+
+        let _shadow_power_gt_1db = meter
+            .u64_observable_counter("channelizer.shadow.power_gt_1db")
+            .with_description("Power-comparable ticks where the paths differ by more than 1 dB")
+            .with_callback({
+                let snap = Arc::clone(&gr_metrics);
+                move |observer| observe_shadow_u64(&snap, observer, |m| m.power_gt_1db)
+            })
+            .build();
+
+        let _shadow_power_gt_3db = meter
+            .u64_observable_counter("channelizer.shadow.power_gt_3db")
+            .with_description("Power-comparable ticks where the paths differ by more than 3 dB")
+            .with_callback({
+                let snap = Arc::clone(&gr_metrics);
+                move |observer| observe_shadow_u64(&snap, observer, |m| m.power_gt_3db)
+            })
+            .build();
+
+        let _shadow_power_abs_sum_db = meter
+            .f64_observable_counter("channelizer.shadow.power_abs_sum_db")
+            .with_description("Sum of |shared - legacy| channel power (dB) over power_polls")
+            .with_callback({
+                let snap = Arc::clone(&gr_metrics);
+                move |observer| observe_shadow_f64(&snap, observer, |m| m.power_abs_sum_db)
+            })
+            .build();
+
+        let _shadow_power_bias_sum_db = meter
+            .f64_observable_counter("channelizer.shadow.power_bias_sum_db")
+            .with_description("Sum of (shared - legacy) channel power (dB) over power_polls")
+            .with_callback({
+                let snap = Arc::clone(&gr_metrics);
+                move |observer| observe_shadow_f64(&snap, observer, |m| m.power_bias_sum_db)
+            })
+            .build();
+
+        let _shadow_power_abs_max_db = meter
+            .f64_observable_gauge("channelizer.shadow.power_abs_max_db")
+            .with_description("Max |shared - legacy| channel power (dB) since the source started")
+            .with_callback({
+                let snap = Arc::clone(&gr_metrics);
+                move |observer| observe_shadow_f64(&snap, observer, |m| m.power_abs_max_db)
+            })
+            .build();
+
+        let _shadow_ferr_polls = meter
+            .u64_observable_counter("channelizer.shadow.ferr_polls")
+            .with_description("Ticks where both paths reported an FLL frequency error")
+            .with_callback({
+                let snap = Arc::clone(&gr_metrics);
+                move |observer| observe_shadow_u64(&snap, observer, |m| m.ferr_polls)
+            })
+            .build();
+
+        let _shadow_ferr_abs_sum_hz = meter
+            .f64_observable_counter("channelizer.shadow.ferr_abs_sum_hz")
+            .with_description("Sum of |shared - legacy| FLL frequency error (Hz) over ferr_polls")
+            .with_callback({
+                let snap = Arc::clone(&gr_metrics);
+                move |observer| observe_shadow_f64(&snap, observer, |m| m.ferr_abs_sum_hz)
+            })
+            .build();
+
+        let _shadow_ferr_abs_max_hz = meter
+            .f64_observable_gauge("channelizer.shadow.ferr_abs_max_hz")
+            .with_description(
+                "Max |shared - legacy| FLL frequency error (Hz) since the source started",
+            )
+            .with_callback({
+                let snap = Arc::clone(&gr_metrics);
+                move |observer| observe_shadow_f64(&snap, observer, |m| m.ferr_abs_max_hz)
             })
             .build();
 

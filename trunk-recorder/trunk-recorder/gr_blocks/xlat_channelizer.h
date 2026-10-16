@@ -4,6 +4,8 @@
 #include <boost/log/trivial.hpp>
 #include <functional>
 #include <iomanip>
+#include <memory>
+#include <optional>
 
 #include "./rms_agc.h"
 #include "./freq_xlating_fft_filter.h"
@@ -69,7 +71,15 @@ public:
   void set_samples_per_symbol(int samples_per_symbol);
   void set_squelch_db(double squelch_db);
   void set_analog_squelch(bool analog_squelch);
-  void set_max_dev(double max_dev); 
+  void set_max_dev(double max_dev);
+  bool uses_squelch() const { return d_use_squelch; }
+
+  // Shadow validation (see Source::attach_shadow): a shared-mode twin that
+  // receives every setter call this channelizer gets, so the two can be
+  // compared while this one stays in charge. A twin has the same geometry,
+  // squelch and FLL settings; set_mirror() replays the state set so far.
+  sptr make_shared_twin(double shared_rate) const;
+  void set_mirror(sptr twin);
 
 private:
   bool double_decim;
@@ -81,6 +91,15 @@ private:
   double d_system_channel_rate;
   int d_samples_per_symbol;
   double d_symbol_rate;
+  double d_excess_bw;
+
+  // Setter state, kept so a mirror attached later can be brought up to date.
+  std::optional<double> d_offset;
+  std::optional<double> d_max_dev;
+  std::optional<double> d_squelch_db;
+  std::optional<bool> d_analog_squelch;
+  std::optional<int> d_sps_override;
+  sptr d_mirror;
 
   bool d_use_squelch;
   bool d_shared = false;
@@ -88,7 +107,7 @@ private:
   std::function<void(double, double)> filter_hook;
   long symbol_rate;
   double initial_rate;
-  double squelch_db;
+  double squelch_db = 0.0;
   long decim;
 
   // gr::filter::freq_xlating_fir_filter<gr_complex, gr_complex, float>::sptr freq_xlat;

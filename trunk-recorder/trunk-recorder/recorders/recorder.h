@@ -15,6 +15,7 @@
 
 class Source;
 class System;
+class xlat_channelizer;
 
 class Recorder {
 
@@ -55,6 +56,11 @@ public:
 
   /// Return key internal gr::block instances for performance-counter collection.
   virtual std::vector<gr::block_sptr> get_metric_blocks() const = 0;
+
+  /// The recorder's channel filter/squelch front end, for shadow comparison
+  /// against the shared channelizer (see Source::attach_shadow). Null if the
+  /// recorder has none.
+  virtual std::shared_ptr<xlat_channelizer> prefilter_block() const { return nullptr; }
 
   uint64_t get_rust_call_id() const { return rust_call_id; }
 

@@ -38,7 +38,14 @@ void dmr_recorder_impl::initialize(const std::shared_ptr<Source> &src) {
 
   starttime = std::chrono::steady_clock::now();
 
-  prefilter = xlat_channelizer::make(input_rate, channelizer::phase1_samples_per_symbol, channelizer::phase1_symbol_rate, xlat_channelizer::channel_bandwidth, center_freq, conventional);
+  if (auto chz = source->primary_channelizer()) {
+    // Input is one channel already extracted by the source's shared channelizer.
+    prefilter = xlat_channelizer::make(input_rate, channelizer::phase1_samples_per_symbol, channelizer::phase1_symbol_rate, xlat_channelizer::channel_bandwidth, center_freq, conventional, xlat_channelizer::default_excess_bw, chz->out_rate(CHANNEL_PROFILE_NARROW));
+    prefilter->set_tune_hook([this](double offset_hz) { source->channelizer_set_offset(selector_port, offset_hz); });
+    prefilter->set_filter_hook([this](double cutoff_hz, double transition_hz) { source->channelizer_set_filter(selector_port, cutoff_hz, transition_hz); });
+  } else {
+    prefilter = xlat_channelizer::make(input_rate, channelizer::phase1_samples_per_symbol, channelizer::phase1_symbol_rate, xlat_channelizer::channel_bandwidth, center_freq, conventional);
+  }
 
   /* FSK4 Demod */
   const double phase1_channel_rate = phase1_symbol_rate * phase1_samples_per_symbol;
@@ -140,7 +147,11 @@ RecorderState dmr_recorder_impl::get_state() const {
 }
 
 void dmr_recorder_impl::set_enabled(bool enabled) {
-  source->set_selector_port_enabled(selector_port, enabled);
+  if (prefilter->is_shared()) {
+    source->channelizer_set_enabled(selector_port, enabled);
+  } else {
+    source->set_selector_port_enabled(selector_port, enabled);
+  }
 }
 
 double dmr_recorder_impl::get_pwr() const {

@@ -13,7 +13,7 @@ use serde::Deserialize;
 pub use discord::{ChannelGroup, ChannelMapping, DiscordConfig, NonZeroU64, TalkgroupSelector};
 pub use recorder::{DebugRecorderConfig, DefaultMode, RecorderConfig};
 pub use service::{AudioConfig, GrpcConfig, OxideConfig, WhispererConfig};
-pub use source::{SourceConfig, SourceDriver};
+pub use source::{ChannelizerMode, SourceConfig, SourceDriver};
 pub use system::{
     ChannelConfig, Modulation, SystemConfig, SystemType, TalkgroupConfig, TalkgroupDisplayFormat,
     TalkgroupMode, UnitTagEntry, UnitTagsSettings,
@@ -217,6 +217,22 @@ digital_recorders = 8
         assert_eq!(src.device, "rtl=0");
         assert!((src.gain - 36.0).abs() < f64::EPSILON);
         assert_eq!(src.digital_recorders, 8);
+        assert_eq!(src.channelizer, ChannelizerMode::Legacy);
+    }
+
+    #[test]
+    fn parse_channelizer_mode() {
+        for (value, want) in [
+            ("legacy", ChannelizerMode::Legacy),
+            ("shadow", ChannelizerMode::Shadow),
+            ("shared", ChannelizerMode::Shared),
+        ] {
+            let toml = format!("[[source]]\ndriver = \"osmosdr\"\nchannelizer = \"{value}\"\n");
+            let config: Config = toml::from_str(&toml).unwrap();
+            assert_eq!(config.source[0].channelizer, want);
+        }
+        let bad = "[[source]]\ndriver = \"osmosdr\"\nchannelizer = \"both\"\n";
+        assert!(toml::from_str::<Config>(bad).is_err());
     }
 
     #[test]

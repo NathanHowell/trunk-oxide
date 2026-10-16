@@ -105,8 +105,10 @@ void tr_context_wire_event_notifiers(TrContext &ctx);
 struct TrGrBlockMetrics;
 struct TrRecorderMetrics;
 struct TrSourceMetrics;
+struct TrShadowMetrics;
 rust::Vec<TrRecorderMetrics> tr_collect_recorder_metrics(const TrContext &ctx);
 rust::Vec<TrSourceMetrics> tr_collect_source_metrics(const TrContext &ctx);
+rust::Vec<TrShadowMetrics> tr_collect_shadow_metrics(const TrContext &ctx);
 
 // ── Trunk message conversion (used by GR callbacks) ──
 TrTrunkMessage convert_trunk_message(const TrunkMessage &msg);

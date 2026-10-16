@@ -1,5 +1,9 @@
 #include "source.h"
 #include "formatter.h"
+#include <chrono>
+#include <cmath>
+#include <stdexcept>
+#include <gnuradio/blocks/null_sink.h>
 
 using json = nlohmann::json;
 
@@ -221,6 +225,11 @@ Source::Source(std::string iq_file, bool repeat, double center, double rate, con
 
 void Source::set_selector_port_enabled(unsigned int port, bool enabled) {
   recorder_selector->set_port_enabled(port, enabled);
+  auto it = shadow_by_selector_port.find(port);
+  if (it != shadow_by_selector_port.end()) {
+    channelizer->set_port_enabled(it->second->twin_port, enabled);
+    it->second->active_since_ns = enabled ? std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now().time_since_epoch()).count() : 0;
+  }
 }
 
 bool Source::is_selector_port_enabled(unsigned int port) {
@@ -263,14 +272,136 @@ unsigned int Source::add_channelizer_port(unsigned profile) {
 }
 
 bool Source::prepare_voice_input(gr::top_block_sptr tb, unsigned profile) {
-  if (channelizer_factory) {
-    attach_channelizer(tb);
+  if (channelizer_mode == CHANNELIZER_LEGACY || !channelizer_factory) {
+    attach_selector(tb);
+    return false;
   }
-  if (channelizer_supports(profile)) {
+  attach_channelizer(tb);
+  if (channelizer_mode == CHANNELIZER_SHARED) {
+    if (!channelizer_supports(profile)) {
+      throw std::runtime_error("Source " + std::to_string(src_num) + ": the shared channelizer cannot provide the " +
+                               (profile == CHANNEL_PROFILE_WIDE ? "wide (analog)" : "narrow (digital)") + " channel profile at a sample rate of " + std::to_string(rate) +
+                               " S/s; raise the source rate or use channelizer = \"legacy\"");
+    }
     return true;
   }
+  // Shadow: the legacy path stays in charge; attach_shadow() adds the twin.
   attach_selector(tb);
   return false;
+}
+
+template <typename Rec>
+void Source::wire_voice_recorder(gr::top_block_sptr tb, const Rec &log, bool shared, unsigned profile) {
+  if (shared) {
+    unsigned int port = add_channelizer_port(profile);
+    log->set_selector_port(port);
+    tb->connect(channelizer, port, log, 0);
+  } else {
+    log->set_selector_port(next_selector_port);
+    tb->connect(recorder_selector, next_selector_port, log, 0);
+    next_selector_port++;
+    attach_shadow(tb, log, profile);
+  }
+}
+
+void Source::attach_shadow(gr::top_block_sptr tb, const std::shared_ptr<Recorder> &rec, unsigned profile) {
+  if (channelizer_mode != CHANNELIZER_SHADOW || !channelizer) {
+    return;
+  }
+  auto primary = rec->prefilter_block();
+  if (!primary) {
+    return;
+  }
+  if (!channelizer_supports(profile)) {
+    BOOST_LOG_TRIVIAL(warning) << "Source " << src_num << ": shadow channelizer cannot provide profile " << profile << " at " << rate << " S/s; recorder " << rec->get_num() << " is not shadowed";
+    return;
+  }
+  auto entry = std::make_shared<ShadowEntry>();
+  entry->primary = primary;
+  entry->profile = profile;
+  entry->twin_port = add_channelizer_port(profile);
+  entry->twin = primary->make_shared_twin(channelizer->out_rate(profile));
+  unsigned twin_port = entry->twin_port;
+  entry->twin->set_tune_hook([this, twin_port](double offset_hz) { channelizer_set_offset(twin_port, offset_hz); });
+  entry->twin->set_filter_hook([this, twin_port](double cutoff_hz, double transition_hz) { channelizer_set_filter(twin_port, cutoff_hz, transition_hz); });
+  tb->connect(channelizer, twin_port, entry->twin, 0);
+  tb->connect(entry->twin, 0, gr::blocks::null_sink::make(sizeof(gr_complex)), 0);
+  primary->set_mirror(entry->twin);
+
+  shadow_by_selector_port[rec->selector_port] = entry;
+  shadow_entries.push_back(entry);
+  if (!shadow_thread.joinable()) {
+    shadow_thread = std::thread([this] { shadow_poll_loop(); });
+  }
+}
+
+void Source::shadow_poll_loop() {
+  using namespace std::chrono;
+  constexpr auto kPoll = milliseconds(50);
+  // Let both paths' power averages (alpha 1e-4, ~0.4 s at 24 kS/s) and FLLs
+  // settle after a recorder is enabled before comparing them.
+  constexpr long long kSettleNs = 2'000'000'000LL;
+  while (!shadow_stop) {
+    std::this_thread::sleep_for(kPoll);
+    long long now = duration_cast<nanoseconds>(steady_clock::now().time_since_epoch()).count();
+    std::lock_guard<std::mutex> lk(shadow_mutex);
+    for (auto &e : shadow_entries) {
+      long long since = e->active_since_ns;
+      if (since == 0 || now - since < kSettleNs) {
+        continue;
+      }
+      ShadowStats &st = shadow_stats[e->profile < 2 ? e->profile : 0];
+      st.polls++;
+      if (e->primary->uses_squelch()) {
+        bool a = e->primary->is_squelched();
+        bool b = e->twin->is_squelched();
+        st.squelch_polls++;
+        if (a != b) {
+          st.squelch_disagree++;
+        }
+        if (a || b) {
+          continue; // no signal on at least one path; power and FLL are not comparable
+        }
+      }
+      double pa = e->primary->get_pwr();
+      double pb = e->twin->get_pwr();
+      if (pa != DB_UNSET && pb != DB_UNSET) {
+        double d = pb - pa;
+        double ad = std::fabs(d);
+        st.power_polls++;
+        st.power_abs_sum_db += ad;
+        st.power_bias_sum_db += d;
+        st.power_abs_max_db = std::max(st.power_abs_max_db, ad);
+        if (ad > 1.0) st.power_gt_1db++;
+        if (ad > 3.0) st.power_gt_3db++;
+        double fe = std::fabs(static_cast<double>(e->twin->get_freq_error() - e->primary->get_freq_error()));
+        st.ferr_polls++;
+        st.ferr_abs_sum_hz += fe;
+        st.ferr_abs_max_hz = std::max(st.ferr_abs_max_hz, fe);
+      }
+    }
+  }
+}
+
+std::vector<ShadowSnapshot> Source::collect_shadow_stats() {
+  std::vector<ShadowSnapshot> out;
+  std::lock_guard<std::mutex> lk(shadow_mutex);
+  for (unsigned profile = 0; profile < 2; profile++) {
+    unsigned n = 0;
+    for (auto &e : shadow_entries) {
+      if (e->profile == profile) n++;
+    }
+    if (n == 0) continue;
+    out.push_back({profile, n, shadow_stats[profile]});
+  }
+  return out;
+}
+
+Source::~Source() {
+  shadow_stop = true;
+  if (shadow_thread.joinable()) {
+    shadow_thread.join();
+  }
 }
 
 void Source::attach_detector(gr::top_block_sptr tb) {
@@ -499,66 +630,36 @@ BOOST_LOG_TRIVIAL(info) << " - Setting Signal Detector Threshold to: " << thresh
 }
 
 void Source::create_analog_recorders(gr::top_block_sptr tb, int r) {
-  bool shared = false;
-  if (r > 0) {
-    shared = prepare_voice_input(tb, CHANNEL_PROFILE_WIDE);
-  }
+  bool shared = r > 0 && prepare_voice_input(tb, CHANNEL_PROFILE_WIDE);
   max_analog_recorders = r;
 
   for (int i = 0; i < max_analog_recorders; i++) {
     analog_recorder_sptr log = make_analog_recorder(shared_from_this(), ANALOG);
     analog_recorders.push_back(log);
-    if (shared) {
-      unsigned int port = add_channelizer_port(CHANNEL_PROFILE_WIDE);
-      log->set_selector_port(port);
-      tb->connect(channelizer, port, log, 0);
-    } else {
-      log->set_selector_port(next_selector_port);
-      tb->connect(recorder_selector, next_selector_port, log, 0);
-      next_selector_port++;
-    }
+    wire_voice_recorder(tb, log, shared, CHANNEL_PROFILE_WIDE);
   }
 }
 
 void Source::create_digital_recorders(gr::top_block_sptr tb, int r) {
-
-  if (r > 0) {
-    if (channelizer_factory) {
-      attach_channelizer(tb);
-    } else {
-      attach_selector(tb);
-    }
-  }
+  bool shared = r > 0 && prepare_voice_input(tb, CHANNEL_PROFILE_NARROW);
   max_digital_recorders = r;
 
   for (int i = 0; i < max_digital_recorders; i++) {
     p25_recorder_sptr log = make_p25_recorder(shared_from_this(), P25);
     digital_recorders.push_back(log);
-    if (channelizer) {
-      unsigned int port = add_channelizer_port(CHANNEL_PROFILE_NARROW);
-      log->set_selector_port(port);
-      tb->connect(channelizer, port, log, 0);
-    } else {
-      log->set_selector_port(next_selector_port);
-      tb->connect(recorder_selector, next_selector_port, log, 0);
-      next_selector_port++;
-    }
+    wire_voice_recorder(tb, log, shared, CHANNEL_PROFILE_NARROW);
   }
 }
 
 void Source::create_sigmf_recorders(gr::top_block_sptr tb, int r) {
   max_sigmf_recorders = r;
+  bool shared = r > 0 && prepare_voice_input(tb, CHANNEL_PROFILE_NARROW);
 
-  if (r > 0) {
-    attach_selector(tb);
-  }
   for (int i = 0; i < max_sigmf_recorders; i++) {
     sigmf_recorder_sptr log = make_sigmf_recorder(shared_from_this(), SIGMF);
 
     sigmf_recorders.push_back(log);
-    log->set_selector_port(next_selector_port);
-    tb->connect(recorder_selector, next_selector_port, log, 0);
-    next_selector_port++;
+    wire_voice_recorder(tb, log, shared, CHANNEL_PROFILE_NARROW);
   }
 }
 
@@ -570,15 +671,7 @@ analog_recorder_sptr Source::create_conventional_recorder(gr::top_block_sptr tb,
 
   analog_recorder_sptr log = make_analog_recorder(shared_from_this(), ANALOGC, tone_freq);
   analog_conv_recorders.push_back(log);
-  if (shared) {
-    unsigned int port = add_channelizer_port(CHANNEL_PROFILE_WIDE);
-    log->set_selector_port(port);
-    tb->connect(channelizer, port, log, 0);
-  } else {
-    log->set_selector_port(next_selector_port);
-    tb->connect(recorder_selector, next_selector_port, log, 0);
-    next_selector_port++;
-  }
+  wire_voice_recorder(tb, log, shared, CHANNEL_PROFILE_WIDE);
   return log;
 }
 
@@ -590,27 +683,18 @@ analog_recorder_sptr Source::create_conventional_recorder(gr::top_block_sptr tb)
 
   analog_recorder_sptr log = make_analog_recorder(shared_from_this(), ANALOGC);
   analog_conv_recorders.push_back(log);
-  if (shared) {
-    unsigned int port = add_channelizer_port(CHANNEL_PROFILE_WIDE);
-    log->set_selector_port(port);
-    tb->connect(channelizer, port, log, 0);
-  } else {
-    log->set_selector_port(next_selector_port);
-    tb->connect(recorder_selector, next_selector_port, log, 0);
-    next_selector_port++;
-  }
+  wire_voice_recorder(tb, log, shared, CHANNEL_PROFILE_WIDE);
   return log;
 }
+
 sigmf_recorder_sptr Source::create_sigmf_conventional_recorder(gr::top_block_sptr tb) {
   // Not adding it to the vector of digital_recorders. We don't want it to be available for trunk recording.
   // Conventional recorders are tracked seperately in digital_conv_recorders
   attach_detector(tb);
-  attach_selector(tb);
+  bool shared = prepare_voice_input(tb, CHANNEL_PROFILE_NARROW);
   sigmf_recorder_sptr log = make_sigmf_recorder(shared_from_this(), SIGMFC);
   sigmf_conv_recorders.push_back(log);
-  log->set_selector_port(next_selector_port);
-  tb->connect(recorder_selector, next_selector_port, log, 0);
-  next_selector_port++;
+  wire_voice_recorder(tb, log, shared, CHANNEL_PROFILE_NARROW);
   return log;
 }
 
@@ -618,23 +702,11 @@ p25_recorder_sptr Source::create_digital_conventional_recorder(gr::top_block_spt
   // Not adding it to the vector of digital_recorders. We don't want it to be available for trunk recording.
   // Conventional recorders are tracked seperately in digital_conv_recorders
   attach_detector(tb);
-  if (channelizer_factory) {
-    attach_channelizer(tb);
-  } else {
-    attach_selector(tb);
-  }
+  bool shared = prepare_voice_input(tb, CHANNEL_PROFILE_NARROW);
 
   p25_recorder_sptr log = make_p25_recorder(shared_from_this(), P25C);
   digital_conv_recorders.push_back(log);
-  if (channelizer) {
-    unsigned int port = add_channelizer_port(CHANNEL_PROFILE_NARROW);
-    log->set_selector_port(port);
-    tb->connect(channelizer, port, log, 0);
-  } else {
-    log->set_selector_port(next_selector_port);
-    tb->connect(recorder_selector, next_selector_port, log, 0);
-    next_selector_port++;
-  }
+  wire_voice_recorder(tb, log, shared, CHANNEL_PROFILE_NARROW);
   return log;
 }
 
@@ -642,13 +714,11 @@ dmr_recorder_sptr Source::create_dmr_conventional_recorder(gr::top_block_sptr tb
   // Not adding it to the vector of digital_recorders. We don't want it to be available for trunk recording.
   // Conventional recorders are tracked seperately in digital_conv_recorders
   attach_detector(tb);
-  attach_selector(tb);
+  bool shared = prepare_voice_input(tb, CHANNEL_PROFILE_NARROW);
 
   dmr_recorder_sptr log = make_dmr_recorder(shared_from_this(), DMR);
   dmr_conv_recorders.push_back(log);
-  log->set_selector_port(next_selector_port);
-  tb->connect(recorder_selector, next_selector_port, log, 0);
-  next_selector_port++;
+  wire_voice_recorder(tb, log, shared, CHANNEL_PROFILE_NARROW);
   return log;
 }
 

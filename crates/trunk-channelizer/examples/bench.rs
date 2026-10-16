@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 
 use num_complex::Complex32;
 use rustfft::FftPlanner;
-use trunk_channelizer::{Channelizer, Config};
+use trunk_channelizer::{Channelizer, Config, NARROW, WIDE};
 
 struct Rng(u64);
 impl Rng {
@@ -79,16 +79,17 @@ fn run(
     blocks: usize,
 ) -> (Config, Duration, Duration, Duration) {
     let mut cfg = Config::p25(fs).unwrap();
-    cfg.k = k;
-    cfg.overlap_out = ko;
+    let d = cfg.profile(NARROW).decim;
+    cfg.n = d * k;
+    cfg.overlap_in = d * ko;
     cfg.threads = threads;
     let hop = cfg.hop();
     let mut ch = Channelizer::new(cfg.clone()).unwrap();
     // spread channels across the passband, avoiding the DC bin
-    let span = fs * 0.9 - cfg.out_rate();
+    let span = fs * 0.9 - cfg.out_rate(NARROW);
     for i in 0..nch {
         let f = -span / 2.0 + span * (i as f64 + 0.37) / nch as f64;
-        ch.add_channel(f).unwrap();
+        ch.add_channel(NARROW, f).unwrap();
     }
     let mut rng = Rng(42);
     let input: Vec<Complex32> = (0..hop)
@@ -148,11 +149,11 @@ fn main() {
             println!(
                 "\n== fs={:.3} MS/s decim={} K={k} Ko={ko} N={} hop={} ({:.2} ms/block) bin={:.1} Hz ==",
                 fs / 1e6,
-                probe.decim,
-                probe.decim * k,
-                probe.decim * (k - ko),
-                (probe.decim * (k - ko)) as f64 / fs * 1e3,
-                fs / (probe.decim * k) as f64
+                probe.profile(NARROW).decim,
+                probe.profile(NARROW).decim * k,
+                probe.profile(NARROW).decim * (k - ko),
+                (probe.profile(NARROW).decim * (k - ko)) as f64 / fs * 1e3,
+                fs / (probe.profile(NARROW).decim * k) as f64
             );
             println!(
                 "{:>4} {:>3} {:>9} {:>10} {:>10} {:>9} {:>8}",
@@ -178,6 +179,63 @@ fn main() {
                     );
                 }
             }
+        }
+    }
+
+    mixed(quick);
+}
+
+/// One source carrying analog and digital channels at once (`Config::standard`):
+/// the forward FFT is shared, so adding analog channels costs only their
+/// (larger) inverse FFTs.
+fn mixed(quick: bool) {
+    println!("\n== mixed analog + digital, Config::standard, serial ==");
+    println!(
+        "{:>9} {:>6} {:>6} {:>8} {:>9} {:>10} {:>8}",
+        "fs MS/s", "narrow", "wide", "fwd us", "chans us", "block ms", "load %"
+    );
+    let blocks = if quick { 100 } else { 300 };
+    for fs in [912_000.0, 1_872_000.0, 2_496_000.0] {
+        for &(nn, nw) in &[(6, 0), (0, 4), (6, 4), (6, 16)] {
+            let cfg = Config::standard(fs).unwrap();
+            let hop = cfg.hop();
+            let mut ch = Channelizer::new(cfg.clone()).unwrap();
+            let span = fs * 0.85 - cfg.out_rate(WIDE);
+            let total = nn + nw;
+            for i in 0..total {
+                let f = -span / 2.0 + span * (i as f64 + 0.37) / total as f64;
+                ch.add_channel(if i < nn { NARROW } else { WIDE }, f)
+                    .unwrap();
+            }
+            let mut rng = Rng(42);
+            let input: Vec<Complex32> = (0..hop)
+                .map(|_| Complex32::new(rng.next(), rng.next()))
+                .collect();
+            for _ in 0..20 {
+                ch.process_block(&input);
+            }
+            let mut f = Vec::new();
+            let mut c = Vec::new();
+            for _ in 0..blocks {
+                let s = ch.process_block(&input);
+                f.push(s.forward);
+                c.push(s.channels);
+                black_box(ch.outputs().count());
+            }
+            f.sort();
+            c.sort();
+            let (f, c) = (f[f.len() / 2], c[c.len() / 2]);
+            let budget = cfg.block_duration();
+            println!(
+                "{:>9.3} {:>6} {:>6} {:>8.0} {:>9.0} {:>10.2} {:>7.1}%",
+                fs / 1e6,
+                nn,
+                nw,
+                us(f),
+                us(c),
+                budget.as_secs_f64() * 1e3,
+                100.0 * (f + c).as_secs_f64() / budget.as_secs_f64()
+            );
         }
     }
 }

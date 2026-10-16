@@ -17,11 +17,18 @@ fn i0(x: f64) -> f64 {
     sum
 }
 
+/// Number of taps [`lowpass_taps`] produces for these parameters (always odd).
+pub fn tap_count(rate: f64, transition_hz: f64, atten_db: f64) -> usize {
+    let dw = 2.0 * PI * transition_hz / rate;
+    let n = ((atten_db - 7.95) / (2.285 * dw)).ceil() as usize + 1;
+    n | 1 // odd
+}
+
 /// Kaiser-window low-pass with unity DC gain.
 ///
 /// `cutoff_hz` is the centre of the transition band, `transition_hz` its
 /// width, `atten_db` the stop-band attenuation (same convention as GNU
-/// Radio's `firdes::low_pass_2`). Length is odd.
+/// Radio's `firdes::low_pass_2`). Length is [`tap_count`], odd.
 pub fn lowpass_taps(rate: f64, cutoff_hz: f64, transition_hz: f64, atten_db: f64) -> Vec<f32> {
     let beta = if atten_db > 50.0 {
         0.1102 * (atten_db - 8.7)
@@ -30,9 +37,7 @@ pub fn lowpass_taps(rate: f64, cutoff_hz: f64, transition_hz: f64, atten_db: f64
     } else {
         0.0
     };
-    let dw = 2.0 * PI * transition_hz / rate;
-    let mut n = ((atten_db - 7.95) / (2.285 * dw)).ceil() as usize + 1;
-    n |= 1; // odd
+    let n = tap_count(rate, transition_hz, atten_db);
     let mid = (n - 1) as f64 / 2.0;
     let wc = 2.0 * PI * cutoff_hz / rate;
     let denom = i0(beta);

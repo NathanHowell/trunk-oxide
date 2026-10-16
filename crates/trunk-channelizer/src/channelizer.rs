@@ -1,88 +1,14 @@
 use std::f64::consts::TAU;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Result, bail, ensure};
 use num_complex::Complex32;
 use rayon::prelude::*;
 
+use crate::config::{Config, ProfileId};
 use crate::design::lowpass_taps;
 use crate::fft::{Direction, Plan};
-
-/// Channelizer geometry. Everything else is derived.
-///
-/// Forward FFT size `N = decim * k`; each frame holds `hop` new samples plus
-/// `overlap = decim * overlap_out` saved ones. A channel's inverse FFT has
-/// `k` points at `rate / decim`, of which the first `overlap_out` outputs are
-/// time-aliased and discarded, so each block yields `k - overlap_out` samples
-/// per channel. The channel filter's impulse response must fit in
-/// `overlap_out + 1` taps (the overlap-save constraint).
-#[derive(Clone, Debug)]
-pub struct Config {
-    /// Input sample rate (Hz).
-    pub sample_rate: f64,
-    /// Decimation: output rate is `sample_rate / decim`.
-    pub decim: usize,
-    /// Per-channel inverse FFT size (output-rate samples per frame).
-    pub k: usize,
-    /// Output samples discarded per frame; sets the max filter length.
-    pub overlap_out: usize,
-    /// Channel filter 6 dB point (Hz, one-sided): `channel_bw / 2`.
-    pub cutoff_hz: f64,
-    /// Channel filter transition width (Hz).
-    pub transition_hz: f64,
-    /// Channel filter stop-band attenuation (dB).
-    pub atten_db: f64,
-    /// Worker threads for the per-channel stage (0 = run on the caller).
-    pub threads: usize,
-}
-
-impl Config {
-    /// P25/DMR defaults: 12.5 kHz channel, same filter spec as
-    /// `xlat_channelizer` (`low_pass_2(bw/2, bw/4, 60 dB)`), output rate as
-    /// close to 24 kS/s as an integer decimation allows (exactly 24 kS/s when
-    /// `sample_rate` is a multiple of 24 kHz; otherwise slightly above, and
-    /// the host resamples the remainder).
-    pub fn p25(sample_rate: f64) -> Result<Self> {
-        let decim = (sample_rate / 24_000.0).floor() as usize;
-        ensure!(
-            decim >= 2,
-            "sample rate {sample_rate} too low for a 24 kS/s channel"
-        );
-        Ok(Self {
-            sample_rate,
-            decim,
-            k: 256,
-            overlap_out: 64,
-            cutoff_hz: 6_250.0,
-            transition_hz: 3_125.0,
-            atten_db: 60.0,
-            threads: 0,
-        })
-    }
-
-    pub const fn fft_size(&self) -> usize {
-        self.decim * self.k
-    }
-
-    /// New input samples consumed per block.
-    pub const fn hop(&self) -> usize {
-        self.decim * (self.k - self.overlap_out)
-    }
-
-    /// Output samples produced per channel per block.
-    pub const fn out_per_block(&self) -> usize {
-        self.k - self.overlap_out
-    }
-
-    pub fn out_rate(&self) -> f64 {
-        self.sample_rate / self.decim as f64
-    }
-
-    /// Wall-clock duration of one block of input.
-    pub fn block_duration(&self) -> Duration {
-        Duration::from_secs_f64(self.hop() as f64 / self.sample_rate)
-    }
-}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ChannelId(pub u64);
@@ -97,6 +23,7 @@ pub struct BlockStats {
 
 struct Channel {
     id: ChannelId,
+    profile: ProfileId,
     freq_hz: f64,
     /// Centre bin in `0..N`.
     bin0: usize,
@@ -104,20 +31,66 @@ struct Channel {
     resid_hz: f64,
     /// Output-sample index of the next kept sample (for residual phase).
     out_index: u64,
+    /// This channel's frequency response (K-point, pre-scaled by `1/N`).
+    /// Every channel has its own; channels with the same filter share one.
+    h: Arc<[Complex32]>,
     buf: Vec<Complex32>,
     scratch: Vec<Complex32>,
     out: Vec<Complex32>,
 }
 
-struct Shared {
-    n: usize,
+/// Per-profile state shared by all channels of that profile.
+struct ProfileShared {
     k: usize,
     overlap_out: usize,
-    decim: usize,
     out_rate: f64,
+    atten_db: f64,
     inv: Plan,
-    /// Channel frequency response (K-point) pre-scaled by `1/N`.
-    h: Vec<Complex32>,
+    /// K-point forward plan, for turning taps into a frequency response.
+    kfwd: Plan,
+    /// Response of the profile's default filter.
+    default_h: Arc<[Complex32]>,
+}
+
+struct Shared {
+    n: usize,
+    profiles: Vec<ProfileShared>,
+}
+
+impl ProfileShared {
+    /// Frequency response of the causal `taps` at K points, scaled by `1/N`
+    /// so the unnormalised fwd/inv pair has unity passband gain.
+    fn response(&self, n: usize, taps: &[f32]) -> Arc<[Complex32]> {
+        let mut hb = vec![Complex32::ZERO; self.k];
+        for (d, t) in hb.iter_mut().zip(taps) {
+            *d = Complex32::new(*t, 0.0);
+        }
+        let mut hs = self.kfwd.scratch();
+        self.kfwd.execute(&mut hb, &mut hs);
+        let scale = 1.0 / n as f32;
+        hb.iter().map(|c| c * scale).collect()
+    }
+
+    /// Check a filter fits the overlap-save constraint and return its taps:
+    /// circular convolution of length K is exact for outputs `m >= L-1`, so
+    /// `L-1 <= overlap_out`.
+    fn design(&self, cutoff_hz: f64, transition_hz: f64) -> Result<Vec<f32>> {
+        ensure!(
+            cutoff_hz > 0.0 && transition_hz > 0.0 && cutoff_hz < self.out_rate / 2.0,
+            "filter cutoff {cutoff_hz} Hz / transition {transition_hz} Hz do not fit a {} S/s channel",
+            self.out_rate
+        );
+        let taps = lowpass_taps(self.out_rate, cutoff_hz, transition_hz, self.atten_db);
+        if taps.len() > self.overlap_out + 1 {
+            bail!(
+                "channel filter has {} taps but overlap_out={} allows at most {}",
+                taps.len(),
+                self.overlap_out,
+                self.overlap_out + 1
+            );
+        }
+        Ok(taps)
+    }
 }
 
 pub struct Channelizer {
@@ -137,42 +110,35 @@ pub struct Channelizer {
 impl Channelizer {
     pub fn new(cfg: Config) -> Result<Self> {
         ensure!(
-            cfg.decim >= 2 && cfg.k >= 8 && cfg.overlap_out < cfg.k,
+            !cfg.profiles.is_empty() && cfg.overlap_in < cfg.n,
             "bad geometry"
         );
         let n = cfg.fft_size();
-        let taps = lowpass_taps(
-            cfg.out_rate(),
-            cfg.cutoff_hz,
-            cfg.transition_hz,
-            cfg.atten_db,
-        );
-        // Overlap-save constraint: circular convolution of length K is exact
-        // for outputs m >= L-1, so L-1 <= overlap_out.
-        if taps.len() > cfg.overlap_out + 1 {
-            bail!(
-                "channel filter has {} taps but overlap_out={} allows at most {}",
-                taps.len(),
-                cfg.overlap_out,
-                cfg.overlap_out + 1
+        let mut profiles = Vec::with_capacity(cfg.profiles.len());
+        for (i, p) in cfg.profiles.iter().enumerate() {
+            ensure!(
+                p.decim >= 2
+                    && n.is_multiple_of(p.decim)
+                    && cfg.overlap_in.is_multiple_of(p.decim)
+                    && cfg.k(i) >= 8
+                    && cfg.overlap_out(i) < cfg.k(i),
+                "bad geometry for profile {i}"
             );
+            let k = cfg.k(i);
+            let mut ps = ProfileShared {
+                k,
+                overlap_out: cfg.overlap_out(i),
+                out_rate: cfg.out_rate(i),
+                atten_db: p.atten_db,
+                inv: Plan::new(k, Direction::Backward),
+                kfwd: Plan::new(k, Direction::Forward),
+                default_h: Arc::from(Vec::new()),
+            };
+            let taps = ps.design(p.cutoff_hz, p.transition_hz)?;
+            ps.default_h = ps.response(n, &taps);
+            profiles.push(ps);
         }
-
         let fwd = Plan::new(n, Direction::Forward);
-        let inv = Plan::new(cfg.k, Direction::Backward);
-
-        // Frequency response of the (causal) taps at K points, scaled by 1/N
-        // so the unnormalised fwd/inv pair has unity passband gain.
-        let kplan = Plan::new(cfg.k, Direction::Forward);
-        let mut hb = vec![Complex32::ZERO; cfg.k];
-        for (d, t) in hb.iter_mut().zip(&taps) {
-            *d = Complex32::new(*t, 0.0);
-        }
-        let mut hs = kplan.scratch();
-        kplan.execute(&mut hb, &mut hs);
-        let scale = 1.0 / n as f32;
-        let h = hb.iter().map(|c| c * scale).collect();
-
         let pool = if cfg.threads > 0 {
             Some(
                 rayon::ThreadPoolBuilder::new()
@@ -183,21 +149,12 @@ impl Channelizer {
         } else {
             None
         };
-        let overlap = cfg.decim * cfg.overlap_out;
         Ok(Self {
-            shared: Shared {
-                n,
-                k: cfg.k,
-                overlap_out: cfg.overlap_out,
-                decim: cfg.decim,
-                out_rate: cfg.out_rate(),
-                inv,
-                h,
-            },
+            shared: Shared { n, profiles },
             fwd_scratch: fwd.scratch(),
             fwd,
             frame: vec![Complex32::ZERO; n],
-            history: vec![Complex32::ZERO; overlap],
+            history: vec![Complex32::ZERO; cfg.overlap_in],
             block: 0,
             channels: Vec::new(),
             next_id: 0,
@@ -219,12 +176,19 @@ impl Channelizer {
         self.cfg.sample_rate / self.shared.n as f64
     }
 
-    fn place(&self, freq_hz: f64) -> Result<(usize, f64)> {
-        let half = self.cfg.sample_rate / 2.0;
+    fn place(&self, profile: ProfileId, freq_hz: f64) -> Result<(usize, f64)> {
         ensure!(
-            freq_hz.abs() + self.cfg.out_rate() / 2.0 <= half,
-            "channel at {freq_hz} Hz (+/-{} Hz) falls outside the +/-{half} Hz passband",
-            self.cfg.out_rate() / 2.0
+            profile < self.cfg.profiles.len(),
+            "unknown profile {profile}"
+        );
+        let p = self.cfg.profile(profile);
+        // The channel's slice wraps past Nyquist, so what matters is that the
+        // filter's stop band starts before the edge.
+        let half = self.cfg.sample_rate / 2.0;
+        let reach = p.cutoff_hz + p.transition_hz / 2.0;
+        ensure!(
+            freq_hz.abs() + reach <= half,
+            "channel at {freq_hz} Hz (+/-{reach} Hz) falls outside the +/-{half} Hz passband"
         );
         let df = self.bin_hz();
         let b = (freq_hz / df).round();
@@ -232,22 +196,26 @@ impl Channelizer {
         Ok((bin0, freq_hz - b * df))
     }
 
-    /// Add a channel centred `freq_hz` from the source centre. Takes effect
-    /// on the next block; there is no per-channel history, so the first
-    /// output is immediately valid.
-    pub fn add_channel(&mut self, freq_hz: f64) -> Result<ChannelId> {
-        let (bin0, resid_hz) = self.place(freq_hz)?;
+    /// Add a channel of `profile` centred `freq_hz` from the source centre,
+    /// with the profile's default filter. Takes effect on the next block;
+    /// there is no per-channel history, so the first output is immediately
+    /// valid.
+    pub fn add_channel(&mut self, profile: ProfileId, freq_hz: f64) -> Result<ChannelId> {
+        let (bin0, resid_hz) = self.place(profile, freq_hz)?;
+        let ps = &self.shared.profiles[profile];
         let id = ChannelId(self.next_id);
         self.next_id += 1;
         self.channels.push(Channel {
             id,
+            profile,
             freq_hz,
             bin0,
             resid_hz,
             out_index: 0,
-            buf: vec![Complex32::ZERO; self.cfg.k],
-            scratch: self.shared.inv.scratch(),
-            out: vec![Complex32::ZERO; self.cfg.out_per_block()],
+            h: Arc::clone(&ps.default_h),
+            buf: vec![Complex32::ZERO; ps.k],
+            scratch: ps.inv.scratch(),
+            out: vec![Complex32::ZERO; self.cfg.out_per_block(profile)],
         });
         Ok(id)
     }
@@ -260,14 +228,35 @@ impl Channelizer {
 
     /// Retune in place. Costs nothing and cannot glitch other channels.
     pub fn retune(&mut self, id: ChannelId, freq_hz: f64) -> Result<()> {
-        let (bin0, resid_hz) = self.place(freq_hz)?;
-        let Some(c) = self.channels.iter_mut().find(|c| c.id == id) else {
+        let Some(profile) = self.channels.iter().find(|c| c.id == id).map(|c| c.profile) else {
             bail!("unknown channel {id:?}")
         };
+        let (bin0, resid_hz) = self.place(profile, freq_hz)?;
+        let c = self
+            .channels
+            .iter_mut()
+            .find(|c| c.id == id)
+            .expect("checked above");
         c.freq_hz = freq_hz;
         c.bin0 = bin0;
         c.resid_hz = resid_hz;
         Ok(())
+    }
+
+    /// Give a channel its own filter (cutoff and transition, Hz). Applies to
+    /// the next block. The channel's other state is untouched.
+    pub fn set_filter(&mut self, id: ChannelId, cutoff_hz: f64, transition_hz: f64) -> Result<()> {
+        let Some(c) = self.channels.iter_mut().find(|c| c.id == id) else {
+            bail!("unknown channel {id:?}")
+        };
+        let ps = &self.shared.profiles[c.profile];
+        let taps = ps.design(cutoff_hz, transition_hz)?;
+        c.h = ps.response(self.shared.n, &taps);
+        Ok(())
+    }
+
+    pub fn profile_of(&self, id: ChannelId) -> Option<ProfileId> {
+        self.channels.iter().find(|c| c.id == id).map(|c| c.profile)
     }
 
     /// Baseband output of the last block for one channel.
@@ -331,12 +320,13 @@ impl Channelizer {
 /// Per-channel work for one block: bin slice * H -> K-point IFFT -> drop the
 /// aliased head -> phase-correct (bin shift + residual offset).
 fn extract(s: &Shared, spec: &[Complex32], frame_start: u64, c: &mut Channel) {
-    let (n, k, half) = (s.n, s.k, s.k / 2);
+    let ps = &s.profiles[c.profile];
+    let (n, k, half) = (s.n, ps.k, ps.k / 2);
 
     // buf[j] = spec[bin0 + jj] * H[j], jj = j (j < K/2) or j - K (j >= K/2).
     let mut src = c.bin0;
     for j in 0..half {
-        c.buf[j] = spec[src] * s.h[j];
+        c.buf[j] = spec[src] * c.h[j];
         src += 1;
         if src == n {
             src = 0;
@@ -344,13 +334,13 @@ fn extract(s: &Shared, spec: &[Complex32], frame_start: u64, c: &mut Channel) {
     }
     let mut src = (c.bin0 + n - half) % n;
     for j in half..k {
-        c.buf[j] = spec[src] * s.h[j];
+        c.buf[j] = spec[src] * c.h[j];
         src += 1;
         if src == n {
             src = 0;
         }
     }
-    s.inv.execute(&mut c.buf, &mut c.scratch);
+    ps.inv.execute(&mut c.buf, &mut c.scratch);
 
     // Kept sample i (m = overlap_out + i) maps to global output index g and
     // input index D*g. The bin shift contributes exp(-j2pi*bin0*frame_start/N)
@@ -358,17 +348,16 @@ fn extract(s: &Shared, spec: &[Complex32], frame_start: u64, c: &mut Channel) {
     // exp(-j2pi*resid*g/out_rate).
     let bin_phase = (c.bin0 as u64 * frame_start) % n as u64;
     let phase0 =
-        -TAU * (bin_phase as f64 / n as f64 + c.resid_hz * c.out_index as f64 / s.out_rate);
+        -TAU * (bin_phase as f64 / n as f64 + c.resid_hz * c.out_index as f64 / ps.out_rate);
     let (sin0, cos0) = phase0.sin_cos();
     let mut rot = Complex32::new(cos0 as f32, sin0 as f32);
-    let step = -TAU * c.resid_hz / s.out_rate;
+    let step = -TAU * c.resid_hz / ps.out_rate;
     let inc = Complex32::new(step.cos() as f32, step.sin() as f32);
-    for (o, v) in c.out.iter_mut().zip(&c.buf[s.overlap_out..]) {
+    for (o, v) in c.out.iter_mut().zip(&c.buf[ps.overlap_out..]) {
         *o = v * rot;
         rot *= inc;
     }
-    c.out_index += (k - s.overlap_out) as u64;
-    let _ = s.decim;
+    c.out_index += (k - ps.overlap_out) as u64;
 }
 
 #[cfg(test)]

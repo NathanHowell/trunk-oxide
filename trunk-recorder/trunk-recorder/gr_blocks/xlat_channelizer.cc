@@ -204,10 +204,6 @@ double xlat_channelizer::get_pwr() {
 }
 
 void xlat_channelizer::tune_offset(double f) {
-  d_offset = f;
-  if (d_mirror) {
-    d_mirror->tune_offset(f);
-  }
   if (d_shared) {
     // f is (source centre - channel); the channelizer wants channel - centre.
     if (tune_hook) {
@@ -222,10 +218,6 @@ void xlat_channelizer::tune_offset(double f) {
 }
 
 void xlat_channelizer::set_max_dev(double max_dev) {
-  d_max_dev = max_dev;
-  if (d_mirror) {
-    d_mirror->set_max_dev(max_dev);
-  }
   if (d_shared) {
     // The channel filter lives in the shared channelizer; same spec as below
     // (cutoff max_dev, transition bandwidth/2), applied to this channel only.
@@ -239,18 +231,10 @@ void xlat_channelizer::set_max_dev(double max_dev) {
 }
 
 void xlat_channelizer::set_squelch_db(double squelch_db) {
-  d_squelch_db = squelch_db;
-  if (d_mirror) {
-    d_mirror->set_squelch_db(squelch_db);
-  }
   squelch->set_threshold(squelch_db);
 }
 
 void xlat_channelizer::set_analog_squelch(bool analog_squelch) {
-  d_analog_squelch = analog_squelch;
-  if (d_mirror) {
-    d_mirror->set_analog_squelch(analog_squelch);
-  }
   if (analog_squelch) {
     squelch->set_alpha(0.01);
     squelch->set_ramp(10);
@@ -263,10 +247,6 @@ void xlat_channelizer::set_analog_squelch(bool analog_squelch) {
 }
 
 void xlat_channelizer::set_samples_per_symbol(int samples_per_symbol) {
-  d_sps_override = samples_per_symbol;
-  if (d_mirror) {
-    d_mirror->set_samples_per_symbol(samples_per_symbol);
-  }
   fll_band_edge->set_samples_per_symbol(samples_per_symbol);
 }
 
@@ -275,19 +255,4 @@ std::vector<gr::block_sptr> xlat_channelizer::get_metric_blocks() const {
   if (arb_resampler) blocks.push_back(arb_resampler);
   if (fll_band_edge) blocks.push_back(fll_band_edge);
   return blocks;
-}
-xlat_channelizer::sptr xlat_channelizer::make_shared_twin(double shared_rate) const {
-  return make(d_input_rate, d_samples_per_symbol, d_symbol_rate, d_bandwidth, d_center_freq, d_use_squelch, d_excess_bw, shared_rate);
-}
-
-void xlat_channelizer::set_mirror(sptr twin) {
-  d_mirror = std::move(twin);
-  if (!d_mirror) {
-    return;
-  }
-  if (d_sps_override) d_mirror->set_samples_per_symbol(*d_sps_override);
-  if (d_analog_squelch) d_mirror->set_analog_squelch(*d_analog_squelch);
-  if (d_squelch_db) d_mirror->set_squelch_db(*d_squelch_db);
-  if (d_max_dev) d_mirror->set_max_dev(*d_max_dev);
-  if (d_offset) d_mirror->tune_offset(*d_offset);
 }

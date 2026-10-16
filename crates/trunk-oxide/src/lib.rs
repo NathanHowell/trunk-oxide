@@ -30,38 +30,6 @@ pub use call_state::{Freq, Talkgroup};
 pub struct GrMetricsSnapshot {
     pub recorders: Vec<ffi::TrRecorderMetrics>,
     pub sources: Vec<ffi::TrSourceMetrics>,
-    pub shadow: Vec<ffi::TrShadowMetrics>,
-}
-
-/// One-line summary of the legacy-vs-shared channelizer comparison, cumulative
-/// since the source started. Means are over the ticks where both paths could
-/// be compared; bias is shared minus legacy.
-#[allow(clippy::cast_precision_loss)]
-fn log_shadow_summary(m: &ffi::TrShadowMetrics) {
-    let mean = |sum: f64, n: u64| if n == 0 { f64::NAN } else { sum / n as f64 };
-    let pct = |k: u64, n: u64| {
-        if n == 0 {
-            f64::NAN
-        } else {
-            100.0 * k as f64 / n as f64
-        }
-    };
-    tracing::info!(
-        source = m.source_id,
-        profile = %m.profile,
-        recorders = m.shadowed_recorders,
-        polls = m.polls,
-        squelch_disagree_pct = pct(m.squelch_disagree, m.squelch_polls),
-        power_polls = m.power_polls,
-        power_abs_mean_db = mean(m.power_abs_sum_db, m.power_polls),
-        power_bias_db = mean(m.power_bias_sum_db, m.power_polls),
-        power_gt_1db_pct = pct(m.power_gt_1db, m.power_polls),
-        power_gt_3db_pct = pct(m.power_gt_3db, m.power_polls),
-        power_abs_max_db = m.power_abs_max_db,
-        ferr_abs_mean_hz = mean(m.ferr_abs_sum_hz, m.ferr_polls),
-        ferr_abs_max_hz = m.ferr_abs_max_hz,
-        "channelizer shadow: shared vs legacy"
-    );
 }
 
 /// Per-channel metrics for a single conventional channel.
@@ -401,11 +369,6 @@ impl TrunkRecorderBuilder {
                     digital_recorders: src.digital_recorders,
                     analog_recorders: src.analog_recorders,
                     sigmf_recorders: src.sigmf_recorders,
-                    channelizer_mode: match src.channelizer {
-                        trunk_config::ChannelizerMode::Legacy => 0,
-                        trunk_config::ChannelizerMode::Shadow => 1,
-                        trunk_config::ChannelizerMode::Shared => 2,
-                    },
                 },
             )?;
             let half_rate = src.rate / 2.0;
@@ -747,7 +710,6 @@ impl TrunkRecorder {
         let mut tick = delayed_interval(Duration::from_secs(1));
         let mut status = delayed_interval(Duration::from_secs(200));
         let mut metrics_tick = delayed_interval(Duration::from_secs(1));
-        let mut shadow_log_ticks = 0u32;
 
         loop {
             tokio::select! {
@@ -839,18 +801,9 @@ impl TrunkRecorder {
                 _ = metrics_tick.tick() => {
                     let recorders = ffi::tr_collect_recorder_metrics(&self.ctx);
                     let sources = ffi::tr_collect_source_metrics(&self.ctx);
-                    let shadow = ffi::tr_collect_shadow_metrics(&self.ctx);
-                    shadow_log_ticks += 1;
-                    if shadow_log_ticks >= 60 {
-                        shadow_log_ticks = 0;
-                        for m in shadow.iter().filter(|m| m.polls > 0) {
-                            log_shadow_summary(m);
-                        }
-                    }
                     if let Ok(mut snap) = self.gr_metrics.lock() {
                         snap.recorders = recorders;
                         snap.sources = sources;
-                        snap.shadow = shadow;
                     }
                 },
             }

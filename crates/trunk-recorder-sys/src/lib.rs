@@ -242,28 +242,6 @@ pub mod ffi {
         pub blocks: Vec<TrGrBlockMetrics>,
     }
 
-    /// Legacy-vs-shared comparison for one (source, channel profile), polled
-    /// while shadowed recorders are active. Everything is cumulative since
-    /// the source started (the `*_max` fields are all-time maxima).
-    #[derive(Debug, Clone)]
-    struct TrShadowMetrics {
-        pub source_id: i32,
-        pub profile: String,
-        pub shadowed_recorders: u32,
-        pub polls: u64,
-        pub squelch_polls: u64,
-        pub squelch_disagree: u64,
-        pub power_polls: u64,
-        pub power_gt_1db: u64,
-        pub power_gt_3db: u64,
-        pub power_abs_sum_db: f64,
-        pub power_bias_sum_db: f64,
-        pub power_abs_max_db: f64,
-        pub ferr_polls: u64,
-        pub ferr_abs_sum_hz: f64,
-        pub ferr_abs_max_hz: f64,
-    }
-
     // ── Bulk config structs for source/system setup ──
 
     struct TrGainStage {
@@ -288,8 +266,6 @@ pub mod ffi {
         pub digital_recorders: i32,
         pub analog_recorders: i32,
         pub sigmf_recorders: i32,
-        /// 0 = legacy, 1 = shadow (legacy primary, shared compared), 2 = shared.
-        pub channelizer_mode: u8,
     }
 
     /// Minimal device parameters needed to open a source standalone for
@@ -496,7 +472,6 @@ pub mod ffi {
         // ── GR block performance metrics ──
         fn tr_collect_recorder_metrics(ctx: &TrContext) -> Vec<TrRecorderMetrics>;
         fn tr_collect_source_metrics(ctx: &TrContext) -> Vec<TrSourceMetrics>;
-        fn tr_collect_shadow_metrics(ctx: &TrContext) -> Vec<TrShadowMetrics>;
     }
 
     // ── Rust functions callable from C++ (event handler callbacks) ──

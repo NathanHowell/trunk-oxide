@@ -11,15 +11,6 @@ pub enum SourceDriver {
     Iqfile,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum ChannelizerMode {
-    #[default]
-    Legacy,
-    Shadow,
-    Shared,
-}
-
 #[derive(Debug, Deserialize)]
 pub struct SourceConfig {
     pub driver: SourceDriver,
@@ -89,14 +80,6 @@ pub struct SourceConfig {
     pub analog_recorders: i32,
     #[serde(default)]
     pub sigmf_recorders: i32,
-    /// How voice recorders get their channel from this source's IQ.
-    /// `legacy` gives each recorder a private frequency-translating filter;
-    /// `shared` runs every recorder off one shared fast-convolution
-    /// channelizer (a single forward FFT per block); `shadow` keeps `legacy`
-    /// in charge but also runs the shared path beside it and exports
-    /// `channelizer.shadow.*` comparison metrics, for validating a swap.
-    #[serde(default)]
-    pub channelizer: ChannelizerMode,
     #[serde(default)]
     pub enabled: Option<bool>,
     /// Named gain stages, e.g. `{ "IF" = 20.0, "LNA" = 15.0 }`.

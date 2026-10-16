@@ -30,9 +30,9 @@ public:
   static int rec_counter;
   std::string get_type_string();
   bool conventional;
-  unsigned int selector_port;
+  unsigned int channelizer_port;
 
-  void set_selector_port(unsigned int port) {selector_port = port;}
+  void set_channelizer_port(unsigned int port) {channelizer_port = port;}
   Recorder(Recorder_Type  type);
   int get_num() const { return rec_num; };
 
@@ -56,11 +56,6 @@ public:
 
   /// Return key internal gr::block instances for performance-counter collection.
   virtual std::vector<gr::block_sptr> get_metric_blocks() const = 0;
-
-  /// The recorder's channel filter/squelch front end, for shadow comparison
-  /// against the shared channelizer (see Source::attach_shadow). Null if the
-  /// recorder has none.
-  virtual std::shared_ptr<xlat_channelizer> prefilter_block() const { return nullptr; }
 
   uint64_t get_rust_call_id() const { return rust_call_id; }
 

@@ -5,7 +5,6 @@
 #include <functional>
 #include <iomanip>
 #include <memory>
-#include <optional>
 
 #include "./rms_agc.h"
 #include "./freq_xlating_fft_filter.h"
@@ -74,13 +73,6 @@ public:
   void set_max_dev(double max_dev);
   bool uses_squelch() const { return d_use_squelch; }
 
-  // Shadow validation (see Source::attach_shadow): a shared-mode twin that
-  // receives every setter call this channelizer gets, so the two can be
-  // compared while this one stays in charge. A twin has the same geometry,
-  // squelch and FLL settings; set_mirror() replays the state set so far.
-  sptr make_shared_twin(double shared_rate) const;
-  void set_mirror(sptr twin);
-
 private:
   bool double_decim;
   long if1;
@@ -92,14 +84,6 @@ private:
   int d_samples_per_symbol;
   double d_symbol_rate;
   double d_excess_bw;
-
-  // Setter state, kept so a mirror attached later can be brought up to date.
-  std::optional<double> d_offset;
-  std::optional<double> d_max_dev;
-  std::optional<double> d_squelch_db;
-  std::optional<bool> d_analog_squelch;
-  std::optional<int> d_sps_override;
-  sptr d_mirror;
 
   bool d_use_squelch;
   bool d_shared = false;

@@ -224,10 +224,15 @@ services:
 
   jaeger:
     image: cr.jaegertracing.io/jaegertracing/jaeger:2.15.0
+    # Badger storage on a volume (48h TTL) instead of the in-memory default.
+    command: ["--config=file:/etc/jaeger/config.yaml"]
     ports:
       - "16686:16686"
       - "4317:4317"
       - "4318:4318"
+    volumes:
+      - ./jaeger-config.yaml:/etc/jaeger/config.yaml:ro
+      - jaeger-data:/badger
 
   victoriametrics:
     image: victoriametrics/victoria-metrics:v1.115.0
@@ -251,3 +256,4 @@ volumes:
   parakeet-models:
   whistle-models:
   victoriametrics-data:
+  jaeger-data:

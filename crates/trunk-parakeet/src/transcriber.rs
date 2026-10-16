@@ -17,11 +17,34 @@ enum ParakeetModel {
     Standard(Box<Parakeet>),
 }
 
+/// Recognised text and where it sits in the submitted audio (seconds). The
+/// timing comes from the model's token timestamps and is `None` when there are
+/// no tokens.
+pub struct Transcript {
+    pub text: String,
+    pub first_start_s: Option<f32>,
+    pub last_end_s: Option<f32>,
+}
+
+impl From<parakeet_rs::TranscriptionResult> for Transcript {
+    fn from(r: parakeet_rs::TranscriptionResult) -> Self {
+        Self {
+            first_start_s: r.tokens.first().map(|t| t.start),
+            last_end_s: r.tokens.last().map(|t| t.end),
+            text: r.text,
+        }
+    }
+}
+
 impl ParakeetModel {
-    fn transcribe_samples(&mut self, audio: Vec<f32>) -> parakeet_rs::Result<String> {
+    fn transcribe_samples(&mut self, audio: Vec<f32>) -> parakeet_rs::Result<Transcript> {
         match self {
-            Self::Tdt(m) => m.transcribe_samples(audio, 16000, 1, None).map(|r| r.text),
-            Self::Standard(m) => m.transcribe_samples(audio, 16000, 1, None).map(|r| r.text),
+            Self::Tdt(m) => m
+                .transcribe_samples(audio, 16000, 1, None)
+                .map(Transcript::from),
+            Self::Standard(m) => m
+                .transcribe_samples(audio, 16000, 1, None)
+                .map(Transcript::from),
         }
     }
 }
@@ -110,7 +133,7 @@ impl ParakeetTranscriber {
         short_name: &str,
         is_conventional: bool,
         priority: i32,
-    ) -> Result<String> {
+    ) -> Result<Transcript> {
         // Attribute the decode cost by system. short_name + is_conventional are
         // low-cardinality, so they are safe as metric labels (talkgroup is not —
         // it rides on the span instead). priority_bucket is also low-cardinality
@@ -145,12 +168,12 @@ impl ParakeetTranscriber {
         let model = Arc::clone(&self.model);
         let start = std::time::Instant::now();
         let result = tokio::task::spawn_blocking(move || {
-            let text = model
+            let transcript = model
                 .blocking_lock()
                 .transcribe_samples(audio)
                 .map_err(|e| anyhow::anyhow!("parakeet transcription failed: {e}"))?;
             drop(permit);
-            Ok::<String, anyhow::Error>(text)
+            Ok::<Transcript, anyhow::Error>(transcript)
         })
         .instrument(tracing::info_span!("decode"))
         .await?;
@@ -161,9 +184,9 @@ impl ParakeetTranscriber {
         // served rate can be split per tier. Decode duration stays on `attrs`
         // (no bucket): decode cost is priority-independent.
         match result {
-            Ok(text) => {
+            Ok(transcript) => {
                 self.transcriptions_completed.add(1, &wait_attrs);
-                Ok(text)
+                Ok(transcript)
             }
             Err(e) => {
                 self.transcription_errors.add(1, &wait_attrs);

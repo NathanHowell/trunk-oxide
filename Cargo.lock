@@ -2931,6 +2931,7 @@ dependencies = [
  "base64 0.22.1",
  "bitflags",
  "bytes",
+ "flate2",
  "futures",
  "mime_guess",
  "percent-encoding",
@@ -2943,6 +2944,7 @@ dependencies = [
  "tokio",
  "tokio-tungstenite",
  "tracing",
+ "typemap_rev",
  "url",
 ]
 
@@ -3912,6 +3914,12 @@ dependencies = [
  "url",
  "utf-8",
 ]
+
+[[package]]
+name = "typemap_rev"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "74b08b0c1257381af16a5c3605254d529d3e7e109f3c62befc5d168968192998"
 
 [[package]]
 name = "typenum"

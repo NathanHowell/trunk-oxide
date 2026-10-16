@@ -39,6 +39,9 @@ private:
   // Accumulate across the recording so the Transmission carries real counts, not 0.
   std::atomic<long> d_error_count;
   std::atomic<long> d_spike_count;
+  // Terminator accounting from op25's "terminate" / "term_after" stream tags.
+  std::atomic<long> d_term_events;
+  std::atomic<long> d_after_term_samples;
   long d_talkgroup;
   double d_freq;
 

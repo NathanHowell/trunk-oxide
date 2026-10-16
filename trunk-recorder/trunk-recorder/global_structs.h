@@ -18,6 +18,10 @@ struct Transmission {
   long sample_count;
   long spike_count;
   long error_count;
+  // op25 terminator (TDU) accounting: events seen, and audio samples that were
+  // produced after the terminator position within the same work call.
+  long term_events;
+  long after_term_samples;
   double freq;
   char filename[255];
 };

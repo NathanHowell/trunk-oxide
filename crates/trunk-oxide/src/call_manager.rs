@@ -79,6 +79,11 @@ struct VoiceCounters {
     errors: i64,
     spikes: i64,
     samples: i64,
+    /// op25 terminator (TDU) events seen, and audio samples produced after the
+    /// terminator position within the same work call (candidate end-of-call
+    /// clipping; see `headless_sink`).
+    term_events: i64,
+    after_term_samples: i64,
 }
 
 impl VoiceCounters {
@@ -88,6 +93,8 @@ impl VoiceCounters {
             c.errors += t.error_count;
             c.spikes += t.spike_count;
             c.samples += t.sample_count;
+            c.term_events += t.term_events;
+            c.after_term_samples += t.after_term_samples;
         }
         c
     }
@@ -99,6 +106,8 @@ impl VoiceCounters {
             errors: (self.errors - prior.errors).max(0),
             spikes: (self.spikes - prior.spikes).max(0),
             samples: (self.samples - prior.samples).max(0),
+            term_events: (self.term_events - prior.term_events).max(0),
+            after_term_samples: (self.after_term_samples - prior.after_term_samples).max(0),
         }
     }
 }
@@ -139,6 +148,11 @@ pub struct CallManager {
     /// (the cause of P25 audio clipping), typically driven by frequency error.
     voice_frame_errors: Counter<u64>,
     voice_frame_spikes: Counter<u64>,
+    /// op25 terminator (TDU) events per call and the audio produced after the
+    /// terminator position (ms at 8 kHz). Tests whether end-of-call clipping
+    /// coincides with audio landing behind the terminator tag.
+    terminator_events: Counter<u64>,
+    terminator_after_ms: Histogram<f64>,
     /// Per-call FLL frequency error (Hz) at recorder stop, bucketed by source.
     /// Distribution (not last value) so the per-dongle median = clock bias and
     /// the spread = decode margin, both trendable over time to watch TCXO drift.
@@ -259,6 +273,18 @@ impl CallManager {
             voice_frame_spikes: meter
                 .u64_counter("trunk.oxide.voice_frame_spikes")
                 .with_description("op25-reported voice codeword spikes, summed per call")
+                .build(),
+            terminator_events: meter
+                .u64_counter("trunk.oxide.terminator_events")
+                .with_description("op25 call-terminator (TDU) events, summed per call")
+                .build(),
+            terminator_after_ms: meter
+                .f64_histogram("trunk.oxide.terminator_after_ms")
+                .with_description("Per call: audio (ms) produced after the terminator position")
+                .with_unit("ms")
+                .with_boundaries(vec![
+                    0.0, 10.0, 25.0, 50.0, 100.0, 200.0, 400.0, 800.0, 1600.0,
+                ])
                 .build(),
             freq_error_hz: meter
                 .f64_histogram("trunk.oxide.freq_error_hz")
@@ -510,6 +536,8 @@ impl CallManager {
                             elapsed = tracing::field::Empty,
                             voice_errors = tracing::field::Empty,
                             voice_spikes = tracing::field::Empty,
+                            term_events = tracing::field::Empty,
+                            after_term_ms = tracing::field::Empty,
                             voice_samples = tracing::field::Empty,
                         );
                         let traceparent = traceparent_of(&span);
@@ -890,6 +918,8 @@ impl CallManager {
                     );
                     s.record("voice_errors", delta.errors);
                     s.record("voice_spikes", delta.spikes);
+                    s.record("term_events", delta.term_events);
+                    s.record("after_term_ms", delta.after_term_samples / 8);
                     s.record("voice_samples", delta.samples);
                 }
                 let voice_attrs = [
@@ -904,6 +934,12 @@ impl CallManager {
                     .add(u64::try_from(delta.errors).unwrap_or(0), &voice_attrs);
                 self.voice_frame_spikes
                     .add(u64::try_from(delta.spikes).unwrap_or(0), &voice_attrs);
+                self.terminator_events
+                    .add(u64::try_from(delta.term_events).unwrap_or(0), &voice_attrs);
+                if delta.term_events > 0 {
+                    self.terminator_after_ms
+                        .record(delta.after_term_samples as f64 / 8.0, &voice_attrs);
+                }
 
                 let mut data = self.build_call_data(call_id);
                 data.length = recording_length;
@@ -1010,11 +1046,14 @@ impl CallManager {
                     // Sum op25 decode-quality counters across the call's
                     // transmissions to expose P25 audio loss (clipping).
                     let (mut tx_errors, mut tx_spikes, mut tx_samples) = (0i64, 0i64, 0i64);
+                    let (mut tx_terms, mut tx_after) = (0i64, 0i64);
                     let mut tally = |list: &[ffi::TrTransmission]| {
                         for t in list {
                             tx_errors += t.error_count;
                             tx_spikes += t.spike_count;
                             tx_samples += t.sample_count;
+                            tx_terms += t.term_events;
+                            tx_after += t.after_term_samples;
                         }
                     };
                     if metrics.is_dmr {
@@ -1051,11 +1090,15 @@ impl CallManager {
                         errors: tx_errors,
                         spikes: tx_spikes,
                         samples: tx_samples,
+                        term_events: tx_terms,
+                        after_term_samples: tx_after,
                     }
                     .since(prior);
                     if let Some(s) = &span {
                         s.record("voice_errors", delta.errors);
                         s.record("voice_spikes", delta.spikes);
+                        s.record("term_events", delta.term_events);
+                        s.record("after_term_ms", delta.after_term_samples / 8);
                         s.record("voice_samples", delta.samples);
                     }
                     let voice_attrs = [
@@ -1070,6 +1113,12 @@ impl CallManager {
                         .add(u64::try_from(delta.errors).unwrap_or(0), &voice_attrs);
                     self.voice_frame_spikes
                         .add(u64::try_from(delta.spikes).unwrap_or(0), &voice_attrs);
+                    self.terminator_events
+                        .add(u64::try_from(delta.term_events).unwrap_or(0), &voice_attrs);
+                    if delta.term_events > 0 {
+                        self.terminator_after_ms
+                            .record(delta.after_term_samples as f64 / 8.0, &voice_attrs);
+                    }
 
                     // Per-source clock-error distribution: median = TCXO bias,
                     // spread = decode margin; both trendable to watch drift.
@@ -1780,6 +1829,8 @@ mod tests {
             sample_count,
             spike_count,
             error_count,
+            term_events: 0,
+            after_term_samples: 0,
             freq: 0.0,
         }
     }
@@ -1802,17 +1853,20 @@ mod tests {
                 errors: 4,
                 spikes: 2,
                 samples: 80,
+                ..VoiceCounters::default()
             }, // after A
             VoiceCounters {
                 errors: 7,
                 spikes: 5,
                 samples: 130,
+                ..VoiceCounters::default()
             }, // after B
         ];
         let total = VoiceCounters {
             errors: 10,
             spikes: 6,
             samples: 200,
+            ..VoiceCounters::default()
         }; // at final stop
 
         let a = snapshots[1].since(snapshots[0]);
@@ -1835,11 +1889,13 @@ mod tests {
             errors: 1,
             spikes: 0,
             samples: 10,
+            ..VoiceCounters::default()
         };
         let stale = VoiceCounters {
             errors: 9,
             spikes: 9,
             samples: 999,
+            ..VoiceCounters::default()
         };
         let d = after_reset.since(stale);
         assert_eq!((d.errors, d.spikes, d.samples), (0, 0, 0));

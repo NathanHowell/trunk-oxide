@@ -15,4 +15,8 @@ message TranscribeRequest {
 
 message TranscribeResponse {
   string text = 1;
+  // Where the recognised text sits within the submitted audio, in seconds.
+  // Unset when the backend can't provide timing (or there is no text).
+  optional float first_text_start_s = 2;
+  optional float last_text_end_s = 3;
 }

@@ -21,6 +21,25 @@ impl opentelemetry::propagation::Injector for MetadataInjector<'_> {
     }
 }
 
+/// A completed transcription: the text plus, when the backend reports it, where
+/// that text sits within the submitted audio (seconds).
+pub struct Transcription {
+    pub text: String,
+    pub first_start_s: Option<f32>,
+    pub last_end_s: Option<f32>,
+}
+
+impl Transcription {
+    /// No text and no timing (silence, timeout, or an RPC error).
+    pub const fn empty() -> Self {
+        Self {
+            text: String::new(),
+            first_start_s: None,
+            last_end_s: None,
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct TranscriberConnection {
     client: TranscriberClient<tonic::transport::Channel>,
@@ -49,7 +68,7 @@ impl TranscriberConnection {
     }
 
     /// Transcribe `audio`, bounded by [`TranscriberConnection::timeout`]. Returns
-    /// `Ok(Some(text))` on completion (the text may be empty for silence) and
+    /// `Ok(Some(transcription))` on completion (the text may be empty for silence) and
     /// `Ok(None)` when the request was abandoned after exceeding the timeout, so
     /// the caller can record a distinct timeout metric.
     ///
@@ -63,7 +82,7 @@ impl TranscriberConnection {
         is_conventional: bool,
         talkgroup: i64,
         priority: i32,
-    ) -> Result<Option<String>> {
+    ) -> Result<Option<Transcription>> {
         let bytes: Vec<u8> = audio.iter().flat_map(|s| s.to_le_bytes()).collect();
 
         let mut request = tonic::Request::new(TranscribeRequest {
@@ -85,7 +104,14 @@ impl TranscriberConnection {
         let rpc = client.transcribe(request);
 
         match tokio::time::timeout(self.timeout, rpc).await {
-            Ok(response) => Ok(Some(response?.into_inner().text)),
+            Ok(response) => {
+                let r = response?.into_inner();
+                Ok(Some(Transcription {
+                    text: r.text,
+                    first_start_s: r.first_text_start_s,
+                    last_end_s: r.last_text_end_s,
+                }))
+            }
             Err(_elapsed) => {
                 // Abandon the request and let the call finalize without a
                 // transcript rather than hanging the handler forever.

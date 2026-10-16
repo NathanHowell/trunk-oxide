@@ -263,6 +263,11 @@ p25_frame_assembler_impl::general_work (int noutput_items,
               BOOST_LOG_TRIVIAL(info) << "P25 Frame Assembler: TDU was not at the end of the data. TDU: " << terminate_call.second << " Amount: " << amt_produce << " nitems_written(0): " << nitems_written(0);  
             }
             add_item_tag(0, nitems_written(0), pmt::intern("terminate"), pmt::from_long(1), d_tag_src );
+            // Audio produced after the terminator position in this work call
+            // (the "TDU was not at the end of the data" case). Counted by the
+            // sink so it can be tied to end-of-call clipping.
+            long after_term = (amt_produce != 1 && amt_produce > terminate_call.second) ? (amt_produce - terminate_call.second) : 0;
+            add_item_tag(0, nitems_written(0), pmt::intern("term_after"), pmt::from_long(after_term), d_tag_src );
 
             // Tag per-call decode-error counts. Phase 1 reads them from p1fdma's
             // Rx_Status; Phase 2 (which previously emitted nothing — leaving

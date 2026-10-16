@@ -109,6 +109,8 @@ pub mod ffi {
         pub sample_count: i64,
         pub spike_count: i64,
         pub error_count: i64,
+        pub term_events: i64,
+        pub after_term_samples: i64,
         pub freq: f64,
     }
 

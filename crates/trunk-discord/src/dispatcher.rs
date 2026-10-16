@@ -18,8 +18,8 @@ use trunk_database::Database;
 
 use crate::aggregator::Aggregator;
 use crate::call_handler::{CallHandler, CallHandlerConfig, CallMessage};
-use crate::channel_writer::ChannelWriters;
 use crate::channel_manager::ChannelLookup;
+use crate::channel_writer::ChannelWriters;
 use crate::discord::DiscordClient;
 use crate::dispatcher_state::{CallKey, DispatchEffect, DispatcherState};
 use crate::grpc_transcriber::TranscriberConnection;
@@ -115,7 +115,10 @@ impl DispatchPump {
         heartbeat: Arc<AtomicU64>,
     ) -> Self {
         let (dead_call_tx, dead_call_rx) = mpsc::channel(64);
-        let writers = Arc::new(ChannelWriters::new(Arc::clone(&discord), Arc::clone(&metrics)));
+        let writers = Arc::new(ChannelWriters::new(
+            Arc::clone(&discord),
+            Arc::clone(&metrics),
+        ));
 
         Self {
             state: DispatcherState::new(coalesce_timeout_ms),

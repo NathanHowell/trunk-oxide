@@ -61,6 +61,7 @@ impl TranscriberService for ParakeetService {
         if audio.is_empty() {
             return Ok(Response::new(TranscribeResponse {
                 text: String::new(),
+                ..Default::default()
             }));
         }
 
@@ -79,13 +80,17 @@ impl TranscriberService for ParakeetService {
             tracing::debug!(?e, "failed to parent transcribe span to caller trace");
         }
 
-        let text = self
+        let t = self
             .transcriber
             .transcribe(audio, &req.short_name, req.is_conventional, req.priority)
             .instrument(span)
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        Ok(Response::new(TranscribeResponse { text }))
+        Ok(Response::new(TranscribeResponse {
+            text: t.text,
+            first_text_start_s: t.first_start_s,
+            last_text_end_s: t.last_end_s,
+        }))
     }
 }

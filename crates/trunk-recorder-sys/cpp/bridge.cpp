@@ -237,6 +237,8 @@ static TrTransmission convert_transmission(const Transmission &tx) {
     out.sample_count = tx.sample_count;
     out.spike_count = tx.spike_count;
     out.error_count = tx.error_count;
+    out.term_events = tx.term_events;
+    out.after_term_samples = tx.after_term_samples;
     out.freq = tx.freq;
     return out;
 }

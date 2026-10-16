@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use anyhow::Result;
+use opentelemetry::KeyValue;
 use proto::types::CallRowId;
 use serenity::model::id::{ChannelId, MessageId};
 use tokio::sync::{Mutex, mpsc};
@@ -9,10 +10,11 @@ use trunk_oxide_proto as proto;
 
 use trunk_database::Database;
 
+use crate::audio_shape::{self, AudioShape};
 use crate::call_state::{CallEffect, CallState, CallStateConfig, SILENCE_RMS_THRESHOLD};
 use crate::channel_writer::{ChannelWriterHandle, ChannelWriters, WriteIdentity};
 use crate::discord::{DiscordClient, TRANSCRIBING_EMOJI};
-use crate::grpc_transcriber::TranscriberConnection;
+use crate::grpc_transcriber::{TranscriberConnection, Transcription};
 use crate::metrics::Metrics;
 use crate::ogg_encoder::OggOpusEncoder;
 use crate::resampler::Resampler;
@@ -84,6 +86,8 @@ struct SegmentMeta {
     samples: usize,
     /// Loudest 0.5 s window RMS — what the silence gate decided on.
     peak_rms: f64,
+    /// Where speech starts/ends in this segment (None if no voiced frame).
+    shape: Option<AudioShape>,
 }
 
 /// Result handed back from the transcription worker, applied in FIFO order by
@@ -100,6 +104,7 @@ enum TranscribeResult {
 struct TranscribeIdentity {
     short_name: String,
     is_conventional: bool,
+    tdma: bool,
     talkgroup: i64,
     /// Talkgroup priority (lower = more important) for whisperer admission order.
     priority: i32,
@@ -169,6 +174,8 @@ pub struct CallHandler {
     // Identity for transcription attribution (whisperer metric labels + span).
     short_name: String,
     is_conventional: bool,
+    /// P25 Phase 2 (TDMA) call; a metric facet for the audio-shape series.
+    tdma: bool,
     talkgroup: i64,
     /// Talkgroup priority (lower = more important); drives whisperer admission.
     priority: i32,
@@ -247,6 +254,7 @@ impl CallHandler {
             call_row_id,
             short_name: call_info.short_name.clone(),
             is_conventional: call_info.is_conventional,
+            tdma: call_info.phase2_tdma,
             talkgroup: call_info.talkgroup,
             priority: call_info.priority,
             dbg_audio_samples: 0,
@@ -290,6 +298,7 @@ impl CallHandler {
                 TranscribeIdentity {
                     short_name: self.short_name.clone(),
                     is_conventional: self.is_conventional,
+                    tdma: self.tdma,
                     talkgroup: self.talkgroup,
                     priority: self.priority,
                 },
@@ -410,6 +419,18 @@ impl CallHandler {
                     // create bucket, so this is brief.
                     let msg_id = self.writer.send_embed(embed).await?;
                     self.embed_message_id = Some(msg_id);
+                    // Remember the call so a reaction on this embed can be
+                    // attributed (ground truth for clipping / lead-in loss).
+                    crate::reactions::FLAGS.register(
+                        msg_id,
+                        crate::reactions::FlagInfo {
+                            short_name: self.short_name.clone(),
+                            is_conventional: self.is_conventional,
+                            tdma: self.tdma,
+                            talkgroup: self.talkgroup,
+                            trace_id: current_trace_id(),
+                        },
+                    );
                 }
                 // Prompt and throttled edits are identical now: the writer
                 // coalesces per-channel (latest-wins per message) and paces
@@ -588,6 +609,19 @@ impl CallHandler {
 
             // Strip dispatch tone samples from the front of the audio buffer
             let strip = result.tone_end_sample.min(self.audio_buffer.len());
+
+            // A false-positive tone eats the start of the speech, so count what
+            // was found and how much audio was removed because of it.
+            let labels = self.labels();
+            for tone in &tones {
+                let kind = [KeyValue::new("kind", tone_kind(tone))];
+                self.metrics
+                    .tones_detected
+                    .add(1, &[&labels[..], &kind[..]].concat());
+            }
+            self.metrics
+                .tone_strip_seconds
+                .record(strip as f64 / 16000.0, &labels);
             if strip > 0 {
                 self.audio_buffer.drain(..strip);
             }
@@ -607,6 +641,11 @@ impl CallHandler {
         }
 
         Ok(())
+    }
+
+    /// Metric facets for the audio-shape series (low cardinality).
+    fn labels(&self) -> [KeyValue; 3] {
+        shape_labels(&self.short_name, self.is_conventional, self.tdma)
     }
 
     /// Enqueue a job for the transcription worker. The channel is unbounded so
@@ -636,11 +675,19 @@ impl CallHandler {
         let peak_rms = peak_window_rms(&audio);
         let kept = peak_rms >= SILENCE_RMS_THRESHOLD;
 
+        // Shape metrics cover every segment, including gated ones: a "silent"
+        // segment is exactly where a clipped lead-in or tail would hide.
+        let shape = audio_shape::analyze(&audio);
+        if let Some(s) = &shape {
+            record_audio_shape(&self.metrics, &self.labels(), s);
+        }
+
         let meta = SegmentMeta {
             index: self.segment_index,
             offset_s: self.segment_offset_samples as f64 / 16000.0,
             samples,
             peak_rms,
+            shape,
         };
         self.segment_index += 1;
         self.segment_offset_samples += samples as u64;
@@ -841,10 +888,12 @@ async fn transcription_worker(
                     samples = meta.samples,
                     peak_rms = meta.peak_rms,
                 );
-                let text = transcribe_one(&whisperer, &metrics, &identity, audio)
+                let samples = audio.len();
+                let t = transcribe_one(&whisperer, &metrics, &identity, audio)
                     .instrument(span)
                     .await;
-                TranscribeResult::Text(text)
+                record_transcript_coverage(&metrics, &identity, &meta, samples, &t);
+                TranscribeResult::Text(t.text)
             }
             TranscribeJob::Boundary => TranscribeResult::Boundary,
         };
@@ -862,9 +911,9 @@ async fn transcribe_one(
     metrics: &Metrics,
     identity: &TranscribeIdentity,
     audio: Vec<f32>,
-) -> String {
+) -> Transcription {
     if audio.is_empty() {
-        return String::new();
+        return Transcription::empty();
     }
     let start = std::time::Instant::now();
     let outcome = whisperer
@@ -880,15 +929,102 @@ async fn transcribe_one(
         .transcription_duration
         .record(start.elapsed().as_secs_f64(), &[]);
     match outcome {
-        Ok(Some(text)) => text,
+        Ok(Some(t)) => t,
         Ok(None) => {
             metrics.transcriptions_timed_out.add(1, &[]);
-            String::new()
+            Transcription::empty()
         }
         Err(e) => {
             tracing::error!(error = %e, "transcription request failed");
-            String::new()
+            Transcription::empty()
         }
+    }
+}
+
+/// Trace id of the active span (shared with trunk-oxide's call span through
+/// the propagated `traceparent`), for linking a flagged call to its trace.
+fn current_trace_id() -> String {
+    use opentelemetry::trace::TraceContextExt;
+    use tracing_opentelemetry::OpenTelemetrySpanExt;
+    let cx = tracing::Span::current().context();
+    let span = cx.span();
+    let sc = span.span_context();
+    if sc.is_valid() {
+        sc.trace_id().to_string()
+    } else {
+        String::new()
+    }
+}
+
+fn shape_labels(short_name: &str, is_conventional: bool, tdma: bool) -> [KeyValue; 3] {
+    [
+        KeyValue::new("short_name", short_name.to_string()),
+        KeyValue::new("is_conventional", is_conventional),
+        KeyValue::new("tdma", tdma),
+    ]
+}
+
+fn record_audio_shape(metrics: &Metrics, labels: &[KeyValue; 3], s: &AudioShape) {
+    metrics.audio_leading_silence.record(s.onset_s, labels);
+    metrics
+        .audio_trailing_silence
+        .record(s.trailing_silence_s, labels);
+    metrics.audio_end_level_db.record(s.end_level_db, labels);
+    if s.abrupt_end() {
+        metrics.audio_abrupt_ends.add(1, labels);
+    }
+    metrics.audio_gaps.record(f64::from(s.gaps), labels);
+    if s.gaps > 0 {
+        metrics
+            .audio_longest_gap_ms
+            .record(s.longest_gap_s * 1000.0, labels);
+    }
+}
+
+/// Stable, low-cardinality name for a detected tone.
+const fn tone_kind(tone: &DetectedTone) -> &'static str {
+    match tone {
+        DetectedTone::TwoTone { .. } => "two_tone",
+        DetectedTone::LongTone { .. } => "long_tone",
+        DetectedTone::HiLowWarble { .. } => "hi_low_warble",
+        DetectedTone::Dtmf { .. } => "dtmf",
+        DetectedTone::Ctcss { .. } => "ctcss",
+    }
+}
+
+/// Compare where the model put its text against where the audio's speech is.
+/// A positive leading gap means text starts later than the speech does — the
+/// "first second or two is missing" symptom — and the audio's own onset tells
+/// us whether that is the model or the capture.
+fn record_transcript_coverage(
+    metrics: &Metrics,
+    identity: &TranscribeIdentity,
+    meta: &SegmentMeta,
+    samples: usize,
+    t: &Transcription,
+) {
+    let labels = shape_labels(
+        &identity.short_name,
+        identity.is_conventional,
+        identity.tdma,
+    );
+    if t.text.trim().is_empty() {
+        metrics.transcript_empty.add(1, &labels);
+        return;
+    }
+    let (Some(first), Some(last)) = (t.first_start_s, t.last_end_s) else {
+        return; // backend gave no timing
+    };
+    let (first, last) = (f64::from(first), f64::from(last));
+    metrics.transcript_first_text_offset.record(first, &labels);
+    if let Some(shape) = &meta.shape {
+        metrics
+            .transcript_leading_gap
+            .record(first - shape.onset_s, &labels);
+        let audio_end = samples as f64 / 16000.0 - shape.trailing_silence_s;
+        metrics
+            .transcript_trailing_gap
+            .record(audio_end - last, &labels);
     }
 }
 

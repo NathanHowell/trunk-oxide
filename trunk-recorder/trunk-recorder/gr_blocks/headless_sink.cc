@@ -37,6 +37,8 @@ headless_sink::headless_sink(int n_channels, unsigned int sample_rate, int /*bit
       d_sample_count(0),
       d_error_count(0),
       d_spike_count(0),
+      d_term_events(0),
+      d_after_term_samples(0),
       d_talkgroup(0),
       d_freq(0.0) {}
 
@@ -47,6 +49,8 @@ bool headless_sink::start_recording(const RecorderConfig &config) {
   d_sample_count = 0;
   d_error_count = 0;
   d_spike_count = 0;
+  d_term_events = 0;
+  d_after_term_samples = 0;
   d_last_write_time = std::chrono::steady_clock::now();
   d_talkgroup = config.talkgroup;
   d_freq = config.freq;
@@ -99,6 +103,8 @@ std::vector<Transmission> headless_sink::get_transmission_list() {
   t.color_code = 0;
   t.spike_count = d_spike_count.load();
   t.error_count = d_error_count.load();
+  t.term_events = d_term_events.load();
+  t.after_term_samples = d_after_term_samples.load();
   t.filename[0] = '\0';
 
   return {t};
@@ -129,6 +135,14 @@ int headless_sink::work(int noutput_items,
     get_tags_in_window(tags, 0, 0, noutput_items, pmt::intern("spike_count"));
     for (const auto &tag : tags) {
       d_spike_count.fetch_add(pmt::to_long(tag.value));
+    }
+    tags.clear();
+    get_tags_in_window(tags, 0, 0, noutput_items, pmt::intern("terminate"));
+    d_term_events.fetch_add(static_cast<long>(tags.size()));
+    tags.clear();
+    get_tags_in_window(tags, 0, 0, noutput_items, pmt::intern("term_after"));
+    for (const auto &tag : tags) {
+      d_after_term_samples.fetch_add(pmt::to_long(tag.value));
     }
   }
 

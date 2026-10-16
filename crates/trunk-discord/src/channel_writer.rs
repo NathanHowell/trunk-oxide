@@ -251,9 +251,10 @@ async fn run_create_lane(
                 let res = discord
                     .send_embed(channel, embed_data_to_serenity(&embed))
                     .await;
-                metrics
-                    .discord_api_duration
-                    .record(start.elapsed().as_secs_f64(), &identity.labels("send_embed"));
+                metrics.discord_api_duration.record(
+                    start.elapsed().as_secs_f64(),
+                    &identity.labels("send_embed"),
+                );
                 // Receiver gone (handler exited) just drops the result.
                 let _ = reply.send(res);
             }
@@ -264,7 +265,10 @@ async fn run_create_lane(
                 identity,
             } => {
                 let start = Instant::now();
-                if let Err(e) = discord.attach_file(channel, message_id, ogg, &filename).await {
+                if let Err(e) = discord
+                    .attach_file(channel, message_id, ogg, &filename)
+                    .await
+                {
                     tracing::warn!(error = %e, "failed to attach audio");
                 }
                 metrics.discord_api_duration.record(

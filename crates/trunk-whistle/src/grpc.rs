@@ -58,6 +58,7 @@ impl TranscriberService for WhistleService {
         if audio.is_empty() {
             return Ok(Response::new(TranscribeResponse {
                 text: String::new(),
+                ..Default::default()
             }));
         }
 
@@ -83,6 +84,9 @@ impl TranscriberService for WhistleService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        Ok(Response::new(TranscribeResponse { text }))
+        Ok(Response::new(TranscribeResponse {
+            text,
+            ..Default::default()
+        }))
     }
 }

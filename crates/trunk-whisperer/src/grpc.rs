@@ -62,6 +62,7 @@ impl TranscriberService for WhispererService {
         if audio.is_empty() {
             return Ok(Response::new(TranscribeResponse {
                 text: String::new(),
+                ..Default::default()
             }));
         }
 
@@ -87,6 +88,9 @@ impl TranscriberService for WhispererService {
             .await
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        Ok(Response::new(TranscribeResponse { text }))
+        Ok(Response::new(TranscribeResponse {
+            text,
+            ..Default::default()
+        }))
     }
 }

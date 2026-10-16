@@ -1,5 +1,6 @@
 mod aggregator;
 mod aggregator_state;
+mod audio_shape;
 mod call_handler;
 mod call_state;
 mod channel_manager;
@@ -11,6 +12,7 @@ mod grpc_oxide;
 mod grpc_transcriber;
 mod metrics;
 mod ogg_encoder;
+mod reactions;
 mod resampler;
 mod stats_chart;
 mod tone_detect;
@@ -306,6 +308,12 @@ async fn main() -> Result<()> {
 
     let meter = opentelemetry::global::meter("trunk-discord");
     let metrics = Arc::new(metrics::Metrics::new(&meter));
+
+    // Reaction listener: ground truth for clipping / missing-lead-in reports.
+    tokio::spawn(reactions::run(
+        discord_config.bot_token.clone(),
+        Arc::clone(&metrics),
+    ));
 
     let pump = dispatcher::DispatchPump::new(
         whisperer,

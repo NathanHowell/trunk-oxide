@@ -309,7 +309,7 @@ fn main() -> Result<()> {
 
         let _gr_work_time = meter
             .f64_observable_counter("gr.block.work_time_total")
-            .with_description("Cumulative time spent in work()")
+            .with_description("Cumulative time spent in work(), in GNU Radio perf-counter clock ticks (needs GR_CONF_PERFCOUNTERS_ON=True)")
             .with_callback({
                 let snap = Arc::clone(&gr_metrics);
                 move |observer| observe_block_f64(&snap, observer, |b| f64::from(b.work_time_total))

@@ -95,16 +95,16 @@ impl Database {
 
     pub fn get_thread(
         &self,
-        sys_num: SysNum,
+        short_name: &str,
         talkgroup: Talkgroup,
         date: &str,
     ) -> Result<Option<u64>> {
         let mut stmt = self.conn.prepare_cached(
-            "SELECT channel_id FROM thread_cache WHERE sys_num = ?1 AND talkgroup = ?2 AND date = ?3",
+            "SELECT channel_id FROM thread_cache WHERE short_name = ?1 AND talkgroup = ?2 AND date = ?3",
         )?;
 
         let result = stmt
-            .query_row(rusqlite::params![sys_num.0, talkgroup.0, date], |row| {
+            .query_row(rusqlite::params![short_name, talkgroup.0, date], |row| {
                 row.get(0)
             })
             .optional()
@@ -115,16 +115,16 @@ impl Database {
 
     pub fn set_thread(
         &self,
-        sys_num: SysNum,
+        short_name: &str,
         talkgroup: Talkgroup,
         date: &str,
         channel_id: u64,
     ) -> Result<()> {
         self.conn
             .execute(
-                "INSERT OR REPLACE INTO thread_cache (sys_num, talkgroup, date, channel_id)
+                "INSERT OR REPLACE INTO thread_cache (short_name, talkgroup, date, channel_id)
              VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![sys_num.0, talkgroup.0, date, channel_id],
+                rusqlite::params![short_name, talkgroup.0, date, channel_id],
             )
             .context("setting thread cache")?;
 
@@ -133,21 +133,21 @@ impl Database {
 
     pub fn copy_threads_from(&self, other: &Self, date: &str) -> Result<usize> {
         let mut read_stmt = other.conn.prepare(
-            "SELECT sys_num, talkgroup, date, channel_id FROM thread_cache WHERE date = ?1",
+            "SELECT short_name, talkgroup, date, channel_id FROM thread_cache WHERE date = ?1",
         )?;
 
-        let rows: Vec<(i32, i64, String, u64)> = read_stmt
+        let rows: Vec<(String, i64, String, u64)> = read_stmt
             .query_map([date], |row| {
                 Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
             })?
             .collect::<std::result::Result<Vec<_>, _>>()?;
 
         let count = rows.len();
-        for (sys_num, talkgroup, d, channel_id) in rows {
+        for (short_name, talkgroup, d, channel_id) in rows {
             self.conn.execute(
-                "INSERT OR IGNORE INTO thread_cache (sys_num, talkgroup, date, channel_id)
+                "INSERT OR IGNORE INTO thread_cache (short_name, talkgroup, date, channel_id)
                  VALUES (?1, ?2, ?3, ?4)",
-                rusqlite::params![sys_num, talkgroup, d, channel_id],
+                rusqlite::params![short_name, talkgroup, d, channel_id],
             )?;
         }
 
@@ -277,7 +277,7 @@ mod tests {
     fn thread_cache_round_trip() {
         let db = test_db();
 
-        let sys = SysNum(1);
+        let sys = "smco";
         let tg = Talkgroup(1001);
 
         assert!(db.get_thread(sys, tg, "2026-02-26").unwrap().is_none());
@@ -287,6 +287,9 @@ mod tests {
 
         // Different date returns None
         assert!(db.get_thread(sys, tg, "2026-02-27").unwrap().is_none());
+
+        // The same talkgroup on another system is a separate thread
+        assert!(db.get_thread("svrcs", tg, "2026-02-26").unwrap().is_none());
     }
 
     #[test]
@@ -294,29 +297,29 @@ mod tests {
         let old = test_db();
         let new = test_db();
 
-        old.set_thread(SysNum(1), Talkgroup(100), "2026-02-26", 111)
+        old.set_thread("smco", Talkgroup(100), "2026-02-26", 111)
             .unwrap();
-        old.set_thread(SysNum(1), Talkgroup(200), "2026-02-26", 222)
+        old.set_thread("smco", Talkgroup(200), "2026-02-26", 222)
             .unwrap();
-        old.set_thread(SysNum(1), Talkgroup(300), "2026-02-25", 333)
+        old.set_thread("smco", Talkgroup(300), "2026-02-25", 333)
             .unwrap();
 
         let copied = new.copy_threads_from(&old, "2026-02-26").unwrap();
         assert_eq!(copied, 2);
 
         assert_eq!(
-            new.get_thread(SysNum(1), Talkgroup(100), "2026-02-26")
+            new.get_thread("smco", Talkgroup(100), "2026-02-26")
                 .unwrap(),
             Some(111)
         );
         assert_eq!(
-            new.get_thread(SysNum(1), Talkgroup(200), "2026-02-26")
+            new.get_thread("smco", Talkgroup(200), "2026-02-26")
                 .unwrap(),
             Some(222)
         );
         // Old date not copied
         assert!(
-            new.get_thread(SysNum(1), Talkgroup(300), "2026-02-25")
+            new.get_thread("smco", Talkgroup(300), "2026-02-25")
                 .unwrap()
                 .is_none()
         );

@@ -501,7 +501,6 @@ impl DispatchContext {
 
     async fn resolve_channel_inner(&self, call: &proto::CallInfo) -> Option<ChannelId> {
         let talkgroup = Talkgroup(call.talkgroup);
-        let sys_num = SysNum(call.sys_num);
 
         // Check mapped channels first
         let mapped_channel = {
@@ -526,7 +525,7 @@ impl DispatchContext {
         // Check DB for thread from earlier this session/hour
         let db_thread = {
             let db = self.db.lock().await;
-            db.get_thread(sys_num, talkgroup, &date_str)
+            db.get_thread(&call.short_name, talkgroup, &date_str)
                 .unwrap_or(None)
                 .and_then(|id| std::num::NonZeroU64::new(id).map(ChannelId::from))
         };
@@ -551,7 +550,8 @@ impl DispatchContext {
             Ok(id) => {
                 {
                     let db = self.db.lock().await;
-                    if let Err(e) = db.set_thread(sys_num, talkgroup, &date_str, id.get()) {
+                    if let Err(e) = db.set_thread(&call.short_name, talkgroup, &date_str, id.get())
+                    {
                         tracing::warn!(error = %e, "failed to persist thread to db");
                     }
                 }

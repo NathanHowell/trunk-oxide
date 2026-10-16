@@ -17,12 +17,14 @@ CREATE TABLE IF NOT EXISTS calls (
     embed_message_id INTEGER
 );
 
+-- Keyed by the system's short_name, not sys_num: sys_num is assigned at startup
+-- and is not stable across restarts.
 CREATE TABLE IF NOT EXISTS thread_cache (
-    sys_num INTEGER NOT NULL,
+    short_name TEXT NOT NULL,
     talkgroup INTEGER NOT NULL,
     date TEXT NOT NULL,
     channel_id INTEGER NOT NULL,
-    PRIMARY KEY (sys_num, talkgroup, date)
+    PRIMARY KEY (short_name, talkgroup, date)
 );
 
 CREATE TABLE IF NOT EXISTS activity (

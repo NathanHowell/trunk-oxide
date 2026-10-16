@@ -180,7 +180,7 @@ pub struct AggregatorState {
     last_setup_config: Option<String>,
     last_setup_systems: Option<String>,
     last_setup_sources: Option<String>,
-    last_setup_system: HashMap<i32, String>,
+    last_setup_system: HashMap<String, String>,
 
     // Recorder table: single embed edited in place
     recorder_state: HashMap<i32, proto::RecorderInfo>,
@@ -252,7 +252,11 @@ impl AggregatorState {
                 }
             }
             AggMessage::SetupSystem(e) => {
-                let key = e.system.as_ref().map_or(0, |s| s.sys_num);
+                let key = e
+                    .system
+                    .as_ref()
+                    .map(|s| s.short_name.clone())
+                    .unwrap_or_default();
                 let text = e.format_embed();
                 if self.last_setup_system.get(&key) != Some(&text) {
                     self.last_setup_system.insert(key, text.clone());
@@ -504,7 +508,7 @@ mod tests {
         };
         let event2 = proto::SetupSystemEvent {
             system: Some(proto::SystemInfo {
-                short_name: "smco".into(),
+                short_name: "svrcs".into(),
                 sys_num: 2,
                 system_type: 0,
                 ..Default::default()

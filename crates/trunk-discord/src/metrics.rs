@@ -6,6 +6,11 @@ use opentelemetry::metrics::{Counter, Gauge, Histogram, Meter, ObservableGauge};
 /// Bucket edges for per-segment durations in seconds.
 const SECONDS_BOUNDARIES: [f64; 11] = [0.0, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 1.5, 2.0, 3.0, 5.0];
 
+/// Bucket edges for request latencies in seconds (sub-second to minutes).
+const LATENCY_BOUNDARIES: [f64; 12] = [
+    0.05, 0.1, 0.25, 0.5, 1.0, 2.0, 5.0, 10.0, 30.0, 60.0, 120.0, 300.0,
+];
+
 pub struct Metrics {
     pub audio_packets_dropped: Counter<u64>,
     pub events_dropped: Counter<u64>,
@@ -111,10 +116,12 @@ impl Metrics {
             discord_api_duration: meter
                 .f64_histogram("trunk.discord.discord_api_duration_seconds")
                 .with_description("Duration of Discord API calls")
+                .with_boundaries(LATENCY_BOUNDARIES.to_vec())
                 .build(),
             transcription_duration: meter
                 .f64_histogram("trunk.discord.transcription_duration_seconds")
                 .with_description("Duration of whisper transcription requests")
+                .with_boundaries(LATENCY_BOUNDARIES.to_vec())
                 .build(),
             transcriptions_timed_out: meter
                 .u64_counter("trunk.discord.transcriptions_timed_out")

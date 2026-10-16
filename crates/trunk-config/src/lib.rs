@@ -115,7 +115,20 @@ channel_id = 123456789
         let discord = config.discord.unwrap();
         assert_eq!(discord.channel_id.get(), 123_456_789);
         assert!(discord.guild_id.is_none());
+        assert!(discord.monitoring_channel_id.is_none());
         assert!(discord.groups.is_empty());
+    }
+
+    #[test]
+    fn parse_discord_monitoring_channel() {
+        let toml = r#"
+[discord]
+channel_id = 123456789
+monitoring_channel_id = 555
+"#;
+        let config: Config = toml::from_str(toml).unwrap();
+        let discord = config.discord.unwrap();
+        assert_eq!(discord.monitoring_channel_id.map(|c| c.get()), Some(555));
     }
 
     #[test]

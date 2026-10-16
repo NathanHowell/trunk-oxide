@@ -14,7 +14,7 @@ use trunk_database::Database;
 
 /// Filename the stats embed references via `attachment://`.
 const STATS_FILENAME: &str = "stats.png";
-/// How often the `VictoriaMetrics` stats chart is refreshed within the hour.
+/// How often the `VictoriaMetrics` stats chart is refreshed.
 // `from_mins` is not stable on our MSRV (1.94); keep `from_secs`.
 #[allow(clippy::duration_suboptimal_units)]
 const STATS_REFRESH: Duration = Duration::from_secs(300);
@@ -42,6 +42,7 @@ impl Aggregator {
         channel_id: ChannelId,
         db: Arc<Mutex<Database>>,
         stats: Option<StatsClient>,
+        monitoring_channel_id: Option<ChannelId>,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
 
@@ -52,6 +53,7 @@ impl Aggregator {
             rx,
             db,
             stats,
+            monitoring_channel_id,
             current_thread_id: None,
             recorder_embed_id: None,
             activity_embed_id: None,
@@ -76,11 +78,13 @@ struct AggregatorExecutor {
     db: Arc<Mutex<Database>>,
     /// `None` when the `VictoriaMetrics` stats chart feature is disabled.
     stats: Option<StatsClient>,
+    /// Channel the stats dashboard is posted to; `None` disables it.
+    monitoring_channel_id: Option<ChannelId>,
     current_thread_id: Option<ChannelId>,
     recorder_embed_id: Option<MessageId>,
     activity_embed_id: Option<MessageId>,
-    /// Message holding the stats chart in the current hourly thread; re-posted
-    /// fresh each hour (reset on thread creation).
+    /// Dashboard message in the monitoring channel: posted once per process
+    /// start, then edited in place.
     stats_message_id: Option<MessageId>,
 }
 
@@ -108,14 +112,14 @@ impl AggregatorExecutor {
     }
 
     /// Render the `VictoriaMetrics` stats chart and post (or update) it in the
-    /// current hourly thread. No-op when the feature is disabled or no thread
-    /// exists yet; logs and moves on if VM is unreachable or rendering fails,
-    /// so a flaky chart never wedges the aggregator loop.
+    /// monitoring channel. No-op when the feature is disabled; logs and moves
+    /// on if VM is unreachable or rendering fails, so a flaky chart never
+    /// wedges the aggregator loop.
     async fn update_stats(&mut self) {
         let Some(stats) = self.stats.as_ref() else {
             return;
         };
-        let Some(thread_id) = self.current_thread_id else {
+        let Some(channel_id) = self.monitoring_channel_id else {
             return;
         };
 
@@ -132,7 +136,7 @@ impl AggregatorExecutor {
             Some(msg_id) => {
                 if let Err(e) = self
                     .discord
-                    .edit_embed_with_image(thread_id, msg_id, embed, png, STATS_FILENAME)
+                    .edit_embed_with_image(channel_id, msg_id, embed, png, STATS_FILENAME)
                     .await
                 {
                     tracing::warn!(error = %e, "failed to edit stats embed");
@@ -140,7 +144,7 @@ impl AggregatorExecutor {
             }
             None => match self
                 .discord
-                .send_embed_with_image(thread_id, embed, png, STATS_FILENAME)
+                .send_embed_with_image(channel_id, embed, png, STATS_FILENAME)
                 .await
             {
                 Ok(msg_id) => self.stats_message_id = Some(msg_id),
@@ -163,7 +167,6 @@ impl AggregatorExecutor {
                             self.current_thread_id = Some(thread_id);
                             self.recorder_embed_id = None;
                             self.activity_embed_id = None;
-                            self.stats_message_id = None;
                             self.state.on_thread_created(hour_key);
                             tracing::info!(thread = %thread_id, "created hourly summary thread");
                         }
@@ -247,7 +250,7 @@ fn build_stats_embed() -> serenity::all::CreateEmbed {
 
     let footer = format!("updated {}", Utc::now().format("%Y-%m-%d %H:%M:%S UTC"));
     CreateEmbed::new()
-        .title("📊 Hourly Stats")
+        .title("📊 Monitoring — last 6 h (UTC)")
         .colour(0x0034_98db)
         .image(format!("attachment://{STATS_FILENAME}"))
         .footer(CreateEmbedFooter::new(footer))

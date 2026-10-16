@@ -175,8 +175,8 @@ impl DiscordClient {
 
     /// Post an embed carrying an inline image attachment (the stats chart).
     /// The embed should reference the image via `attachment://{filename}`.
-    /// Lives in the summary thread — a separate per-channel rate bucket from
-    /// the per-call embeds — so it carries the generous attach timeout.
+    /// Posted to the monitoring channel — a separate per-channel rate bucket
+    /// from the per-call embeds — so it carries the generous attach timeout.
     pub async fn send_embed_with_image(
         &self,
         channel_id: ChannelId,

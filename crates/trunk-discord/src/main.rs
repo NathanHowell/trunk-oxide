@@ -296,7 +296,7 @@ async fn main() -> Result<()> {
     stats_chart::register_font();
     let stats_client = stats_chart::StatsClient::from_env();
     if stats_client.is_none() {
-        tracing::info!("VM_QUERY_URL set empty; hourly stats chart disabled");
+        tracing::info!("VM_QUERY_URL set empty; stats chart disabled");
     }
 
     let aggregator = Arc::new(aggregator::Aggregator::new(
@@ -304,6 +304,9 @@ async fn main() -> Result<()> {
         fallback_channel_id,
         Arc::clone(&db),
         stats_client,
+        discord_config
+            .monitoring_channel_id
+            .map(|id| ChannelId::from(id.get())),
     ));
 
     let meter = opentelemetry::global::meter("trunk-discord");

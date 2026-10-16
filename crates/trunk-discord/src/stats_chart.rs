@@ -1,5 +1,5 @@
 //! Renders a PNG chart of key metrics pulled from `VictoriaMetrics` for posting
-//! into the hourly summary thread.
+//! into the #monitoring channel.
 //!
 //! `VictoriaMetrics` has no server-side image rendering (its `/render` is a
 //! Graphite *data* subset), so we query its JSON API (`/api/v1/query_range`)
@@ -21,12 +21,15 @@ use serde::Deserialize;
 /// resolves on the fontless distroless runtime.
 const FONT_BYTES: &[u8] = include_bytes!("../assets/DejaVuSans.ttf");
 
-const WIDTH: u32 = 1000;
-const HEIGHT: u32 = 1000;
-/// Trailing window charted, in seconds (one hour).
-const WINDOW_SECS: i64 = 3600;
+/// Grid columns; rows follow from the panel count.
+const COLUMNS: usize = 2;
+const WIDTH: u32 = 1600;
+/// Pixel height of one grid row.
+const ROW_HEIGHT: u32 = 340;
+/// Trailing window charted, in seconds (six hours).
+const WINDOW_SECS: i64 = 6 * 3600;
 /// Resolution of the `query_range` step, in seconds.
-const STEP_SECS: i64 = 60;
+const STEP_SECS: i64 = 120;
 /// Per-request timeout for VM queries.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
 
@@ -60,89 +63,173 @@ struct QuerySpec {
 struct PanelSpec {
     title: &'static str,
     y_desc: &'static str,
+    /// Anchor the y-axis at zero (rates, counts, levels); off for dB panels.
+    zero_floor: bool,
     queries: &'static [QuerySpec],
 }
 
-/// The four panels, top to bottom. Metric names keep their dots (VM does not
-/// rewrite them on OTLP ingest) and counters have no `_total` suffix — both
-/// verified against the live VM instance.
+/// Dashboard panels, row-major in a [`COLUMNS`]-wide grid. Metric names keep
+/// their dots (VM does not rewrite them on OTLP ingest) and counters have no
+/// `_total` suffix — both verified against the live VM instance. Latency
+/// panels use sum/count means: several of the underlying histograms have
+/// coarse default buckets, which make quantiles collapse into one bucket.
 const PANELS: &[PanelSpec] = &[
     PanelSpec {
-        title: "Call Activity",
-        y_desc: "calls",
+        title: "Calls started / min",
+        y_desc: "calls/min",
+        zero_floor: true,
+        queries: &[QuerySpec {
+            query: "sum by (short_name)(rate(trunk.oxide.calls_started{short_name!=\"\"}[5m]))*60",
+            label: Label::Tagged {
+                prefix: "",
+                tag: "short_name",
+            },
+        }],
+    },
+    PanelSpec {
+        title: "Recorder load",
+        y_desc: "calls / denials per min",
+        zero_floor: true,
         queries: &[
             QuerySpec {
-                query: "trunk.discord.active_calls",
-                label: Label::Fixed("active"),
+                query: "trunk.oxide.active_calls",
+                label: Label::Fixed("active calls"),
             },
             QuerySpec {
-                query: "trunk.discord.coalescing_calls",
-                label: Label::Fixed("coalescing"),
+                query: "sum(rate(trunk.oxide.recorder_denied{short_name!=\"\"}[5m]))*60",
+                label: Label::Fixed("denied/min (no recorder)"),
             },
         ],
     },
     PanelSpec {
-        title: "Pipeline Health",
-        y_desc: "count / per-sec",
+        title: "Audio level (median segment peak RMS)",
+        y_desc: "RMS (1.0 = full scale)",
+        zero_floor: true,
+        queries: &[QuerySpec {
+            query: "histogram_quantile(0.5, sum by (le,short_name)(rate(trunk.discord.audio_peak_rms_bucket[30m])))",
+            label: Label::Tagged {
+                prefix: "",
+                tag: "short_name",
+            },
+        }],
+    },
+    PanelSpec {
+        title: "Quiet segments (peak RMS < 0.005)",
+        y_desc: "% of segments",
+        zero_floor: true,
+        queries: &[QuerySpec {
+            query: "sum by (short_name)(rate(trunk.discord.audio_peak_rms_bucket{le=\"0.005\"}[30m]))/sum by (short_name)(rate(trunk.discord.audio_peak_rms_count[30m]))*100",
+            label: Label::Tagged {
+                prefix: "",
+                tag: "short_name",
+            },
+        }],
+    },
+    PanelSpec {
+        title: "RF power: signal vs noise floor (median)",
+        y_desc: "dB",
+        zero_floor: false,
         queries: &[
             QuerySpec {
-                query: "trunk.discord.live_handlers",
-                label: Label::Fixed("live handlers"),
+                query: "histogram_quantile(0.5, sum by (le,short_name)(rate(trunk.oxide.signal_power_db_bucket[30m])))",
+                label: Label::Tagged {
+                    prefix: "sig",
+                    tag: "short_name",
+                },
+            },
+            QuerySpec {
+                query: "histogram_quantile(0.5, sum by (le,short_name)(rate(trunk.oxide.noise_floor_db_bucket[30m])))",
+                label: Label::Tagged {
+                    prefix: "noise",
+                    tag: "short_name",
+                },
+            },
+        ],
+    },
+    PanelSpec {
+        title: "Voice frame errors",
+        y_desc: "errors/s",
+        zero_floor: true,
+        queries: &[QuerySpec {
+            query: "sum by (short_name)(rate(trunk.oxide.voice_frame_errors[10m]))",
+            label: Label::Tagged {
+                prefix: "",
+                tag: "short_name",
+            },
+        }],
+    },
+    PanelSpec {
+        title: "Channelizer DSP time per block (mean)",
+        y_desc: "µs",
+        zero_floor: true,
+        queries: &[QuerySpec {
+            query: "sum by (source)(rate(trunk.oxide.channelizer.block_time_us_sum{stat=\"mean\"}[5m]))/sum by (source)(rate(trunk.oxide.channelizer.block_time_us_count{stat=\"mean\"}[5m]))",
+            label: Label::Tagged {
+                prefix: "source",
+                tag: "source",
+            },
+        }],
+    },
+    PanelSpec {
+        title: "Latency (mean)",
+        y_desc: "seconds",
+        zero_floor: true,
+        queries: &[
+            QuerySpec {
+                query: "sum(rate(trunk.parakeet.transcription_duration_seconds_sum[10m]))/sum(rate(trunk.parakeet.transcription_duration_seconds_count[10m]))",
+                label: Label::Fixed("transcribe"),
+            },
+            QuerySpec {
+                query: "sum(rate(trunk.parakeet.queue_wait_seconds_sum[10m]))/sum(rate(trunk.parakeet.queue_wait_seconds_count[10m]))",
+                label: Label::Fixed("transcribe queue wait"),
+            },
+            QuerySpec {
+                query: "sum by (operation)(rate(trunk.discord.discord_api_duration_seconds_sum[10m]))/sum by (operation)(rate(trunk.discord.discord_api_duration_seconds_count[10m]))",
+                label: Label::Tagged {
+                    prefix: "discord",
+                    tag: "operation",
+                },
+            },
+        ],
+    },
+    PanelSpec {
+        title: "Backlog and drops",
+        y_desc: "count",
+        zero_floor: true,
+        queries: &[
+            QuerySpec {
+                query: "trunk.parakeet.queue.depth",
+                label: Label::Fixed("transcribe queue"),
             },
             QuerySpec {
                 query: "trunk.discord.unfinalized_handlers",
-                label: Label::Fixed("unfinalized"),
+                label: Label::Fixed("unfinalized handlers"),
             },
             QuerySpec {
-                query: "rate(trunk.discord.attach_dropped[5m])",
-                label: Label::Fixed("attach drop/s"),
+                query: "sum(increase(trunk.discord.attach_dropped[10m]))",
+                label: Label::Fixed("audio attach drops /10m"),
             },
             QuerySpec {
-                query: "rate(trunk.discord.events_dropped[5m])",
-                label: Label::Fixed("event drop/s"),
+                query: "sum(increase(trunk.discord.events_dropped[10m]))",
+                label: Label::Fixed("event drops /10m"),
+            },
+            QuerySpec {
+                query: "sum(increase(trunk.oxide.channelizer.overruns[10m]))",
+                label: Label::Fixed("channelizer overruns /10m"),
             },
         ],
     },
     PanelSpec {
-        title: "Transcription Latency",
-        y_desc: "seconds",
-        queries: &[
-            QuerySpec {
-                query: "histogram_quantile(0.5, sum(rate(trunk.discord.transcription_duration_seconds_bucket[5m])) by (le))",
-                label: Label::Fixed("p50"),
+        title: "Flagged calls",
+        y_desc: "per 30 min",
+        zero_floor: true,
+        queries: &[QuerySpec {
+            query: "sum by (reason)(increase(trunk.discord.calls_flagged[30m]))",
+            label: Label::Tagged {
+                prefix: "",
+                tag: "reason",
             },
-            QuerySpec {
-                query: "histogram_quantile(0.9, sum(rate(trunk.discord.transcription_duration_seconds_bucket[5m])) by (le))",
-                label: Label::Fixed("p90"),
-            },
-        ],
-    },
-    PanelSpec {
-        title: "SDR Signal / Noise / Squelch",
-        y_desc: "dB",
-        queries: &[
-            QuerySpec {
-                query: "trunk.oxide.conventional.signal_power_db",
-                label: Label::Tagged {
-                    prefix: "sig tg",
-                    tag: "talkgroup",
-                },
-            },
-            QuerySpec {
-                query: "trunk.oxide.conventional.noise_floor_db",
-                label: Label::Tagged {
-                    prefix: "noise tg",
-                    tag: "talkgroup",
-                },
-            },
-            QuerySpec {
-                query: "trunk.oxide.conventional.adaptive_squelch_db",
-                label: Label::Tagged {
-                    prefix: "sqlch tg",
-                    tag: "talkgroup",
-                },
-            },
-        ],
+        }],
     },
 ];
 
@@ -156,6 +243,7 @@ struct Series {
 struct Panel {
     title: &'static str,
     y_desc: &'static str,
+    zero_floor: bool,
     series: Vec<Series>,
 }
 
@@ -258,10 +346,14 @@ impl StatsClient {
                     for r in results {
                         let label = match &q.label {
                             Label::Fixed(s) => (*s).to_string(),
-                            Label::Tagged { prefix, tag } => format!(
-                                "{prefix} {}",
-                                r.metric.get(*tag).map_or("?", String::as_str)
-                            ),
+                            Label::Tagged { prefix, tag } => {
+                                let value = r.metric.get(*tag).map_or("?", String::as_str);
+                                if prefix.is_empty() {
+                                    value.to_string()
+                                } else {
+                                    format!("{prefix} {value}")
+                                }
+                            }
                         };
                         let points = parse_points(&r.values);
                         if !points.is_empty() {
@@ -277,6 +369,7 @@ impl StatsClient {
         Panel {
             title: spec.title,
             y_desc: spec.y_desc,
+            zero_floor: spec.zero_floor,
             series,
         }
     }
@@ -296,12 +389,14 @@ impl StatsClient {
 // ── Rendering ─────────────────────────────────────────────────────────────────
 
 fn render(panels: &[Panel], start: i64, end: i64) -> Result<Vec<u8>> {
-    let mut buf = vec![0u8; (WIDTH * HEIGHT * 3) as usize];
+    let rows = panels.len().div_ceil(COLUMNS).max(1);
+    let height = ROW_HEIGHT * u32::try_from(rows).unwrap_or(1);
+    let mut buf = vec![0u8; (WIDTH * height * 3) as usize];
     {
-        let root = BitMapBackend::with_buffer(&mut buf, (WIDTH, HEIGHT)).into_drawing_area();
+        let root = BitMapBackend::with_buffer(&mut buf, (WIDTH, height)).into_drawing_area();
         root.fill(&WHITE)
             .map_err(|e| anyhow::anyhow!("chart fill: {e}"))?;
-        let areas = root.split_evenly((panels.len().max(1), 1));
+        let areas = root.split_evenly((rows, COLUMNS));
         for (area, panel) in areas.iter().zip(panels) {
             draw_panel(area, panel, start, end)?;
         }
@@ -310,12 +405,27 @@ fn render(panels: &[Panel], start: i64, end: i64) -> Result<Vec<u8>> {
     }
 
     let img =
-        image::RgbImage::from_raw(WIDTH, HEIGHT, buf).context("chart buffer size mismatch")?;
+        image::RgbImage::from_raw(WIDTH, height, buf).context("chart buffer size mismatch")?;
     let mut png = Vec::new();
     image::DynamicImage::ImageRgb8(img)
         .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
         .context("encoding chart PNG")?;
     Ok(png)
+}
+
+/// Stable per-system colours so a system reads the same on every panel;
+/// anything else falls back to its position in the palette. Noise-floor lines
+/// are drawn translucent so they pair visibly with their signal line.
+fn series_color(label: &str, idx: usize) -> RGBAColor {
+    let system = label.rsplit(' ').next().unwrap_or(label);
+    let base = match system {
+        "conv" => RGBColor(31, 119, 180),
+        "smco" => RGBColor(44, 160, 44),
+        "svrcs" => RGBColor(255, 127, 14),
+        _ => return Palette99::pick(idx + 3).to_rgba(),
+    };
+    let alpha = if label.starts_with("noise ") { 0.45 } else { 1.0 };
+    base.mix(alpha)
 }
 
 // Unix-second timestamps fit f64 exactly for any realistic epoch; the x-axis
@@ -344,13 +454,17 @@ where
         ymax = ymin + 1.0;
     }
     let pad = (ymax - ymin) * 0.1;
-    let (ymin, ymax) = (ymin - pad, ymax + pad);
+    let (ymin, ymax) = if panel.zero_floor {
+        (0.0, ymax + pad)
+    } else {
+        (ymin - pad, ymax + pad)
+    };
 
     let mut chart = ChartBuilder::on(area)
-        .caption(panel.title, ("sans-serif", 22))
+        .caption(panel.title, ("sans-serif", 20))
         .margin(8)
         .x_label_area_size(28)
-        .y_label_area_size(56)
+        .y_label_area_size(64)
         .build_cartesian_2d(start as f64..end as f64, ymin..ymax)
         .map_err(|e| anyhow::anyhow!("chart build: {e}"))?;
 
@@ -367,7 +481,7 @@ where
         .map_err(|e| anyhow::anyhow!("chart mesh: {e}"))?;
 
     for (idx, s) in panel.series.iter().enumerate() {
-        let color = Palette99::pick(idx).to_rgba();
+        let color = series_color(&s.label, idx);
         chart
             .draw_series(LineSeries::new(
                 s.points.iter().map(|&(t, v)| (t as f64, v)),
@@ -382,6 +496,8 @@ where
 
     chart
         .configure_series_labels()
+        .position(SeriesLabelPosition::UpperLeft)
+        .label_font(("sans-serif", 14))
         .background_style(WHITE.mix(0.8))
         .border_style(BLACK.mix(0.3))
         .draw()
@@ -439,6 +555,7 @@ mod tests {
             Panel {
                 title: "Call Activity",
                 y_desc: "calls",
+                zero_floor: true,
                 series: vec![Series {
                     label: "active".to_string(),
                     points: vec![(0, 1.0), (60, 3.0), (120, 2.0), (180, 5.0)],
@@ -447,6 +564,7 @@ mod tests {
             Panel {
                 title: "SDR Signal / Noise / Squelch",
                 y_desc: "dB",
+                zero_floor: false,
                 series: vec![Series {
                     label: "sig tg 1".to_string(),
                     points: vec![(0, -40.0), (60, -38.5), (120, -42.0)],
@@ -465,5 +583,17 @@ mod tests {
 
         // Best-effort artifact for eyeballing; ignore write failures.
         let _ = std::fs::write("/tmp/stats_chart_test.png", &png);
+    }
+
+    /// Render the dashboard against a live `VictoriaMetrics`:
+    /// `VM_QUERY_URL=http://localhost:8428 STATS_PNG_OUT=/tmp/x.png cargo test -p trunk-discord live_render -- --ignored`
+    #[tokio::test]
+    #[ignore = "needs a live VictoriaMetrics"]
+    async fn live_render() {
+        register_font();
+        let client = StatsClient::from_env().expect("VM_QUERY_URL");
+        let png = client.render_chart().await.expect("render");
+        let out = std::env::var("STATS_PNG_OUT").unwrap_or_else(|_| "/tmp/stats_live.png".into());
+        std::fs::write(out, png).expect("write png");
     }
 }

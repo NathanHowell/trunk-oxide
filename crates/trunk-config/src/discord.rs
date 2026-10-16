@@ -5,6 +5,9 @@ pub struct DiscordConfig {
     #[serde(default)]
     pub bot_token: String,
     pub channel_id: NonZeroU64,
+    /// Channel that receives the live metrics dashboard image. Unset disables it.
+    #[serde(default)]
+    pub monitoring_channel_id: Option<NonZeroU64>,
     #[serde(default)]
     pub guild_id: Option<u64>,
     #[serde(default)]

@@ -539,7 +539,7 @@ impl CallManager {
                     // CallStart event so discord parents its call span to ours.
                     let started = self.state.get_call_view(call_id).map(|view| {
                         self.calls_started
-                            .add(1, &[KeyValue::new("sys_num", i64::from(view.sys_num()))]);
+                            .add(1, &[KeyValue::new("short_name", view.short_name().to_string())]);
                         let span = tracing::info_span!(
                             "call",
                             short_name = %view.short_name(),
@@ -577,7 +577,7 @@ impl CallManager {
                 Effect::EmitCallEnd { call_id, reason } => {
                     if let Some(view) = self.state.get_call_view(call_id) {
                         let mut attrs = vec![
-                            KeyValue::new("sys_num", i64::from(view.sys_num())),
+                            KeyValue::new("short_name", view.short_name().to_string()),
                             KeyValue::new("reason", reason.as_str()),
                             KeyValue::new("encrypted", view.encrypted()),
                         ];
@@ -822,8 +822,14 @@ impl CallManager {
             result,
             RecordingResult::NoRecorder | RecordingResult::NoSource
         ) {
+            let short_name = self
+                .state
+                .config
+                .systems
+                .get(&sys_num)
+                .map_or_else(String::new, |p| p.short_name.clone());
             self.recorder_denied
-                .add(1, &[KeyValue::new("sys_num", i64::from(sys_num))]);
+                .add(1, &[KeyValue::new("short_name", short_name)]);
         }
 
         let followup = self.state.on_recording_result(call_id, result);
@@ -1270,8 +1276,14 @@ impl CallManager {
         let rust_msg = Self::convert_message(msg);
 
         if !matches!(rust_msg.message_type, MessageType::InvalidCcMessage) {
+            let short_name = self
+                .state
+                .config
+                .systems
+                .get(&msg.sys_num)
+                .map_or_else(String::new, |p| p.short_name.clone());
             self.control_channel_messages
-                .add(1, &[KeyValue::new("sys_num", i64::from(msg.sys_num))]);
+                .add(1, &[KeyValue::new("short_name", short_name)]);
         }
 
         // Sysid/Status need FFI call before state machine processes them

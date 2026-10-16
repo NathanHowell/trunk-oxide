@@ -497,7 +497,7 @@ fn main() -> Result<()> {
     }
 
     // Spawn gRPC server as a background task on the runtime
-    let socket_path = trunk_oxide_grpc::GrpcConfig::default().socket_path;
+    let socket_path = config.grpc.listen_path.clone();
     rt.spawn(trunk_oxide_grpc::serve_grpc(socket_path, stream_tx));
 
     tracing::info!("trunk-recorder engine running, press Ctrl+C to stop");

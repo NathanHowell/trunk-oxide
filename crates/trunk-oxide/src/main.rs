@@ -325,6 +325,30 @@ fn main() -> Result<()> {
             })
             .build();
 
+        // ── Process CPU (from /proc; GNU Radio names threads after their block) ──
+        let _process_cpu = meter
+            .f64_observable_counter("process.cpu.time")
+            .with_description("CPU seconds used by the process")
+            .with_unit("s")
+            .with_callback(|observer| {
+                if let Some(t) = trunk_oxide::proc_stats::process_cpu() {
+                    observer.observe(t.user, &[KeyValue::new("state", "user")]);
+                    observer.observe(t.system, &[KeyValue::new("state", "system")]);
+                }
+            })
+            .build();
+
+        let _process_thread_cpu = meter
+            .f64_observable_counter("process.thread.cpu.time")
+            .with_description("CPU seconds used by live threads, grouped by thread name")
+            .with_unit("s")
+            .with_callback(|observer| {
+                for (thread, secs) in trunk_oxide::proc_stats::thread_cpu_by_group() {
+                    observer.observe(secs, &[KeyValue::new("thread", thread)]);
+                }
+            })
+            .build();
+
         let _gr_output_buf = meter
             .f64_observable_gauge("gr.block.output_buffer_full")
             .with_description("Output buffer saturation (0.0-1.0)")

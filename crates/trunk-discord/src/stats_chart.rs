@@ -171,6 +171,36 @@ const PANELS: &[PanelSpec] = &[
         }],
     },
     PanelSpec {
+        title: "trunk-oxide CPU (cores)",
+        y_desc: "cores",
+        zero_floor: true,
+        queries: &[
+            QuerySpec {
+                query: "sum(rate(process.cpu.time[5m]))",
+                label: Label::Fixed("process total"),
+            },
+            QuerySpec {
+                query: "topk(5, sum by (thread)(rate(process.thread.cpu.time[5m])))",
+                label: Label::Tagged {
+                    prefix: "",
+                    tag: "thread",
+                },
+            },
+        ],
+    },
+    PanelSpec {
+        title: "Active channels per source",
+        y_desc: "channels",
+        zero_floor: true,
+        queries: &[QuerySpec {
+            query: "trunk.oxide.channelizer.active_channels",
+            label: Label::Tagged {
+                prefix: "source",
+                tag: "source",
+            },
+        }],
+    },
+    PanelSpec {
         title: "Latency (mean)",
         y_desc: "seconds",
         zero_floor: true,

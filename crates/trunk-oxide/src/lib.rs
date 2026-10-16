@@ -12,6 +12,7 @@ mod call_manager;
 mod call_state;
 mod dedup;
 mod p25_lfsr;
+pub mod proc_stats;
 
 use std::hash::{Hash, Hasher};
 use std::ops::RangeInclusive;

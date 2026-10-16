@@ -106,7 +106,15 @@ fn init_otel() -> OtelProviders {
 
     let otel_layer = tracer_provider.as_ref().map(|provider| {
         let tracer = provider.tracer(env!("CARGO_PKG_NAME"));
-        tracing_opentelemetry::layer().with_tracer(tracer)
+        // serenity's HTTP spans record the whole request (including uploaded
+        // images, hundreds of KB of Debug text) as attributes. That inflates
+        // span batches until Jaeger rejects them with a 400, losing every other
+        // span in the batch, so keep them out of the exported traces.
+        tracing_opentelemetry::layer()
+            .with_tracer(tracer)
+            .with_filter(tracing_subscriber::filter::filter_fn(|meta| {
+                !meta.target().starts_with("serenity")
+            }))
     });
 
     tracing_subscriber::registry()

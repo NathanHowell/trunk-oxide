@@ -18,6 +18,12 @@ const VOICED_FLOOR: f64 = 0.002;
 const DIGITAL_SILENCE_PEAK: f32 = 0.0005;
 /// Digital-silence runs shorter than this are ignored (2 frames = 40 ms).
 const MIN_GAP_FRAMES: usize = 2;
+/// Longer runs are pauses between phrases, not dropouts (20 frames = 400 ms).
+const MAX_GAP_FRAMES: usize = 20;
+/// A dropout interrupts speech that is still going: the frames on both sides
+/// are within about 12 dB of the segment's loudest. Words end by decaying, so
+/// the natural pause after one starts from a quiet frame and doesn't count.
+const LOUD_NEIGHBOR_REL: f64 = 0.25;
 /// An ending this close to the segment's peak level is abrupt (about -9 dB).
 const ABRUPT_END_DB: f64 = -9.0;
 
@@ -30,8 +36,9 @@ pub struct AudioShape {
     /// Level of the last voiced frame relative to the loudest frame, in dB
     /// (<= 0). Natural endings decay and land near -20; a cut mid-word stays loud.
     pub end_level_db: f64,
-    /// Number of digital-silence holes (>= 40 ms) between onset and the end of
-    /// speech. Muted/dropped voice frames show up here.
+    /// Number of dropouts: digital-silence holes of 40-400 ms with loud speech
+    /// on both sides. Muted/dropped voice frames show up here; pauses between
+    /// words and phrases don't.
     pub gaps: u32,
     /// Longest such hole, in seconds.
     pub longest_gap_s: f64,
@@ -67,13 +74,15 @@ pub fn analyze(samples: &[f32]) -> Option<AudioShape> {
     let first = rms.iter().position(|r| *r >= threshold)?;
     let last = rms.iter().rposition(|r| *r >= threshold)?;
 
-    // Digital-silence holes strictly inside the speech span.
+    // Dropouts strictly inside the speech span.
+    let loud = |i: usize| rms[i] >= peak * LOUD_NEIGHBOR_REL;
     let (mut gaps, mut longest, mut run) = (0u32, 0usize, 0usize);
-    for f in &frames[first..=last] {
+    for (i, f) in frames.iter().enumerate().take(last + 1).skip(first) {
         if f.iter().all(|s| s.abs() < DIGITAL_SILENCE_PEAK) {
             run += 1;
         } else {
-            if run >= MIN_GAP_FRAMES {
+            // `first` is voiced, so a run always has a frame before it.
+            if (MIN_GAP_FRAMES..=MAX_GAP_FRAMES).contains(&run) && loud(i - run - 1) && loud(i) {
                 gaps += 1;
                 longest = longest.max(run);
             }
@@ -144,6 +153,24 @@ mod tests {
         let a = analyze(&s).unwrap();
         assert_eq!(a.gaps, 1);
         assert!((a.longest_gap_s - 0.06).abs() < 1e-9);
+    }
+
+    #[test]
+    fn pauses_are_not_dropouts() {
+        // Hole after a word that decayed: the frame before it is quiet.
+        let mut s = tone(10, 0.3);
+        for amp in [0.1, 0.05, 0.02] {
+            s.extend(tone(1, amp));
+        }
+        s.extend(silence(5));
+        s.extend(tone(10, 0.3));
+        assert_eq!(analyze(&s).unwrap().gaps, 0);
+
+        // A 600 ms silence between two loud phrases is a pause, not a mute.
+        let mut s = tone(10, 0.3);
+        s.extend(silence(30));
+        s.extend(tone(10, 0.3));
+        assert_eq!(analyze(&s).unwrap().gaps, 0);
     }
 
     #[test]

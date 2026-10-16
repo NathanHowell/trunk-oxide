@@ -81,15 +81,32 @@ struct Handler {
 
 #[async_trait]
 impl EventHandler for Handler {
-    async fn reaction_add(&self, _ctx: Context, reaction: Reaction) {
+    async fn reaction_add(&self, ctx: Context, reaction: Reaction) {
         let ReactionType::Unicode(emoji) = &reaction.emoji else {
             return;
         };
         let Some(reason) = reason_for(emoji) else {
             return;
         };
-        let Some(info) = FLAGS.get(reaction.message_id) else {
-            tracing::debug!(message = %reaction.message_id, "reaction on an unknown message");
+        // The audio attachment is posted as a *reply* to the call's embed, so a
+        // reaction on it arrives with the reply's message id. Resolve it to the
+        // embed it replies to.
+        let mut info = FLAGS.get(reaction.message_id);
+        if info.is_none()
+            && let Ok(msg) = reaction
+                .channel_id
+                .message(&ctx.http, reaction.message_id)
+                .await
+            && let Some(parent) = msg.message_reference.and_then(|r| r.message_id)
+        {
+            info = FLAGS.get(parent);
+        }
+        let Some(info) = info else {
+            tracing::info!(
+                reason,
+                message = %reaction.message_id,
+                "reaction on a message that is not a known call (too old, or after a restart)"
+            );
             return;
         };
         self.metrics.calls_flagged.add(

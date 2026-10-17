@@ -10,7 +10,7 @@ use num_complex::Complex32;
 /// `firdes::low_pass_2` with a 4-term (92 dB) Blackman-Harris window.
 fn low_pass_2_bh(gain: f64, fs: f64, cutoff: f64, transition: f64, atten_db: f64) -> Vec<f32> {
     let mut ntaps = (atten_db * fs / (22.0 * transition)) as usize;
-    if ntaps % 2 == 0 {
+    if ntaps.is_multiple_of(2) {
         ntaps += 1;
     }
     // window::coswindow (f32 like GR)

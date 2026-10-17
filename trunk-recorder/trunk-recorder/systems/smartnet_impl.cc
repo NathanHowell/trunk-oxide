@@ -29,9 +29,12 @@ void smartnet_impl::initialize(double freq, double center, const ChannelTap &tap
   this->sys_num = sys_num;
 
 
-  prefilter = xlat_channelizer::make(xlat_channelizer::smartnet_samples_per_symbol, xlat_channelizer::smartnet_symbol_rate, xlat_channelizer::channel_bandwidth, false, tap.rate, xlat_channelizer::smartnet_excess_bw);
+  prefilter = xlat_channelizer::make(xlat_channelizer::smartnet_samples_per_symbol, xlat_channelizer::smartnet_symbol_rate, xlat_channelizer::channel_bandwidth, false, tap.rate, xlat_channelizer::smartnet_excess_bw, static_cast<bool>(tap.cond.set));
   prefilter->set_tune_hook(tap.set_offset);
   prefilter->set_filter_hook(tap.set_filter);
+  if (prefilter->external_conditioning()) {
+    prefilter->set_conditioning_hooks(tap.cond);
+  }
 
   double offset_amount = (center_freq - chan_freq);
   prefilter->tune_offset(offset_amount);

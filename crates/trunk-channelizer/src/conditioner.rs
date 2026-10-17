@@ -225,8 +225,8 @@ fn design_taps(sps: f32, rolloff: f32, filter_size: usize) -> (Vec<Complex32>, V
     let inv_twice_sps = 0.5 / sps;
     let mut lower = vec![Complex32::ZERO; filter_size];
     let mut upper = vec![Complex32::ZERO; filter_size];
-    for i in 0..filter_size {
-        let tap = bb[i] * invpower;
+    for (i, b) in bb.iter().enumerate() {
+        let tap = b * invpower;
         let k = (i as isize - n) as f32 * inv_twice_sps;
         let index = filter_size - i - 1;
         let ph = -TAU * f64::from(1.0 + rolloff) * f64::from(k);
@@ -543,6 +543,40 @@ mod tests {
         c.process(&mut x);
         let e = c.freq_error_hz(24_000.0);
         assert!((-300..=-150).contains(&e), "FLL freq {e} Hz");
+    }
+
+    #[test]
+    fn smartnet_channel_resamples_and_tracks_an_offset() {
+        // Smartnet: 3600 baud FSK2, 5 sps (18 kHz) out of a 24 kHz channel.
+        let (fin, fout) = (24_000.0, 18_000.0);
+        let mut s = 777u64;
+        let mut dev = 0.0f64;
+        let mut ph = 0.0f64;
+        let x: Vec<Complex32> = (0..240_000)
+            .map(|i| {
+                if i % 20 == 0 {
+                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
+                    dev = if (s >> 40) & 1 == 0 { 700.0 } else { -700.0 };
+                }
+                ph += TAU * (dev + 250.0) / fin;
+                Complex32::from_polar(0.05, ph as f32)
+            })
+            .collect();
+        #[allow(clippy::cast_possible_truncation)]
+        let mut c = Conditioner::new(5, 0.35, ConditionerParams::default())
+            .with_resampler((fout / fin) as f32);
+        let mut out = vec![Complex32::ZERO; x.len()];
+        let mut n = 0;
+        for chunk in x.chunks(1_000) {
+            n += c.process_into(chunk, &mut out[n..]);
+        }
+        assert!((n as i64 - 180_000).abs() < 40, "{n}");
+        // reported against the hard-coded 24 kHz like xlat_channelizer:
+        // 250 Hz at 18 kHz reads as 333 Hz
+        let e = c.freq_error_hz(24_000.0);
+        assert!((-450..=-200).contains(&e), "FLL freq {e} Hz");
+        let rms = (out[n - 10_000..n].iter().map(|v| v.norm_sqr()).sum::<f32>() / 10_000.0).sqrt();
+        assert!((rms - 0.85).abs() < 0.05, "rms {rms}");
     }
 
     #[test]

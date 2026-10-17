@@ -13,6 +13,22 @@ enum ChannelProfile : unsigned {
   CHANNEL_PROFILE_WIDE = 1,   // analog FM voice, >= 96 kS/s
 };
 
+enum ConditioningSquelch : unsigned {
+  CONDITIONING_SQUELCH_NONE = 0,
+  CONDITIONING_SQUELCH_ANALOG = 1,  // alpha 0.01, 10-sample ramps, zeros while muted
+  CONDITIONING_SQUELCH_DIGITAL = 2, // alpha 1e-4, no ramp, muted samples dropped
+};
+
+// Per-port conditioning, replacing xlat_channelizer's GR blocks: resample
+// in_rate -> out_rate when lower, power squelch, RMS AGC, band-edge FLL.
+struct ConditioningSpec {
+  unsigned sps;
+  double excess_bw;
+  double in_rate;
+  double out_rate;
+  ConditioningSquelch squelch;
+};
+
 // DSP engine behind shared_channelizer. The trunk-recorder tree only sees this
 // interface; trunk-oxide implements it in Rust (trunk-channelizer crate).
 //
@@ -43,10 +59,16 @@ public:
   // Disable `port`: it produces no output from the next block on.
   virtual void clear_channel(unsigned port) = 0;
 
-  // Condition the port's output with AGC and a band-edge FLL (digital
-  // channels). Persists while the port is disabled; calling it again with a
-  // different `sps` (P25 phase 1 <-> 2) retunes the FLL without resetting it.
-  virtual void set_conditioning(unsigned port, unsigned sps, double excess_bw) = 0;
+  // Condition the port's output (see ConditioningSpec). Persists while the
+  // port is disabled; calling it again with a different `sps` (P25 phase
+  // 1 <-> 2) or squelch mode changes it without resetting the loops. A
+  // resampling or gating port produces fewer than out_per_block() samples.
+  virtual void set_conditioning(unsigned port, const ConditioningSpec &spec) = 0;
+  virtual void set_squelch_db(unsigned port, double db) = 0;
+  virtual bool squelch_open(unsigned port) = 0;
+  // Pop the oldest squelch transition: 0 none, 1 opened, 2 closed; pwr_db is
+  // the squelch power at the transition.
+  virtual int next_squelch_event(unsigned port, double &pwr_db) = 0;
   // FLL frequency error (Hz) and smoothed input power (dB; NaN if none yet) of
   // a conditioned port. Safe to call from any thread.
   virtual int freq_error_hz(unsigned port) = 0;

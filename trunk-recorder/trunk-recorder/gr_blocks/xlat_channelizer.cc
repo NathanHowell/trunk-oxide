@@ -22,8 +22,9 @@ xlat_channelizer::xlat_channelizer(int samples_per_symbol, double symbol_rate, d
       d_bandwidth(bandwidth),
       d_samples_per_symbol(samples_per_symbol),
       d_use_squelch(use_squelch),
-      d_external(external_conditioning && !use_squelch),
-      d_excess_bw(excess_bw) {
+      d_external(external_conditioning),
+      d_excess_bw(excess_bw),
+      d_squelch_mode(use_squelch ? CONDITIONING_SQUELCH_DIGITAL : CONDITIONING_SQUELCH_NONE) {
 
   long channel_rate = symbol_rate * d_samples_per_symbol;
   d_channel_rate_in = channel_rate_in;
@@ -76,12 +77,9 @@ xlat_channelizer::xlat_channelizer(int samples_per_symbol, double symbol_rate, d
   squelch = callback_pwr_squelch_cc::make(0.0, 0.0001, 0, true);
 
   if (d_external) {
-    // The channelizer already resampled (digital: arb_rate == 1) and conditions
-    // the channel; nothing left to do here.
-    if (arb_rate != 1.0) {
-      throw std::runtime_error("xlat_channelizer: external conditioning needs the channel at the symbol-rate multiple");
-    }
-    BOOST_LOG_TRIVIAL(info) << "\t Conditioning (AGC + FLL) in the channelizer";
+    // The channelizer resamples and conditions the channel; nothing left to do here.
+    BOOST_LOG_TRIVIAL(info) << "\t Conditioning (" << (arb_rate < 1 ? "resampler, " : "") << (d_use_squelch ? "squelch, " : "")
+                            << "AGC, FLL) in the channelizer";
     // TODO: a hier_block2 cannot wire its input straight to its output; this
     // goes away when the callers connect around the xlat_channelizer.
     passthrough = gr::blocks::copy::make(sizeof(gr_complex));
@@ -155,6 +153,9 @@ int xlat_channelizer::get_freq_error() {
 }
 
 bool xlat_channelizer::is_squelched() {
+  if (d_external) {
+    return d_cond.squelch_open && !d_cond.squelch_open();
+  }
   return !squelch->unmuted();
 }
 
@@ -186,10 +187,21 @@ void xlat_channelizer::set_max_dev(double max_dev) {
 }
 
 void xlat_channelizer::set_squelch_db(double squelch_db) {
+  if (d_external) {
+    if (d_cond.set_squelch_db) d_cond.set_squelch_db(squelch_db);
+    return;
+  }
   squelch->set_threshold(squelch_db);
 }
 
 void xlat_channelizer::set_analog_squelch(bool analog_squelch) {
+  if (d_external) {
+    if (d_use_squelch) {
+      d_squelch_mode = analog_squelch ? CONDITIONING_SQUELCH_ANALOG : CONDITIONING_SQUELCH_DIGITAL;
+      send_conditioning();
+    }
+    return;
+  }
   if (analog_squelch) {
     squelch->set_alpha(0.01);
     squelch->set_ramp(10);
@@ -201,15 +213,22 @@ void xlat_channelizer::set_analog_squelch(bool analog_squelch) {
   }
 }
 
+void xlat_channelizer::send_conditioning() {
+  if (d_cond.set) {
+    d_cond.set({static_cast<unsigned>(d_samples_per_symbol), d_excess_bw, d_channel_rate_in, d_channel_rate_out, d_squelch_mode});
+  }
+}
+
 void xlat_channelizer::set_conditioning_hooks(ConditioningHooks hooks) {
   d_cond = std::move(hooks);
-  if (d_cond.set) d_cond.set(d_samples_per_symbol, d_excess_bw);
+  send_conditioning();
+  if (d_squelch_cb && d_cond.set_squelch_callback) d_cond.set_squelch_callback(d_squelch_cb);
 }
 
 void xlat_channelizer::set_samples_per_symbol(int samples_per_symbol) {
   if (d_external) {
     d_samples_per_symbol = samples_per_symbol;
-    if (d_cond.set) d_cond.set(samples_per_symbol, d_excess_bw);
+    send_conditioning();
     return;
   }
   fll_band_edge->set_samples_per_symbol(samples_per_symbol);

@@ -44,10 +44,26 @@ void shared_channelizer::set_port_filter(unsigned port, double cutoff_hz, double
   d_backend->set_filter(port, cutoff_hz, transition_hz);
 }
 
-void shared_channelizer::set_port_conditioning(unsigned port, unsigned sps, double excess_bw) {
+void shared_channelizer::set_port_conditioning(unsigned port, const ConditioningSpec &spec) {
   std::lock_guard<std::mutex> l(d_mutex);
   port_locked(port);
-  d_backend->set_conditioning(port, sps, excess_bw);
+  d_backend->set_conditioning(port, spec);
+}
+
+void shared_channelizer::set_port_squelch_callback(unsigned port, std::function<void(bool, double)> cb) {
+  std::lock_guard<std::mutex> l(d_mutex);
+  port_locked(port).squelch_cb = std::move(cb);
+}
+
+ConditioningHooks shared_channelizer::conditioning_hooks(unsigned port) {
+  // The block outlives every recorder and decoder holding these.
+  shared_channelizer *self = this;
+  return {[self, port](const ConditioningSpec &s) { self->set_port_conditioning(port, s); },
+          [self, port]() { return self->port_freq_error_hz(port); },
+          [self, port]() { return self->port_power_db(port); },
+          [self, port](double db) { self->set_port_squelch_db(port, db); },
+          [self, port]() { return self->port_squelch_open(port); },
+          [self, port](std::function<void(bool, double)> cb) { self->set_port_squelch_callback(port, std::move(cb)); }};
 }
 
 void shared_channelizer::set_port_offset(unsigned port, double offset_hz) {
@@ -108,7 +124,18 @@ int shared_channelizer::general_work(int /*noutput_items*/, gr_vector_int &ninpu
   {
     std::lock_guard<std::mutex> l(d_mutex);
     d_got_samples = true;
+    // Squelch transitions from this block (conditioned ports only).
+    for (size_t p = 0; p < d_ports.size(); p++) {
+      if (!d_ports[p].squelch_cb) continue;
+      double db;
+      for (int ev; (ev = d_backend->next_squelch_event(p, db)) != 0;) {
+        d_pending_events.push_back({d_ports[p].squelch_cb, ev == 2, db});
+      }
+    }
   }
+  // Outside the lock: the callback may call back into this block.
+  for (auto &e : d_pending_events) e.cb(e.muted, e.db);
+  d_pending_events.clear();
   consume_each(static_cast<int>(d_hop));
   return WORK_CALLED_PRODUCE;
 }

@@ -14,6 +14,7 @@ mod conditioner;
 mod config;
 mod design;
 mod fft;
+mod resampler;
 mod service;
 
 /// FFTW backend, kept only so the bench can compare against rustfft.
@@ -21,7 +22,9 @@ mod service;
 pub mod fftw;
 
 pub use channelizer::{BlockStats, ChannelId, Channelizer};
-pub use conditioner::{Conditioner, ConditionerParams};
+pub use conditioner::{Conditioner, ConditionerParams, SquelchEvent, SquelchMode};
 pub use config::{Config, NARROW, Profile, ProfileId, ProfileSpec, WIDE};
 pub use design::{lowpass_taps, tap_count};
-pub use service::{ConditioningSettings, Counters, ResetPolicy, SharedChannelizer, SlotStats};
+pub use service::{
+    ConditioningSettings, ConditioningSpec, Counters, ResetPolicy, SharedChannelizer, SlotStats,
+};

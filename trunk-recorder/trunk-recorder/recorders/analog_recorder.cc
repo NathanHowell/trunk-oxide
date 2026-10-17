@@ -114,7 +114,7 @@ analog_recorder::analog_recorder(const std::shared_ptr<Source> &src, const std::
   // The Prefilter provides the initial squelch for the channel
   // Input is one channel already extracted by the source's shared channelizer
   // (at or above 96 kS/s; the prefilter's arbitrary resampler does the rest).
-  prefilter = xlat_channelizer::make(samp_per_sym, system_channel_rate / samp_per_sym, bandwidth, true, source->get_channelizer()->out_rate(CHANNEL_PROFILE_WIDE));
+  prefilter = xlat_channelizer::make(samp_per_sym, system_channel_rate / samp_per_sym, bandwidth, true, source->get_channelizer()->out_rate(CHANNEL_PROFILE_WIDE), xlat_channelizer::default_excess_bw, config.rust_conditioner);
   prefilter->set_tune_hook([this](double offset_hz) { source->channelizer_set_offset(channelizer_port, offset_hz); });
   prefilter->set_filter_hook([this](double cutoff_hz, double transition_hz) { source->channelizer_set_filter(channelizer_port, cutoff_hz, transition_hz); });
   prefilter->set_analog_squelch(true);
@@ -198,6 +198,13 @@ analog_recorder::analog_recorder(const std::shared_ptr<Source> &src, const std::
 }
 
 analog_recorder::~analog_recorder() {}
+
+void analog_recorder::set_channelizer_port(unsigned int port) {
+  Recorder::set_channelizer_port(port);
+  if (prefilter->external_conditioning()) {
+    prefilter->set_conditioning_hooks(source->channelizer_conditioning(port));
+  }
+}
 
 void analog_recorder::tune_offset(double f) { prefilter->tune_offset(f); }
 void analog_recorder::set_system(const std::shared_ptr<System> &sys) { system = sys; }

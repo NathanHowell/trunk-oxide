@@ -529,8 +529,23 @@ pub mod ffi {
             transition_hz: f64,
         );
         fn clear_channel(self: &SharedChannelizerHandle, port: u32);
-        /// AGC + FLL on the port's output; calling again changes `sps`.
-        fn set_conditioning(self: &SharedChannelizerHandle, port: u32, sps: u32, excess_bw: f64);
+        /// Condition the port's output: resample `in_rate` -> `out_rate` if
+        /// lower, squelch (`squelch_mode` 0 none, 1 analog, 2 digital), AGC,
+        /// FLL. Calling again changes `sps` and the squelch mode.
+        fn set_conditioning(
+            self: &SharedChannelizerHandle,
+            port: u32,
+            sps: u32,
+            excess_bw: f64,
+            in_rate: f64,
+            out_rate: f64,
+            squelch_mode: u32,
+        );
+        fn set_squelch_db(self: &SharedChannelizerHandle, port: u32, db: f64);
+        fn squelch_open(self: &SharedChannelizerHandle, port: u32) -> bool;
+        /// Pop the oldest squelch transition: 0 none, 1 opened, 2 closed
+        /// (`pwr_db` = squelch power at the transition).
+        fn next_squelch_event(self: &SharedChannelizerHandle, port: u32, pwr_db: &mut f64) -> i32;
         fn freq_error_hz(self: &SharedChannelizerHandle, port: u32) -> i32;
         /// NaN until the port has carried signal.
         fn power_db(self: &SharedChannelizerHandle, port: u32) -> f64;
@@ -907,10 +922,49 @@ impl SharedChannelizerHandle {
         self.0.clear_slot(port as usize);
     }
 
-    fn set_conditioning(&self, port: u32, sps: u32, excess_bw: f64) {
-        #[allow(clippy::cast_possible_truncation)]
-        self.0
-            .set_slot_conditioning(port as usize, sps, excess_bw as f32);
+    #[allow(clippy::cast_possible_truncation)]
+    fn set_conditioning(
+        &self,
+        port: u32,
+        sps: u32,
+        excess_bw: f64,
+        in_rate: f64,
+        out_rate: f64,
+        squelch_mode: u32,
+    ) {
+        let squelch = match squelch_mode {
+            1 => Some(trunk_channelizer::SquelchMode::ANALOG),
+            2 => Some(trunk_channelizer::SquelchMode::DIGITAL),
+            _ => None,
+        };
+        self.0.set_slot_conditioning(
+            port as usize,
+            trunk_channelizer::ConditioningSpec {
+                sps,
+                excess_bw: excess_bw as f32,
+                in_rate,
+                out_rate,
+                squelch,
+            },
+        );
+    }
+
+    fn set_squelch_db(&self, port: u32, db: f64) {
+        self.0.set_slot_squelch_db(port as usize, db);
+    }
+
+    fn squelch_open(&self, port: u32) -> bool {
+        self.0.slot_squelch_open(port as usize)
+    }
+
+    fn next_squelch_event(&self, port: u32, pwr_db: &mut f64) -> i32 {
+        match self.0.next_squelch_event(port as usize) {
+            Some(e) => {
+                *pwr_db = e.pwr_db;
+                if e.muted { 2 } else { 1 }
+            }
+            None => 0,
+        }
     }
 
     fn freq_error_hz(&self, port: u32) -> i32 {

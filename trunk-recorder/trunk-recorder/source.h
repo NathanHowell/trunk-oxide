@@ -147,9 +147,7 @@ public:
   void channelizer_set_enabled(unsigned int port, bool enabled);
   void channelizer_set_offset(unsigned int port, double offset_hz);
   void channelizer_set_filter(unsigned int port, double cutoff_hz, double transition_hz);
-  void channelizer_set_conditioning(unsigned int port, unsigned sps, double excess_bw);
-  int channelizer_freq_error(unsigned int port) { return channelizer->port_freq_error_hz(port); }
-  double channelizer_power_db(unsigned int port) { return channelizer->port_power_db(port); }
+  ConditioningHooks channelizer_conditioning(unsigned int port) { return channelizer->conditioning_hooks(port); }
   // Attach the shared channelizer a voice recorder of `profile` will take its
   // channel from. Throws if there is no channelizer factory or it cannot
   // provide `profile` at this sample rate. Call before constructing the recorder.

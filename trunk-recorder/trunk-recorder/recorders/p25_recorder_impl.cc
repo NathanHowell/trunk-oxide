@@ -57,9 +57,7 @@ void p25_recorder_impl::initialize(const std::shared_ptr<Source> &src) {
 void p25_recorder_impl::set_channelizer_port(unsigned int port) {
   Recorder::set_channelizer_port(port);
   if (prefilter->external_conditioning()) {
-    prefilter->set_conditioning_hooks({[this](unsigned sps, double excess_bw) { source->channelizer_set_conditioning(channelizer_port, sps, excess_bw); },
-                                       [this]() { return source->channelizer_freq_error(channelizer_port); },
-                                       [this]() { return source->channelizer_power_db(channelizer_port); }});
+    prefilter->set_conditioning_hooks(source->channelizer_conditioning(port));
   }
 }
 

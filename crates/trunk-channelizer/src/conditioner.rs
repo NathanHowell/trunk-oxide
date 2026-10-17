@@ -9,6 +9,164 @@ use std::f64::consts::{PI, TAU};
 
 use num_complex::Complex32;
 
+use crate::resampler::{ArbResampler, xlat_arb_taps};
+
+/// Power squelch behaviour (`xlat_channelizer::set_analog_squelch`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SquelchMode {
+    /// Power average smoothing factor.
+    pub alpha: f64,
+    /// Raised-cosine ramp length in samples on open/close (0 = hard).
+    pub ramp: u32,
+    /// Drop muted samples (true) or output zeros (false).
+    pub gate: bool,
+}
+
+impl SquelchMode {
+    /// Analog FM: fast average, 10-sample ramps, zeros while muted.
+    pub const ANALOG: Self = Self {
+        alpha: 0.01,
+        ramp: 10,
+        gate: false,
+    };
+    /// Digital (conventional P25): slow average, muted samples dropped.
+    pub const DIGITAL: Self = Self {
+        alpha: 0.0001,
+        ramp: 0,
+        gate: true,
+    };
+}
+
+/// A squelch transition, as `callback_pwr_squelch_cc` publishes them.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SquelchEvent {
+    pub muted: bool,
+    /// Squelch power average at the transition.
+    pub pwr_db: f64,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SqState {
+    Muted,
+    Attack,
+    Unmuted,
+    Decay,
+}
+
+/// Port of trunk-recorder's `callback_pwr_squelch_cc`.
+struct Squelch {
+    mode: SquelchMode,
+    threshold: f64,
+    pwr: f64,
+    state: SqState,
+    ramped: u32,
+    envelope: f64,
+    tag_next_unmuted: bool,
+}
+
+impl Squelch {
+    fn new(mode: SquelchMode, db: f64) -> Self {
+        Self {
+            mode,
+            threshold: 10f64.powf(db / 10.0),
+            pwr: 0.0,
+            state: SqState::Muted,
+            ramped: 0,
+            envelope: if mode.ramp > 0 { 0.0 } else { 1.0 },
+            tag_next_unmuted: true,
+        }
+    }
+
+    fn pwr_db(&self) -> f64 {
+        10.0 * self.pwr.log10()
+    }
+
+    const fn unmuted(&self) -> bool {
+        matches!(self.state, SqState::Unmuted | SqState::Attack)
+    }
+
+    /// Squelch `buf` in place; returns how many samples remain (all of them
+    /// unless gating).
+    fn process(&mut self, buf: &mut [Complex32], events: &mut Vec<SquelchEvent>) -> usize {
+        let a = self.mode.alpha;
+        let ramp = self.mode.ramp;
+        let mut j = 0;
+        for i in 0..buf.len() {
+            let x = buf[i];
+            let mag2 = f64::from(x.re * x.re + x.im * x.im);
+            self.pwr = a * mag2 + (1.0 - a) * self.pwr;
+            let mute = self.pwr < self.threshold;
+            match self.state {
+                SqState::Muted => {
+                    if !mute {
+                        self.state = if ramp > 0 {
+                            SqState::Attack
+                        } else {
+                            SqState::Unmuted
+                        };
+                        if self.state == SqState::Unmuted {
+                            self.tag_next_unmuted = true;
+                        }
+                    }
+                }
+                SqState::Unmuted => {
+                    if self.tag_next_unmuted {
+                        self.tag_next_unmuted = false;
+                        events.push(SquelchEvent {
+                            muted: false,
+                            pwr_db: self.pwr_db(),
+                        });
+                    }
+                    if mute {
+                        self.state = if ramp > 0 {
+                            SqState::Decay
+                        } else {
+                            SqState::Muted
+                        };
+                        if self.state == SqState::Muted {
+                            events.push(SquelchEvent {
+                                muted: true,
+                                pwr_db: self.pwr_db(),
+                            });
+                        }
+                    }
+                }
+                SqState::Attack => {
+                    self.ramped += 1;
+                    self.envelope =
+                        0.5 - (PI * f64::from(self.ramped) / f64::from(ramp)).cos() / 2.0;
+                    if self.ramped >= ramp {
+                        self.state = SqState::Unmuted;
+                        self.tag_next_unmuted = true;
+                        self.envelope = 1.0;
+                    }
+                }
+                SqState::Decay => {
+                    self.ramped = self.ramped.saturating_sub(1);
+                    self.envelope =
+                        0.5 - (PI * f64::from(self.ramped) / f64::from(ramp)).cos() / 2.0;
+                    if self.ramped == 0 {
+                        self.state = SqState::Muted;
+                        events.push(SquelchEvent {
+                            muted: true,
+                            pwr_db: self.pwr_db(),
+                        });
+                    }
+                }
+            }
+            if self.state != SqState::Muted {
+                // gr_complex(envelope, 0) is float: envelope rounds to f32
+                buf[j] = x * (self.envelope as f32);
+                j += 1;
+            } else if !self.mode.gate {
+                buf[j] = Complex32::ZERO;
+                j += 1;
+            }
+        }
+        j
+    }
+}
+
 /// Tunables. Defaults reproduce the GR chain.
 #[derive(Clone, Copy, Debug)]
 pub struct ConditionerParams {
@@ -128,6 +286,10 @@ pub struct Conditioner {
     max_freq: f32,
     upper: Fir,
     lower: Fir,
+    resampler: Option<ArbResampler>,
+    squelch: Option<Squelch>,
+    events: Vec<SquelchEvent>,
+    scratch: Vec<Complex32>,
 }
 
 impl Conditioner {
@@ -149,9 +311,54 @@ impl Conditioner {
             max_freq: freq_limit(sps),
             upper: Fir::new(upper),
             lower: Fir::new(lower),
+            resampler: None,
+            squelch: None,
+            events: Vec::new(),
+            scratch: Vec::new(),
         };
         c.set_gains();
         c
+    }
+
+    /// Resample by `rate` (< 1) first, with `xlat_channelizer`'s arbitrary
+    /// resampler.
+    #[must_use]
+    pub fn with_resampler(mut self, rate: f32) -> Self {
+        self.resampler = (rate < 1.0).then(|| ArbResampler::new(rate, &xlat_arb_taps(rate), 32));
+        self
+    }
+
+    /// Power squelch between the resampler and the AGC.
+    #[must_use]
+    pub fn with_squelch(mut self, mode: SquelchMode, threshold_db: f64) -> Self {
+        self.squelch = Some(Squelch::new(mode, threshold_db));
+        self
+    }
+
+    pub fn has_squelch(&self) -> bool {
+        self.squelch.is_some()
+    }
+
+    pub fn set_squelch_db(&mut self, db: f64) {
+        if let Some(sq) = &mut self.squelch {
+            sq.threshold = 10f64.powf(db / 10.0);
+        }
+    }
+
+    pub fn set_squelch_mode(&mut self, mode: SquelchMode) {
+        if let Some(sq) = &mut self.squelch {
+            sq.mode = mode;
+        }
+    }
+
+    /// True while the squelch is open (or there is none).
+    pub fn squelch_open(&self) -> bool {
+        self.squelch.as_ref().is_none_or(Squelch::unmuted)
+    }
+
+    /// Squelch transitions since the last call.
+    pub fn take_events(&mut self) -> std::vec::Drain<'_, SquelchEvent> {
+        self.events.drain(..)
     }
 
     fn set_gains(&mut self) {
@@ -212,14 +419,56 @@ impl Conditioner {
         (self.probe > 0.0).then(|| 10.0 * self.probe.log10())
     }
 
-    /// Condition `buf` in place.
-    pub fn process(&mut self, buf: &mut [Complex32]) {
-        let two_pi = (2.0 * PI) as f32;
-        let inv_ref = (1.0 / self.p.agc_reference) as f32;
-        let (pa, aa) = (self.p.probe_alpha, self.p.agc_alpha);
-        for s in buf {
+    fn probe(&mut self, input: &[Complex32]) {
+        let pa = self.p.probe_alpha;
+        for s in input {
             let mag2 = f64::from(s.re) * f64::from(s.re) + f64::from(s.im) * f64::from(s.im);
             self.probe = pa * mag2 + (1.0 - pa) * self.probe;
+        }
+    }
+
+    /// Condition `input` into `out`, returning the samples written. Without a
+    /// resampler or a gating squelch that is `input.len()`; otherwise fewer.
+    ///
+    /// # Panics
+    /// If `out` is shorter than `input`.
+    pub fn process_into(&mut self, input: &[Complex32], out: &mut [Complex32]) -> usize {
+        assert!(out.len() >= input.len(), "output shorter than input");
+        if self.resampler.is_none() && self.squelch.is_none() {
+            out[..input.len()].copy_from_slice(input);
+            self.process(&mut out[..input.len()]);
+            return input.len();
+        }
+        self.probe(input);
+        let mut buf = std::mem::take(&mut self.scratch);
+        buf.clear();
+        match &mut self.resampler {
+            Some(r) => r.process(input, &mut buf),
+            None => buf.extend_from_slice(input),
+        }
+        let n = match &mut self.squelch {
+            Some(sq) => sq.process(&mut buf, &mut self.events),
+            None => buf.len(),
+        };
+        let n = n.min(out.len());
+        out[..n].copy_from_slice(&buf[..n]);
+        self.scratch = buf;
+        self.agc_fll(&mut out[..n]);
+        n
+    }
+
+    /// Condition `buf` in place (no resampler or squelch).
+    pub fn process(&mut self, buf: &mut [Complex32]) {
+        self.probe(buf);
+        self.agc_fll(buf);
+    }
+
+    fn agc_fll(&mut self, buf: &mut [Complex32]) {
+        let two_pi = (2.0 * PI) as f32;
+        let inv_ref = (1.0 / self.p.agc_reference) as f32;
+        let aa = self.p.agc_alpha;
+        for s in buf {
+            let mag2 = f64::from(s.re) * f64::from(s.re) + f64::from(s.im) * f64::from(s.im);
 
             // rms_agc: x / (rms / ref + 1e-18)
             self.agc_avg = (1.0 - aa) * self.agc_avg + aa * mag2;

@@ -8,7 +8,8 @@
 //! slot is one consumer's port: it has a profile, a frequency and a filter,
 //! and the filter persists while the slot is disabled.
 
-use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
@@ -16,8 +17,8 @@ use anyhow::Result;
 use num_complex::Complex32;
 
 use crate::channelizer::{ChannelId, Channelizer};
-use crate::conditioner::{Conditioner, ConditionerParams};
-use crate::config::{Config, NARROW, ProfileId};
+use crate::conditioner::{Conditioner, ConditionerParams, SquelchEvent, SquelchMode};
+use crate::config::{Config, ProfileId};
 
 /// When a slot's conditioner (AGC, FLL) starts over.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -39,12 +40,31 @@ pub struct ConditioningSettings {
     pub reset: ResetPolicy,
 }
 
+/// How a slot is conditioned (see [`SharedChannelizer::set_slot_conditioning`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ConditioningSpec {
+    pub sps: u32,
+    pub excess_bw: f32,
+    /// The slot's channel rate and the rate the consumer wants; a resampler
+    /// runs first when `out_rate < in_rate`.
+    pub in_rate: f64,
+    pub out_rate: f64,
+    /// Power squelch before the AGC.
+    pub squelch: Option<SquelchMode>,
+}
+
+/// `xlat_channelizer::get_freq_error` scales the FLL by 24 kHz whatever the
+/// channel rate; kept so the reported error means the same thing.
+const FREQ_ERROR_RATE: f64 = 24_000.0;
+
 /// What a conditioned slot reports; readable from any thread.
 #[derive(Debug)]
 pub struct SlotStats {
     freq_error_hz: AtomicI32,
     /// `f64` bits; NaN until the first block.
     power_db: AtomicU64,
+    squelch_open: AtomicBool,
+    events: Mutex<VecDeque<SquelchEvent>>,
 }
 
 impl SlotStats {
@@ -52,7 +72,19 @@ impl SlotStats {
         Self {
             freq_error_hz: AtomicI32::new(0),
             power_db: AtomicU64::new(f64::NAN.to_bits()),
+            squelch_open: AtomicBool::new(true),
+            events: Mutex::new(VecDeque::new()),
         }
+    }
+    pub fn squelch_open(&self) -> bool {
+        self.squelch_open.load(Ordering::Relaxed)
+    }
+    /// Oldest squelch transition not yet taken.
+    pub fn next_event(&self) -> Option<SquelchEvent> {
+        self.events
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .pop_front()
     }
     pub fn freq_error_hz(&self) -> i32 {
         self.freq_error_hz.load(Ordering::Relaxed)
@@ -82,9 +114,12 @@ enum Cmd {
     /// Condition the slot's output (or change its samples per symbol).
     Condition {
         slot: usize,
-        sps: u32,
-        excess_bw: f32,
+        spec: ConditioningSpec,
         stats: Arc<SlotStats>,
+    },
+    SquelchDb {
+        slot: usize,
+        db: f64,
     },
 }
 
@@ -119,7 +154,7 @@ struct Slot {
     /// `(cutoff_hz, transition_hz)`; `None` = the profile's default.
     filter: Option<(f64, f64)>,
     freq_hz: f64,
-    cond: Option<(Conditioner, Arc<SlotStats>)>,
+    cond: Option<(Conditioner, ConditioningSpec, Arc<SlotStats>)>,
 }
 
 impl Slot {
@@ -182,10 +217,11 @@ impl SharedChannelizer {
         });
     }
 
-    /// Run AGC and the band-edge FLL on `slot`'s output (narrow channels),
-    /// or change its samples per symbol if already conditioned. The
-    /// conditioner persists while the slot is disabled.
-    pub fn set_slot_conditioning(&self, slot: usize, sps: u32, excess_bw: f32) {
+    /// Condition `slot`'s output: resample (if `spec` asks), squelch (if it
+    /// asks), AGC and the band-edge FLL. Calling it again changes the
+    /// samples per symbol and the squelch mode in place; other changes start
+    /// a new conditioner. It persists while the slot is disabled.
+    pub fn set_slot_conditioning(&self, slot: usize, spec: ConditioningSpec) {
         let stats = {
             let mut v = self.stats.lock().unwrap_or_else(PoisonError::into_inner);
             if v.len() <= slot {
@@ -193,12 +229,22 @@ impl SharedChannelizer {
             }
             Arc::clone(v[slot].get_or_insert_with(|| Arc::new(SlotStats::new())))
         };
-        self.post(Cmd::Condition {
-            slot,
-            sps,
-            excess_bw,
-            stats,
-        });
+        self.post(Cmd::Condition { slot, spec, stats });
+    }
+
+    /// Squelch threshold of a conditioned slot (dB).
+    pub fn set_slot_squelch_db(&self, slot: usize, db: f64) {
+        self.post(Cmd::SquelchDb { slot, db });
+    }
+
+    /// False while a conditioned slot's squelch is closed.
+    pub fn slot_squelch_open(&self, slot: usize) -> bool {
+        self.slot_stats(slot).is_none_or(|s| s.squelch_open())
+    }
+
+    /// Oldest squelch transition of a slot not yet taken.
+    pub fn next_squelch_event(&self, slot: usize) -> Option<SquelchEvent> {
+        self.slot_stats(slot).and_then(|s| s.next_event())
     }
 
     /// FLL frequency error (Hz) of a conditioned slot, 0 if none.
@@ -340,7 +386,7 @@ impl SharedChannelizer {
                             ResetPolicy::Enable => !was_enabled,
                             ResetPolicy::Retune => !was_enabled || moved,
                         };
-                        if let (true, Some((c, _))) = (reset, s.cond.as_mut()) {
+                        if let (true, Some((c, _, _))) = (reset, s.cond.as_mut()) {
                             c.reset();
                         }
                     }
@@ -361,22 +407,30 @@ impl SharedChannelizer {
                         counters.rejected += 1;
                     }
                 }
-                Cmd::Condition {
-                    slot,
-                    sps,
-                    excess_bw,
-                    stats,
-                } => {
+                Cmd::Condition { slot, spec, stats } => {
                     if slots.len() <= slot {
                         slots.resize_with(slot + 1, Slot::empty);
                     }
                     let s = &mut slots[slot];
-                    match s.cond.as_mut() {
-                        Some((c, _)) => c.set_samples_per_symbol(sps),
-                        None => {
-                            s.cond =
-                                Some((Conditioner::new(sps, excess_bw, self.cond.params), stats));
+                    let in_place = s.cond.as_ref().is_some_and(|(_, old, _)| {
+                        old.excess_bw.to_bits() == spec.excess_bw.to_bits()
+                            && old.in_rate.to_bits() == spec.in_rate.to_bits()
+                            && old.out_rate.to_bits() == spec.out_rate.to_bits()
+                            && old.squelch.is_some() == spec.squelch.is_some()
+                    });
+                    if let (true, Some((c, old, _))) = (in_place, s.cond.as_mut()) {
+                        c.set_samples_per_symbol(spec.sps);
+                        if let Some(m) = spec.squelch {
+                            c.set_squelch_mode(m);
                         }
+                        *old = spec;
+                    } else {
+                        s.cond = Some((build_conditioner(&spec, self.cond.params), spec, stats));
+                    }
+                }
+                Cmd::SquelchDb { slot, db } => {
+                    if let Some((c, _, _)) = slots.get_mut(slot).and_then(|s| s.cond.as_mut()) {
+                        c.set_squelch_db(db);
                     }
                 }
                 Cmd::Clear { slot } => {
@@ -391,24 +445,23 @@ impl SharedChannelizer {
         counters.blocks += 1;
 
         produced.fill(0);
-        let out_rate = self.cfg.out_rate(NARROW);
         for (slot, s) in slots.iter_mut().enumerate().take(produced.len()) {
             if let Some(id) = s.id
                 && let Some(o) = ch.output(id)
             {
-                let dst = &mut out[slot * stride..slot * stride + o.len()];
-                dst.copy_from_slice(o);
-                produced[slot] = u32::try_from(o.len()).unwrap_or(u32::MAX);
-                if let Some((c, stats)) = s.cond.as_mut() {
-                    c.process(dst);
-                    stats
-                        .freq_error_hz
-                        .store(c.freq_error_hz(out_rate), Ordering::Relaxed);
-                    stats.power_db.store(
-                        c.power_db().unwrap_or(f64::NAN).to_bits(),
-                        Ordering::Relaxed,
-                    );
-                }
+                let dst = &mut out[slot * stride..(slot + 1) * stride];
+                let n = match s.cond.as_mut() {
+                    Some((c, _, stats)) => {
+                        let n = c.process_into(o, dst);
+                        publish(c, stats);
+                        n
+                    }
+                    None => {
+                        dst[..o.len()].copy_from_slice(o);
+                        o.len()
+                    }
+                };
+                produced[slot] = u32::try_from(n).unwrap_or(u32::MAX);
             }
         }
 
@@ -417,6 +470,38 @@ impl SharedChannelizer {
         counters.max_ns = counters.max_ns.max(elapsed);
         counters.overruns += u64::from(elapsed > self.block_budget_ns());
         counters.active = slots.iter().filter(|s| s.id.is_some()).count() as u64;
+    }
+}
+
+fn build_conditioner(spec: &ConditioningSpec, params: ConditionerParams) -> Conditioner {
+    #[allow(clippy::cast_possible_truncation)]
+    let mut c = Conditioner::new(spec.sps, spec.excess_bw, params)
+        .with_resampler((spec.out_rate / spec.in_rate) as f32);
+    if let Some(m) = spec.squelch {
+        // callback_pwr_squelch_cc starts at 0 dB until the recorder sets it
+        c = c.with_squelch(m, 0.0);
+    }
+    c
+}
+
+fn publish(c: &mut Conditioner, stats: &SlotStats) {
+    stats
+        .freq_error_hz
+        .store(c.freq_error_hz(FREQ_ERROR_RATE), Ordering::Relaxed);
+    stats.power_db.store(
+        c.power_db().unwrap_or(f64::NAN).to_bits(),
+        Ordering::Relaxed,
+    );
+    stats
+        .squelch_open
+        .store(c.squelch_open(), Ordering::Relaxed);
+    let mut ev = c.take_events().peekable();
+    if ev.peek().is_some() {
+        stats
+            .events
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .extend(ev);
     }
 }
 
@@ -543,7 +628,16 @@ mod tests {
         let mut out = vec![Complex32::ZERO; stride];
         let mut produced = [0u32; 1];
         assert!(sc.slot_power_db(0).is_nan());
-        sc.set_slot_conditioning(0, 5, 0.2);
+        sc.set_slot_conditioning(
+            0,
+            ConditioningSpec {
+                sps: 5,
+                excess_bw: 0.2,
+                in_rate: cfg.out_rate(NARROW),
+                out_rate: cfg.out_rate(NARROW),
+                squelch: None,
+            },
+        );
         sc.set_slot(0, NARROW, 50_000.0);
         for i in 0..40 {
             let mut x = tone(&cfg, 50_500.0, i * hop, hop);
@@ -556,5 +650,48 @@ mod tests {
         let db = sc.slot_power_db(0);
         // the probe's average is slow (alpha 1e-4), so it is still settling
         assert!((-35.0..-26.0).contains(&db), "power {db} dB");
+    }
+
+    #[test]
+    fn analog_slot_resamples_squelches_and_reports_transitions() {
+        let cfg = Config::standard(912_000.0).unwrap();
+        let (hop, stride) = (cfg.hop(), cfg.max_out_per_block());
+        let in_rate = cfg.out_rate(WIDE);
+        let sc = SharedChannelizer::new(cfg.clone()).unwrap();
+        let mut out = vec![Complex32::ZERO; stride];
+        let mut produced = [0u32; 1];
+        sc.set_slot_conditioning(
+            0,
+            ConditioningSpec {
+                sps: 2,
+                excess_bw: 0.2,
+                in_rate,
+                out_rate: 96_000.0,
+                squelch: Some(SquelchMode::ANALOG),
+            },
+        );
+        sc.set_slot_squelch_db(0, -40.0);
+        sc.set_slot(0, WIDE, 100_000.0);
+        let (mut total_in, mut total_out) = (0usize, 0usize);
+        // 20 blocks of carrier at -20 dB, then 20 of silence
+        for i in 0..40 {
+            let mut x = tone(&cfg, 101_000.0, i * hop, hop);
+            let amp = if i < 20 { 0.1 } else { 0.0 };
+            x.iter_mut().for_each(|v| *v *= amp);
+            sc.process(&x, &mut out, &mut produced);
+            total_in += cfg.out_per_block(WIDE);
+            total_out += produced[0] as usize;
+            if i == 10 {
+                assert!(sc.slot_squelch_open(0));
+            }
+        }
+        let ratio = total_out as f64 / total_in as f64;
+        assert!((ratio - 96_000.0 / in_rate).abs() < 1e-3, "rate {ratio}");
+        assert!(!sc.slot_squelch_open(0));
+        let open = sc.next_squelch_event(0).unwrap();
+        let close = sc.next_squelch_event(0).unwrap();
+        assert!(!open.muted && close.muted);
+        assert!(open.pwr_db > -40.0 && close.pwr_db < -40.0);
+        assert!(sc.next_squelch_event(0).is_none());
     }
 }

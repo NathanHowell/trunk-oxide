@@ -18,6 +18,7 @@
 #include <string>
 
 #include "../formatter.h"
+#include "./shared_channelizer.h"
 #include "../global_structs.h"
 
 // Where a block takes its channel from on a shared_channelizer: the channel's
@@ -27,17 +28,7 @@ struct ChannelTap {
   std::function<void(double)> set_offset;               // offset from source centre, Hz
   std::function<void(double, double)> set_filter;       // cutoff, transition (Hz)
   std::string tap_base;                                 // tap file path prefix; empty = no taps
-  // Set when the channelizer conditions this channel (AGC + FLL) itself; empty = the GR blocks do.
-  std::function<void(unsigned, double)> set_conditioning; // samples per symbol, excess bandwidth
-  std::function<int()> freq_error;
-  std::function<double()> power_db;                       // NaN if no signal yet
-};
-
-// How an xlat_channelizer reaches the channelizer's own conditioning (see ChannelTap).
-struct ConditioningHooks {
-  std::function<void(unsigned, double)> set;
-  std::function<int()> freq_error;
-  std::function<double()> power_db;
+  ConditioningHooks cond;                               // set = the channelizer conditions the channel
 };
 
 class xlat_channelizer : public gr::hier_block2 {
@@ -48,9 +39,9 @@ public:
   // `channel_rate`; this block resamples it to the symbol-rate multiple and runs
   // squelch, AGC and the FLL. Frequency and filter changes are forwarded to the
   // tune and filter hooks (set before the first tune_offset()/set_max_dev()).
-  // `external_conditioning` (digital, no squelch only): leave AGC and the FLL
-  // to the channelizer; the input is passed through and set_conditioning_hooks()
-  // must be called before the graph runs.
+  // `external_conditioning`: leave resampling, squelch, AGC and the FLL to
+  // the channelizer (see ConditioningSpec); the input is passed through and
+  // set_conditioning_hooks() must be called before the graph runs.
   static sptr make(int samples_per_symbol, double symbol_rate, double bandwidth, bool use_squelch, double channel_rate, double excess_bw=default_excess_bw, bool external_conditioning=false);
   xlat_channelizer(int samples_per_symbol, double symbol_rate, double bandwidth, bool use_squelch, double channel_rate, double excess_bw, bool external_conditioning);
 
@@ -69,6 +60,12 @@ public:
   double get_pwr();
   std::vector<gr::block_sptr> get_metric_blocks() const;
   void set_squelch_callback(std::function<void(bool, double)> cb) {
+    if (d_external) {
+      // Kept until the hooks arrive if they are not set yet.
+      d_squelch_cb = std::move(cb);
+      if (d_cond.set_squelch_callback) d_cond.set_squelch_callback(d_squelch_cb);
+      return;
+    }
     squelch->set_squelch_callback(std::move(cb));
   }
   void tune_offset(double f);
@@ -105,7 +102,10 @@ private:
   bool d_use_squelch;
   bool d_external;
   double d_excess_bw;
+  ConditioningSquelch d_squelch_mode;
   ConditioningHooks d_cond;
+  std::function<void(bool, double)> d_squelch_cb;
+  void send_conditioning();
   std::function<void(double)> tune_hook;
   std::function<void(double, double)> filter_hook;
   std::vector<float> arb_taps;

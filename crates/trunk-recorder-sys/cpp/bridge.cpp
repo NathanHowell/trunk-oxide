@@ -361,7 +361,12 @@ public:
     void set_channel(unsigned port, unsigned profile, double offset_hz) override { h_->set_channel(port, profile, offset_hz); }
     void set_filter(unsigned port, double cutoff_hz, double transition_hz) override { h_->set_filter(port, cutoff_hz, transition_hz); }
     void clear_channel(unsigned port) override { h_->clear_channel(port); }
-    void set_conditioning(unsigned port, unsigned sps, double excess_bw) override { h_->set_conditioning(port, sps, excess_bw); }
+    void set_conditioning(unsigned port, const ConditioningSpec &s) override {
+        h_->set_conditioning(port, s.sps, s.excess_bw, s.in_rate, s.out_rate, static_cast<uint32_t>(s.squelch));
+    }
+    void set_squelch_db(unsigned port, double db) override { h_->set_squelch_db(port, db); }
+    bool squelch_open(unsigned port) override { return h_->squelch_open(port); }
+    int next_squelch_event(unsigned port, double &pwr_db) override { return h_->next_squelch_event(port, pwr_db); }
     int freq_error_hz(unsigned port) override { return h_->freq_error_hz(port); }
     double power_db(unsigned port) override { return h_->power_db(port); }
     void process(const gr_complex *in, size_t nports, gr_complex *out, uint32_t *produced) override {

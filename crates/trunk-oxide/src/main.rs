@@ -13,7 +13,7 @@ use opentelemetry::KeyValue;
 use opentelemetry::trace::TracerProvider;
 use tracing_subscriber::prelude::*;
 use trunk_oxide::TrunkRecorderBuilder;
-use trunk_oxide_grpc::{EventBridge, TalkgroupMeta};
+use trunk_oxide_grpc::EventBridge;
 
 #[derive(Parser)]
 struct Args {
@@ -213,36 +213,7 @@ fn main() -> Result<()> {
 
     let config = trunk_config::Config::load(config_path).context("failed to load TOML config")?;
 
-    // Build talkgroup metadata lookup from config
-    let tg_map = {
-        use std::collections::HashMap;
-        let mut tg_map = HashMap::new();
-        for (short_name, sys) in &config.system {
-            for tg in &sys.talkgroup {
-                tg_map.insert(
-                    (short_name.clone(), tg.id),
-                    TalkgroupMeta {
-                        alpha_tag: tg.alpha_tag.clone(),
-                        tag: tg.tag.clone(),
-                        group: tg.group.clone(),
-                        priority: Some(tg.priority),
-                    },
-                );
-            }
-            for ch in &sys.channel {
-                tg_map.insert(
-                    (short_name.clone(), ch.id),
-                    TalkgroupMeta {
-                        alpha_tag: ch.alpha_tag.clone(),
-                        tag: ch.tag.clone(),
-                        group: ch.group.clone(),
-                        priority: Some(ch.priority),
-                    },
-                );
-            }
-        }
-        tg_map
-    };
+    let tg_map = trunk_oxide::talkgroup_meta_map(&config);
 
     let (bridge, stream_tx) = EventBridge::new(tg_map);
     let bridge = Arc::new(bridge);

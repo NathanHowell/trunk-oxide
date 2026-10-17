@@ -90,9 +90,9 @@ public:
   const Config &get_config();
   Source(double c, double r, double e, std::string driver, std::string device, const Config &cfg);
   Source(std::string sigmf_meta, std::string sigmf_data, bool repeat, const Config &cfg);
-  Source(std::string iq_file, bool repeat, double center, double rate, const Config &cfg);
+  Source(std::string iq_file, bool repeat, double center, double rate, const Config &cfg, std::string iq_format = "cf32");
   void init_shared();
-  void set_iq_source(std::string iq_file, bool repeat, double center, double rate);
+  void set_iq_source(std::string iq_file, bool repeat, double center, double rate, std::string iq_format = "cf32");
   gr::basic_block_sptr get_src_block();
   void attach_detector(gr::top_block_sptr tb);
   double get_min_hz();

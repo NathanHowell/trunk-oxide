@@ -149,7 +149,7 @@ Source::Source(double c, double r, double e, std::string drv, std::string dev, c
   }
 }
 
-void Source::set_iq_source(std::string iq_file, bool repeat, double center, double rate) {
+void Source::set_iq_source(std::string iq_file, bool repeat, double center, double rate, std::string iq_format) {
   this->rate = rate;
   this->center = center;
   error = 0;
@@ -174,7 +174,7 @@ void Source::set_iq_source(std::string iq_file, bool repeat, double center, doub
   signal_detector = signal_detector_cvf::make(rate, 1024, 0, -45, 0.9, true, 0.8, 0.01, 0.0, 50000, "");
 
   iq_file_source::sptr iq_file_src;
-  iq_file_src = iq_file_source::make(iq_file, this->rate, repeat);
+  iq_file_src = iq_file_source::make(iq_file, this->rate, repeat, iq_format);
 
   BOOST_LOG_TRIVIAL(info) << "SOURCE TYPE IQ FILE";
   BOOST_LOG_TRIVIAL(info) << "Setting Center to: " << FormatSamplingRate(center);
@@ -207,9 +207,9 @@ Source::Source(std::string sigmf_meta, std::string sigmf_data, bool repeat, cons
   set_iq_source(sigmf_data, repeat, center, rate);
 }
 
-Source::Source(std::string iq_file, bool repeat, double center, double rate, const Config &cfg)
+Source::Source(std::string iq_file, bool repeat, double center, double rate, const Config &cfg, std::string iq_format)
     : config(cfg) {
-  set_iq_source(iq_file, repeat, center, rate);
+  set_iq_source(iq_file, repeat, center, rate, iq_format);
 }
 
 void Source::attach_channelizer(gr::top_block_sptr tb) {

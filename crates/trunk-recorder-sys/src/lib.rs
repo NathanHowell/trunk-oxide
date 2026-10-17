@@ -266,6 +266,10 @@ pub mod ffi {
         pub digital_recorders: i32,
         pub analog_recorders: i32,
         pub sigmf_recorders: i32,
+        /// `iqfile` driver only: file format, "cf32" or "cu8".
+        pub iq_format: String,
+        /// `iqfile` driver only: loop the file (false = play once then stop).
+        pub iq_repeat: bool,
     }
 
     /// Minimal device parameters needed to open a source standalone for

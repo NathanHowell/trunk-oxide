@@ -11,6 +11,14 @@ pub enum SourceDriver {
     Iqfile,
 }
 
+fn default_iq_format() -> String {
+    "cf32".to_string()
+}
+
+const fn default_true() -> bool {
+    true
+}
+
 #[derive(Debug, Deserialize)]
 pub struct SourceConfig {
     pub driver: SourceDriver,
@@ -82,6 +90,14 @@ pub struct SourceConfig {
     pub sigmf_recorders: i32,
     #[serde(default)]
     pub enabled: Option<bool>,
+    /// `iqfile` driver only: sample format of the file, `cf32` (interleaved
+    /// float32, the default) or `cu8` (interleaved unsigned 8-bit, as written
+    /// by `rtl_sdr`).
+    #[serde(default = "default_iq_format")]
+    pub iq_format: String,
+    /// `iqfile` driver only: loop the file forever (default) or play it once.
+    #[serde(default = "default_true")]
+    pub iq_repeat: bool,
     /// Named gain stages, e.g. `{ "IF" = 20.0, "LNA" = 15.0 }`.
     #[serde(default)]
     pub gain_settings: HashMap<String, f64>,

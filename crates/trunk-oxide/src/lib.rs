@@ -228,6 +228,57 @@ pub struct TrunkRecorderBuilder {
     source_freq_corrections_hz: Vec<f64>,
 }
 
+/// Talkgroup/channel metadata from a parsed config, keyed by `(short_name, id)`,
+/// for [`trunk_oxide_grpc::EventBridge::new`].
+pub fn talkgroup_meta_map(
+    config: &Config,
+) -> HashMap<(String, i64), trunk_oxide_grpc::TalkgroupMeta> {
+    let mut map = HashMap::new();
+    for (short_name, sys) in &config.system {
+        for tg in &sys.talkgroup {
+            map.insert(
+                (short_name.clone(), tg.id),
+                trunk_oxide_grpc::TalkgroupMeta {
+                    alpha_tag: tg.alpha_tag.clone(),
+                    tag: tg.tag.clone(),
+                    group: tg.group.clone(),
+                    priority: Some(tg.priority),
+                },
+            );
+        }
+        for ch in &sys.channel {
+            map.insert(
+                (short_name.clone(), ch.id),
+                trunk_oxide_grpc::TalkgroupMeta {
+                    alpha_tag: ch.alpha_tag.clone(),
+                    tag: ch.tag.clone(),
+                    group: ch.group.clone(),
+                    priority: Some(ch.priority),
+                },
+            );
+        }
+    }
+    map
+}
+
+/// Options for [`TrunkRecorder::run_monitor_with`].
+pub struct MonitorOptions {
+    /// Exit the process when a source stops delivering samples (production
+    /// behaviour). Disable for finite IQ-file replay.
+    pub check_sources: bool,
+    /// When notified, conclude all calls and return.
+    pub shutdown: Option<Arc<tokio::sync::Notify>>,
+}
+
+impl Default for MonitorOptions {
+    fn default() -> Self {
+        Self {
+            check_sources: true,
+            shutdown: None,
+        }
+    }
+}
+
 /// A running trunk-recorder instance. Stops automatically on drop.
 pub struct TrunkRecorder {
     ctx: cxx::UniquePtr<ffi::TrContext>,
@@ -370,6 +421,8 @@ impl TrunkRecorderBuilder {
                     digital_recorders: src.digital_recorders,
                     analog_recorders: src.analog_recorders,
                     sigmf_recorders: src.sigmf_recorders,
+                    iq_format: src.iq_format.clone(),
+                    iq_repeat: src.iq_repeat,
                 },
             )?;
             let half_rate = src.rate / 2.0;
@@ -688,6 +741,17 @@ impl TrunkRecorder {
     /// `Handle::block_on`). All FFI calls are made on the calling thread,
     /// keeping `TrContext` (C++ objects) pinned.
     pub async fn run_monitor(&mut self) -> anyhow::Result<()> {
+        self.run_monitor_with(MonitorOptions::default()).await
+    }
+
+    /// [`run_monitor`](Self::run_monitor) with options: an explicit shutdown
+    /// trigger and control over the source-liveness check (replay of a finite
+    /// IQ file reaches end-of-file, which must not be treated as a dead dongle).
+    pub async fn run_monitor_with(&mut self, opts: MonitorOptions) -> anyhow::Result<()> {
+        let MonitorOptions {
+            check_sources,
+            shutdown,
+        } = opts;
         let mut call_mgr = CallManager::new(
             self.call_mgr_config.clone(),
             self.bridge.clone(),
@@ -716,6 +780,16 @@ impl TrunkRecorder {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
                     tracing::info!("shutting down");
+                    call_mgr.conclude_all(self.ctx.pin_mut());
+                    return Ok(());
+                },
+                () = async {
+                    match &shutdown {
+                        Some(n) => n.notified().await,
+                        None => std::future::pending().await,
+                    }
+                } => {
+                    tracing::info!("shutdown requested");
                     call_mgr.conclude_all(self.ctx.pin_mut());
                     return Ok(());
                 },
@@ -789,7 +863,9 @@ impl TrunkRecorder {
                 _ = tick.tick() => {
                     call_mgr.tick(self.ctx.pin_mut());
                     call_mgr.clear_stale_patches();
-                    if let Err(e) = ffi::tr_context_check_sources(self.ctx.pin_mut()) {
+                    if check_sources
+                        && let Err(e) = ffi::tr_context_check_sources(self.ctx.pin_mut())
+                    {
                         tracing::error!(%e, "source health check failed, exiting");
                         std::process::exit(1);
                     }

@@ -61,7 +61,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry \
     --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git \
     --mount=type=cache,target=/build/target,id=target-oxide \
     cargo build --release -p trunk-oxide \
-    && cp target/release/trunk-oxide /usr/local/bin/trunk-oxide
+    && cp target/release/trunk-oxide target/release/trunk-replay /usr/local/bin/
 
 # ── Runtime ──
 
@@ -86,7 +86,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=health-probe /ko-app/grpc-health-probe /usr/local/bin/grpc_health_probe
-COPY --from=builder /usr/local/bin/trunk-oxide /usr/local/bin/
+COPY --from=builder /usr/local/bin/trunk-oxide /usr/local/bin/trunk-replay /usr/local/bin/
 
 WORKDIR /app
 ENV HOME=/tmp

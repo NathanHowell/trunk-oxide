@@ -370,10 +370,12 @@ private:
 int32_t tr_add_source_from_config(TrContext &ctx, const TrSourceConfig &cfg) {
     std::string drv(cfg.driver.data(), cfg.driver.size());
     std::string dev(cfg.device.data(), cfg.device.size());
-    // "iqfile": `device` is the path to a gr_complex IQ file, looped forever.
-    // Used for hardware-free testing (tests/generate_test_iq.py).
+    // "iqfile": `device` is the path to a raw IQ file (cf32 or cu8), paced at
+    // the source rate; looped unless `iq_repeat` is false. Used for
+    // hardware-free testing (tests/generate_test_iq.py) and offline replay.
     auto source = (drv == "iqfile")
-        ? std::make_shared<Source>(dev, true, cfg.center, cfg.rate, ctx.impl->trunk_ctx.config)
+        ? std::make_shared<Source>(dev, cfg.iq_repeat, cfg.center, cfg.rate, ctx.impl->trunk_ctx.config,
+                                   std::string(cfg.iq_format.data(), cfg.iq_format.size()))
         : std::make_shared<Source>(cfg.center, cfg.rate, cfg.error, drv, dev,
                                    ctx.impl->trunk_ctx.config);
     source->init_shared();

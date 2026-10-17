@@ -25,6 +25,58 @@ impl DefaultMode {
     }
 }
 
+/// When the Rust conditioner restarts a channel's AGC and FLL.
+#[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConditionerReset {
+    /// Never (state carries over, as the GNU Radio blocks did).
+    #[default]
+    Never,
+    /// When a disabled channel is enabled.
+    Enable,
+    /// On enable and on every retune.
+    Retune,
+}
+
+/// AGC + FLL conditioning of digital channels, done in the Rust channelizer
+/// instead of GNU Radio blocks.
+#[derive(Debug, Deserialize)]
+pub struct ConditionerConfig {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default = "default_agc_alpha")]
+    pub agc_alpha: f64,
+    #[serde(default = "default_agc_reference")]
+    pub agc_reference: f64,
+    /// FLL loop bandwidth relative to GNU Radio's `2*pi/sps/250`.
+    #[serde(default = "default_fll_bw_scale")]
+    pub fll_bw_scale: f64,
+    #[serde(default)]
+    pub reset: ConditionerReset,
+}
+
+const fn default_agc_alpha() -> f64 {
+    0.45
+}
+const fn default_agc_reference() -> f64 {
+    0.85
+}
+const fn default_fll_bw_scale() -> f64 {
+    1.0
+}
+
+impl Default for ConditionerConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            agc_alpha: default_agc_alpha(),
+            agc_reference: default_agc_reference(),
+            fll_bw_scale: default_fll_bw_scale(),
+            reset: ConditionerReset::Never,
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[allow(clippy::struct_excessive_bools)]
 pub struct RecorderConfig {
@@ -40,6 +92,8 @@ pub struct RecorderConfig {
     /// `trunk-replay --tap`; leave unset in production.
     #[serde(default)]
     pub tap_dir: Option<String>,
+    #[serde(default)]
+    pub conditioner: ConditionerConfig,
     #[serde(default = "default_true")]
     pub record_uu_v_calls: bool,
     #[serde(default = "default_true")]

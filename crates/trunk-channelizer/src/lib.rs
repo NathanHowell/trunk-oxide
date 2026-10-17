@@ -10,6 +10,7 @@
 //! wxt.1 spike. See `examples/bench.rs` for measurements.
 
 mod channelizer;
+mod conditioner;
 mod config;
 mod design;
 mod fft;
@@ -20,6 +21,7 @@ mod service;
 pub mod fftw;
 
 pub use channelizer::{BlockStats, ChannelId, Channelizer};
+pub use conditioner::{Conditioner, ConditionerParams};
 pub use config::{Config, NARROW, Profile, ProfileId, ProfileSpec, WIDE};
 pub use design::{lowpass_taps, tap_count};
-pub use service::{Counters, SharedChannelizer};
+pub use service::{ConditioningSettings, Counters, ResetPolicy, SharedChannelizer, SlotStats};

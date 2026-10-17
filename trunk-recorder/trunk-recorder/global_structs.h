@@ -35,6 +35,9 @@ struct Config {
   // When non-empty, channel conditioners and decoders write raw taps here for
   // offline baselines (see xlat_channelizer::enable_tap).
   std::string tap_dir;
+  // Digital voice/control channels are conditioned (AGC + FLL) inside the Rust
+  // channelizer instead of GR blocks in xlat_channelizer.
+  bool rust_conditioner = false;
   std::shared_ptr<EventSink> event_sink;
 };
 

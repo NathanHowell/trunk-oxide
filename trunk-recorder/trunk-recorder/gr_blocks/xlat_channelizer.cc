@@ -3,9 +3,9 @@
 #include <fstream>
 #include <stdexcept>
 
-xlat_channelizer::sptr xlat_channelizer::make(int samples_per_symbol, double symbol_rate, double bandwidth, bool use_squelch, double channel_rate, double excess_bw) {
+xlat_channelizer::sptr xlat_channelizer::make(int samples_per_symbol, double symbol_rate, double bandwidth, bool use_squelch, double channel_rate, double excess_bw, bool external_conditioning) {
 
-  return gnuradio::get_initial_sptr(new xlat_channelizer(samples_per_symbol, symbol_rate, bandwidth, use_squelch, channel_rate, excess_bw));
+  return gnuradio::get_initial_sptr(new xlat_channelizer(samples_per_symbol, symbol_rate, bandwidth, use_squelch, channel_rate, excess_bw, external_conditioning));
 }
 
 const int xlat_channelizer::smartnet_samples_per_symbol;
@@ -15,13 +15,15 @@ const double xlat_channelizer::phase1_symbol_rate;
 const double xlat_channelizer::phase2_symbol_rate;
 const double xlat_channelizer::smartnet_symbol_rate;
 
-xlat_channelizer::xlat_channelizer(int samples_per_symbol, double symbol_rate, double bandwidth, bool use_squelch, double channel_rate_in, double excess_bw)
+xlat_channelizer::xlat_channelizer(int samples_per_symbol, double symbol_rate, double bandwidth, bool use_squelch, double channel_rate_in, double excess_bw, bool external_conditioning)
     : gr::hier_block2("xlat_channelizer_ccf",
                       gr::io_signature::make(1, 1, sizeof(gr_complex)),
                       gr::io_signature::make(1, 1, sizeof(gr_complex))),
       d_bandwidth(bandwidth),
       d_samples_per_symbol(samples_per_symbol),
-      d_use_squelch(use_squelch) {
+      d_use_squelch(use_squelch),
+      d_external(external_conditioning && !use_squelch),
+      d_excess_bw(excess_bw) {
 
   long channel_rate = symbol_rate * d_samples_per_symbol;
   d_channel_rate_in = channel_rate_in;
@@ -72,6 +74,21 @@ xlat_channelizer::xlat_channelizer(int samples_per_symbol, double symbol_rate, d
   // reverse squelch. If the power is then BELOW a threshold, open the squelch.
 
   squelch = callback_pwr_squelch_cc::make(0.0, 0.0001, 0, true);
+
+  if (d_external) {
+    // The channelizer already resampled (digital: arb_rate == 1) and conditions
+    // the channel; nothing left to do here.
+    if (arb_rate != 1.0) {
+      throw std::runtime_error("xlat_channelizer: external conditioning needs the channel at the symbol-rate multiple");
+    }
+    BOOST_LOG_TRIVIAL(info) << "\t Conditioning (AGC + FLL) in the channelizer";
+    // TODO: a hier_block2 cannot wire its input straight to its output; this
+    // goes away when the callers connect around the xlat_channelizer.
+    passthrough = gr::blocks::copy::make(sizeof(gr_complex));
+    connect(self(), 0, passthrough, 0);
+    connect(passthrough, 0, self(), 0);
+    return;
+  }
 
   // Power probe: taps off the filtered signal to measure average magnitude
   // without affecting the main signal path. alpha=0.0001 for a slow average.
@@ -128,7 +145,10 @@ xlat_channelizer::xlat_channelizer(int samples_per_symbol, double symbol_rate, d
   connect(fll_band_edge, 0, self(), 0);
 }
 
-int xlat_channelizer::get_freq_error() { // get frequency error from FLL and convert to Hz
+int xlat_channelizer::get_freq_error() {
+  if (d_external) {
+    return d_cond.freq_error ? d_cond.freq_error() : 0;
+  } // get frequency error from FLL and convert to Hz
   const float pi = M_PI;
   long if_rate = 24000;
   return int((fll_band_edge->get_frequency() / (2 * pi)) * if_rate);
@@ -139,6 +159,10 @@ bool xlat_channelizer::is_squelched() {
 }
 
 double xlat_channelizer::get_pwr() {
+  if (d_external) {
+    const double db = d_cond.power_db ? d_cond.power_db() : std::nan("");
+    return std::isnan(db) ? DB_UNSET : db;
+  }
   double level = pwr_probe->level();
   if (level > 0.0) {
     return 10.0 * std::log10(level);
@@ -177,12 +201,23 @@ void xlat_channelizer::set_analog_squelch(bool analog_squelch) {
   }
 }
 
+void xlat_channelizer::set_conditioning_hooks(ConditioningHooks hooks) {
+  d_cond = std::move(hooks);
+  if (d_cond.set) d_cond.set(d_samples_per_symbol, d_excess_bw);
+}
+
 void xlat_channelizer::set_samples_per_symbol(int samples_per_symbol) {
+  if (d_external) {
+    d_samples_per_symbol = samples_per_symbol;
+    if (d_cond.set) d_cond.set(samples_per_symbol, d_excess_bw);
+    return;
+  }
   fll_band_edge->set_samples_per_symbol(samples_per_symbol);
 }
 
 std::vector<gr::block_sptr> xlat_channelizer::get_metric_blocks() const {
   std::vector<gr::block_sptr> blocks;
+  if (d_external) return blocks;
   if (arb_resampler) blocks.push_back(arb_resampler);
   if (fll_band_edge) blocks.push_back(fll_band_edge);
   return blocks;
@@ -197,7 +232,11 @@ void xlat_channelizer::enable_tap() {
   tap_in->close();
   tap_out->close();
   connect(self(), 0, tap_in, 0);
-  connect(fll_band_edge, 0, tap_out, 0);
+  if (d_external) {
+    connect(passthrough, 0, tap_out, 0); // conditioned in the channelizer: input is already the output
+  } else {
+    connect(fll_band_edge, 0, tap_out, 0);
+  }
 }
 
 void xlat_channelizer::tap_open(const std::string &base, const std::string &meta_json) {

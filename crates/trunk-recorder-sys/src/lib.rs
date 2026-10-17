@@ -386,6 +386,7 @@ pub mod ffi {
         // ── Config builder functions ──
         fn tr_config_set_temp_dir(ctx: Pin<&mut TrContext>, dir: &str);
         fn tr_config_set_tap_dir(ctx: Pin<&mut TrContext>, dir: &str);
+        fn tr_config_set_rust_conditioner(ctx: Pin<&mut TrContext>, enabled: bool);
         fn tr_config_set_soft_vocoder(ctx: Pin<&mut TrContext>, enabled: bool);
         fn tr_config_set_debug_recorder(
             ctx: Pin<&mut TrContext>,
@@ -528,6 +529,11 @@ pub mod ffi {
             transition_hz: f64,
         );
         fn clear_channel(self: &SharedChannelizerHandle, port: u32);
+        /// AGC + FLL on the port's output; calling again changes `sps`.
+        fn set_conditioning(self: &SharedChannelizerHandle, port: u32, sps: u32, excess_bw: f64);
+        fn freq_error_hz(self: &SharedChannelizerHandle, port: u32) -> i32;
+        /// NaN until the port has carried signal.
+        fn power_db(self: &SharedChannelizerHandle, port: u32) -> f64;
         /// `input`: `hop` interleaved IQ samples. `output`: port-major,
         /// `max_out_per_block` IQ samples of stride per port. `produced[p]` =
         /// samples written for port p (0 = port inactive).
@@ -816,15 +822,31 @@ fn shared_channelizer_new(
     source: i32,
 ) -> Result<Box<SharedChannelizerHandle>, String> {
     let cfg = trunk_channelizer::Config::standard(sample_rate).map_err(|e| e.to_string())?;
-    let inner =
-        Arc::new(trunk_channelizer::SharedChannelizer::new(cfg).map_err(|e| e.to_string())?);
+    let settings = *CONDITIONING.lock().unwrap_or_else(PoisonError::into_inner);
+    let inner = Arc::new(
+        trunk_channelizer::SharedChannelizer::with_conditioning(cfg, settings)
+            .map_err(|e| e.to_string())?,
+    );
     let mut reg = CHANNELIZERS.lock().unwrap_or_else(PoisonError::into_inner);
     reg.retain(|(s, w)| *s != source && w.strong_count() > 0);
     reg.push((source, Arc::downgrade(&inner)));
     Ok(Box::new(SharedChannelizerHandle(inner)))
 }
 
+static CONDITIONING: Mutex<trunk_channelizer::ConditioningSettings> =
+    Mutex::new(trunk_channelizer::ConditioningSettings {
+        params: trunk_channelizer::ConditionerParams::DEFAULT,
+        reset: trunk_channelizer::ResetPolicy::Never,
+    });
+
+/// Conditioner settings for shared channelizers created from now on (call
+/// before the sources are built).
+pub fn set_conditioning_settings(settings: trunk_channelizer::ConditioningSettings) {
+    *CONDITIONING.lock().unwrap_or_else(PoisonError::into_inner) = settings;
+}
+
 pub use trunk_channelizer::Counters as ChannelizerCounters;
+pub use trunk_channelizer::{ConditionerParams, ConditioningSettings, ResetPolicy};
 
 /// One source's shared-channelizer counters (see [`channelizer_stats`]).
 #[derive(Clone, Copy, Debug)]
@@ -883,6 +905,20 @@ impl SharedChannelizerHandle {
 
     fn clear_channel(&self, port: u32) {
         self.0.clear_slot(port as usize);
+    }
+
+    fn set_conditioning(&self, port: u32, sps: u32, excess_bw: f64) {
+        #[allow(clippy::cast_possible_truncation)]
+        self.0
+            .set_slot_conditioning(port as usize, sps, excess_bw as f32);
+    }
+
+    fn freq_error_hz(&self, port: u32) -> i32 {
+        self.0.slot_freq_error_hz(port as usize)
+    }
+
+    fn power_db(&self, port: u32) -> f64 {
+        self.0.slot_power_db(port as usize)
     }
 
     fn process(&self, input: &[f32], output: &mut [f32], produced: &mut [u32]) {

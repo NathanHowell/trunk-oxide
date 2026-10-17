@@ -44,6 +44,12 @@ void shared_channelizer::set_port_filter(unsigned port, double cutoff_hz, double
   d_backend->set_filter(port, cutoff_hz, transition_hz);
 }
 
+void shared_channelizer::set_port_conditioning(unsigned port, unsigned sps, double excess_bw) {
+  std::lock_guard<std::mutex> l(d_mutex);
+  port_locked(port);
+  d_backend->set_conditioning(port, sps, excess_bw);
+}
+
 void shared_channelizer::set_port_offset(unsigned port, double offset_hz) {
   std::lock_guard<std::mutex> l(d_mutex);
   Port &p = port_locked(port);

@@ -43,6 +43,15 @@ public:
   // Disable `port`: it produces no output from the next block on.
   virtual void clear_channel(unsigned port) = 0;
 
+  // Condition the port's output with AGC and a band-edge FLL (digital
+  // channels). Persists while the port is disabled; calling it again with a
+  // different `sps` (P25 phase 1 <-> 2) retunes the FLL without resetting it.
+  virtual void set_conditioning(unsigned port, unsigned sps, double excess_bw) = 0;
+  // FLL frequency error (Hz) and smoothed input power (dB; NaN if none yet) of
+  // a conditioned port. Safe to call from any thread.
+  virtual int freq_error_hz(unsigned port) = 0;
+  virtual double power_db(unsigned port) = 0;
+
   // Consume exactly hop() samples. For each active port p < nports, write
   // out_per_block(profile of p) samples to out[p * max_out_per_block()] and set
   // produced[p] to that count; all other produced[] entries are set to 0.

@@ -233,6 +233,10 @@ void Source::channelizer_set_filter(unsigned int port, double cutoff_hz, double 
   channelizer->set_port_filter(port, cutoff_hz, transition_hz);
 }
 
+void Source::channelizer_set_conditioning(unsigned int port, unsigned sps, double excess_bw) {
+  channelizer->set_port_conditioning(port, sps, excess_bw);
+}
+
 unsigned int Source::add_channelizer_port(unsigned profile) {
   unsigned int port = next_channelizer_port++;
   channelizer->set_port_profile(port, profile);

@@ -105,7 +105,9 @@ fn delayed_interval(period: Duration) -> tokio::time::Interval {
 use call_manager::CallManager;
 use std::collections::HashMap;
 
-use trunk_config::{Config, DefaultMode, Modulation, SourceConfig, SourceDriver, SystemType};
+use trunk_config::{
+    Config, ConditionerReset, DefaultMode, Modulation, SourceConfig, SourceDriver, SystemType,
+};
 use trunk_oxide_grpc::EventBridge;
 use trunk_recorder_sys::ffi;
 
@@ -331,6 +333,21 @@ impl TrunkRecorderBuilder {
         if let Some(rec) = &config.recorder {
             ffi::tr_config_set_temp_dir(ctx.pin_mut(), &rec.temp_dir);
             ffi::tr_config_set_soft_vocoder(ctx.pin_mut(), rec.soft_vocoder);
+            let c = &rec.conditioner;
+            ffi::tr_config_set_rust_conditioner(ctx.pin_mut(), c.enabled);
+            trunk_recorder_sys::set_conditioning_settings(trunk_recorder_sys::ConditioningSettings {
+                params: trunk_recorder_sys::ConditionerParams {
+                    agc_alpha: c.agc_alpha,
+                    agc_reference: c.agc_reference,
+                    fll_bw_scale: c.fll_bw_scale,
+                    ..trunk_recorder_sys::ConditionerParams::DEFAULT
+                },
+                reset: match c.reset {
+                    ConditionerReset::Never => trunk_recorder_sys::ResetPolicy::Never,
+                    ConditionerReset::Enable => trunk_recorder_sys::ResetPolicy::Enable,
+                    ConditionerReset::Retune => trunk_recorder_sys::ResetPolicy::Retune,
+                },
+            });
             if let Some(dir) = &rec.tap_dir {
                 ffi::tr_config_set_tap_dir(ctx.pin_mut(), dir);
             }

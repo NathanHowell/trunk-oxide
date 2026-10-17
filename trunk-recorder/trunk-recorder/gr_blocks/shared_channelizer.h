@@ -31,6 +31,10 @@ public:
   // Offset of the port's channel from the source centre. Takes effect
   // immediately if the port is enabled, else when it is enabled.
   void set_port_offset(unsigned port, double offset_hz);
+  // AGC + FLL on the port's output (see channelizer_backend::set_conditioning).
+  void set_port_conditioning(unsigned port, unsigned sps, double excess_bw);
+  int port_freq_error_hz(unsigned port) { return d_backend->freq_error_hz(port); }
+  double port_power_db(unsigned port) { return d_backend->power_db(port); }
   void set_port_enabled(unsigned port, bool enabled);
   bool is_port_enabled(unsigned port);
   // True if samples flowed since the last call.

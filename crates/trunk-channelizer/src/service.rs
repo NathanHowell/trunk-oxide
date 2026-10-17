@@ -8,16 +8,61 @@
 //! slot is one consumer's port: it has a profile, a frequency and a filter,
 //! and the filter persists while the slot is disabled.
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::Instant;
 
 use anyhow::Result;
 use num_complex::Complex32;
 
 use crate::channelizer::{ChannelId, Channelizer};
-use crate::config::{Config, ProfileId};
+use crate::conditioner::{Conditioner, ConditionerParams};
+use crate::config::{Config, NARROW, ProfileId};
 
-#[derive(Clone, Copy, Debug)]
+/// When a slot's conditioner (AGC, FLL) starts over.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum ResetPolicy {
+    /// Never: state carries across disable/enable and retunes, as the GNU
+    /// Radio blocks it replaces did.
+    #[default]
+    Never,
+    /// When a disabled slot is enabled.
+    Enable,
+    /// On enable, and whenever an enabled slot is retuned.
+    Retune,
+}
+
+/// Conditioner settings shared by every slot of a [`SharedChannelizer`].
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ConditioningSettings {
+    pub params: ConditionerParams,
+    pub reset: ResetPolicy,
+}
+
+/// What a conditioned slot reports; readable from any thread.
+#[derive(Debug)]
+pub struct SlotStats {
+    freq_error_hz: AtomicI32,
+    /// `f64` bits; NaN until the first block.
+    power_db: AtomicU64,
+}
+
+impl SlotStats {
+    fn new() -> Self {
+        Self {
+            freq_error_hz: AtomicI32::new(0),
+            power_db: AtomicU64::new(f64::NAN.to_bits()),
+        }
+    }
+    pub fn freq_error_hz(&self) -> i32 {
+        self.freq_error_hz.load(Ordering::Relaxed)
+    }
+    pub fn power_db(&self) -> f64 {
+        f64::from_bits(self.power_db.load(Ordering::Relaxed))
+    }
+}
+
+#[derive(Clone, Debug)]
 enum Cmd {
     /// Enable (or retune) a slot at an offset from the source centre.
     Set {
@@ -33,6 +78,13 @@ enum Cmd {
     },
     Clear {
         slot: usize,
+    },
+    /// Condition the slot's output (or change its samples per symbol).
+    Condition {
+        slot: usize,
+        sps: u32,
+        excess_bw: f32,
+        stats: Arc<SlotStats>,
     },
 }
 
@@ -56,15 +108,29 @@ pub struct Counters {
 
 pub struct SharedChannelizer {
     cfg: Config,
+    cond: ConditioningSettings,
+    stats: Mutex<Vec<Option<Arc<SlotStats>>>>,
     mailbox: Mutex<Vec<Cmd>>,
     dsp: Mutex<Dsp>,
 }
 
-#[derive(Clone, Copy)]
 struct Slot {
     id: Option<ChannelId>,
     /// `(cutoff_hz, transition_hz)`; `None` = the profile's default.
     filter: Option<(f64, f64)>,
+    freq_hz: f64,
+    cond: Option<(Conditioner, Arc<SlotStats>)>,
+}
+
+impl Slot {
+    const fn empty() -> Self {
+        Self {
+            id: None,
+            filter: None,
+            freq_hz: 0.0,
+            cond: None,
+        }
+    }
 }
 
 struct Dsp {
@@ -75,9 +141,15 @@ struct Dsp {
 
 impl SharedChannelizer {
     pub fn new(cfg: Config) -> Result<Self> {
+        Self::with_conditioning(cfg, ConditioningSettings::default())
+    }
+
+    pub fn with_conditioning(cfg: Config, cond: ConditioningSettings) -> Result<Self> {
         let ch = Channelizer::new(cfg.clone())?;
         Ok(Self {
             cfg,
+            cond,
+            stats: Mutex::new(Vec::new()),
             mailbox: Mutex::new(Vec::new()),
             dsp: Mutex::new(Dsp {
                 ch,
@@ -108,6 +180,44 @@ impl SharedChannelizer {
             cutoff_hz,
             transition_hz,
         });
+    }
+
+    /// Run AGC and the band-edge FLL on `slot`'s output (narrow channels),
+    /// or change its samples per symbol if already conditioned. The
+    /// conditioner persists while the slot is disabled.
+    pub fn set_slot_conditioning(&self, slot: usize, sps: u32, excess_bw: f32) {
+        let stats = {
+            let mut v = self.stats.lock().unwrap_or_else(PoisonError::into_inner);
+            if v.len() <= slot {
+                v.resize(slot + 1, None);
+            }
+            Arc::clone(v[slot].get_or_insert_with(|| Arc::new(SlotStats::new())))
+        };
+        self.post(Cmd::Condition {
+            slot,
+            sps,
+            excess_bw,
+            stats,
+        });
+    }
+
+    /// FLL frequency error (Hz) of a conditioned slot, 0 if none.
+    pub fn slot_freq_error_hz(&self, slot: usize) -> i32 {
+        self.slot_stats(slot).map_or(0, |s| s.freq_error_hz())
+    }
+
+    /// Smoothed input power (dB) of a conditioned slot; NaN if none yet.
+    pub fn slot_power_db(&self, slot: usize) -> f64 {
+        self.slot_stats(slot).map_or(f64::NAN, |s| s.power_db())
+    }
+
+    fn slot_stats(&self, slot: usize) -> Option<Arc<SlotStats>> {
+        self.stats
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(slot)
+            .cloned()
+            .flatten()
     }
 
     /// Disable `slot` (it produces no output from the next block on).
@@ -189,15 +299,11 @@ impl SharedChannelizer {
                     freq_hz,
                 } => {
                     if slots.len() <= slot {
-                        slots.resize(
-                            slot + 1,
-                            Slot {
-                                id: None,
-                                filter: None,
-                            },
-                        );
+                        slots.resize_with(slot + 1, Slot::empty);
                     }
                     let s = &mut slots[slot];
+                    let was_enabled = s.id.is_some();
+                    let moved = (s.freq_hz - freq_hz).abs() > f64::EPSILON;
                     // A slot keeps its profile while enabled; changing it
                     // means a new channel.
                     let same =
@@ -227,6 +333,16 @@ impl SharedChannelizer {
                         if let Some(id) = s.id.take() {
                             ch.remove_channel(id);
                         }
+                    } else {
+                        s.freq_hz = freq_hz;
+                        let reset = match self.cond.reset {
+                            ResetPolicy::Never => false,
+                            ResetPolicy::Enable => !was_enabled,
+                            ResetPolicy::Retune => !was_enabled || moved,
+                        };
+                        if let (true, Some((c, _))) = (reset, s.cond.as_mut()) {
+                            c.reset();
+                        }
                     }
                 }
                 Cmd::Filter {
@@ -235,13 +351,7 @@ impl SharedChannelizer {
                     transition_hz,
                 } => {
                     if slots.len() <= slot {
-                        slots.resize(
-                            slot + 1,
-                            Slot {
-                                id: None,
-                                filter: None,
-                            },
-                        );
+                        slots.resize_with(slot + 1, Slot::empty);
                     }
                     let s = &mut slots[slot];
                     s.filter = Some((cutoff_hz, transition_hz));
@@ -249,6 +359,24 @@ impl SharedChannelizer {
                         && ch.set_filter(id, cutoff_hz, transition_hz).is_err()
                     {
                         counters.rejected += 1;
+                    }
+                }
+                Cmd::Condition {
+                    slot,
+                    sps,
+                    excess_bw,
+                    stats,
+                } => {
+                    if slots.len() <= slot {
+                        slots.resize_with(slot + 1, Slot::empty);
+                    }
+                    let s = &mut slots[slot];
+                    match s.cond.as_mut() {
+                        Some((c, _)) => c.set_samples_per_symbol(sps),
+                        None => {
+                            s.cond =
+                                Some((Conditioner::new(sps, excess_bw, self.cond.params), stats));
+                        }
                     }
                 }
                 Cmd::Clear { slot } => {
@@ -263,12 +391,24 @@ impl SharedChannelizer {
         counters.blocks += 1;
 
         produced.fill(0);
-        for (slot, s) in slots.iter().enumerate().take(produced.len()) {
+        let out_rate = self.cfg.out_rate(NARROW);
+        for (slot, s) in slots.iter_mut().enumerate().take(produced.len()) {
             if let Some(id) = s.id
                 && let Some(o) = ch.output(id)
             {
-                out[slot * stride..slot * stride + o.len()].copy_from_slice(o);
+                let dst = &mut out[slot * stride..slot * stride + o.len()];
+                dst.copy_from_slice(o);
                 produced[slot] = u32::try_from(o.len()).unwrap_or(u32::MAX);
+                if let Some((c, stats)) = s.cond.as_mut() {
+                    c.process(dst);
+                    stats
+                        .freq_error_hz
+                        .store(c.freq_error_hz(out_rate), Ordering::Relaxed);
+                    stats.power_db.store(
+                        c.power_db().unwrap_or(f64::NAN).to_bits(),
+                        Ordering::Relaxed,
+                    );
+                }
             }
         }
 
@@ -393,5 +533,28 @@ mod tests {
         assert_eq!(sc.take_counters().max_ns, 0);
         assert_eq!(sc.counters().blocks, 3);
         assert!(sc.block_budget_ns() > 1_000_000);
+    }
+
+    #[test]
+    fn conditioned_slot_reports_power_and_levels_output() {
+        let cfg = Config::standard(912_000.0).unwrap();
+        let (hop, stride) = (cfg.hop(), cfg.max_out_per_block());
+        let sc = SharedChannelizer::new(cfg.clone()).unwrap();
+        let mut out = vec![Complex32::ZERO; stride];
+        let mut produced = [0u32; 1];
+        assert!(sc.slot_power_db(0).is_nan());
+        sc.set_slot_conditioning(0, 5, 0.2);
+        sc.set_slot(0, NARROW, 50_000.0);
+        for i in 0..40 {
+            let mut x = tone(&cfg, 50_500.0, i * hop, hop);
+            x.iter_mut().for_each(|v| *v *= 0.05);
+            sc.process(&x, &mut out, &mut produced);
+        }
+        let n = produced[0] as usize;
+        let rms = (out[..n].iter().map(|c| c.norm_sqr()).sum::<f32>() / n as f32).sqrt();
+        assert!((rms - 0.85).abs() < 0.05, "AGC output rms {rms}");
+        let db = sc.slot_power_db(0);
+        // the probe's average is slow (alpha 1e-4), so it is still settling
+        assert!((-35.0..-26.0).contains(&db), "power {db} dB");
     }
 }

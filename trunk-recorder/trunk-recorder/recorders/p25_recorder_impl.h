@@ -72,6 +72,7 @@ public:
   void initialize_fsk4();
   void initialize_p25();
   bool start(const RecorderConfig &config) override;
+  void set_channelizer_port(unsigned int port) override;
   void stop() override;
   void flush_audio() override;
   int get_num() const;

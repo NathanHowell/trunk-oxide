@@ -80,8 +80,9 @@ fn set_path(root: &mut toml::Value, path: &str, value: &toml::Value) -> Result<(
                     t.insert((*seg).to_string(), value.clone());
                     return Ok(());
                 }
-                t.get_mut(*seg)
-                    .ok_or_else(|| anyhow!("no such key '{seg}' in '{path}'"))?
+                // Optional sub-tables (e.g. `recorder.conditioner`) may be absent.
+                t.entry((*seg).to_string())
+                    .or_insert_with(|| toml::Value::Table(toml::map::Map::new()))
             }
             toml::Value::Array(a) => {
                 let idx: usize = seg
@@ -298,7 +299,7 @@ mod tests {
         );
         assert_eq!(root["system"]["conv"]["squelch"], toml::Value::Float(-45.0));
         assert!(set_path(&mut root, "source.9.x", &toml::Value::Float(1.0)).is_err());
-        assert!(set_path(&mut root, "nope.x", &toml::Value::Float(1.0)).is_err());
+        assert!(set_path(&mut root, "system.conv.squelch.x", &toml::Value::Float(1.0)).is_err());
     }
 
     #[test]

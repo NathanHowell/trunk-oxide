@@ -324,6 +324,10 @@ void tr_config_set_temp_dir(TrContext &ctx, rust::Str dir) {
     ctx.impl->trunk_ctx.config.temp_dir = std::string(dir.data(), dir.size());
 }
 
+void tr_config_set_rust_conditioner(TrContext &ctx, bool enabled) {
+    ctx.impl->trunk_ctx.config.rust_conditioner = enabled;
+}
+
 void tr_config_set_tap_dir(TrContext &ctx, rust::Str dir) {
     ctx.impl->trunk_ctx.config.tap_dir = std::string(dir.data(), dir.size());
 }
@@ -357,6 +361,9 @@ public:
     void set_channel(unsigned port, unsigned profile, double offset_hz) override { h_->set_channel(port, profile, offset_hz); }
     void set_filter(unsigned port, double cutoff_hz, double transition_hz) override { h_->set_filter(port, cutoff_hz, transition_hz); }
     void clear_channel(unsigned port) override { h_->clear_channel(port); }
+    void set_conditioning(unsigned port, unsigned sps, double excess_bw) override { h_->set_conditioning(port, sps, excess_bw); }
+    int freq_error_hz(unsigned port) override { return h_->freq_error_hz(port); }
+    double power_db(unsigned port) override { return h_->power_db(port); }
     void process(const gr_complex *in, size_t nports, gr_complex *out, uint32_t *produced) override {
         h_->process(rust::Slice<const float>(reinterpret_cast<const float *>(in), 2 * hop_),
                     rust::Slice<float>(reinterpret_cast<float *>(out), 2 * nports * stride_),

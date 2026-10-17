@@ -32,7 +32,7 @@ public:
   bool conventional;
   unsigned int channelizer_port;
 
-  void set_channelizer_port(unsigned int port) {channelizer_port = port;}
+  virtual void set_channelizer_port(unsigned int port) {channelizer_port = port;}
   Recorder(Recorder_Type  type);
   int get_num() const { return rec_num; };
 

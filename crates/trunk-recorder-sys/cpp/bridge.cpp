@@ -18,6 +18,8 @@
 #include <gnuradio/blocks/vector_sink.h>
 
 #include <cctype>
+#include <chrono>
+#include <fstream>
 #include <sstream>
 #include <stdexcept>
 
@@ -322,6 +324,10 @@ void tr_config_set_temp_dir(TrContext &ctx, rust::Str dir) {
     ctx.impl->trunk_ctx.config.temp_dir = std::string(dir.data(), dir.size());
 }
 
+void tr_config_set_tap_dir(TrContext &ctx, rust::Str dir) {
+    ctx.impl->trunk_ctx.config.tap_dir = std::string(dir.data(), dir.size());
+}
+
 void tr_config_set_soft_vocoder(TrContext &ctx, bool enabled) {
     ctx.impl->trunk_ctx.config.soft_vocoder = enabled;
 }
@@ -612,6 +618,29 @@ struct TrunkDrainState {
     std::unique_ptr<P25Parser> p25_parser;            // non-null for P25
     P25ParserConfig p25_config;
 
+    // Offline baseline: every raw decoder message, before parsing
+    // (Config::tap_dir). One decoder = one GR thread, so no locking.
+    std::ofstream raw_log;
+    std::chrono::steady_clock::time_point raw_t0 = std::chrono::steady_clock::now();
+    uint64_t raw_seq = 0;
+
+    void log_raw(const gr::message::sptr &msg) {
+        if (!raw_log.is_open()) return;
+        static const char *hex = "0123456789abcdef";
+        std::string payload = msg->to_string();
+        std::string h;
+        h.reserve(payload.size() * 2);
+        for (unsigned char ch : payload) {
+            h.push_back(hex[ch >> 4]);
+            h.push_back(hex[ch & 15]);
+        }
+        auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - raw_t0).count();
+        raw_log << "{\"seq\":" << raw_seq++ << ",\"ms\":" << ms << ",\"type\":" << msg->type()
+                << ",\"arg1\":" << msg->arg1() << ",\"arg2\":" << msg->arg2()
+                << ",\"hex\":\"" << h << "\"}\n";
+        raw_log.flush();
+    }
+
     explicit TrunkDrainState(rust::Box<EventNotifier> n)
         : notifier(std::move(n)) {}
 };
@@ -647,7 +676,14 @@ void tr_context_wire_event_notifiers(TrContext &ctx) {
                 state->p25_config = std::move(p25_config);
             }
 
+            const std::string &tap_dir = ctx.impl->trunk_ctx.config.tap_dir;
+            if (!tap_dir.empty()) {
+                state->raw_log.open(tap_dir + "/cc_" + system->get_short_name() + "_" +
+                                    std::to_string(static_cast<long long>(decoder->get_freq())) + ".msgs.jsonl");
+            }
+
             decoder->set_msg_callback([state](gr::message::sptr msg) {
+                state->log_raw(msg);
                 std::vector<TrunkMessage> parsed;
                 if (state->smartnet_parser) {
                     parsed = state->smartnet_parser->parse_message(msg);

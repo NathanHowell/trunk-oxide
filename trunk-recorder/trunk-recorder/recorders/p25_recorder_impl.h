@@ -109,6 +109,11 @@ protected:
   p25_recorder_qpsk_demod_sptr qpsk_demod;
   p25_recorder_decode_sptr qpsk_p25_decode;
   xlat_channelizer::sptr prefilter;
+  // Offline taps (enabled by Config::tap_dir): demodulated symbols per demod.
+  gr::blocks::file_sink::sptr qpsk_symbol_tap;
+  gr::blocks::file_sink::sptr fsk4_symbol_tap;
+  void tap_begin(const RecorderConfig &config);
+  void tap_end();
 
 private:
   void tune_offset(double f);

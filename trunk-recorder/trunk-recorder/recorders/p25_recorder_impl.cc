@@ -47,6 +47,7 @@ void p25_recorder_impl::initialize(const std::shared_ptr<Source> &src) {
   prefilter = xlat_channelizer::make(xlat_channelizer::phase1_samples_per_symbol, xlat_channelizer::phase1_symbol_rate, xlat_channelizer::channel_bandwidth, conventional, chz->out_rate(CHANNEL_PROFILE_NARROW));
   prefilter->set_tune_hook([this](double offset_hz) { source->channelizer_set_offset(channelizer_port, offset_hz); });
   prefilter->set_filter_hook([this](double cutoff_hz, double transition_hz) { source->channelizer_set_filter(channelizer_port, cutoff_hz, transition_hz); });
+  if (!config.tap_dir.empty()) prefilter->enable_tap();
 
   modulation_selector = gr::blocks::selector::make(sizeof(gr_complex), 0, 0);
   qpsk_demod = make_p25_recorder_qpsk_demod();
@@ -64,6 +65,34 @@ void p25_recorder_impl::build_graph() {
   connect(fsk4_demod, 0, fsk4_p25_decode, 0);
   connect(modulation_selector, 1, qpsk_demod, 0);
   connect(qpsk_demod, 0, qpsk_p25_decode, 0);
+
+  if (prefilter->tap_enabled()) {
+    qpsk_symbol_tap = gr::blocks::file_sink::make(sizeof(float), "/dev/null");
+    fsk4_symbol_tap = gr::blocks::file_sink::make(sizeof(float), "/dev/null");
+    qpsk_symbol_tap->close();
+    fsk4_symbol_tap->close();
+    connect(qpsk_demod, 0, qpsk_symbol_tap, 0);
+    connect(fsk4_demod, 0, fsk4_symbol_tap, 0);
+  }
+}
+
+void p25_recorder_impl::tap_begin(const RecorderConfig &rc) {
+  if (!prefilter->tap_enabled()) return;
+  const std::string base = config.tap_dir + "/v_" + std::to_string(rc.rust_call_id) + "_" + rc.short_name + "_" + std::to_string(rc.talkgroup);
+  prefilter->tap_open(base, "\"kind\":\"voice\",\"system\":\"" + rc.short_name + "\",\"talkgroup\":" + std::to_string(rc.talkgroup) +
+                                ",\"freq\":" + std::to_string(static_cast<long long>(rc.freq)) +
+                                ",\"center\":" + std::to_string(static_cast<long long>(center_freq)) +
+                                ",\"tdma\":" + (rc.phase2_tdma ? "true" : "false") + ",\"slot\":" + std::to_string(rc.tdma_slot) +
+                                ",\"call_id\":" + std::to_string(rc.rust_call_id) + ",\"recorder\":" + std::to_string(rec_num) +
+                                ",\"symbols_file\":\"" + base + ".symbols.f32\"");
+  (qpsk_mod ? qpsk_symbol_tap : fsk4_symbol_tap)->open((base + ".symbols.f32").c_str());
+}
+
+void p25_recorder_impl::tap_end() {
+  if (!prefilter->tap_enabled()) return;
+  prefilter->tap_close();
+  qpsk_symbol_tap->close();
+  fsk4_symbol_tap->close();
 }
 
 void p25_recorder_impl::switch_tdma(bool phase2) {
@@ -223,6 +252,7 @@ void p25_recorder_impl::stop() {
   if (state == REC_ACTIVE) {
     state = REC_INACTIVE;
     set_enabled(false);
+    tap_end();
 
     clear();
     if (qpsk_mod) {
@@ -282,6 +312,7 @@ bool p25_recorder_impl::start(const RecorderConfig &config) {
     int offset_amount = (center_freq - chan_freq);
 
     prefilter->tune_offset(offset_amount);
+    tap_begin(config);
 
     if (qpsk_mod) {
       modulation_selector->set_output_index(1);

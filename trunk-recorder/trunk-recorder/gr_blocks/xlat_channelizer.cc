@@ -1,5 +1,6 @@
 #include "xlat_channelizer.h"
 #include <cmath>
+#include <fstream>
 #include <stdexcept>
 
 xlat_channelizer::sptr xlat_channelizer::make(int samples_per_symbol, double symbol_rate, double bandwidth, bool use_squelch, double channel_rate, double excess_bw) {
@@ -23,6 +24,8 @@ xlat_channelizer::xlat_channelizer(int samples_per_symbol, double symbol_rate, d
       d_use_squelch(use_squelch) {
 
   long channel_rate = symbol_rate * d_samples_per_symbol;
+  d_channel_rate_in = channel_rate_in;
+  d_channel_rate_out = channel_rate;
   // long if_rate = 12500;
 
   const float pi = M_PI;
@@ -183,4 +186,35 @@ std::vector<gr::block_sptr> xlat_channelizer::get_metric_blocks() const {
   if (arb_resampler) blocks.push_back(arb_resampler);
   if (fll_band_edge) blocks.push_back(fll_band_edge);
   return blocks;
+}
+
+void xlat_channelizer::enable_tap() {
+  if (tap_in) return;
+  // file_sink opens its file on construction; point it at /dev/null and close
+  // it so the sink drops samples until tap_open().
+  tap_in = gr::blocks::file_sink::make(sizeof(gr_complex), "/dev/null");
+  tap_out = gr::blocks::file_sink::make(sizeof(gr_complex), "/dev/null");
+  tap_in->close();
+  tap_out->close();
+  connect(self(), 0, tap_in, 0);
+  connect(fll_band_edge, 0, tap_out, 0);
+}
+
+void xlat_channelizer::tap_open(const std::string &base, const std::string &meta_json) {
+  if (!tap_in) return;
+  tap_in->open((base + ".in.cf32").c_str());
+  tap_out->open((base + ".out.cf32").c_str());
+  std::ofstream meta(base + ".json");
+  meta << "{\"format\":\"cf32\",\"in_rate\":" << d_channel_rate_in
+       << ",\"out_rate\":" << d_channel_rate_out
+       << ",\"samples_per_symbol\":" << d_samples_per_symbol
+       << ",\"squelch\":" << (d_use_squelch ? "true" : "false");
+  if (!meta_json.empty()) meta << "," << meta_json;
+  meta << "}\n";
+}
+
+void xlat_channelizer::tap_close() {
+  if (!tap_in) return;
+  tap_in->close();
+  tap_out->close();
 }

@@ -20,6 +20,7 @@
 #include <gnuradio/block.h>
 
 #include <gnuradio/analog/sig_source.h>
+#include <gnuradio/blocks/file_sink.h>
 #include <gnuradio/blocks/multiply.h>
 #include <gnuradio/blocks/multiply_const.h>
 #include <gnuradio/filter/fir_filter_blk.h>
@@ -161,6 +162,7 @@ private:
   gr::op25_repeater::fsk4_demod_ff::sptr fsk4_demod;
   gr::op25_repeater::p25_frame_assembler::sptr op25_frame_assembler;
   gr::op25_repeater::fsk4_slicer_fb::sptr slicer;
+  gr::blocks::file_sink::sptr dibit_sink; // offline tap of the slicer output (dibits)
   gr::op25_repeater::gardner_cc::sptr clock;
   gr::op25_repeater::costas_loop_cc::sptr costas;
   gr::digital::fll_band_edge_cc::sptr fll_band_edge;

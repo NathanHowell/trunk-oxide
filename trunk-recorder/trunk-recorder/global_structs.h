@@ -32,6 +32,9 @@ struct Config {
   bool debug_recorder;
   int debug_recorder_port;
   bool soft_vocoder;
+  // When non-empty, channel conditioners and decoders write raw taps here for
+  // offline baselines (see xlat_channelizer::enable_tap).
+  std::string tap_dir;
   std::shared_ptr<EventSink> event_sink;
 };
 

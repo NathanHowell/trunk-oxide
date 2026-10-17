@@ -331,6 +331,9 @@ impl TrunkRecorderBuilder {
         if let Some(rec) = &config.recorder {
             ffi::tr_config_set_temp_dir(ctx.pin_mut(), &rec.temp_dir);
             ffi::tr_config_set_soft_vocoder(ctx.pin_mut(), rec.soft_vocoder);
+            if let Some(dir) = &rec.tap_dir {
+                ffi::tr_config_set_tap_dir(ctx.pin_mut(), dir);
+            }
             ffi::tr_config_set_debug_recorder(
                 ctx.pin_mut(),
                 rec.debug.enabled,

@@ -119,6 +119,10 @@ private:
 
   /* GR blocks */
   xlat_channelizer::sptr prefilter;
+  // Offline tap bookkeeping (see set_enabled()).
+  bool tap_window_open = false;
+  int tap_window_seq = 0;
+  std::string short_name_tap;
   gr::filter::iir_filter_ffd::sptr deemph;
   gr::filter::fir_filter_fff::sptr sym_filter;
   gr::filter::fft_filter_ccf::sptr channel_lpf;

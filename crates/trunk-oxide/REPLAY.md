@@ -28,9 +28,10 @@ apply `freq_correction_hz`; replay does, through the normal tune path.
 ## Commands
 
 ```
-trunk-replay run   --capture DIR --out RUN [--set key=value]... [--limit-s N]
+trunk-replay run   --capture DIR --out RUN [--set key=value]... [--limit-s N] [--tap]
 trunk-replay sweep --capture DIR --out DIR [--grid key=v1,v2,..]... [--set key=value]... [-j 4]
 trunk-replay compare DIR
+trunk-replay taps  RUN/taps
 ```
 
 `--set` edits the config TOML before it is parsed: `source.2.freq_correction_hz=0`,
@@ -53,6 +54,37 @@ SysV shared-memory segments per process and the host allows 4096.
 - `config.toml` — the exact config that was replayed; `run.log` — process log.
 
 `comparison.md` in a sweep directory tabulates every variant's summary.
+
+## Decoder baselines (`--tap`)
+
+`run --tap` also writes `RUN/taps/` — the inputs and outputs of the C++ signal
+chain, for testing Rust replacements offline and faster than real time (no
+wall-clock logic involved). `trunk-replay taps RUN/taps` writes `index.json`
+and prints a table. Per tap (`<base>` = `cc_<system>_<freq Hz>` for a control
+channel, `v_<call id>_<system>_<tg>` for a P25 voice call, `a_<call id>_<system>_<tg>`
+for an analog channel), with a `<base>.json` sidecar describing it:
+
+| file | what | use |
+|---|---|---|
+| `.in.cf32` | conditioner input: the Rust shared channelizer's output (`in_rate`: 24 kS/s digital, ~101 kS/s analog) | input of a Rust conditioner (bead k55) |
+| `.out.cf32` | conditioner output: after resample, squelch, RMS AGC and FLL (`out_rate`) | input of a Rust demod / P25 decoder; expected output of the conditioner |
+| `.dibits` | control channels: slicer output, one byte (0..3) per dibit | input of a Rust frame assembler |
+| `.symbols.f32` | voice calls: demodulator output (soft symbols) | input of a Rust voice frame decoder |
+| `.msgs.jsonl` | control channels: every raw decoder message (`type`, `arg1`, `arg2`, `hex` payload, `ms` since start) | golden output of the decoder |
+
+Voice taps cover the span the recorder was active. An analog channel gets one
+tap per *enabled window* (`a_<recorder>_w<n>_<system>_<tg>`): a conventional
+channel is only enabled while signal detection sees a carrier, so there are
+gaps between windows and squelch gating is inside `.out.cf32`. The decoded WAVs
+and `events.jsonl` from the same run are the end-to-end golden output.
+
+The taps are deterministic: two replays of the same capture produce
+byte-identical `.in.cf32` / `.out.cf32` / `.dibits` and identical raw message
+sequences (only the tail length differs, by a few blocks, because the run is
+stopped by wall clock). Call-level results (`events.jsonl`, `summary.json`) vary
+slightly run to run — ±1 call, ~1 s of audio — because the state machine is
+wall-clock driven, so compare those with a tolerance. Taps are big (~4 GB per
+10 minutes); `recorder.tap_dir` enables them outside replay.
 
 ## Notes
 

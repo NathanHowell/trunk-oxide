@@ -298,7 +298,8 @@ void System_impl::setup_decoders(gr::top_block_sptr &tb, std::vector<std::shared
     unsigned int port = src->add_channelizer_port(CHANNEL_PROFILE_NARROW);
     ChannelTap tap{src->get_channelizer()->out_rate(CHANNEL_PROFILE_NARROW),
                    [src, port](double offset_hz) { src->channelizer_set_offset(port, offset_hz); },
-                   [src, port](double cutoff_hz, double transition_hz) { src->channelizer_set_filter(port, cutoff_hz, transition_hz); }};
+                   [src, port](double cutoff_hz, double transition_hz) { src->channelizer_set_filter(port, cutoff_hz, transition_hz); },
+                   src->get_config().tap_dir.empty() ? std::string() : src->get_config().tap_dir + "/cc_" + short_name + "_" + std::to_string(static_cast<long long>(freq))};
 
     std::shared_ptr<trunking_decoder> decoder;
     if (system_type == SYS_SMARTNET) {

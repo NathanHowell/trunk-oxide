@@ -118,6 +118,7 @@ analog_recorder::analog_recorder(const std::shared_ptr<Source> &src, const std::
   prefilter->set_tune_hook([this](double offset_hz) { source->channelizer_set_offset(channelizer_port, offset_hz); });
   prefilter->set_filter_hook([this](double cutoff_hz, double transition_hz) { source->channelizer_set_filter(channelizer_port, cutoff_hz, transition_hz); });
   prefilter->set_analog_squelch(true);
+  if (!config.tap_dir.empty()) prefilter->enable_tap();
 
   //  based on squelch code form ham2mon
   // set low -200 since its after demod and its just gate for previous squelch so that the audio
@@ -243,6 +244,21 @@ void analog_recorder::flush_audio() {
 
 void analog_recorder::set_enabled(bool enabled) {
   source->channelizer_set_enabled(channelizer_port, enabled);
+  // Offline tap: one file per enabled window (a conventional channel is only
+  // enabled while signal detection sees a carrier, so there are gaps between).
+  if (prefilter->tap_enabled() && enabled != tap_window_open) {
+    tap_window_open = enabled;
+    if (enabled) {
+      prefilter->tap_open(config.tap_dir + "/a_" + std::to_string(rec_num) + "_w" + std::to_string(tap_window_seq++) + "_" + short_name_tap + "_" + std::to_string(talkgroup),
+                          "\"kind\":\"analog\",\"system\":\"" + short_name_tap + "\",\"talkgroup\":" + std::to_string(talkgroup) +
+                              ",\"freq\":" + std::to_string(static_cast<long long>(chan_freq)) +
+                              ",\"center\":" + std::to_string(static_cast<long long>(center_freq)) +
+                              ",\"call_id\":" + std::to_string(rust_call_id) + ",\"recorder\":" + std::to_string(rec_num) +
+                              ",\"max_dev\":" + std::to_string(system->get_max_dev()) + ",\"squelch_db\":" + std::to_string(squelch_db));
+    } else {
+      prefilter->tap_close();
+    }
+  }
 }
 
 double analog_recorder::get_pwr() const {
@@ -310,6 +326,8 @@ bool analog_recorder::start(const RecorderConfig &config) {
   talkgroup = config.talkgroup;
   chan_freq = config.freq;
   rust_call_id = config.rust_call_id;
+  short_name_tap = config.short_name;
+  squelch_db = config.squelch_db;
 
   levels->set_k(system->get_analog_levels());
   int d_max_dev = system->get_max_dev();

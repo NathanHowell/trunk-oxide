@@ -13,6 +13,8 @@
 #include <gnuradio/hier_block2.h>
 
 #include <gnuradio/analog/probe_avg_mag_sqrd_c.h>
+#include <gnuradio/blocks/file_sink.h>
+#include <string>
 
 #include "../formatter.h"
 #include "../global_structs.h"
@@ -23,6 +25,7 @@ struct ChannelTap {
   double rate;
   std::function<void(double)> set_offset;               // offset from source centre, Hz
   std::function<void(double, double)> set_filter;       // cutoff, transition (Hz)
+  std::string tap_base;                                 // tap file path prefix; empty = no taps
 };
 
 class xlat_channelizer : public gr::hier_block2 {
@@ -67,6 +70,17 @@ public:
   void set_max_dev(double max_dev);
   bool uses_squelch() const { return d_use_squelch; }
 
+  // Offline-baseline taps. enable_tap() adds two file sinks, on the block's
+  // input (`.in.cf32`, the shared channelizer's output) and output (`.out.cf32`,
+  // after squelch, AGC and FLL); call it before the graph runs. The sinks
+  // discard samples until tap_open(base) opens `<base>.in.cf32`,
+  // `<base>.out.cf32` and a `<base>.json` sidecar (`meta_json` is spliced in as
+  // extra fields); tap_close() stops writing again.
+  void enable_tap();
+  bool tap_enabled() const { return tap_in != nullptr; }
+  void tap_open(const std::string &base, const std::string &meta_json = "");
+  void tap_close();
+
 private:
   double d_bandwidth;
   int d_samples_per_symbol;
@@ -82,6 +96,11 @@ private:
 
   gr::filter::pfb_arb_resampler_ccf::sptr arb_resampler;
   gr::analog::probe_avg_mag_sqrd_c::sptr pwr_probe;
+
+  double d_channel_rate_in = 0;
+  double d_channel_rate_out = 0;
+  gr::blocks::file_sink::sptr tap_in;
+  gr::blocks::file_sink::sptr tap_out;
 };
 
 #endif

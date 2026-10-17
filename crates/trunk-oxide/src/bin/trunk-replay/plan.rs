@@ -142,7 +142,12 @@ pub struct Plan {
 }
 
 /// Write `<run_dir>/config.toml` for replaying `capture_dir`.
-pub fn build(capture_dir: &Path, run_dir: &Path, overrides: &[Override]) -> Result<Plan> {
+pub fn build(
+    capture_dir: &Path,
+    run_dir: &Path,
+    overrides: &[Override],
+    tap: bool,
+) -> Result<Plan> {
     let capture = Capture::load(capture_dir)?;
     let base = capture_dir.join("config.toml");
     let text =
@@ -225,6 +230,15 @@ pub fn build(capture_dir: &Path, run_dir: &Path, overrides: &[Override]) -> Resu
                 t.insert("recorder".into(), r.into());
             })
     })?;
+    if tap {
+        let tap_dir = run_dir.join("taps");
+        std::fs::create_dir_all(&tap_dir)?;
+        set_path(
+            &mut root,
+            "recorder.tap_dir",
+            &toml::Value::String(tap_dir.display().to_string()),
+        )?;
+    }
     // Adaptive ppm correction mutates state from live FLL errors; keep replays
     // reproducible unless explicitly asked.
     let _ = set_path(

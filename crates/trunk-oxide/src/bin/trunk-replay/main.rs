@@ -8,6 +8,7 @@
 mod plan;
 mod record;
 mod sweep;
+mod taps;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -50,6 +51,10 @@ enum Cmd {
         /// Seconds to keep running after the last sample so calls can finish.
         #[arg(long, default_value_t = 8.0)]
         grace_s: f64,
+        /// Write decoder baseline taps to `<out>/taps` (conditioner IQ,
+        /// symbols/dibits, raw control messages); see REPLAY.md.
+        #[arg(long)]
+        tap: bool,
     },
     /// Run a grid of overrides in parallel and print a comparison table.
     Sweep {
@@ -75,6 +80,8 @@ enum Cmd {
     },
     /// Tabulate the summary.json of every run under a directory.
     Compare { dir: PathBuf },
+    /// Index a run's baseline taps (writes index.json, prints a table).
+    Taps { dir: PathBuf },
 }
 
 fn main() -> Result<()> {
@@ -89,7 +96,8 @@ fn main() -> Result<()> {
             set,
             limit_s,
             grace_s,
-        } => run(&capture, &out, &set, limit_s, grace_s),
+            tap,
+        } => run(&capture, &out, &set, limit_s, grace_s, tap),
         Cmd::Sweep {
             capture,
             out,
@@ -111,6 +119,10 @@ fn main() -> Result<()> {
             println!("{}", sweep::compare(&dir)?);
             Ok(())
         }
+        Cmd::Taps { dir } => {
+            println!("{}", taps::index(&dir)?);
+            Ok(())
+        }
     }
 }
 
@@ -120,9 +132,10 @@ fn run(
     overrides: &[Override],
     limit_s: Option<f64>,
     grace_s: f64,
+    tap: bool,
 ) -> Result<()> {
     std::fs::create_dir_all(out)?;
-    let plan = plan::build(capture, out, overrides)?;
+    let plan = plan::build(capture, out, overrides, tap)?;
     for s in &plan.skipped_sources {
         tracing::warn!(device = %s, "no capture for source; disabled");
     }

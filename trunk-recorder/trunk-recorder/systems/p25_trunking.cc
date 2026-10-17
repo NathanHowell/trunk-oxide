@@ -139,6 +139,15 @@ p25_trunking::p25_trunking(double f, double c, const ChannelTap &tap, bool qpsk,
   } else {
     initialize_qpsk();
   }
+  if (!tap.tap_base.empty()) {
+    prefilter->enable_tap();
+    prefilter->tap_open(tap.tap_base, "\"kind\":\"control_channel\",\"modulation\":\"" + std::string(qpsk_mod ? "qpsk" : "fsk4") +
+                                          "\",\"freq\":" + std::to_string(static_cast<long long>(f)) +
+                                          ",\"center\":" + std::to_string(static_cast<long long>(c)) +
+                                          ",\"dibits_file\":\"" + tap.tap_base + ".dibits\"");
+    dibit_sink = gr::blocks::file_sink::make(1, (tap.tap_base + ".dibits").c_str());
+    connect(slicer, 0, dibit_sink, 0);
+  }
   tune_freq(chan_freq);
 }
 

@@ -34,6 +34,12 @@ pub struct RecorderConfig {
     pub call_timeout: f64,
     #[serde(default)]
     pub soft_vocoder: bool,
+    /// Debug/baseline capture: when set, every channel conditioner and control
+    /// decoder writes raw taps (conditioner in/out IQ, demodulated symbols or
+    /// dibits, raw decoder messages) into this directory. Used by
+    /// `trunk-replay --tap`; leave unset in production.
+    #[serde(default)]
+    pub tap_dir: Option<String>,
     #[serde(default = "default_true")]
     pub record_uu_v_calls: bool,
     #[serde(default = "default_true")]

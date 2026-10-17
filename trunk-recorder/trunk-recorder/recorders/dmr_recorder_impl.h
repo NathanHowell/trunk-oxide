@@ -54,7 +54,7 @@
 #include <gnuradio/message.h>
 #include <gnuradio/msg_queue.h>
 
-#include "../gr_blocks/xlat_channelizer.h"
+#include "../gr_blocks/channel_control.h"
 #include "../gr_blocks/plugin_wrapper_impl.h"
 #include "../gr_blocks/selector.h"
 #include "../gr_blocks/headless_sink.h"
@@ -104,7 +104,7 @@ protected:
   double squelch_db;
 
   // gr::blocks::multiply_const_ss::sptr levels;
-  xlat_channelizer::sptr prefilter;
+  channel_control::sptr prefilter;
   gr::op25_repeater::gardner_cc::sptr clock;
   gr::op25_repeater::costas_loop_cc::sptr costas;
 

@@ -21,7 +21,7 @@
 #include <gnuradio/message.h>
 #include <gnuradio/blocks/null_sink.h>
 
-#include "../gr_blocks/xlat_channelizer.h"
+#include "../gr_blocks/channel_control.h"
 #include "smartnet_fsk2_demod.h"
 #include "trunking_decoder.h"
 
@@ -69,7 +69,7 @@ private:
   int sys_num;
 
 
-  xlat_channelizer::sptr prefilter;
+  channel_control::sptr prefilter;
 
   smartnet_fsk2_demod::sptr fsk2_demod;
 

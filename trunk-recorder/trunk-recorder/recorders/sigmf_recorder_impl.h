@@ -52,8 +52,7 @@
 #include <gnuradio/message.h>
 #include <gnuradio/msg_queue.h>
 #include <json.hpp>
-#include "../gr_blocks/rms_agc.h"
-#include "../gr_blocks/xlat_channelizer.h"
+#include "../gr_blocks/channel_control.h"
 #include "recorder.h"
 
 #include "../source.h"
@@ -99,7 +98,7 @@ private:
   // int num;
   RecorderState state;
 
-  xlat_channelizer::sptr prefilter;
+  channel_control::sptr prefilter;
   std::vector<float> arb_taps;
   std::vector<gr_complex> bandpass_filter_coeffs;
   std::vector<float> inital_lpf_taps;
@@ -114,11 +113,6 @@ private:
   gr::filter::fft_filter_ccc::sptr bandpass_filter;
   gr::filter::fft_filter_ccf::sptr lowpass_filter;
   gr::filter::fft_filter_ccf::sptr cutoff_filter;
-  gr::filter::freq_xlating_fir_filter<gr_complex, gr_complex, float>::sptr freq_xlat;
-  gr::filter::pfb_arb_resampler_ccf::sptr arb_resampler;
-  gr::digital::fll_band_edge_cc::sptr fll_band_edge;
-  gr::blocks::rms_agc::sptr rms_agc;
-  gr::analog::pwr_squelch_cc::sptr squelch;
   gr::blocks::file_sink::sptr raw_sink;
   gr::blocks::copy::sptr valve;
 };

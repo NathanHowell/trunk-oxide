@@ -37,7 +37,7 @@
 #include <gnuradio/message.h>
 #include <gnuradio/runtime_types.h>
 
-#include "../gr_blocks/xlat_channelizer.h"
+#include "../gr_blocks/channel_control.h"
 #include "../gr_blocks/selector.h"
 
 // #include <op25_repeater/include/op25_repeater/rmsagc_ff.h>
@@ -45,7 +45,6 @@
 #include "../../lib/gr-latency-manager/include/tag_to_msg.h"
 #include "../../lib/gr-latency/latency_probe.h"
 #include "../../lib/gr-latency/latency_tagger.h"
-#include "../gr_blocks/rms_agc.h"
 #include "../call_conventional.h"
 #include "p25_recorder.h"
 #include "p25_recorder_decode.h"
@@ -109,7 +108,7 @@ protected:
   p25_recorder_decode_sptr fsk4_p25_decode;
   p25_recorder_qpsk_demod_sptr qpsk_demod;
   p25_recorder_decode_sptr qpsk_p25_decode;
-  xlat_channelizer::sptr prefilter;
+  channel_control::sptr prefilter;
   // Offline taps (enabled by Config::tap_dir): demodulated symbols per demod.
   gr::blocks::file_sink::sptr qpsk_symbol_tap;
   gr::blocks::file_sink::sptr fsk4_symbol_tap;

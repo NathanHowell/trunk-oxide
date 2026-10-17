@@ -66,8 +66,8 @@ for an analog channel), with a `<base>.json` sidecar describing it:
 
 | file | what | use |
 |---|---|---|
-| `.in.cf32` | conditioner input: the Rust shared channelizer's output (`in_rate`: 24 kS/s digital, ~101 kS/s analog) | input of a Rust conditioner (bead k55) |
-| `.out.cf32` | conditioner output: after resample, squelch, RMS AGC and FLL (`out_rate`) | input of a Rust demod / P25 decoder; expected output of the conditioner |
+| `.in.cf32` | conditioner input (`in_rate`: 24 kS/s digital, ~101 kS/s analog). Only in baselines from before the conditioner moved into the Rust channelizer (k55), e.g. the golden capture's | `examples/condcheck.rs` input |
+| `.out.cf32` | the channelizer's conditioned output: after resample, squelch, RMS AGC and FLL (`out_rate`) | input of a Rust demod / P25 decoder; `condcheck` expected output |
 | `.dibits` | control channels: slicer output, one byte (0..3) per dibit | input of a Rust frame assembler |
 | `.symbols.f32` | voice calls: demodulator output (soft symbols) | input of a Rust voice frame decoder |
 | `.msgs.jsonl` | control channels: every raw decoder message (`type`, `arg1`, `arg2`, `hex` payload, `ms` since start) | golden output of the decoder |
@@ -79,7 +79,7 @@ gaps between windows and squelch gating is inside `.out.cf32`. The decoded WAVs
 and `events.jsonl` from the same run are the end-to-end golden output.
 
 The taps are deterministic: two replays of the same capture produce
-byte-identical `.in.cf32` / `.out.cf32` / `.dibits` and identical raw message
+byte-identical `.out.cf32` / `.dibits` and identical raw message
 sequences (only the tail length differs, by a few blocks, because the run is
 stopped by wall clock). Call-level results (`events.jsonl`, `summary.json`) vary
 slightly run to run — ±1 call, ~1 s of audio — because the state machine is

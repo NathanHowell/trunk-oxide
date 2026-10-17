@@ -113,8 +113,8 @@ analog_recorder::analog_recorder(const std::shared_ptr<Source> &src, const std::
 
   // The Prefilter provides the initial squelch for the channel
   // Input is one channel already extracted by the source's shared channelizer
-  // (at or above 96 kS/s; the prefilter's arbitrary resampler does the rest).
-  prefilter = xlat_channelizer::make(samp_per_sym, system_channel_rate / samp_per_sym, bandwidth, true, source->get_channelizer()->out_rate(CHANNEL_PROFILE_WIDE), xlat_channelizer::default_excess_bw, config.rust_conditioner);
+  // (at or above 96 kS/s; the channelizer's arbitrary resampler does the rest).
+  prefilter = channel_control::make(samp_per_sym, system_channel_rate / samp_per_sym, bandwidth, true, source->get_channelizer()->out_rate(CHANNEL_PROFILE_WIDE));
   prefilter->set_tune_hook([this](double offset_hz) { source->channelizer_set_offset(channelizer_port, offset_hz); });
   prefilter->set_filter_hook([this](double cutoff_hz, double transition_hz) { source->channelizer_set_filter(channelizer_port, cutoff_hz, transition_hz); });
   prefilter->set_analog_squelch(true);
@@ -175,9 +175,8 @@ analog_recorder::analog_recorder(const std::shared_ptr<Source> &src, const std::
 
   low_f = gr::filter::fir_filter_fff::make(1, low_f_taps);
 
-  // using squelch
-  connect(self(), 0, prefilter, 0);
-  connect(prefilter, 0, demod, 0);
+  connect(self(), 0, demod, 0);
+  if (prefilter->tap_enabled()) connect(self(), 0, prefilter->enable_tap(), 0);
   connect(demod, 0, deemph, 0);
   if (use_tone_squelch) {
     connect(deemph, 0, tone_squelch, 0); 
@@ -201,9 +200,7 @@ analog_recorder::~analog_recorder() {}
 
 void analog_recorder::set_channelizer_port(unsigned int port) {
   Recorder::set_channelizer_port(port);
-  if (prefilter->external_conditioning()) {
-    prefilter->set_conditioning_hooks(source->channelizer_conditioning(port));
-  }
+  prefilter->set_conditioning_hooks(source->channelizer_conditioning(port));
 }
 
 void analog_recorder::tune_offset(double f) { prefilter->tune_offset(f); }
@@ -358,10 +355,6 @@ bool analog_recorder::start(const RecorderConfig &config) {
 
 std::vector<gr::block_sptr> analog_recorder::get_metric_blocks() const {
   std::vector<gr::block_sptr> blocks;
-  if (prefilter) {
-    auto inner = prefilter->get_metric_blocks();
-    blocks.insert(blocks.end(), inner.begin(), inner.end());
-  }
   if (demod) blocks.push_back(demod);
   return blocks;
 }

@@ -37,7 +37,7 @@ class Source;
 class analog_recorder;
 
 #include "../gr_blocks/callback_ctcss_squelch_ff.h"
-#include "../gr_blocks/xlat_channelizer.h"
+#include "../gr_blocks/channel_control.h"
 #include "../gr_blocks/decoder_wrapper.h"
 #include "../gr_blocks/plugin_wrapper.h"
 #include "../gr_blocks/headless_sink.h"
@@ -119,7 +119,7 @@ private:
   void calculate_iir_taps(float tau);
 
   /* GR blocks */
-  xlat_channelizer::sptr prefilter;
+  channel_control::sptr prefilter;
   // Offline tap bookkeeping (see set_enabled()).
   bool tap_window_open = false;
   int tap_window_seq = 0;

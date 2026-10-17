@@ -15,7 +15,7 @@
 
 class Source;
 class System;
-class xlat_channelizer;
+class channel_control;
 
 class Recorder {
 

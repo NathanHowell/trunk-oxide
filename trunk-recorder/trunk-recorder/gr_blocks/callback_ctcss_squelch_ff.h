@@ -8,7 +8,7 @@
  *
  * gnuradio does not export the concrete ctcss_squelch_ff_impl, so we subclass
  * the abstract interface and provide our own general_work() and tone detector
- * (mirrors the approach used by callback_pwr_squelch_cc).
+ * (mirrors the power squelch in trunk-channelizer).
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */

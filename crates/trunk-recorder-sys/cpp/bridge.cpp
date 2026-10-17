@@ -324,10 +324,6 @@ void tr_config_set_temp_dir(TrContext &ctx, rust::Str dir) {
     ctx.impl->trunk_ctx.config.temp_dir = std::string(dir.data(), dir.size());
 }
 
-void tr_config_set_rust_conditioner(TrContext &ctx, bool enabled) {
-    ctx.impl->trunk_ctx.config.rust_conditioner = enabled;
-}
-
 void tr_config_set_tap_dir(TrContext &ctx, rust::Str dir) {
     ctx.impl->trunk_ctx.config.tap_dir = std::string(dir.data(), dir.size());
 }

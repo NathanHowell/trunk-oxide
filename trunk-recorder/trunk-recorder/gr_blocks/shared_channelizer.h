@@ -9,8 +9,8 @@
 
 #include "channelizer_backend.h"
 
-// What a recorder's xlat_channelizer calls instead of its own GR blocks when
-// the channelizer conditions its port (empty `set` = it does not).
+// What a recorder's channel_control calls to configure and read back the
+// conditioning the channelizer applies to its port.
 struct ConditioningHooks {
   std::function<void(const ConditioningSpec &)> set;
   std::function<int()> freq_error;
@@ -51,7 +51,7 @@ public:
   bool port_squelch_open(unsigned port) { return d_backend->squelch_open(port); }
   // Called on the GR thread, after the block that saw the transition.
   void set_port_squelch_callback(unsigned port, std::function<void(bool, double)> cb);
-  // The hooks an xlat_channelizer on `port` uses.
+  // The hooks a channel_control on `port` uses.
   ConditioningHooks conditioning_hooks(unsigned port);
   void set_port_enabled(unsigned port, bool enabled);
   bool is_port_enabled(unsigned port);

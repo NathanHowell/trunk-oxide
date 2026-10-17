@@ -15,7 +15,6 @@
 
 #include <gnuradio/blocks/multiply_const.h>
 #include <gnuradio/filter/fir_filter_blk.h>
-#include "../gr_blocks/rms_agc.h"
 #include <op25_repeater/fsk4_slicer_fb.h>
 #include <op25_repeater/rmsagc_ff.h>
 #include <op25_repeater/include/op25_repeater/fsk4_demod_ff.h>

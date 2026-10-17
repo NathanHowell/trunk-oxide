@@ -334,7 +334,6 @@ impl TrunkRecorderBuilder {
             ffi::tr_config_set_temp_dir(ctx.pin_mut(), &rec.temp_dir);
             ffi::tr_config_set_soft_vocoder(ctx.pin_mut(), rec.soft_vocoder);
             let c = &rec.conditioner;
-            ffi::tr_config_set_rust_conditioner(ctx.pin_mut(), c.enabled);
             trunk_recorder_sys::set_conditioning_settings(trunk_recorder_sys::ConditioningSettings {
                 params: trunk_recorder_sys::ConditionerParams {
                     agc_alpha: c.agc_alpha,

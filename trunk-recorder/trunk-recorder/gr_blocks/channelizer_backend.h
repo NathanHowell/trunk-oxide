@@ -19,7 +19,7 @@ enum ConditioningSquelch : unsigned {
   CONDITIONING_SQUELCH_DIGITAL = 2, // alpha 1e-4, no ramp, muted samples dropped
 };
 
-// Per-port conditioning, replacing xlat_channelizer's GR blocks: resample
+// Per-port conditioning, done in the channelizer: resample
 // in_rate -> out_rate when lower, power squelch, RMS AGC, band-edge FLL.
 struct ConditioningSpec {
   unsigned sps;

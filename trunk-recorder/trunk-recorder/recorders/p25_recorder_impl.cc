@@ -44,7 +44,7 @@ void p25_recorder_impl::initialize(const std::shared_ptr<Source> &src) {
 
   // Input is one channel already extracted by the source's shared channelizer.
   auto chz = source->get_channelizer();
-  prefilter = xlat_channelizer::make(xlat_channelizer::phase1_samples_per_symbol, xlat_channelizer::phase1_symbol_rate, xlat_channelizer::channel_bandwidth, conventional, chz->out_rate(CHANNEL_PROFILE_NARROW), xlat_channelizer::default_excess_bw, config.rust_conditioner);
+  prefilter = channel_control::make(channel_control::phase1_samples_per_symbol, channel_control::phase1_symbol_rate, channel_control::channel_bandwidth, conventional, chz->out_rate(CHANNEL_PROFILE_NARROW));
   prefilter->set_tune_hook([this](double offset_hz) { source->channelizer_set_offset(channelizer_port, offset_hz); });
   prefilter->set_filter_hook([this](double cutoff_hz, double transition_hz) { source->channelizer_set_filter(channelizer_port, cutoff_hz, transition_hz); });
   if (!config.tap_dir.empty()) prefilter->enable_tap();
@@ -56,9 +56,7 @@ void p25_recorder_impl::initialize(const std::shared_ptr<Source> &src) {
 
 void p25_recorder_impl::set_channelizer_port(unsigned int port) {
   Recorder::set_channelizer_port(port);
-  if (prefilter->external_conditioning()) {
-    prefilter->set_conditioning_hooks(source->channelizer_conditioning(port));
-  }
+  prefilter->set_conditioning_hooks(source->channelizer_conditioning(port));
 }
 
 void p25_recorder_impl::build_graph() {
@@ -66,14 +64,14 @@ void p25_recorder_impl::build_graph() {
   qpsk_p25_decode = make_p25_recorder_decode(self_recorder, config, silence_frames, d_soft_vocoder);
   fsk4_p25_decode = make_p25_recorder_decode(self_recorder, config, silence_frames, d_soft_vocoder);
 
-  connect(self(), 0, prefilter, 0);
-  connect(prefilter, 0, modulation_selector, 0);
+  connect(self(), 0, modulation_selector, 0);
   connect(modulation_selector, 0, fsk4_demod, 0);
   connect(fsk4_demod, 0, fsk4_p25_decode, 0);
   connect(modulation_selector, 1, qpsk_demod, 0);
   connect(qpsk_demod, 0, qpsk_p25_decode, 0);
 
   if (prefilter->tap_enabled()) {
+    connect(self(), 0, prefilter->enable_tap(), 0);
     qpsk_symbol_tap = gr::blocks::file_sink::make(sizeof(float), "/dev/null");
     fsk4_symbol_tap = gr::blocks::file_sink::make(sizeof(float), "/dev/null");
     qpsk_symbol_tap->close();
@@ -345,10 +343,6 @@ bool p25_recorder_impl::start(const RecorderConfig &config) {
 
 std::vector<gr::block_sptr> p25_recorder_impl::get_metric_blocks() const {
   std::vector<gr::block_sptr> blocks;
-  if (prefilter) {
-    auto inner = prefilter->get_metric_blocks();
-    blocks.insert(blocks.end(), inner.begin(), inner.end());
-  }
   if (modulation_selector) blocks.push_back(modulation_selector);
   return blocks;
 }

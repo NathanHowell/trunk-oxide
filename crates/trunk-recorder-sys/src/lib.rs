@@ -386,7 +386,6 @@ pub mod ffi {
         // ── Config builder functions ──
         fn tr_config_set_temp_dir(ctx: Pin<&mut TrContext>, dir: &str);
         fn tr_config_set_tap_dir(ctx: Pin<&mut TrContext>, dir: &str);
-        fn tr_config_set_rust_conditioner(ctx: Pin<&mut TrContext>, enabled: bool);
         fn tr_config_set_soft_vocoder(ctx: Pin<&mut TrContext>, enabled: bool);
         fn tr_config_set_debug_recorder(
             ctx: Pin<&mut TrContext>,

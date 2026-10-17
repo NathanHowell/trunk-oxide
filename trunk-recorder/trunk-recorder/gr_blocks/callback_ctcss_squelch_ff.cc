@@ -5,7 +5,7 @@
  * Tone detection is ported verbatim from gnuradio's ctcss_squelch_ff_impl
  * (three Goertzel correlators: center tone + the two neighbouring standard
  * CTCSS tones). The squelch state machine and callback are the same as
- * callback_pwr_squelch_cc.
+ * the power squelch now in trunk-channelizer's conditioner.
  *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
@@ -65,7 +65,7 @@ private:
     std::unique_ptr<gr::fft::goertzel> d_goertzel_c;
     std::unique_ptr<gr::fft::goertzel> d_goertzel_r;
 
-    // Squelch state machine (mirrors callback_pwr_squelch_cc)
+    // Squelch state machine (mirrors the power squelch in trunk-channelizer)
     int d_ramp;
     int d_ramped;
     bool d_gate;

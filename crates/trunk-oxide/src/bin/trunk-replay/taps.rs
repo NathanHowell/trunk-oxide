@@ -1,8 +1,10 @@
 //! Index of a run's baseline taps (`trunk-replay run --tap`).
 //!
 //! Every tap is `<base>.json` (sidecar) plus some of:
-//! - `<base>.in.cf32`  conditioner input: the shared channelizer's output (`in_rate`)
-//! - `<base>.out.cf32` conditioner output: after squelch, AGC and FLL (`out_rate`)
+//! - `<base>.in.cf32`  conditioner input (only in baselines from before the
+//!   conditioner moved into the Rust channelizer; `in_rate`)
+//! - `<base>.out.cf32` the channelizer's conditioned output: after resample,
+//!   squelch, AGC and FLL (`out_rate`)
 //! - `<base>.dibits`   control channels: slicer output, one byte (0..3) per dibit, 4800/s
 //! - `<base>.symbols.f32` voice calls: demodulator output, f32 symbols
 //! - `<base>.msgs.jsonl`  control channels: every raw decoder message (golden output)

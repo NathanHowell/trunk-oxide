@@ -39,7 +39,7 @@ void p25_trunking::initialize_fsk4() {
   tune_queue = gr::msg_queue::make(20);
   fsk4_demod = gr::op25_repeater::fsk4_demod_ff::make(tune_queue, phase1_channel_rate, phase1_symbol_rate);
 
-  connect(prefilter, 0, pll_freq_lock, 0);
+  connect(self(), 0, pll_freq_lock, 0);
   connect(pll_freq_lock, 0, pll_amp, 0);
   connect(pll_amp, 0, noise_filter, 0);
   connect(noise_filter, 0, sym_filter, 0);
@@ -77,7 +77,7 @@ void p25_trunking::initialize_qpsk() {
 
 
 
-  connect(prefilter, 0, clock, 0);
+  connect(self(), 0, clock, 0);
   connect(clock, 0, diffdec, 0);
   connect(diffdec, 0, costas,0);
   connect(costas,0, to_float, 0);
@@ -127,23 +127,20 @@ p25_trunking::p25_trunking(double f, double c, const ChannelTap &tap, bool qpsk,
   input_rate = static_cast<long>(tap.rate);
   qpsk_mod = qpsk;
 
-  prefilter = xlat_channelizer::make(xlat_channelizer::phase1_samples_per_symbol, xlat_channelizer::phase1_symbol_rate, xlat_channelizer::channel_bandwidth, false, tap.rate, xlat_channelizer::default_excess_bw, static_cast<bool>(tap.cond.set));
+  prefilter = channel_control::make(channel_control::phase1_samples_per_symbol, channel_control::phase1_symbol_rate, channel_control::channel_bandwidth, false, tap.rate, channel_control::default_excess_bw);
   prefilter->set_tune_hook(tap.set_offset);
   prefilter->set_filter_hook(tap.set_filter);
-  if (prefilter->external_conditioning()) {
-    prefilter->set_conditioning_hooks(tap.cond);
-  }
+  prefilter->set_conditioning_hooks(tap.cond);
 
   initialize_p25();
 
-  connect(self(),0, prefilter, 0);
   if (!qpsk_mod) {
     initialize_fsk4();
   } else {
     initialize_qpsk();
   }
   if (!tap.tap_base.empty()) {
-    prefilter->enable_tap();
+    connect(self(), 0, prefilter->enable_tap(), 0);
     prefilter->tap_open(tap.tap_base, "\"kind\":\"control_channel\",\"modulation\":\"" + std::string(qpsk_mod ? "qpsk" : "fsk4") +
                                           "\",\"freq\":" + std::to_string(static_cast<long long>(f)) +
                                           ",\"center\":" + std::to_string(static_cast<long long>(c)) +

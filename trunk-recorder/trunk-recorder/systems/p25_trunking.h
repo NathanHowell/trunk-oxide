@@ -48,9 +48,8 @@
 #include <gnuradio/message.h>
 #include <gnuradio/msg_queue.h>
 
-#include "../gr_blocks/rms_agc.h"
 //#include <op25_repeater/include/op25_repeater/rmsagc_ff.h>
-#include "../gr_blocks/xlat_channelizer.h"
+#include "../gr_blocks/channel_control.h"
 #include "trunking_decoder.h"
 
 class p25_trunking;
@@ -134,7 +133,7 @@ private:
   std::vector<float> cutoff_filter_coeffs;
 
 
-  xlat_channelizer::sptr prefilter;
+  channel_control::sptr prefilter;
   gr::analog::sig_source_c::sptr lo;
   gr::analog::sig_source_c::sptr bfo;
   gr::blocks::multiply_cc::sptr mixer;
@@ -166,8 +165,6 @@ private:
   gr::op25_repeater::gardner_cc::sptr clock;
   gr::op25_repeater::costas_loop_cc::sptr costas;
   gr::digital::fll_band_edge_cc::sptr fll_band_edge;
-  gr::blocks::rms_agc::sptr rms_agc;
-  //gr::op25_repeater::rmsagc_ff::sptr rms_agc;
 };
 
 #endif // ifndef P25_TRUNKING_H

@@ -38,12 +38,10 @@ pub enum ConditionerReset {
     Retune,
 }
 
-/// AGC + FLL conditioning of digital channels, done in the Rust channelizer
-/// instead of GNU Radio blocks.
+/// Per-channel conditioning (resampler, squelch, AGC, FLL), done in the Rust
+/// channelizer.
 #[derive(Debug, Deserialize)]
 pub struct ConditionerConfig {
-    #[serde(default = "default_true")]
-    pub enabled: bool,
     #[serde(default = "default_agc_alpha")]
     pub agc_alpha: f64,
     #[serde(default = "default_agc_reference")]
@@ -68,7 +66,6 @@ const fn default_fll_bw_scale() -> f64 {
 impl Default for ConditionerConfig {
     fn default() -> Self {
         Self {
-            enabled: true,
             agc_alpha: default_agc_alpha(),
             agc_reference: default_agc_reference(),
             fll_bw_scale: default_fll_bw_scale(),

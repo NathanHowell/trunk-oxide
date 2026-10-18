@@ -12,7 +12,8 @@ use serde::Deserialize;
 
 pub use discord::{ChannelGroup, ChannelMapping, DiscordConfig, NonZeroU64, TalkgroupSelector};
 pub use recorder::{
-    ConditionerConfig, ConditionerReset, DebugRecorderConfig, DefaultMode, RecorderConfig,
+    ConditionerConfig, ConditionerReset, DebugRecorderConfig, DefaultMode, P25Decoder,
+    RecorderConfig,
 };
 pub use service::{AudioConfig, GrpcConfig, OxideConfig, WhispererConfig};
 pub use source::{SourceConfig, SourceDriver};

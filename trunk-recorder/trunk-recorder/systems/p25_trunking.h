@@ -21,6 +21,7 @@
 
 #include <gnuradio/analog/sig_source.h>
 #include <gnuradio/blocks/file_sink.h>
+#include <gnuradio/blocks/null_sink.h>
 #include <gnuradio/blocks/multiply.h>
 #include <gnuradio/blocks/multiply_const.h>
 #include <gnuradio/filter/fir_filter_blk.h>
@@ -120,6 +121,10 @@ private:
   long if2;
   bool qpsk_mod;
   int sys_num;
+  // trunk-p25 decodes in the channelizer; the GR chain below is op25's,
+  // built only when Config::p25_decoder asks for it.
+  bool rust_decoder;
+  gr::blocks::null_sink::sptr null_sink;
   const int phase1_samples_per_symbol = 5;
   const int phase2_samples_per_symbol = 4;
   const double phase1_symbol_rate = 4800;

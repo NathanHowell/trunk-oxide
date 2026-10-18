@@ -18,6 +18,8 @@ struct ChannelTap {
   std::function<void(double, double)> set_filter;       // cutoff, transition (Hz)
   std::string tap_base;                                 // tap file path prefix; empty = no taps
   ConditioningHooks cond;
+  std::string system;                                   // system short name
+  P25DecoderImpl p25_decoder = P25DecoderImpl::Rust;
 };
 
 // Control side of one shared_channelizer port. The channelizer delivers the
@@ -63,6 +65,12 @@ public:
   void set_max_dev(double max_dev);
   bool uses_squelch() const { return d_use_squelch; }
 
+  // Decode the conditioned channel in the channelizer (P25 control channels).
+  // Messages arrive on the GR thread through set_message_callback(); both are
+  // kept until the hooks arrive if they are not set yet.
+  void set_decoder(ControlDecoder kind, const std::string &system, double freq_hz);
+  void set_message_callback(std::function<void(const DecodedMessage &)> cb);
+
   // Offline-baseline taps. enable_tap() returns a file sink for the caller to
   // connect to the conditioned channel; it discards samples until
   // tap_open(base) opens `<base>.out.cf32` and a `<base>.json` sidecar
@@ -80,6 +88,8 @@ private:
   ConditioningSquelch d_squelch_mode;
   ConditioningHooks d_cond;
   std::function<void(bool, double)> d_squelch_cb;
+  ControlDecoderSpec d_decoder{ControlDecoder::None, 0, "", 0};
+  std::function<void(const DecodedMessage &)> d_message_cb;
   void send_conditioning();
   std::function<void(double)> tune_hook;
   std::function<void(double, double)> filter_hook;

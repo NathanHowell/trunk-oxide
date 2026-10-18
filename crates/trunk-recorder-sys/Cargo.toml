@@ -12,6 +12,7 @@ cxx.workspace = true
 num-complex.workspace = true
 anyhow.workspace = true
 trunk-channelizer.workspace = true
+trunk-p25.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
 

@@ -26,6 +26,10 @@ struct Transmission {
   char filename[255];
 };
 
+// Who decodes P25 control channels: trunk-p25 on the channelizer slot, or
+// op25's GNU Radio chain (kept for A/B replays).
+enum class P25DecoderImpl { Rust, Op25 };
+
 struct Config {
   std::string temp_dir;
   std::string debug_recorder_address;
@@ -35,6 +39,7 @@ struct Config {
   // When non-empty, channel conditioners and decoders write raw taps here for
   // offline baselines (see channel_control::enable_tap).
   std::string tap_dir;
+  P25DecoderImpl p25_decoder = P25DecoderImpl::Rust;
   std::shared_ptr<EventSink> event_sink;
 };
 

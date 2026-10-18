@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <gnuradio/gr_complex.h>
+#include <string>
 
 // Channel profiles. A profile fixes a channel's geometry (output rate and
 // default filter); every channel, whatever its profile, has its own centre
@@ -27,6 +28,27 @@ struct ConditioningSpec {
   double in_rate;
   double out_rate;
   ConditioningSquelch squelch;
+};
+
+// Decoder a port runs on its conditioned output, inside the channelizer.
+enum class ControlDecoder : unsigned {
+  None = 0,
+  P25Cqpsk = 1,
+  P25C4fm = 2,
+};
+
+struct ControlDecoderSpec {
+  ControlDecoder kind;
+  double rate;        // the port's conditioned output rate (S/s)
+  std::string system; // short name, for metrics
+  double freq_hz;     // control channel frequency, for metrics
+};
+
+// A decoded message in op25's form: type (DUID; 0xffff = timeout) and body
+// (NAC, then data), exactly what p25_frame_assembler used to send.
+struct DecodedMessage {
+  long type;
+  std::string payload;
 };
 
 // DSP engine behind shared_channelizer. The trunk-recorder tree only sees this
@@ -73,6 +95,12 @@ public:
   // a conditioned port. Safe to call from any thread.
   virtual int freq_error_hz(unsigned port) = 0;
   virtual double power_db(unsigned port) = 0;
+
+  // Run a decoder on the port's conditioned output (kind None stops it). It
+  // persists while the port is disabled and resets itself on a retune.
+  virtual void set_decoder(unsigned port, const ControlDecoderSpec &spec) = 0;
+  // Pop the port decoder's oldest message; false if none.
+  virtual bool next_message(unsigned port, DecodedMessage &msg) = 0;
 
   // Consume exactly hop() samples. For each active port p < nports, write
   // out_per_block(profile of p) samples to out[p * max_out_per_block()] and set

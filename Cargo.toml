@@ -14,6 +14,7 @@ members = [
     "crates/trunk-discord",
     "crates/trunk-solver",
     "crates/trunk-channelizer",
+    "crates/trunk-p25",
 ]
 default-members = [
     "crates/trunk-recorder-sys",
@@ -55,6 +56,7 @@ trunk-oxide-proto = { path = "crates/trunk-oxide-proto" }
 trunk-oxide-grpc = { path = "crates/trunk-oxide-grpc" }
 trunk-transcriber-proto = { path = "crates/trunk-transcriber-proto" }
 trunk-channelizer = { path = "crates/trunk-channelizer" }
+trunk-p25 = { path = "crates/trunk-p25" }
 trunk-config = { path = "crates/trunk-config" }
 trunk-database = { path = "crates/trunk-database" }
 audiopus = "0.2"

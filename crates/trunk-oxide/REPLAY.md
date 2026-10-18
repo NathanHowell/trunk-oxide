@@ -68,7 +68,7 @@ for an analog channel), with a `<base>.json` sidecar describing it:
 |---|---|---|
 | `.in.cf32` | conditioner input (`in_rate`: 24 kS/s digital, ~101 kS/s analog). Only in baselines from before the conditioner moved into the Rust channelizer (k55), e.g. the golden capture's | `examples/condcheck.rs` input |
 | `.out.cf32` | the channelizer's conditioned output: after resample, squelch, RMS AGC and FLL (`out_rate`) | input of a Rust demod / P25 decoder; `condcheck` expected output |
-| `.dibits` | control channels: slicer output, one byte (0..3) per dibit | input of a Rust frame assembler |
+| `.dibits` | control channels decoded by op25 (`recorder.p25_decoder = "op25"`): slicer output, one byte (0..3) per dibit. trunk-p25 (the default) decodes inside the channelizer and writes none | input of a frame assembler |
 | `.symbols.f32` | voice calls: demodulator output (soft symbols) | input of a Rust voice frame decoder |
 | `.msgs.jsonl` | control channels: every raw decoder message (`type`, `arg1`, `arg2`, `hex` payload, `ms` since start) | golden output of the decoder |
 
@@ -85,6 +85,15 @@ stopped by wall clock). Call-level results (`events.jsonl`, `summary.json`) vary
 slightly run to run — ±1 call, ~1 s of audio — because the state machine is
 wall-clock driven, so compare those with a tolerance. Taps are big (~4 GB per
 10 minutes); `recorder.tap_dir` enables them outside replay.
+
+## Control-channel decoder A/B
+
+`recorder.p25_decoder` picks who decodes P25 control channels: `rust`
+(trunk-p25, the default) or `op25` (the GNU Radio chain). Run both with
+`--tap` and compare `taps/cc_*.msgs.jsonl`. Offline, without a replay,
+`cargo run --release -p trunk-p25 --example golden -- RUN/taps` decodes the
+tapped `.out.cf32` (and `.dibits`, if any) and scores the TSBKs against
+`.msgs.jsonl`.
 
 ## Notes
 

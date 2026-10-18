@@ -324,6 +324,11 @@ void tr_config_set_temp_dir(TrContext &ctx, rust::Str dir) {
     ctx.impl->trunk_ctx.config.temp_dir = std::string(dir.data(), dir.size());
 }
 
+void tr_config_set_p25_decoder(TrContext &ctx, TrP25Decoder decoder) {
+    ctx.impl->trunk_ctx.config.p25_decoder =
+        decoder == TrP25Decoder::Op25 ? P25DecoderImpl::Op25 : P25DecoderImpl::Rust;
+}
+
 void tr_config_set_tap_dir(TrContext &ctx, rust::Str dir) {
     ctx.impl->trunk_ctx.config.tap_dir = std::string(dir.data(), dir.size());
 }
@@ -365,6 +370,22 @@ public:
     int next_squelch_event(unsigned port, double &pwr_db) override { return h_->next_squelch_event(port, pwr_db); }
     int freq_error_hz(unsigned port) override { return h_->freq_error_hz(port); }
     double power_db(unsigned port) override { return h_->power_db(port); }
+    void set_decoder(unsigned port, const ControlDecoderSpec &s) override {
+        TrControlDecoder kind = TrControlDecoder::None;
+        switch (s.kind) {
+        case ControlDecoder::P25Cqpsk: kind = TrControlDecoder::P25Cqpsk; break;
+        case ControlDecoder::P25C4fm: kind = TrControlDecoder::P25C4fm; break;
+        case ControlDecoder::None: break;
+        }
+        h_->set_control_decoder(port, kind, s.rate, rust::Str(s.system), s.freq_hz);
+    }
+    bool next_message(unsigned port, DecodedMessage &msg) override {
+        TrDecodedMessage m;
+        if (!h_->next_decoded_message(port, m)) return false;
+        msg.type = static_cast<long>(m.msg_type);
+        msg.payload.assign(reinterpret_cast<const char *>(m.payload.data()), m.payload.size());
+        return true;
+    }
     void process(const gr_complex *in, size_t nports, gr_complex *out, uint32_t *produced) override {
         h_->process(rust::Slice<const float>(reinterpret_cast<const float *>(in), 2 * hop_),
                     rust::Slice<float>(reinterpret_cast<float *>(out), 2 * nports * stride_),

@@ -26,5 +26,6 @@ pub use conditioner::{Conditioner, ConditionerParams, SquelchEvent, SquelchMode}
 pub use config::{Config, NARROW, Profile, ProfileId, ProfileSpec, WIDE};
 pub use design::{lowpass_taps, tap_count};
 pub use service::{
-    ConditioningSettings, ConditioningSpec, Counters, ResetPolicy, SharedChannelizer, SlotStats,
+    ChannelDecoder, ConditioningSettings, ConditioningSpec, Counters, DECODER_RETUNE_HZ,
+    ResetPolicy, SharedChannelizer, SlotStats,
 };

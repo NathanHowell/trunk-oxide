@@ -3768,6 +3768,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "trunk-p25"
+version = "0.1.0"
+dependencies = [
+ "num-complex",
+ "serde_json",
+]
+
+[[package]]
 name = "trunk-parakeet"
 version = "0.1.0"
 dependencies = [
@@ -3807,6 +3815,7 @@ dependencies = [
  "tokio",
  "tracing",
  "trunk-channelizer",
+ "trunk-p25",
 ]
 
 [[package]]

@@ -53,6 +53,20 @@ pub struct ConditioningSpec {
     pub squelch: Option<SquelchMode>,
 }
 
+/// Consumes a slot's conditioned output on the DSP thread: a protocol
+/// decoder (P25 control channel, …) that lives beside the conditioner, so its
+/// input never crosses into GNU Radio. Results leave through whatever shared
+/// state the implementation holds.
+pub trait ChannelDecoder: Send + std::fmt::Debug {
+    /// One block of the slot's conditioned output.
+    fn process(&mut self, iq: &[Complex32]);
+    /// The slot was retuned to another channel: drop timing and lock state.
+    fn retune(&mut self);
+}
+
+/// A retune smaller than this (fine tuning) keeps the decoder's state.
+pub const DECODER_RETUNE_HZ: f64 = 1_000.0;
+
 /// `xlat_channelizer::get_freq_error` scales the FLL by 24 kHz whatever the
 /// channel rate; kept so the reported error means the same thing.
 const FREQ_ERROR_RATE: f64 = 24_000.0;
@@ -94,7 +108,7 @@ impl SlotStats {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 enum Cmd {
     /// Enable (or retune) a slot at an offset from the source centre.
     Set {
@@ -120,6 +134,10 @@ enum Cmd {
     SquelchDb {
         slot: usize,
         db: f64,
+    },
+    Decoder {
+        slot: usize,
+        decoder: Option<Box<dyn ChannelDecoder>>,
     },
 }
 
@@ -155,6 +173,7 @@ struct Slot {
     filter: Option<(f64, f64)>,
     freq_hz: f64,
     cond: Option<(Conditioner, ConditioningSpec, Arc<SlotStats>)>,
+    decoder: Option<Box<dyn ChannelDecoder>>,
 }
 
 impl Slot {
@@ -164,6 +183,7 @@ impl Slot {
             filter: None,
             freq_hz: 0.0,
             cond: None,
+            decoder: None,
         }
     }
 }
@@ -266,6 +286,13 @@ impl SharedChannelizer {
             .flatten()
     }
 
+    /// Run `decoder` on `slot`'s conditioned output (or stop, with `None`).
+    /// It persists while the slot is disabled and is told about retunes of
+    /// more than [`DECODER_RETUNE_HZ`].
+    pub fn set_slot_decoder(&self, slot: usize, decoder: Option<Box<dyn ChannelDecoder>>) {
+        self.post(Cmd::Decoder { slot, decoder });
+    }
+
     /// Disable `slot` (it produces no output from the next block on).
     pub fn clear_slot(&self, slot: usize) {
         self.post(Cmd::Clear { slot });
@@ -350,6 +377,7 @@ impl SharedChannelizer {
                     let s = &mut slots[slot];
                     let was_enabled = s.id.is_some();
                     let moved = (s.freq_hz - freq_hz).abs() > f64::EPSILON;
+                    let jumped = (s.freq_hz - freq_hz).abs() > DECODER_RETUNE_HZ;
                     // A slot keeps its profile while enabled; changing it
                     // means a new channel.
                     let same =
@@ -388,6 +416,9 @@ impl SharedChannelizer {
                         };
                         if let (true, Some((c, _, _))) = (reset, s.cond.as_mut()) {
                             c.reset();
+                        }
+                        if let (true, Some(d)) = (jumped, s.decoder.as_mut()) {
+                            d.retune();
                         }
                     }
                 }
@@ -433,6 +464,12 @@ impl SharedChannelizer {
                         c.set_squelch_db(db);
                     }
                 }
+                Cmd::Decoder { slot, decoder } => {
+                    if slots.len() <= slot {
+                        slots.resize_with(slot + 1, Slot::empty);
+                    }
+                    slots[slot].decoder = decoder;
+                }
                 Cmd::Clear { slot } => {
                     if let Some(id) = slots.get_mut(slot).and_then(|s| s.id.take()) {
                         ch.remove_channel(id);
@@ -461,6 +498,9 @@ impl SharedChannelizer {
                         o.len()
                     }
                 };
+                if let Some(d) = s.decoder.as_mut() {
+                    d.process(&dst[..n]);
+                }
                 produced[slot] = u32::try_from(n).unwrap_or(u32::MAX);
             }
         }
@@ -693,5 +733,61 @@ mod tests {
         assert!(!open.muted && close.muted);
         assert!(open.pwr_db > -40.0 && close.pwr_db < -40.0);
         assert!(sc.next_squelch_event(0).is_none());
+    }
+
+    #[derive(Debug, Default)]
+    struct Seen {
+        samples: usize,
+        retunes: usize,
+    }
+
+    #[derive(Debug)]
+    struct Recorder(Arc<Mutex<Seen>>);
+
+    impl ChannelDecoder for Recorder {
+        fn process(&mut self, iq: &[Complex32]) {
+            self.0.lock().unwrap().samples += iq.len();
+        }
+        fn retune(&mut self) {
+            self.0.lock().unwrap().retunes += 1;
+        }
+    }
+
+    #[test]
+    fn decoder_sees_the_slot_output_and_real_retunes_only() {
+        let cfg = Config::standard(2_496_000.0).unwrap();
+        let (hop, stride) = (cfg.hop(), cfg.max_out_per_block());
+        let sc = SharedChannelizer::new(cfg.clone()).unwrap();
+        let mut out = vec![Complex32::ZERO; 2 * stride];
+        let mut produced = [0u32; 2];
+        let seen = Arc::new(Mutex::new(Seen::default()));
+        sc.set_slot_decoder(1, Some(Box::new(Recorder(Arc::clone(&seen)))));
+        sc.set_slot(1, NARROW, 100_000.0);
+        let mut total = 0;
+        for i in 0..3 {
+            if i == 1 {
+                sc.set_slot(1, NARROW, 100_300.0); // fine tune: kept
+            }
+            if i == 2 {
+                sc.set_slot(1, NARROW, 250_000.0); // another channel
+            }
+            sc.process(
+                &tone(&cfg, 100_700.0, i * hop, hop),
+                &mut out,
+                &mut produced,
+            );
+            total += produced[1] as usize;
+        }
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.samples, total);
+        // Enabling counts as a jump from 0 Hz, plus the 150 kHz move.
+        assert_eq!(seen.retunes, 2);
+
+        sc.set_slot_decoder(1, None);
+        sc.process(
+            &tone(&cfg, 100_700.0, 3 * hop, hop),
+            &mut out,
+            &mut produced,
+        );
     }
 }

@@ -1,11 +1,38 @@
 #![allow(unsafe_code)]
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
+
+pub mod p25;
 
 #[cxx::bridge(namespace = "trunk_oxide")]
 pub mod ffi {
     // ── Shared enums (mirrored in both C++ and Rust) ──
+
+    /// Decoder a shared-channelizer slot runs on its conditioned output.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum TrControlDecoder {
+        None = 0,
+        P25Cqpsk = 1,
+        P25C4fm = 2,
+    }
+
+    /// Which implementation decodes P25 control channels.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum TrP25Decoder {
+        /// trunk-p25 on the channelizer slot.
+        Rust = 0,
+        /// op25's GNU Radio chain (kept for A/B replays).
+        Op25 = 1,
+    }
+
+    /// A decoded control-channel message in op25's wire form: the message
+    /// type (DUID, or 0xffff for a timeout) and the body (NAC, data).
+    struct TrDecodedMessage {
+        msg_type: i64,
+        payload: Vec<u8>,
+    }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum TrSignalType {
@@ -386,6 +413,7 @@ pub mod ffi {
         // ── Config builder functions ──
         fn tr_config_set_temp_dir(ctx: Pin<&mut TrContext>, dir: &str);
         fn tr_config_set_tap_dir(ctx: Pin<&mut TrContext>, dir: &str);
+        fn tr_config_set_p25_decoder(ctx: Pin<&mut TrContext>, decoder: TrP25Decoder);
         fn tr_config_set_soft_vocoder(ctx: Pin<&mut TrContext>, enabled: bool);
         fn tr_config_set_debug_recorder(
             ctx: Pin<&mut TrContext>,
@@ -548,6 +576,22 @@ pub mod ffi {
         fn freq_error_hz(self: &SharedChannelizerHandle, port: u32) -> i32;
         /// NaN until the port has carried signal.
         fn power_db(self: &SharedChannelizerHandle, port: u32) -> f64;
+        /// Run (or with `None`, stop) a control-channel decoder on the port's
+        /// conditioned output, which is `rate` S/s.
+        fn set_control_decoder(
+            self: &SharedChannelizerHandle,
+            port: u32,
+            decoder: TrControlDecoder,
+            rate: f64,
+            system: &str,
+            freq_hz: f64,
+        );
+        /// Pop the port decoder's oldest message; false if none.
+        fn next_decoded_message(
+            self: &SharedChannelizerHandle,
+            port: u32,
+            msg: &mut TrDecodedMessage,
+        ) -> bool;
         /// `input`: `hop` interleaved IQ samples. `output`: port-major,
         /// `max_out_per_block` IQ samples of stride per port. `produced[p]` =
         /// samples written for port p (0 = port inactive).
@@ -824,7 +868,12 @@ fn drop_event_handler_box(_handler: Box<EventHandlerBox>) {
 // ── Shared FFT channelizer ──
 
 /// Rust half of the C++ `channelizer_backend` (see bridge.cpp).
-pub struct SharedChannelizerHandle(Arc<trunk_channelizer::SharedChannelizer>);
+pub struct SharedChannelizerHandle {
+    engine: Arc<trunk_channelizer::SharedChannelizer>,
+    source: i32,
+    /// Drain side of each port's control-channel decoder.
+    decoders: Mutex<HashMap<u32, Arc<p25::Shared>>>,
+}
 
 /// Live channelizers by source index, so the Rust side can read their
 /// counters without a trip through C++. Weak: the GR block owns the engine.
@@ -844,7 +893,11 @@ fn shared_channelizer_new(
     let mut reg = CHANNELIZERS.lock().unwrap_or_else(PoisonError::into_inner);
     reg.retain(|(s, w)| *s != source && w.strong_count() > 0);
     reg.push((source, Arc::downgrade(&inner)));
-    Ok(Box::new(SharedChannelizerHandle(inner)))
+    Ok(Box::new(SharedChannelizerHandle {
+        engine: inner,
+        source,
+        decoders: Mutex::new(HashMap::new()),
+    }))
 }
 
 static CONDITIONING: Mutex<trunk_channelizer::ConditioningSettings> =
@@ -889,36 +942,37 @@ pub fn channelizer_stats() -> Vec<ChannelizerStats> {
 
 impl SharedChannelizerHandle {
     fn hop(&self) -> usize {
-        self.0.config().hop()
+        self.engine.config().hop()
     }
 
     fn profile_count(&self) -> u32 {
-        u32::try_from(self.0.config().profiles.len()).unwrap_or(u32::MAX)
+        u32::try_from(self.engine.config().profiles.len()).unwrap_or(u32::MAX)
     }
 
     fn out_per_block(&self, profile: u32) -> usize {
-        self.0.config().out_per_block(profile as usize)
+        self.engine.config().out_per_block(profile as usize)
     }
 
     fn max_out_per_block(&self) -> usize {
-        self.0.config().max_out_per_block()
+        self.engine.config().max_out_per_block()
     }
 
     fn out_rate(&self, profile: u32) -> f64 {
-        self.0.config().out_rate(profile as usize)
+        self.engine.config().out_rate(profile as usize)
     }
 
     fn set_channel(&self, port: u32, profile: u32, offset_hz: f64) {
-        self.0.set_slot(port as usize, profile as usize, offset_hz);
+        self.engine
+            .set_slot(port as usize, profile as usize, offset_hz);
     }
 
     fn set_filter(&self, port: u32, cutoff_hz: f64, transition_hz: f64) {
-        self.0
+        self.engine
             .set_slot_filter(port as usize, cutoff_hz, transition_hz);
     }
 
     fn clear_channel(&self, port: u32) {
-        self.0.clear_slot(port as usize);
+        self.engine.clear_slot(port as usize);
     }
 
     #[allow(clippy::cast_possible_truncation)]
@@ -936,7 +990,7 @@ impl SharedChannelizerHandle {
             2 => Some(trunk_channelizer::SquelchMode::DIGITAL),
             _ => None,
         };
-        self.0.set_slot_conditioning(
+        self.engine.set_slot_conditioning(
             port as usize,
             trunk_channelizer::ConditioningSpec {
                 sps,
@@ -949,15 +1003,15 @@ impl SharedChannelizerHandle {
     }
 
     fn set_squelch_db(&self, port: u32, db: f64) {
-        self.0.set_slot_squelch_db(port as usize, db);
+        self.engine.set_slot_squelch_db(port as usize, db);
     }
 
     fn squelch_open(&self, port: u32) -> bool {
-        self.0.slot_squelch_open(port as usize)
+        self.engine.slot_squelch_open(port as usize)
     }
 
     fn next_squelch_event(&self, port: u32, pwr_db: &mut f64) -> i32 {
-        match self.0.next_squelch_event(port as usize) {
+        match self.engine.next_squelch_event(port as usize) {
             Some(e) => {
                 *pwr_db = e.pwr_db;
                 if e.muted { 2 } else { 1 }
@@ -967,16 +1021,60 @@ impl SharedChannelizerHandle {
     }
 
     fn freq_error_hz(&self, port: u32) -> i32 {
-        self.0.slot_freq_error_hz(port as usize)
+        self.engine.slot_freq_error_hz(port as usize)
     }
 
     fn power_db(&self, port: u32) -> f64 {
-        self.0.slot_power_db(port as usize)
+        self.engine.slot_power_db(port as usize)
     }
 
     fn process(&self, input: &[f32], output: &mut [f32], produced: &mut [u32]) {
-        self.0
+        self.engine
             .process(as_complex(input), as_complex_mut(output), produced);
+    }
+
+    fn set_control_decoder(
+        &self,
+        port: u32,
+        decoder: ffi::TrControlDecoder,
+        rate: f64,
+        system: &str,
+        freq_hz: f64,
+    ) {
+        let mut decoders = self.decoders.lock().unwrap_or_else(PoisonError::into_inner);
+        let installed = trunk_p25::Modulation::try_from(decoder)
+            .ok()
+            .map(|modulation| {
+                let channel = p25::ControlChannel {
+                    system: system.to_owned(),
+                    freq_hz,
+                    source: self.source,
+                    port,
+                };
+                let (dsp, shared) = p25::attach(channel, modulation, rate);
+                decoders.insert(port, shared);
+                dsp
+            });
+        if installed.is_none() {
+            decoders.remove(&port);
+        }
+        self.engine.set_slot_decoder(port as usize, installed);
+    }
+
+    fn next_decoded_message(&self, port: u32, msg: &mut ffi::TrDecodedMessage) -> bool {
+        let shared = self
+            .decoders
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .get(&port)
+            .cloned();
+        match shared.and_then(|s| s.pop()) {
+            Some(r) => {
+                *msg = ffi::TrDecodedMessage::from(&r.message);
+                true
+            }
+            None => false,
+        }
     }
 }
 

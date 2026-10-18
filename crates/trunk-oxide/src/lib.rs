@@ -12,6 +12,7 @@ mod call_manager;
 mod call_state;
 mod dedup;
 mod p25_lfsr;
+mod p25_metrics;
 pub mod proc_stats;
 
 use std::hash::{Hash, Hasher};
@@ -333,6 +334,13 @@ impl TrunkRecorderBuilder {
         if let Some(rec) = &config.recorder {
             ffi::tr_config_set_temp_dir(ctx.pin_mut(), &rec.temp_dir);
             ffi::tr_config_set_soft_vocoder(ctx.pin_mut(), rec.soft_vocoder);
+            ffi::tr_config_set_p25_decoder(
+                ctx.pin_mut(),
+                match rec.p25_decoder {
+                    trunk_config::P25Decoder::Rust => ffi::TrP25Decoder::Rust,
+                    trunk_config::P25Decoder::Op25 => ffi::TrP25Decoder::Op25,
+                },
+            );
             let c = &rec.conditioner;
             trunk_recorder_sys::set_conditioning_settings(trunk_recorder_sys::ConditioningSettings {
                 params: trunk_recorder_sys::ConditionerParams {

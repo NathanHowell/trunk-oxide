@@ -25,6 +25,17 @@ impl DefaultMode {
     }
 }
 
+/// Who decodes P25 control channels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum P25Decoder {
+    /// trunk-p25, running on the channelizer slot.
+    #[default]
+    Rust,
+    /// op25's GNU Radio chain, kept for A/B replays.
+    Op25,
+}
+
 /// When the Rust conditioner restarts a channel's AGC and FLL.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -91,6 +102,8 @@ pub struct RecorderConfig {
     pub tap_dir: Option<String>,
     #[serde(default)]
     pub conditioner: ConditionerConfig,
+    #[serde(default)]
+    pub p25_decoder: P25Decoder,
     #[serde(default = "default_true")]
     pub record_uu_v_calls: bool,
     #[serde(default = "default_true")]

@@ -123,7 +123,12 @@ private:
   int sys_num;
   // trunk-p25 decodes in the channelizer; the GR chain below is op25's,
   // built only when Config::p25_decoder asks for it.
+  // trunk-p25 is the primary decoder (else op25 is).
   bool rust_decoder;
+  // Which decoders run: the primary, and in shadow mode the other as well.
+  bool run_rust;
+  bool run_op25;
+  std::function<void(P25DecoderImpl, bool, long, const std::string &)> observe;
   gr::blocks::null_sink::sptr null_sink;
   const int phase1_samples_per_symbol = 5;
   const int phase2_samples_per_symbol = 4;

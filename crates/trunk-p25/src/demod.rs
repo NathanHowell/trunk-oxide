@@ -23,7 +23,7 @@ use std::f32::consts::{FRAC_PI_4, PI};
 
 use num_complex::Complex32;
 
-use crate::symbols::{LEVELS, SYMBOL_RATE, slice, wrap};
+use crate::symbols::{LEVELS, PHASE2_SYMBOL_RATE, SYMBOL_RATE, slice, wrap};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Modulation {
@@ -34,6 +34,8 @@ pub enum Modulation {
 #[derive(Clone, Copy, Debug)]
 pub struct DemodConfig {
     pub sample_rate: f64,
+    /// 4800 baud for Phase 1, 6000 for Phase 2 TDMA.
+    pub symbol_rate: f64,
     pub modulation: Modulation,
     pub matched_filter: bool,
     /// Timing loop noise bandwidth, normalised to the symbol rate.
@@ -49,11 +51,20 @@ impl DemodConfig {
     pub const fn new(sample_rate: f64, modulation: Modulation) -> Self {
         Self {
             sample_rate,
+            symbol_rate: SYMBOL_RATE,
             modulation,
             matched_filter: false,
             timing_bandwidth: 0.0025,
             reference_memory: 0.0,
             bias_gain: 0.02,
+        }
+    }
+
+    /// Phase 2 TDMA: H-DQPSK at 6000 baud, read like CQPSK.
+    pub const fn phase2(sample_rate: f64) -> Self {
+        Self {
+            symbol_rate: PHASE2_SYMBOL_RATE,
+            ..Self::new(sample_rate, Modulation::Cqpsk)
         }
     }
 }
@@ -76,7 +87,7 @@ pub struct DemodStats {
     pub bias_hz: f32,
     /// Current samples per symbol estimate.
     pub sps: f64,
-    /// Samples per symbol at exactly 4800 baud.
+    /// Samples per symbol at exactly the nominal symbol rate.
     pub nominal_sps: f64,
 }
 
@@ -116,7 +127,7 @@ pub struct Demodulator {
 
 impl Demodulator {
     pub fn new(cfg: DemodConfig) -> Self {
-        let sps = cfg.sample_rate / SYMBOL_RATE;
+        let sps = cfg.sample_rate / cfg.symbol_rate;
         assert!(sps >= 2.0, "need at least 2 samples per symbol");
         let taps = if cfg.matched_filter {
             rrc_taps(sps, 0.2, 8)
@@ -155,7 +166,7 @@ impl Demodulator {
         DemodStats {
             symbols: self.symbols,
             noise_var: self.noise,
-            bias_hz: (f64::from(self.bias) * SYMBOL_RATE / std::f64::consts::TAU) as f32,
+            bias_hz: (f64::from(self.bias) * self.cfg.symbol_rate / std::f64::consts::TAU) as f32,
             sps: self.sps + self.period_adj,
             nominal_sps: self.sps,
         }

@@ -65,6 +65,12 @@ public:
   std::chrono::duration<double> since_last_voice();
   void stop();
   void flush_plugin();
+  // A shadow decodes only to be compared: its audio, source changes, aliases
+  // and crypto notices go nowhere.
+  void set_shadow(bool shadow) { d_shadow = shadow; }
+  // Source units the call in progress (or last call) named in band, in
+  // order of first appearance.
+  std::vector<long> call_sources() const;
   void reset();
   void reset_block(gr::basic_block_sptr block); 
   int tdma_slot;
@@ -79,5 +85,7 @@ public:
 private:
   void handle_alias_message(const nlohmann::json& j);
   mutable std::mutex d_state_mutex;
+  std::atomic<bool> d_shadow{false};
+  std::vector<long> d_call_sources; // guarded by d_state_mutex
 };
 #endif

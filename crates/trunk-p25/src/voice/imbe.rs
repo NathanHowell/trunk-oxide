@@ -327,9 +327,9 @@ mod tests {
             let p = random_params(&mut rng);
             let f = decode(&llrs(&p.encode(), 0.8, &mut rng));
             if f.params.0[..7] == p.0[..7] {
-                good.push(f.reliability)
+                good.push(f.reliability);
             } else {
-                bad.push(f.reliability)
+                bad.push(f.reliability);
             }
         }
         #[allow(clippy::cast_precision_loss)]

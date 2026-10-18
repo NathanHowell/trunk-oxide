@@ -249,7 +249,7 @@ impl Framer {
 
         // Sync search runs all the time; a sync ends whatever was in flight.
         let errors = (self.acc ^ FRAME_SYNC).count_ones();
-        let start = idx + 1 - SYNC_DIBITS as u64;
+        let start = (idx + 1).saturating_sub(SYNC_DIBITS as u64);
         let at_expected = self.expect_sync_at == Some(start)
             || self
                 .cur

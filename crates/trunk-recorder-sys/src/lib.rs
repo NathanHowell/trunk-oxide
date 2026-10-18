@@ -5,7 +5,10 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 pub mod p25;
+pub mod shadow;
 
+// cxx derives `Clone` field by field for shared structs.
+#[allow(clippy::clone_on_copy)]
 #[cxx::bridge(namespace = "trunk_oxide")]
 pub mod ffi {
     // ── Shared enums (mirrored in both C++ and Rust) ──
@@ -31,6 +34,29 @@ pub mod ffi {
     struct TrCallCounts {
         errors: u64,
         spikes: u64,
+    }
+
+    /// One P25 voice decoder's account of a call (see `P25CallAccount`).
+    struct TrCallAccount {
+        decoder: TrP25Decoder,
+        primary: bool,
+        audio_seconds: f64,
+        transmissions: i64,
+        errors: i64,
+        spikes: i64,
+        /// Source units named in band, in order of first appearance.
+        sources: Vec<i64>,
+    }
+
+    /// A P25 voice call's outcome: the primary decoder's account and, in
+    /// shadow mode, the shadow's.
+    struct TrCallReport {
+        system: String,
+        recorder: i32,
+        talkgroup: i64,
+        freq: f64,
+        phase2: bool,
+        accounts: Vec<TrCallAccount>,
     }
 
     /// A decoded control-channel message in op25's wire form: the message
@@ -420,7 +446,20 @@ pub mod ffi {
         fn tr_config_set_temp_dir(ctx: Pin<&mut TrContext>, dir: &str);
         fn tr_config_set_tap_dir(ctx: Pin<&mut TrContext>, dir: &str);
         fn tr_config_set_p25_decoder(ctx: Pin<&mut TrContext>, decoder: TrP25Decoder);
-        fn tr_config_set_p25_voice_decoder(ctx: Pin<&mut TrContext>, decoder: TrP25Decoder);
+        fn tr_config_set_p25_voice_decoder(
+            ctx: Pin<&mut TrContext>,
+            phase1: TrP25Decoder,
+            phase2: TrP25Decoder,
+        );
+        /// Shadow mode: run the other P25 implementation beside the primary
+        /// on control channels, phase 1 and/or phase 2 voice. Also installs
+        /// the observers that report every decoder's output to Rust.
+        fn tr_config_set_p25_shadow(
+            ctx: Pin<&mut TrContext>,
+            control: bool,
+            phase1: bool,
+            phase2: bool,
+        );
         fn tr_config_set_soft_vocoder(ctx: Pin<&mut TrContext>, enabled: bool);
         fn tr_config_set_debug_recorder(
             ctx: Pin<&mut TrContext>,
@@ -539,7 +578,23 @@ pub mod ffi {
 
     // ── Shared FFT channelizer engine (called from the GR thread / control threads) ──
 
-    // ── trunk-p25 phase 1 voice regenerator (one per P25 recorder) ──
+    // ── P25 decoder observers (every implementation, for metrics and shadow mode) ──
+
+    extern "Rust" {
+        /// A control-channel message from either implementation.
+        fn p25_observe_cc_message(
+            system: &str,
+            freq_hz: f64,
+            decoder: TrP25Decoder,
+            primary: bool,
+            msg_type: i64,
+            payload: &[u8],
+        );
+        /// A P25 voice call ended.
+        fn p25_observe_call(report: &TrCallReport);
+    }
+
+    // ── trunk-p25 voice regenerator, phase 1 and 2 (one per P25 recorder) ──
 
     extern "Rust" {
         type P25RegeneratorHandle;
@@ -550,7 +605,14 @@ pub mod ffi {
         #[cxx_name = "process"]
         fn regenerator_process(self: &mut P25RegeneratorHandle, input: &[f32], out: &mut Vec<f32>);
         #[cxx_name = "start_call"]
-        fn regenerator_start_call(self: &mut P25RegeneratorHandle, qpsk: bool, system: &str);
+        fn regenerator_start_call(
+            self: &mut P25RegeneratorHandle,
+            qpsk: bool,
+            tdma: bool,
+            xor_mask: &[u8],
+            system: &str,
+            primary: bool,
+        );
         #[cxx_name = "take_call_counts"]
         fn regenerator_take_call_counts(self: &mut P25RegeneratorHandle) -> TrCallCounts;
     }
@@ -608,6 +670,7 @@ pub mod ffi {
             rate: f64,
             system: &str,
             freq_hz: f64,
+            primary: bool,
         );
         /// Pop the port decoder's oldest message; false if none.
         fn next_decoded_message(
@@ -892,6 +955,28 @@ fn drop_event_handler_box(_handler: Box<EventHandlerBox>) {
 
 use p25::P25RegeneratorHandle;
 
+fn p25_observe_cc_message(
+    system: &str,
+    freq_hz: f64,
+    decoder: ffi::TrP25Decoder,
+    primary: bool,
+    msg_type: i64,
+    payload: &[u8],
+) {
+    shadow::observe_cc_message(
+        system,
+        freq_hz,
+        decoder.into(),
+        p25::Role::of(primary),
+        msg_type,
+        payload,
+    );
+}
+
+fn p25_observe_call(report: &ffi::TrCallReport) {
+    shadow::observe_call(report);
+}
+
 fn p25_regenerator_new(rate: f64, recorder: i32) -> Box<P25RegeneratorHandle> {
     p25::regenerator_new(rate, recorder)
 }
@@ -901,11 +986,18 @@ impl P25RegeneratorHandle {
         self.process(as_complex(input), out);
     }
 
-    fn regenerator_start_call(&mut self, qpsk: bool, system: &str) {
-        self.start_call(qpsk, system);
+    fn regenerator_start_call(
+        &mut self,
+        qpsk: bool,
+        tdma: bool,
+        xor_mask: &[u8],
+        system: &str,
+        primary: bool,
+    ) {
+        self.start_call(qpsk, tdma, xor_mask, system, primary);
     }
 
-    fn regenerator_take_call_counts(&mut self) -> ffi::TrCallCounts {
+    const fn regenerator_take_call_counts(&mut self) -> ffi::TrCallCounts {
         self.take_call_counts()
     }
 }
@@ -1083,6 +1175,7 @@ impl SharedChannelizerHandle {
         rate: f64,
         system: &str,
         freq_hz: f64,
+        primary: bool,
     ) {
         let mut decoders = self.decoders.lock().unwrap_or_else(PoisonError::into_inner);
         let installed = trunk_p25::Modulation::try_from(decoder)
@@ -1093,6 +1186,11 @@ impl SharedChannelizerHandle {
                     freq_hz,
                     source: self.source,
                     port,
+                    role: if primary {
+                        p25::Role::Primary
+                    } else {
+                        p25::Role::Shadow
+                    },
                 };
                 let (dsp, shared) = p25::attach(channel, modulation, rate);
                 decoders.insert(port, shared);
@@ -1123,14 +1221,20 @@ impl SharedChannelizerHandle {
 
 /// Reinterpret interleaved `[re, im, re, im, ..]` floats as complex samples.
 fn as_complex(s: &[f32]) -> &[num_complex::Complex32] {
-    assert!(s.len() % 2 == 0, "interleaved IQ must have even length");
+    assert!(
+        s.len().is_multiple_of(2),
+        "interleaved IQ must have even length"
+    );
     // SAFETY: Complex<f32> is #[repr(C)] { re: f32, im: f32 }: size 8, align 4,
     // identical layout to two consecutive f32s, and the length is halved.
     unsafe { std::slice::from_raw_parts(s.as_ptr().cast(), s.len() / 2) }
 }
 
 fn as_complex_mut(s: &mut [f32]) -> &mut [num_complex::Complex32] {
-    assert!(s.len() % 2 == 0, "interleaved IQ must have even length");
+    assert!(
+        s.len().is_multiple_of(2),
+        "interleaved IQ must have even length"
+    );
     // SAFETY: as above; exclusive borrow carries over.
     unsafe { std::slice::from_raw_parts_mut(s.as_mut_ptr().cast(), s.len() / 2) }
 }

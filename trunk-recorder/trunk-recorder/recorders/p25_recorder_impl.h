@@ -3,6 +3,7 @@
 
 #define _USE_MATH_DEFINES
 
+#include <optional>
 #include <cstdio>
 #include <iostream>
 #include <math.h>
@@ -110,16 +111,28 @@ protected:
   p25_recorder_decode_sptr fsk4_p25_decode;
   p25_recorder_qpsk_demod_sptr qpsk_demod;
   p25_recorder_decode_sptr qpsk_p25_decode;
-  // trunk-p25 for phase 1 calls when Config::p25_voice_regenerator is set:
-  // regenerated symbols into a third decode chain.
+  // trunk-p25 when Config::p25_voice_regenerator is set: regenerated symbols
+  // into a third decode chain. Fed straight from the port (not through the
+  // selector) so it can run beside an op25 chain in shadow mode.
   p25_regenerator::sptr rust_regen;
   p25_recorder_decode_sptr rust_p25_decode;
   channel_control::sptr prefilter;
-  // Which chain the call in progress uses (the modulation selector's output).
+  // Which chain the call in progress uses; the selector feeds op25's.
   enum class Branch { Fsk4 = 0, Qpsk = 1, Rust = 2 };
   Branch active = Branch::Qpsk;
+  // Shadow mode: the other implementation's chain, decoding the same call
+  // with its audio discarded, reported to Config::p25_call_observer.
+  std::optional<Branch> shadow;
+  bool call_phase2 = false;
+  // trunk-p25's counts for the call just stopped (taken once, at stop()).
+  symbol_regenerator_backend::CallCounts rust_counts;
   Branch branch_for(bool phase2) const;
+  std::optional<Branch> shadow_for(bool phase2) const;
   const p25_recorder_decode_sptr &decode() const;
+  const p25_recorder_decode_sptr &decode_of(Branch b) const;
+  std::vector<Transmission> transmissions_of(Branch b) const;
+  void report_call();
+  void disable_op25_chains();
   // Offline taps (enabled by Config::tap_dir): demodulated symbols per chain.
   gr::blocks::file_sink::sptr qpsk_symbol_tap;
   gr::blocks::file_sink::sptr fsk4_symbol_tap;

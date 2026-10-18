@@ -88,11 +88,11 @@ wall-clock driven, so compare those with a tolerance. Taps are big (~4 GB per
 
 ## P25 decoder A/B
 
-`recorder.p25_decoder` picks who decodes P25 control channels and
-`recorder.p25_voice_decoder` who decodes phase 1 voice: `rust` (trunk-p25,
-the default) or `op25` (the GNU Radio chains). Phase 2 (TDMA) voice is op25
-either way. Run both with `--tap` and compare `taps/cc_*.msgs.jsonl` and
-`summary.json`.
+`recorder.p25_decoder` picks who decodes P25 control channels,
+`recorder.p25_voice_decoder` who decodes phase 1 voice and
+`recorder.p25_tdma_decoder` who decodes phase 2 (TDMA) voice: `rust`
+(trunk-p25, the default) or `op25` (the GNU Radio chains). Run both with
+`--tap` and compare `taps/cc_*.msgs.jsonl` and `summary.json`.
 
 Offline, without a replay:
 - `cargo run --release -p trunk-p25 --example golden -- RUN/taps` decodes the
@@ -100,11 +100,50 @@ Offline, without a replay:
   against `.msgs.jsonl`;
 - `cargo run --release -p trunk-p25 --example voice_golden -- RUN/taps`
   decodes every phase 1 call's `.symbols.f32` and `.out.cf32`, and compares
-  op25's decoding algorithms with trunk-p25's on the same frames.
+  op25's decoding algorithms with trunk-p25's on the same frames;
+- `cargo run --release -p trunk-p25 --example tdma_golden -- RUN/taps
+  [wacn=0xbee00 sysid=0x5e4 nac=0x5e1]` does the same for phase 2 calls:
+  an emulation of op25's TDMA chain on its own symbols, trunk-p25 on those
+  symbols and on the IQ, and op25 again on trunk-p25's regenerated stream
+  (the defaults are svrcs's scrambling parameters).
 
-With the Rust voice decoder a call's `.symbols.f32` holds the regenerated
+With a Rust voice decoder a call's `.symbols.f32` holds the regenerated
 symbols (what the op25 frame assembler received), not raw demodulator
-output; the sidecar says `"decoder":"rust"`.
+output; the sidecar says `"decoder":"rust"`. The offline scorers need op25's
+symbols, so take their taps from a run with both voice decoders on `op25`.
+
+## Shadow mode
+
+`recorder.p25_shadow` runs the implementation *not* chosen above beside the
+primary, on the same IQ, so the two can be compared live or in a replay:
+
+```toml
+[recorder.p25_shadow]
+control = true   # control channels
+voice = true     # phase 1 voice
+tdma = true      # phase 2 voice
+```
+
+The primary drives trunking and audio; the shadow's control messages and
+call audio go nowhere (no plugins, source-change or alias notices). It costs
+about twice the decode CPU of what it covers. In a replay:
+`--set recorder.p25_shadow.tdma=true`.
+
+Every decoder's output is labelled `impl = rust | op25` and
+`role = primary | shadow`, shadow mode or not:
+- `trunk.oxide.p25cc.messages{impl,role,kind}` — control-channel messages;
+- `trunk.oxide.p25call.{calls,audio,transmissions,bit_errors,spikes}{impl,role,phase}`
+  — per-call accounts;
+- `trunk.oxide.shadow.cc{kind,outcome,impl,primary_impl,shadow_impl}` — a
+  message both implementations decoded within 2 s (`outcome=both`) or only
+  one (`outcome=only`, `impl` = which);
+- `trunk.oxide.shadow.voice{phase,item,outcome,impl,primary_impl,shadow_impl}`
+  — per call, source units (`item=source`) and whether there was audio
+  (`item=audio`, ≥ 0.5 s) in both or only one.
+
+The trunk-p25 stage metrics (`p25cc`, `p25voice`, `p25tdma`) carry
+`impl=rust` and the role too. A replay writes the same tallies to
+`summary.json` under `decoders`.
 
 ## Notes
 

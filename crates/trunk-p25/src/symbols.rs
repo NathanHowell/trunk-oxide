@@ -8,6 +8,9 @@
 /// P25 Phase 1 symbol rate.
 pub const SYMBOL_RATE: f64 = 4800.0;
 
+/// P25 Phase 2 (TDMA) symbol rate.
+pub const PHASE2_SYMBOL_RATE: f64 = 6000.0;
+
 /// The 48-bit frame sync, first transmitted dibit in the top bits.
 pub const FRAME_SYNC: u64 = 0x5575_F5FF_77FF;
 pub const SYNC_DIBITS: usize = 24;

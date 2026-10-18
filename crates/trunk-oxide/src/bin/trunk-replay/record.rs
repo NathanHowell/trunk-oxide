@@ -85,6 +85,76 @@ pub struct Summary {
     pub mean_noise_db: Option<f64>,
     pub channelizer: Vec<Value>,
     systems: BTreeMap<String, SystemStats>,
+    /// Every P25 decoder's output by implementation and role, and with
+    /// `recorder.p25_shadow` on, how the implementations agreed.
+    pub decoders: Value,
+}
+
+/// The P25 observers' tallies (`trunk_recorder_sys::shadow`) as JSON.
+pub fn decoder_tallies() -> Value {
+    use trunk_recorder_sys::shadow::{self, Outcome};
+    let outcome = |o: Outcome| match o {
+        Outcome::Both => "both".to_string(),
+        Outcome::Only(i) => format!("only_{}", i.label()),
+    };
+    let control: Vec<Value> = shadow::control_channels()
+        .into_iter()
+        .map(|c| {
+            let messages: BTreeMap<String, u64> = c
+                .tally
+                .messages
+                .iter()
+                .map(|(&(i, r, k), &n)| (format!("{}/{}/{}", i.label(), r.label(), k.label()), n))
+                .collect();
+            let agreement: BTreeMap<String, u64> = c
+                .tally
+                .agreement
+                .iter()
+                .map(|(&(k, o), &n)| (format!("{}/{}", k.label(), outcome(o)), n))
+                .collect();
+            let roles: BTreeMap<&str, &str> = c
+                .roles
+                .iter()
+                .map(|(r, i)| (r.label(), i.label()))
+                .collect();
+            json!({
+                "system": c.system, "freq_hz": c.freq_hz, "roles": roles,
+                "messages": messages, "agreement": agreement,
+            })
+        })
+        .collect();
+    let v = shadow::voice_tally();
+    let calls: BTreeMap<String, Value> = v
+        .calls
+        .iter()
+        .map(|((s, p, i, r), t)| {
+            (
+                format!("{s}/phase{}/{}/{}", p.label(), i.label(), r.label()),
+                json!({
+                    "calls": t.calls, "audio_seconds": round(t.audio_seconds, 3),
+                    "transmissions": t.transmissions, "bit_errors": t.errors, "spikes": t.spikes,
+                }),
+            )
+        })
+        .collect();
+    let agreement: BTreeMap<String, u64> = v
+        .agreement
+        .iter()
+        .map(|((s, p, pi, si, item, o), &n)| {
+            (
+                format!(
+                    "{s}/phase{}/{}+{}-shadow/{}/{}",
+                    p.label(),
+                    pi.label(),
+                    si.label(),
+                    item.label(),
+                    outcome(*o)
+                ),
+                n,
+            )
+        })
+        .collect();
+    json!({ "control": control, "voice": { "calls": calls, "agreement": agreement } })
 }
 
 struct OpenCall {
@@ -366,6 +436,7 @@ impl Recorder {
             mean_noise_db: mean(self.noise_sum, self.noise_n),
             channelizer,
             systems: self.systems,
+            decoders: decoder_tallies(),
         })
     }
 }

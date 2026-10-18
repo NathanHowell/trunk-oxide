@@ -339,7 +339,13 @@ impl TrunkRecorderBuilder {
                 trunk_config::P25Decoder::Op25 => ffi::TrP25Decoder::Op25,
             };
             ffi::tr_config_set_p25_decoder(ctx.pin_mut(), decoder(rec.p25_decoder));
-            ffi::tr_config_set_p25_voice_decoder(ctx.pin_mut(), decoder(rec.p25_voice_decoder));
+            ffi::tr_config_set_p25_voice_decoder(
+                ctx.pin_mut(),
+                decoder(rec.p25_voice_decoder),
+                decoder(rec.p25_tdma_decoder),
+            );
+            let shadow = &rec.p25_shadow;
+            ffi::tr_config_set_p25_shadow(ctx.pin_mut(), shadow.control, shadow.voice, shadow.tdma);
             let c = &rec.conditioner;
             trunk_recorder_sys::set_conditioning_settings(trunk_recorder_sys::ConditioningSettings {
                 params: trunk_recorder_sys::ConditionerParams {
@@ -789,7 +795,7 @@ impl TrunkRecorder {
 
         // Register conventional calls that were pre-created before the
         // flowgraph started (see TrunkRecorderBuilder::start).
-        let pending_calls: Vec<_> = self.pending_conventional_calls.drain(..).collect();
+        let pending_calls = std::mem::take(&mut self.pending_conventional_calls);
         for pending in pending_calls {
             let channel =
                 &self.call_mgr_config.systems[&pending.sys_num].channels[pending.channel_idx];

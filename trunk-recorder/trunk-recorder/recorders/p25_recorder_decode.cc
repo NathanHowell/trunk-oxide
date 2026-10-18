@@ -5,6 +5,7 @@
 #include "../gr_blocks/plugin_wrapper_impl.h"
 #include "../formatter.h"
 #include "../unit_tags_ota.h"
+#include <algorithm>
 #include <chrono>
 #include <gnuradio/msg_queue.h>
 
@@ -33,6 +34,11 @@ void p25_recorder_decode::stop() {
   d_source_id = -1;
 }
 
+std::vector<long> p25_recorder_decode::call_sources() const {
+  std::lock_guard<std::mutex> lock(d_state_mutex);
+  return d_call_sources;
+}
+
 void p25_recorder_decode::flush_plugin() {
   plugin_sink->flush();
 }
@@ -47,6 +53,7 @@ void p25_recorder_decode::start(const RecorderConfig &config) {
   {
     std::lock_guard<std::mutex> lock(d_state_mutex);
     d_source_id = -1;
+    d_call_sources.clear();
   }
   d_last_notified_crypto = ~0u;
 
@@ -122,7 +129,7 @@ void p25_recorder_decode::initialize(int silence_frames, bool d_soft_vocoder) {
   // Wire callback to bypass the msg_queue — alias messages are processed
   // directly on the GR thread instead of being polled from Rust.
   op25_frame_assembler->set_msg_callback([this](gr::message::sptr msg) {
-    if (msg->type() != -3) return; // Only M_P25_JSON_DATA
+    if (d_shadow || msg->type() != -3) return; // Only M_P25_JSON_DATA
     try {
       auto j = nlohmann::json::parse(msg->to_string());
       // ESS crypto parameters ({"encrypted","algid","keyid"}, no "type"). Clear
@@ -163,6 +170,7 @@ void p25_recorder_decode::initialize(int silence_frames, bool d_soft_vocoder) {
 }
 
 void p25_recorder_decode::plugin_callback_handler(int16_t *samples, int sampleCount) {
+  if (d_shadow) return;
   d_config.event_sink->audio_callback(d_recorder, samples, sampleCount);
 }
 
@@ -171,6 +179,11 @@ void p25_recorder_decode::source_id_handler(long src_id) {
   // cut a per-speaker transmission boundary. The op25 tag re-fires every
   // superframe with the same src, so only forward an actual change; ignore the
   // -1 sentinel (encrypted / no-LC frames).
+  if (src_id > 0) {
+    std::lock_guard<std::mutex> lock(d_state_mutex);
+    if (std::find(d_call_sources.begin(), d_call_sources.end(), src_id) == d_call_sources.end()) d_call_sources.push_back(src_id);
+  }
+  if (d_shadow) return;
   if (src_id > 0 && src_id != d_last_notified_src) {
     d_last_notified_src = src_id;
     if (d_recorder) {

@@ -42,6 +42,7 @@ struct ControlDecoderSpec {
   double rate;        // the port's conditioned output rate (S/s)
   std::string system; // short name, for metrics
   double freq_hz;     // control channel frequency, for metrics
+  bool primary = true; // its messages drive trunking (else a shadow)
 };
 
 // A decoded message in op25's form: type (DUID; 0xffff = timeout) and body

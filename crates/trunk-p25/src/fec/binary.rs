@@ -478,9 +478,9 @@ mod tests {
             let info = rng.next_u64() as u32 & 63;
             let d = code.decode_soft(&noisy(code, code.encode(info), 0.9, &mut rng));
             if d.info == info {
-                right.push(d.margin)
+                right.push(d.margin);
             } else {
-                wrong.push(d.margin)
+                wrong.push(d.margin);
             }
         }
         #[allow(clippy::cast_precision_loss)]

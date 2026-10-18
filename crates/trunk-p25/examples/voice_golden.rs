@@ -174,9 +174,9 @@ fn main() {
                 Duid::Ldu1 | Duid::Ldu2 => {
                     let ldu1 = frame.duid == Duid::Ldu1;
                     if ldu1 {
-                        t.ldu1 += 1
+                        t.ldu1 += 1;
                     } else {
-                        t.ldu2 += 1
+                        t.ldu2 += 1;
                     }
                     for i in 0..9 {
                         let llr = bits.imbe(i);

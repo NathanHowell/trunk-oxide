@@ -53,8 +53,10 @@ impl IqProbe for PreflightProbe {
         .map_err(|e| anyhow::anyhow!("IQ capture at gain {gain_db} dB: {e}"))?;
         // C++ returns interleaved [re, im, re, im, ...].
         Ok(interleaved
-            .chunks_exact(2)
-            .map(|c| Complex32::new(c[0], c[1]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&[re, im]| Complex32::new(re, im))
             .collect())
     }
 }

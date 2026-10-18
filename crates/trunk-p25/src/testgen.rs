@@ -388,3 +388,135 @@ impl Channel {
 pub const fn nid_info(nac: Nac, duid: Duid) -> u16 {
     bch::info(nid_word(nac, duid) >> 1)
 }
+
+/// Phase 2 test signals.
+pub mod tdma {
+    use super::Rng;
+    use crate::tdma::isch::{Isch, IschInfo};
+    use crate::tdma::layout::{
+        BURSTS_PER_SUPERFRAME, DUID_AT, ESS_A, ESS_B, PAYLOAD_BITS, VOICE_2V, VOICE_4V,
+        is_sync_slot, payload_dibit,
+    };
+    use crate::tdma::mac::{self, MacChannel};
+    use crate::tdma::{AmbeParams, BurstType, Scrambler};
+    use crate::voice::EncryptionSync;
+
+    pub fn random_ambe(rng: &mut Rng) -> AmbeParams {
+        #[allow(clippy::cast_possible_truncation)]
+        AmbeParams(std::array::from_fn(|i| {
+            (rng.next_u64() & ((1 << [12, 12, 11, 14][i]) - 1)) as u16
+        }))
+    }
+
+    /// The ISCH a slot carries (flag and count zero).
+    pub const fn isch_for(slot: usize) -> Isch {
+        if is_sync_slot(slot) {
+            Isch::Sync
+        } else {
+            #[allow(clippy::cast_possible_truncation)]
+            Isch::Info(IschInfo::new(((slot & 3) << 5 | (slot / 4) << 3) as u8))
+        }
+    }
+
+    /// One 180-dibit burst from its 312 clear payload bits.
+    pub fn burst(slot: usize, kind: BurstType, payload: &[bool], scrambler: &Scrambler) -> Vec<u8> {
+        let mut d = vec![0u8; 180];
+        let cw = isch_for(slot).codeword();
+        for (i, x) in d.iter_mut().take(20).enumerate() {
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                *x = ((cw >> (38 - 2 * i)) & 3) as u8;
+            }
+        }
+        let duid = kind.codeword();
+        for (i, &at) in DUID_AT.iter().enumerate() {
+            #[allow(clippy::cast_possible_truncation)]
+            {
+                d[at] = ((duid >> (6 - 2 * i)) & 3) as u8;
+            }
+        }
+        for p in 0..PAYLOAD_BITS / 2 {
+            let clear = u8::from(payload[2 * p]) << 1 | u8::from(payload[2 * p + 1]);
+            let m = if kind.scrambled() {
+                scrambler.payload(slot, p)
+            } else {
+                0
+            };
+            d[payload_dibit(p)] = clear ^ m;
+        }
+        d
+    }
+
+    fn put(payload: &mut [bool], p: usize, bits: &[bool]) {
+        payload[2 * p..2 * p + bits.len()].copy_from_slice(bits);
+    }
+
+    /// What a test call sent on logical channel 0.
+    #[derive(Debug, Default)]
+    pub struct Sent {
+        pub voice: Vec<AmbeParams>,
+        pub pdus: Vec<Vec<u8>>,
+    }
+
+    /// `superframes` of a call on logical channel 0 (four 4V and a 2V per
+    /// superframe, encryption sync `es`, a `MAC_ACTIVE` SACCH in slot 11),
+    /// with idle FACCH on channel 1, starting at superframe slot `first`.
+    pub fn call(
+        rng: &mut Rng,
+        scrambler: &Scrambler,
+        es: &EncryptionSync,
+        first: usize,
+        superframes: usize,
+        sent: &mut Sent,
+    ) -> Vec<u8> {
+        let ess = mac::encode::ess(es);
+        let mut d = Vec::new();
+        for k in 0..superframes * BURSTS_PER_SUPERFRAME {
+            let slot = (first + k) % BURSTS_PER_SUPERFRAME;
+            let channel = crate::tdma::layout::CHANNEL_OF_SLOT[slot];
+            let mut payload = vec![false; PAYLOAD_BITS];
+            let kind = if slot >= 10 {
+                let mut pdu = [0u8; 21];
+                pdu[0] = if channel == 0 { 0x80 } else { 0x60 }; // MAC_ACTIVE / MAC_IDLE
+                #[allow(clippy::cast_possible_truncation)]
+                for b in &mut pdu[1..] {
+                    *b = rng.next_u64() as u8;
+                }
+                if channel == 0 {
+                    sent.pdus.push(pdu.to_vec());
+                }
+                payload = mac::encode::acch(MacChannel::Sacch, &pdu);
+                BurstType::Sacch { scrambled: true }
+            } else if channel == 1 {
+                let mut pdu = [0u8; 18];
+                pdu[0] = 0x60;
+                payload = mac::encode::acch(MacChannel::Facch, &pdu);
+                BurstType::Facch { scrambled: true }
+            } else {
+                let position = slot / 2;
+                let voice: &[usize] = if position < 4 { &VOICE_4V } else { &VOICE_2V };
+                for &p in voice {
+                    let a = random_ambe(rng);
+                    sent.voice.push(a);
+                    let cw = a.encode();
+                    let bits: Vec<bool> = (0..72).map(|j| cw.bit(j)).collect();
+                    put(&mut payload, p, &bits);
+                }
+                if position < 4 {
+                    let part = &ess[4 * position..4 * position + 4];
+                    put(&mut payload, ESS_B.start, &mac::encode::hexbit_bits(part));
+                    BurstType::Voice4
+                } else {
+                    put(
+                        &mut payload,
+                        ESS_A.start,
+                        &mac::encode::hexbit_bits(&ess[16..]),
+                    );
+                    BurstType::Voice2
+                }
+            };
+            d.extend(burst(slot, kind, &payload, scrambler));
+        }
+        d
+    }
+}

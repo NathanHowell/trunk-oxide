@@ -13,12 +13,14 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use num_complex::Complex32;
 use trunk_channelizer::ChannelDecoder;
+use trunk_p25::tdma::{Scrambler, TdmaEvent, TdmaRegenerator};
 use trunk_p25::voice::Regenerator;
 use trunk_p25::{
     ControlChannelDecoder, DecoderConfig, DemodConfig, Message, Modulation, Nac, Received,
 };
 
 pub use trunk_p25::DecoderStats;
+pub use trunk_p25::tdma::TdmaStats;
 pub use trunk_p25::voice::VoiceStats;
 
 use crate::ffi;
@@ -34,6 +36,42 @@ pub struct ControlChannel {
     pub freq_hz: f64,
     pub source: i32,
     pub port: u32,
+    pub role: Role,
+}
+
+/// Which implementation produced a result.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Impl {
+    Rust,
+    Op25,
+}
+
+impl Impl {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Rust => "rust",
+            Self::Op25 => "op25",
+        }
+    }
+}
+
+/// What a decoder's output was used for.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub enum Role {
+    /// It drives trunking or the call's audio.
+    #[default]
+    Primary,
+    /// It runs alongside the primary only to be compared.
+    Shadow,
+}
+
+impl Role {
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Primary => "primary",
+            Self::Shadow => "shadow",
+        }
+    }
 }
 
 /// A decoder's counters at one instant.
@@ -168,7 +206,7 @@ pub(crate) fn attach(
     )
 }
 
-// ── Phase 1 voice: a regenerator per recorder ──
+// ── Voice: a regenerator per recorder, phase 1 or phase 2 per call ──
 
 /// A voice regenerator's counters at one instant.
 #[derive(Clone, Debug, PartialEq)]
@@ -176,12 +214,25 @@ pub struct VoiceChannelReport {
     pub recorder: i32,
     /// The system of the call in progress (or last call).
     pub system: String,
+    /// Phase 1 calls.
     pub stats: VoiceStats,
+    /// Phase 2 (TDMA) calls.
+    pub tdma: TdmaStats,
+    /// The role of the call in progress (or last call).
+    pub role: Role,
+}
+
+#[derive(Clone, Default)]
+struct Snapshot {
+    phase1: VoiceStats,
+    phase2: TdmaStats,
+    system: String,
+    role: Role,
 }
 
 struct VoiceShared {
     recorder: i32,
-    snapshot: Mutex<(VoiceStats, String)>,
+    snapshot: Mutex<Snapshot>,
 }
 
 static VOICE_REGISTRY: Mutex<Vec<Weak<VoiceShared>>> = Mutex::new(Vec::new());
@@ -195,15 +246,17 @@ pub fn voice_channels() -> Vec<VoiceChannelReport> {
     reg.iter()
         .filter_map(Weak::upgrade)
         .map(|s| {
-            let (stats, system) = s
+            let snap = s
                 .snapshot
                 .lock()
                 .unwrap_or_else(PoisonError::into_inner)
                 .clone();
             VoiceChannelReport {
                 recorder: s.recorder,
-                system,
-                stats,
+                system: snap.system,
+                stats: snap.phase1,
+                tdma: snap.phase2,
+                role: snap.role,
             }
         })
         .collect()
@@ -213,15 +266,19 @@ pub fn voice_channels() -> Vec<VoiceChannelReport> {
 /// GR block serialises every call.
 pub struct P25RegeneratorHandle {
     regen: Regenerator,
+    tdma: TdmaRegenerator,
+    /// The call in progress is phase 2.
+    phase2: bool,
     rate: f64,
     shared: Arc<VoiceShared>,
     events: Vec<Received<trunk_p25::voice::VoiceEvent>>,
+    tdma_events: Vec<Received<TdmaEvent>>,
 }
 
 pub(crate) fn regenerator_new(rate: f64, recorder: i32) -> Box<P25RegeneratorHandle> {
     let shared = Arc::new(VoiceShared {
         recorder,
-        snapshot: Mutex::new((VoiceStats::default(), String::new())),
+        snapshot: Mutex::new(Snapshot::default()),
     });
     VOICE_REGISTRY
         .lock()
@@ -229,44 +286,74 @@ pub(crate) fn regenerator_new(rate: f64, recorder: i32) -> Box<P25RegeneratorHan
         .push(Arc::downgrade(&shared));
     Box::new(P25RegeneratorHandle {
         regen: Regenerator::new(DemodConfig::new(rate, Modulation::Cqpsk)),
+        tdma: TdmaRegenerator::new(DemodConfig::phase2(rate), None),
+        phase2: false,
         rate,
         shared,
         events: Vec::new(),
+        tdma_events: Vec::new(),
     })
 }
 
 impl P25RegeneratorHandle {
     pub(crate) fn process(&mut self, iq: &[Complex32], out: &mut Vec<f32>) {
         out.clear();
-        self.events.clear();
-        self.regen.process(iq, out, &mut self.events);
-        self.shared
+        let mut snap = self
+            .shared
             .snapshot
             .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .0 = self.regen.stats();
+            .unwrap_or_else(PoisonError::into_inner);
+        if self.phase2 {
+            self.tdma_events.clear();
+            self.tdma.process(iq, out, &mut self.tdma_events);
+            snap.phase2 = self.tdma.stats();
+        } else {
+            self.events.clear();
+            self.regen.process(iq, out, &mut self.events);
+            snap.phase1 = self.regen.stats();
+        }
     }
 
-    pub(crate) fn start_call(&mut self, qpsk: bool, system: &str) {
-        let modulation = if qpsk {
-            Modulation::Cqpsk
+    /// A new call. A phase 2 call needs the system's 2160-dibit scrambling
+    /// mask; without one, only its unscrambled bursts are regenerated.
+    pub(crate) fn start_call(
+        &mut self,
+        qpsk: bool,
+        tdma: bool,
+        xor_mask: &[u8],
+        system: &str,
+        primary: bool,
+    ) {
+        self.phase2 = tdma;
+        if tdma {
+            self.tdma.start_call(
+                DemodConfig::phase2(self.rate),
+                Scrambler::from_dibits(xor_mask),
+            );
         } else {
-            Modulation::C4fm
-        };
-        self.regen
-            .start_call(DemodConfig::new(self.rate, modulation));
-        system.clone_into(
-            &mut self
-                .shared
-                .snapshot
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .1,
-        );
+            let modulation = if qpsk {
+                Modulation::Cqpsk
+            } else {
+                Modulation::C4fm
+            };
+            self.regen
+                .start_call(DemodConfig::new(self.rate, modulation));
+        }
+        let mut snap = self
+            .shared
+            .snapshot
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        system.clone_into(&mut snap.system);
+        snap.role = Role::of(primary);
     }
 
     pub(crate) const fn take_call_counts(&mut self) -> ffi::TrCallCounts {
-        let c = self.regen.take_call_counts();
+        let c = if self.phase2 {
+            self.tdma.take_call_counts()
+        } else {
+            self.regen.take_call_counts()
+        };
         ffi::TrCallCounts {
             errors: c.errors,
             spikes: c.spikes,
@@ -306,6 +393,7 @@ mod tests {
             freq_hz: 851e6,
             source: 0,
             port: 3,
+            role: Role::Primary,
         }
     }
 

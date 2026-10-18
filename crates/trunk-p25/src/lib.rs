@@ -1,4 +1,4 @@
-//! P25 Phase 1 control-channel receiver.
+//! P25 receivers: control channels, phase 1 and phase 2 voice.
 //!
 //! Replaces op25's control-channel chain (Gardner clock, differential
 //! decoder, Costas loop, slicer, framer and TSBK decoder) with one that keeps
@@ -14,6 +14,13 @@
 //! - [`control`]: frames to the same messages op25 emits (TSBK, MBT, TDU,
 //!   TDULC, timeout), so the existing parser keeps working.
 //!
+//! Voice channels:
+//! - [`voice`]: phase 1 (HDU, LDU1/2, terminators, IMBE) and its
+//!   regenerator, which re-sends the channel corrected for op25's frame
+//!   assembler.
+//! - [`tdma`]: phase 2 (ISCH, DUID, AMBE+2, FACCH/SACCH, encryption sync)
+//!   and its regenerator.
+//!
 //! [`testgen`] builds modulated test signals for the unit tests and benches.
 
 pub mod bch;
@@ -24,6 +31,7 @@ pub mod fec;
 pub mod framer;
 pub mod gf64;
 pub mod symbols;
+pub mod tdma;
 pub mod testgen;
 pub mod trellis;
 pub mod types;

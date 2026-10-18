@@ -88,7 +88,8 @@ rust::Vec<float> tr_probe_capture(TrProbe &probe, double gain_db, size_t n_sampl
 void tr_config_set_temp_dir(TrContext &ctx, rust::Str dir);
 void tr_config_set_tap_dir(TrContext &ctx, rust::Str dir);
 void tr_config_set_p25_decoder(TrContext &ctx, TrP25Decoder decoder);
-void tr_config_set_p25_voice_decoder(TrContext &ctx, TrP25Decoder decoder);
+void tr_config_set_p25_voice_decoder(TrContext &ctx, TrP25Decoder phase1, TrP25Decoder phase2);
+void tr_config_set_p25_shadow(TrContext &ctx, bool control, bool phase1, bool phase2);
 void tr_config_set_soft_vocoder(TrContext &ctx, bool enabled);
 void tr_config_set_debug_recorder(TrContext &ctx, bool enabled, rust::Str address, int32_t port);
 

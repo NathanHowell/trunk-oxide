@@ -36,6 +36,26 @@ pub enum P25Decoder {
     Op25,
 }
 
+/// Shadow mode: run the other P25 implementation too, for comparison.
+///
+/// Per decoder, the implementation not chosen by `p25_decoder` /
+/// `p25_voice_decoder` / `p25_tdma_decoder` also runs, and its output is only
+/// counted and compared. Costs about twice the decode CPU of whatever it
+/// covers.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct P25Shadow {
+    /// Control channels.
+    #[serde(default)]
+    pub control: bool,
+    /// Phase 1 voice.
+    #[serde(default)]
+    pub voice: bool,
+    /// Phase 2 (TDMA) voice.
+    #[serde(default)]
+    pub tdma: bool,
+}
+
 /// When the Rust conditioner restarts a channel's AGC and FLL.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -105,9 +125,16 @@ pub struct RecorderConfig {
     /// Who decodes P25 control channels.
     #[serde(default)]
     pub p25_decoder: P25Decoder,
-    /// Who decodes P25 phase 1 voice (phase 2 is op25 either way).
+    /// Who decodes P25 phase 1 voice.
     #[serde(default)]
     pub p25_voice_decoder: P25Decoder,
+    /// Who decodes P25 phase 2 (TDMA) voice.
+    #[serde(default)]
+    pub p25_tdma_decoder: P25Decoder,
+    /// Run the other P25 implementation beside each primary, on the same IQ,
+    /// to compare them live (`trunk.oxide.shadow.*` metrics).
+    #[serde(default)]
+    pub p25_shadow: P25Shadow,
     #[serde(default = "default_true")]
     pub record_uu_v_calls: bool,
     #[serde(default = "default_true")]

@@ -48,6 +48,41 @@ pub const fn crc32(buf: &[u8], nbits: usize) -> u32 {
     crc
 }
 
+/// CRC-12 of a Phase 2 MAC PDU over the first `nbits` bits of `buf`:
+/// g(x) = x¹² + x¹¹ + x⁷ + x⁴ + x² + x + 1, zero initial value, inverted.
+pub const fn crc12(buf: &[u8], nbits: usize) -> u16 {
+    const G: u16 = 0x897;
+    let mut reg: u16 = 0;
+    let mut i = 0;
+    while i < nbits {
+        let b = ((buf[i / 8] >> (7 - (i % 8))) & 1) as u16;
+        let top = ((reg >> 11) & 1) ^ b;
+        reg = (reg << 1) & 0xfff;
+        if top == 1 {
+            reg ^= G;
+        }
+        i += 1;
+    }
+    reg ^ 0xfff
+}
+
+/// `count` bits of `buf` from bit `from`, first bit highest.
+pub const fn bits_at(buf: &[u8], from: usize, count: usize) -> u32 {
+    let mut v = 0;
+    let mut i = from;
+    while i < from + count {
+        v = (v << 1) | ((buf[i / 8] >> (7 - (i % 8))) & 1) as u32;
+        i += 1;
+    }
+    v
+}
+
+/// True when bits `nbits..nbits + 12` of `buf` are the CRC-12 of the bits
+/// before them.
+pub const fn crc12_ok(buf: &[u8], nbits: usize) -> bool {
+    bits_at(buf, nbits, 12) == crc12(buf, nbits) as u32
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -96,5 +131,17 @@ mod tests {
         let a = crc32(&data, 64);
         data[2] ^= 1;
         assert_ne!(a, crc32(&data, 64));
+    }
+
+    /// op25's `crc12` (`p25p2_tdma.cc`), from a harness linked against op25.
+    #[test]
+    fn crc12_matches_op25() {
+        let bits = "010000111000111011101101000110011100111101010111111011100010110001100110011000001010110100001000101001010110100100101101101000010100111001101011010100101010001111000110";
+        let mut buf = [0u8; 21];
+        for (i, c) in bits.bytes().enumerate() {
+            buf[i / 8] |= (c - b'0') << (7 - i % 8);
+        }
+        assert_eq!(crc12(&buf, 144), 1506);
+        assert_eq!(crc12(&buf, 168), 2815);
     }
 }

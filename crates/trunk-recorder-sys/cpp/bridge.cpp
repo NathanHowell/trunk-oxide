@@ -336,7 +336,11 @@ public:
         h_->process(rust::Slice<const float>(reinterpret_cast<const float *>(in), 2 * n), out_);
         out.insert(out.end(), out_.begin(), out_.end());
     }
-    void start_call(bool qpsk, const std::string &system) override { h_->start_call(qpsk, rust::Str(system)); }
+    void start_call(bool qpsk, bool tdma, const std::string &xor_mask, const std::string &system, bool primary) override {
+        h_->start_call(qpsk, tdma,
+                       rust::Slice<const uint8_t>(reinterpret_cast<const uint8_t *>(xor_mask.data()), xor_mask.size()),
+                       rust::Str(system), primary);
+    }
     CallCounts take_call_counts() override {
         const TrCallCounts c = h_->take_call_counts();
         return {static_cast<long>(c.errors), static_cast<long>(c.spikes)};
@@ -348,15 +352,60 @@ private:
 };
 } // namespace
 
-void tr_config_set_p25_voice_decoder(TrContext &ctx, TrP25Decoder decoder) {
-    auto &f = ctx.impl->trunk_ctx.config.p25_voice_regenerator;
-    if (decoder == TrP25Decoder::Rust) {
+// Recorders get a trunk-p25 regenerator when it decodes some phase, as
+// primary or as shadow.
+static void update_voice_regenerator(Config &config) {
+    auto &f = config.p25_voice_regenerator;
+    const bool shadow = config.p25_shadow.phase1 || config.p25_shadow.phase2;
+    if (config.p25_rust_phase1 || config.p25_rust_phase2 || shadow) {
         f = [](double rate, int recorder) -> std::shared_ptr<symbol_regenerator_backend> {
             return std::make_shared<RustVoiceRegenerator>(rate, recorder);
         };
     } else {
         f = nullptr;
     }
+}
+
+static TrP25Decoder to_tr(P25DecoderImpl d) {
+    return d == P25DecoderImpl::Rust ? TrP25Decoder::Rust : TrP25Decoder::Op25;
+}
+
+void tr_config_set_p25_voice_decoder(TrContext &ctx, TrP25Decoder phase1, TrP25Decoder phase2) {
+    auto &config = ctx.impl->trunk_ctx.config;
+    config.p25_rust_phase1 = phase1 == TrP25Decoder::Rust;
+    config.p25_rust_phase2 = phase2 == TrP25Decoder::Rust;
+    update_voice_regenerator(config);
+}
+
+void tr_config_set_p25_shadow(TrContext &ctx, bool control, bool phase1, bool phase2) {
+    auto &config = ctx.impl->trunk_ctx.config;
+    config.p25_shadow = {control, phase1, phase2};
+    update_voice_regenerator(config);
+    config.p25_cc_observer = [](const std::string &system, double freq, P25DecoderImpl impl, bool primary, long type,
+                                const std::string &payload) {
+        p25_observe_cc_message(rust::Str(system), freq, to_tr(impl), primary, static_cast<int64_t>(type),
+                               rust::Slice<const uint8_t>(reinterpret_cast<const uint8_t *>(payload.data()), payload.size()));
+    };
+    config.p25_call_observer = [](const P25CallReport &r) {
+        TrCallReport out;
+        out.system = rust::String(r.system);
+        out.recorder = r.recorder;
+        out.talkgroup = r.talkgroup;
+        out.freq = r.freq;
+        out.phase2 = r.phase2;
+        for (const auto &a : r.accounts) {
+            TrCallAccount t;
+            t.decoder = to_tr(a.impl);
+            t.primary = a.primary;
+            t.audio_seconds = a.audio_seconds;
+            t.transmissions = a.transmissions;
+            t.errors = a.errors;
+            t.spikes = a.spikes;
+            for (long s : a.sources) t.sources.push_back(s);
+            out.accounts.push_back(std::move(t));
+        }
+        p25_observe_call(out);
+    };
 }
 
 void tr_config_set_p25_decoder(TrContext &ctx, TrP25Decoder decoder) {
@@ -412,7 +461,7 @@ public:
         case ControlDecoder::P25C4fm: kind = TrControlDecoder::P25C4fm; break;
         case ControlDecoder::None: break;
         }
-        h_->set_control_decoder(port, kind, s.rate, rust::Str(s.system), s.freq_hz);
+        h_->set_control_decoder(port, kind, s.rate, rust::Str(s.system), s.freq_hz, s.primary);
     }
     bool next_message(unsigned port, DecodedMessage &msg) override {
         TrDecodedMessage m;

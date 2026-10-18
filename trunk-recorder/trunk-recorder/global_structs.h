@@ -32,6 +32,35 @@ struct Transmission {
 // op25's GNU Radio chain (kept for A/B replays).
 enum class P25DecoderImpl { Rust, Op25 };
 
+// Shadow mode: the other implementation runs alongside the primary on the
+// same IQ, and its output is only reported (to the observers), never used.
+struct P25Shadow {
+  bool control = false;
+  bool phase1 = false;
+  bool phase2 = false;
+};
+
+// One decoder's account of a voice call.
+struct P25CallAccount {
+  P25DecoderImpl impl;
+  bool primary;
+  double audio_seconds;
+  long transmissions;
+  long errors;
+  long spikes;
+  std::vector<long> sources; // source units named in band, first appearance order
+};
+
+// Every voice call's outcome, by decoder: one account, or two in shadow mode.
+struct P25CallReport {
+  std::string system;
+  int recorder;
+  long talkgroup;
+  double freq;
+  bool phase2;
+  std::vector<P25CallAccount> accounts;
+};
+
 struct Config {
   std::string temp_dir;
   std::string debug_recorder_address;
@@ -42,10 +71,18 @@ struct Config {
   // offline baselines (see channel_control::enable_tap).
   std::string tap_dir;
   P25DecoderImpl p25_decoder = P25DecoderImpl::Rust;
-  // Set by the host when trunk-p25 decodes phase 1 voice: makes the backend
-  // of a recorder's regenerator (conditioned rate, recorder number). Empty =
-  // op25's demodulators throughout.
+  // Set by the host when trunk-p25 decodes P25 voice: makes the backend of a
+  // recorder's regenerator (conditioned rate, recorder number). Empty =
+  // op25's demodulators throughout. The flags say which phases use it.
   std::function<std::shared_ptr<symbol_regenerator_backend>(double, int)> p25_voice_regenerator;
+  bool p25_rust_phase1 = false;
+  bool p25_rust_phase2 = false;
+  P25Shadow p25_shadow;
+  // Every message any P25 control-channel decoder emits (system, frequency,
+  // implementation, primary?, op25 message type and payload).
+  std::function<void(const std::string &, double, P25DecoderImpl, bool, long, const std::string &)> p25_cc_observer;
+  // Every P25 voice call, when it ends.
+  std::function<void(const P25CallReport &)> p25_call_observer;
   std::shared_ptr<EventSink> event_sink;
 };
 

@@ -73,8 +73,9 @@ void p25_recorder_impl::build_graph() {
   connect(fsk4_demod, 0, fsk4_p25_decode, 0);
   connect(modulation_selector, 1, qpsk_demod, 0);
   connect(qpsk_demod, 0, qpsk_p25_decode, 0);
+  disable_op25_chains();
   if (rust_regen) {
-    connect(modulation_selector, 2, rust_regen, 0);
+    connect(self(), 0, rust_regen, 0);
     connect(rust_regen, 0, rust_p25_decode, 0);
   }
 
@@ -95,12 +96,22 @@ void p25_recorder_impl::build_graph() {
 }
 
 p25_recorder_impl::Branch p25_recorder_impl::branch_for(bool phase2) const {
-  if (rust_regen && !phase2) return Branch::Rust;
+  if (rust_regen && (phase2 ? config.p25_rust_phase2 : config.p25_rust_phase1)) return Branch::Rust;
   return qpsk_mod ? Branch::Qpsk : Branch::Fsk4;
 }
 
+std::optional<p25_recorder_impl::Branch> p25_recorder_impl::shadow_for(bool phase2) const {
+  if (!(phase2 ? config.p25_shadow.phase2 : config.p25_shadow.phase1) || !rust_regen) return std::nullopt;
+  if (branch_for(phase2) == Branch::Rust) return qpsk_mod ? Branch::Qpsk : Branch::Fsk4;
+  return Branch::Rust;
+}
+
 const p25_recorder_decode_sptr &p25_recorder_impl::decode() const {
-  switch (active) {
+  return decode_of(active);
+}
+
+const p25_recorder_decode_sptr &p25_recorder_impl::decode_of(Branch b) const {
+  switch (b) {
   case Branch::Rust: return rust_p25_decode;
   case Branch::Fsk4: return fsk4_p25_decode;
   case Branch::Qpsk: break;
@@ -151,6 +162,7 @@ void p25_recorder_impl::switch_tdma(bool phase2) {
     qpsk_p25_decode->switch_tdma(phase2);
     qpsk_demod->switch_tdma(phase2);
   }
+  if (rust_p25_decode) rust_p25_decode->switch_tdma(phase2);
 }
 
 void p25_recorder_impl::set_tdma(bool phase2) {
@@ -270,11 +282,15 @@ void p25_recorder_impl::set_system(const std::shared_ptr<System> &sys) {
 }
 
 std::vector<Transmission> p25_recorder_impl::get_transmission_list() {
-  std::vector<Transmission> list = decode()->get_transmission_list();
-  if (active != Branch::Rust) return list;
+  return transmissions_of(active);
+}
+
+std::vector<Transmission> p25_recorder_impl::transmissions_of(Branch b) const {
+  std::vector<Transmission> list = decode_of(b)->get_transmission_list();
+  if (b != Branch::Rust) return list;
   // The frame assembler only saw regenerated (error-free) frames; the call's
   // decode errors are trunk-p25's, shared out by audio length.
-  const auto counts = rust_regen->take_call_counts();
+  const auto counts = rust_counts;
   long total_samples = 0;
   for (const auto &t : list) total_samples += t.sample_count;
   long errors = counts.errors, spikes = counts.spikes;
@@ -289,6 +305,30 @@ std::vector<Transmission> p25_recorder_impl::get_transmission_list() {
   return list;
 }
 
+void p25_recorder_impl::disable_op25_chains() {
+  modulation_selector->set_port_enabled(static_cast<unsigned>(Branch::Fsk4), false);
+  modulation_selector->set_port_enabled(static_cast<unsigned>(Branch::Qpsk), false);
+}
+
+void p25_recorder_impl::report_call() {
+  if (!config.p25_call_observer) return;
+  P25CallReport r{short_name, rec_num, talkgroup, chan_freq, call_phase2, {}};
+  auto account = [this](Branch b, bool primary) {
+    P25CallAccount a{b == Branch::Rust ? P25DecoderImpl::Rust : P25DecoderImpl::Op25, primary, 0.0, 0, 0, 0, {}};
+    for (const auto &t : transmissions_of(b)) {
+      a.audio_seconds += static_cast<double>(t.sample_count) / 8000.0;
+      a.transmissions++;
+      a.errors += t.error_count;
+      a.spikes += t.spike_count;
+    }
+    a.sources = decode_of(b)->call_sources();
+    return a;
+  };
+  r.accounts.push_back(account(active, true));
+  if (shadow) r.accounts.push_back(account(*shadow, false));
+  config.p25_call_observer(r);
+}
+
 void p25_recorder_impl::stop() {
   if (state == REC_ACTIVE) {
     state = REC_INACTIVE;
@@ -297,6 +337,13 @@ void p25_recorder_impl::stop() {
 
     clear();
     decode()->stop();
+    if (shadow) decode_of(*shadow)->stop();
+    if (rust_regen) {
+      rust_regen->set_enabled(false);
+      if (active == Branch::Rust || shadow == Branch::Rust) rust_counts = rust_regen->take_call_counts();
+    }
+    disable_op25_chains();
+    report_call();
   } else {
     BOOST_LOG_TRIVIAL(error) << "p25_recorder.cc: Trying to Stop an Inactive Logger!!!";
   }
@@ -308,12 +355,16 @@ void p25_recorder_impl::flush_audio() {
 
 void p25_recorder_impl::set_tdma_slot(int slot) {
   decode()->set_tdma_slot(slot);
+  if (shadow) decode_of(*shadow)->set_tdma_slot(slot);
   tdma_slot = slot;
 }
 
 bool p25_recorder_impl::start(const RecorderConfig &config) {
   if (state == REC_INACTIVE) {
     active = branch_for(config.phase2_tdma);
+    shadow = shadow_for(config.phase2_tdma);
+    call_phase2 = config.phase2_tdma;
+    rust_counts = {};
     set_tdma(config.phase2_tdma);
     if (config.phase2_tdma) {
       if (!qpsk_mod) {
@@ -324,6 +375,7 @@ bool p25_recorder_impl::start(const RecorderConfig &config) {
 
       if (!config.xor_mask.empty()) {
         qpsk_p25_decode->set_xor_mask(config.xor_mask);
+        if (rust_p25_decode) rust_p25_decode->set_xor_mask(config.xor_mask);
       } else {
         BOOST_LOG_TRIVIAL(info) << "Error - can't set XOR Mask for TDMA";
         return false;
@@ -344,12 +396,22 @@ bool p25_recorder_impl::start(const RecorderConfig &config) {
     prefilter->tune_offset(offset_amount);
     tap_begin(config);
 
-    if (active == Branch::Rust) {
-      rust_regen->start_call(qpsk_mod, config.short_name);
+    if (active == Branch::Rust || shadow == Branch::Rust) {
+      rust_regen->start_call(qpsk_mod, config.phase2_tdma, config.xor_mask, config.short_name, active == Branch::Rust);
       rust_regen->take_call_counts(); // anything before this call is not its
+      rust_regen->set_enabled(true);
     }
-    modulation_selector->set_output_index(static_cast<int>(active));
+    // The selector feeds whichever op25 chain runs, primary or shadow.
+    const Branch op25 = active != Branch::Rust ? active : shadow.value_or(Branch::Rust);
+    if (op25 != Branch::Rust) {
+      modulation_selector->set_output_index(static_cast<int>(op25)); // enables that port only
+    }
+    decode()->set_shadow(false);
     decode()->start(config);
+    if (shadow) {
+      decode_of(*shadow)->set_shadow(true);
+      decode_of(*shadow)->start(config);
+    }
     state = REC_ACTIVE;
 
     squelch_db = config.squelch_db;

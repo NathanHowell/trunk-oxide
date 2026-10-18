@@ -51,7 +51,7 @@ impl DemodConfig {
             sample_rate,
             modulation,
             matched_filter: false,
-            timing_bandwidth: 0.01,
+            timing_bandwidth: 0.0025,
             reference_memory: 0.0,
             bias_gain: 0.02,
         }
@@ -336,7 +336,7 @@ mod tests {
         }
         let hard: Vec<u8> = soft.iter().map(|&s| slice(s)).collect();
         // Find the alignment with the fewest errors over a window.
-        let settle = 1000;
+        let settle = 2000; // the narrow timing loop pulls in 80 ppm within ~2000 symbols
         let window = &dibits[settle..settle + 200];
         let at = |i: usize, lag: isize| i.checked_add_signed(lag).and_then(|j| hard.get(j));
         let (lag, _) = (-10..60)
@@ -352,7 +352,7 @@ mod tests {
             .unwrap();
         let mut errs = 0;
         let mut n = 0;
-        for (i, &d) in dibits.iter().enumerate().skip(settle).take(4500) {
+        for (i, &d) in dibits.iter().enumerate().skip(settle).take(3500) {
             if let Some(&h) = at(i, lag) {
                 n += 1;
                 errs += usize::from(h != d);

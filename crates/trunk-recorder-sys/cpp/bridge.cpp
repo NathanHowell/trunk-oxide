@@ -35,6 +35,7 @@
 #include "trunk-recorder/recorders/dmr_recorder.h"
 #include "trunk-recorder/source.h"
 #include "trunk-recorder/systems/p25_parser.h"
+#include "trunk-recorder/gr_blocks/symbol_regenerator.h"
 #include "trunk-recorder/systems/smartnet_parser.h"
 #include "trunk-recorder/systems/system.h"
 #include "trunk-recorder/recorders/p25_recorder.h"
@@ -322,6 +323,40 @@ void tr_finalize(TrContext &ctx) {
 
 void tr_config_set_temp_dir(TrContext &ctx, rust::Str dir) {
     ctx.impl->trunk_ctx.config.temp_dir = std::string(dir.data(), dir.size());
+}
+
+namespace {
+// trunk-p25's phase 1 voice regenerator behind the recorder's backend
+// interface (symbol_regenerator.h).
+class RustVoiceRegenerator : public symbol_regenerator_backend {
+public:
+    RustVoiceRegenerator(double rate, int recorder) : h_(p25_regenerator_new(rate, recorder)) {}
+
+    void process(const gr_complex *in, size_t n, std::vector<float> &out) override {
+        h_->process(rust::Slice<const float>(reinterpret_cast<const float *>(in), 2 * n), out_);
+        out.insert(out.end(), out_.begin(), out_.end());
+    }
+    void start_call(bool qpsk, const std::string &system) override { h_->start_call(qpsk, rust::Str(system)); }
+    CallCounts take_call_counts() override {
+        const TrCallCounts c = h_->take_call_counts();
+        return {static_cast<long>(c.errors), static_cast<long>(c.spikes)};
+    }
+
+private:
+    rust::Box<P25RegeneratorHandle> h_;
+    rust::Vec<float> out_;
+};
+} // namespace
+
+void tr_config_set_p25_voice_decoder(TrContext &ctx, TrP25Decoder decoder) {
+    auto &f = ctx.impl->trunk_ctx.config.p25_voice_regenerator;
+    if (decoder == TrP25Decoder::Rust) {
+        f = [](double rate, int recorder) -> std::shared_ptr<symbol_regenerator_backend> {
+            return std::make_shared<RustVoiceRegenerator>(rate, recorder);
+        };
+    } else {
+        f = nullptr;
+    }
 }
 
 void tr_config_set_p25_decoder(TrContext &ctx, TrP25Decoder decoder) {

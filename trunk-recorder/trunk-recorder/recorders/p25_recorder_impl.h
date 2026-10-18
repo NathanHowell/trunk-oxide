@@ -55,6 +55,8 @@
 class Source;
 class p25_recorder;
 
+#include "../gr_blocks/symbol_regenerator.h"
+
 #include "../source.h"
 
 class p25_recorder_impl : public p25_recorder {
@@ -108,10 +110,21 @@ protected:
   p25_recorder_decode_sptr fsk4_p25_decode;
   p25_recorder_qpsk_demod_sptr qpsk_demod;
   p25_recorder_decode_sptr qpsk_p25_decode;
+  // trunk-p25 for phase 1 calls when Config::p25_voice_regenerator is set:
+  // regenerated symbols into a third decode chain.
+  p25_regenerator::sptr rust_regen;
+  p25_recorder_decode_sptr rust_p25_decode;
   channel_control::sptr prefilter;
-  // Offline taps (enabled by Config::tap_dir): demodulated symbols per demod.
+  // Which chain the call in progress uses (the modulation selector's output).
+  enum class Branch { Fsk4 = 0, Qpsk = 1, Rust = 2 };
+  Branch active = Branch::Qpsk;
+  Branch branch_for(bool phase2) const;
+  const p25_recorder_decode_sptr &decode() const;
+  // Offline taps (enabled by Config::tap_dir): demodulated symbols per chain.
   gr::blocks::file_sink::sptr qpsk_symbol_tap;
   gr::blocks::file_sink::sptr fsk4_symbol_tap;
+  gr::blocks::file_sink::sptr rust_symbol_tap;
+  const gr::blocks::file_sink::sptr &symbol_tap() const;
   void tap_begin(const RecorderConfig &config);
   void tap_end();
 

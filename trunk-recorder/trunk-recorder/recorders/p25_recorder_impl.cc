@@ -63,12 +63,20 @@ void p25_recorder_impl::build_graph() {
   auto self_recorder = std::dynamic_pointer_cast<Recorder>(shared_from_this());
   qpsk_p25_decode = make_p25_recorder_decode(self_recorder, config, silence_frames, d_soft_vocoder);
   fsk4_p25_decode = make_p25_recorder_decode(self_recorder, config, silence_frames, d_soft_vocoder);
+  if (config.p25_voice_regenerator) {
+    rust_regen = p25_regenerator::make(config.p25_voice_regenerator(channel_control::phase1_samples_per_symbol * channel_control::phase1_symbol_rate, rec_num));
+    rust_p25_decode = make_p25_recorder_decode(self_recorder, config, silence_frames, d_soft_vocoder);
+  }
 
   connect(self(), 0, modulation_selector, 0);
   connect(modulation_selector, 0, fsk4_demod, 0);
   connect(fsk4_demod, 0, fsk4_p25_decode, 0);
   connect(modulation_selector, 1, qpsk_demod, 0);
   connect(qpsk_demod, 0, qpsk_p25_decode, 0);
+  if (rust_regen) {
+    connect(modulation_selector, 2, rust_regen, 0);
+    connect(rust_regen, 0, rust_p25_decode, 0);
+  }
 
   if (prefilter->tap_enabled()) {
     connect(self(), 0, prefilter->enable_tap(), 0);
@@ -78,7 +86,35 @@ void p25_recorder_impl::build_graph() {
     fsk4_symbol_tap->close();
     connect(qpsk_demod, 0, qpsk_symbol_tap, 0);
     connect(fsk4_demod, 0, fsk4_symbol_tap, 0);
+    if (rust_regen) {
+      rust_symbol_tap = gr::blocks::file_sink::make(sizeof(float), "/dev/null");
+      rust_symbol_tap->close();
+      connect(rust_regen, 0, rust_symbol_tap, 0);
+    }
   }
+}
+
+p25_recorder_impl::Branch p25_recorder_impl::branch_for(bool phase2) const {
+  if (rust_regen && !phase2) return Branch::Rust;
+  return qpsk_mod ? Branch::Qpsk : Branch::Fsk4;
+}
+
+const p25_recorder_decode_sptr &p25_recorder_impl::decode() const {
+  switch (active) {
+  case Branch::Rust: return rust_p25_decode;
+  case Branch::Fsk4: return fsk4_p25_decode;
+  case Branch::Qpsk: break;
+  }
+  return qpsk_p25_decode;
+}
+
+const gr::blocks::file_sink::sptr &p25_recorder_impl::symbol_tap() const {
+  switch (active) {
+  case Branch::Rust: return rust_symbol_tap;
+  case Branch::Fsk4: return fsk4_symbol_tap;
+  case Branch::Qpsk: break;
+  }
+  return qpsk_symbol_tap;
 }
 
 void p25_recorder_impl::tap_begin(const RecorderConfig &rc) {
@@ -89,8 +125,9 @@ void p25_recorder_impl::tap_begin(const RecorderConfig &rc) {
                                 ",\"center\":" + std::to_string(static_cast<long long>(center_freq)) +
                                 ",\"tdma\":" + (rc.phase2_tdma ? "true" : "false") + ",\"slot\":" + std::to_string(rc.tdma_slot) +
                                 ",\"call_id\":" + std::to_string(rc.rust_call_id) + ",\"recorder\":" + std::to_string(rec_num) +
+                                ",\"decoder\":\"" + (active == Branch::Rust ? "rust" : "op25") + "\"" +
                                 ",\"symbols_file\":\"" + base + ".symbols.f32\"");
-  (qpsk_mod ? qpsk_symbol_tap : fsk4_symbol_tap)->open((base + ".symbols.f32").c_str());
+  symbol_tap()->open((base + ".symbols.f32").c_str());
 }
 
 void p25_recorder_impl::tap_end() {
@@ -98,6 +135,7 @@ void p25_recorder_impl::tap_end() {
   prefilter->tap_close();
   qpsk_symbol_tap->close();
   fsk4_symbol_tap->close();
+  if (rust_symbol_tap) rust_symbol_tap->close();
 }
 
 void p25_recorder_impl::switch_tdma(bool phase2) {
@@ -160,6 +198,7 @@ void p25_recorder_impl::clear() {
   qpsk_p25_decode->reset();
   fsk4_demod->reset();
   fsk4_p25_decode->reset();
+  if (rust_p25_decode) rust_p25_decode->reset();
 }
 
 void p25_recorder_impl::autotune() {
@@ -191,27 +230,15 @@ int p25_recorder_impl::get_num() const {
 }
 
 std::chrono::duration<double> p25_recorder_impl::since_last_write() const {
-  if (qpsk_mod) {
-    return qpsk_p25_decode->since_last_write();
-  } else {
-    return fsk4_p25_decode->since_last_write();
-  }
+  return decode()->since_last_write();
 }
 
 std::chrono::duration<double> p25_recorder_impl::since_last_voice() const {
-  if (qpsk_mod) {
-    return qpsk_p25_decode->since_last_voice();
-  } else {
-    return fsk4_p25_decode->since_last_voice();
-  }
+  return decode()->since_last_voice();
 }
 
 RecorderState p25_recorder_impl::get_state() const {
-  if (qpsk_mod) {
-    return qpsk_p25_decode->get_state();
-  } else {
-    return fsk4_p25_decode->get_state();
-  }
+  return decode()->get_state();
 }
 
 void p25_recorder_impl::set_enabled(bool enabled) {
@@ -233,24 +260,33 @@ void p25_recorder_impl::tune_freq(double f) {
 }
 
 void p25_recorder_impl::set_source(long src) {
-  if (qpsk_mod) {
-    return qpsk_p25_decode->set_source(src);
-  } else {
-    return fsk4_p25_decode->set_source(src);
-  }
+  return decode()->set_source(src);
 }
 
 void p25_recorder_impl::set_system(const std::shared_ptr<System> &sys) {
   qpsk_p25_decode->set_system(sys);
   fsk4_p25_decode->set_system(sys);
+  if (rust_p25_decode) rust_p25_decode->set_system(sys);
 }
 
 std::vector<Transmission> p25_recorder_impl::get_transmission_list() {
-  if (qpsk_mod) {
-    return qpsk_p25_decode->get_transmission_list();
-  } else {
-    return fsk4_p25_decode->get_transmission_list();
+  std::vector<Transmission> list = decode()->get_transmission_list();
+  if (active != Branch::Rust) return list;
+  // The frame assembler only saw regenerated (error-free) frames; the call's
+  // decode errors are trunk-p25's, shared out by audio length.
+  const auto counts = rust_regen->take_call_counts();
+  long total_samples = 0;
+  for (const auto &t : list) total_samples += t.sample_count;
+  long errors = counts.errors, spikes = counts.spikes;
+  for (size_t i = 0; i < list.size(); i++) {
+    const bool last = i + 1 == list.size();
+    const double share = total_samples > 0 ? static_cast<double>(list[i].sample_count) / total_samples : 1.0 / list.size();
+    list[i].error_count = last ? errors : static_cast<long>(counts.errors * share);
+    list[i].spike_count = last ? spikes : static_cast<long>(counts.spikes * share);
+    errors -= list[i].error_count;
+    spikes -= list[i].spike_count;
   }
+  return list;
 }
 
 void p25_recorder_impl::stop() {
@@ -260,35 +296,24 @@ void p25_recorder_impl::stop() {
     tap_end();
 
     clear();
-    if (qpsk_mod) {
-      qpsk_p25_decode->stop();
-    } else {
-      fsk4_p25_decode->stop();
-    }
+    decode()->stop();
   } else {
     BOOST_LOG_TRIVIAL(error) << "p25_recorder.cc: Trying to Stop an Inactive Logger!!!";
   }
 }
 
 void p25_recorder_impl::flush_audio() {
-  if (qpsk_mod) {
-    qpsk_p25_decode->flush_plugin();
-  } else {
-    fsk4_p25_decode->flush_plugin();
-  }
+  decode()->flush_plugin();
 }
 
 void p25_recorder_impl::set_tdma_slot(int slot) {
-  if (qpsk_mod) {
-    qpsk_p25_decode->set_tdma_slot(slot);
-  } else {
-    fsk4_p25_decode->set_tdma_slot(slot);
-  }
+  decode()->set_tdma_slot(slot);
   tdma_slot = slot;
 }
 
 bool p25_recorder_impl::start(const RecorderConfig &config) {
   if (state == REC_INACTIVE) {
+    active = branch_for(config.phase2_tdma);
     set_tdma(config.phase2_tdma);
     if (config.phase2_tdma) {
       if (!qpsk_mod) {
@@ -319,13 +344,12 @@ bool p25_recorder_impl::start(const RecorderConfig &config) {
     prefilter->tune_offset(offset_amount);
     tap_begin(config);
 
-    if (qpsk_mod) {
-      modulation_selector->set_output_index(1);
-      qpsk_p25_decode->start(config);
-    } else {
-      modulation_selector->set_output_index(0);
-      fsk4_p25_decode->start(config);
+    if (active == Branch::Rust) {
+      rust_regen->start_call(qpsk_mod, config.short_name);
+      rust_regen->take_call_counts(); // anything before this call is not its
     }
+    modulation_selector->set_output_index(static_cast<int>(active));
+    decode()->start(config);
     state = REC_ACTIVE;
 
     squelch_db = config.squelch_db;

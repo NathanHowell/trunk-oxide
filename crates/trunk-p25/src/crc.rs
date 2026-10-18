@@ -2,17 +2,21 @@
 
 /// CRC-16 of a TSBK or PDU header: CCITT polynomial, zero initial value,
 /// inverted (CRC-16/GSM). Returns the two check bytes to append to `data`.
-pub fn crc16(data: &[u8]) -> u16 {
+pub const fn crc16(data: &[u8]) -> u16 {
     let mut reg: u32 = 0;
-    for &byte in data {
-        for j in (0..8).rev() {
-            let bit = u32::from((byte >> j) & 1);
+    let mut i = 0;
+    while i < data.len() {
+        let mut j = 8;
+        while j > 0 {
+            j -= 1;
+            let bit = ((data[i] >> j) & 1) as u32;
             let top = ((reg >> 15) & 1) ^ bit;
             reg = (reg << 1) & 0xffff;
             if top == 1 {
                 reg ^= 0x1021;
             }
         }
+        i += 1;
     }
     #[allow(clippy::cast_possible_truncation)]
     let crc = (reg ^ 0xffff) as u16;
@@ -20,22 +24,24 @@ pub fn crc16(data: &[u8]) -> u16 {
 }
 
 /// True when the last two bytes of `block` are its CRC-16.
-pub fn crc16_ok(block: &[u8]) -> bool {
+pub const fn crc16_ok(block: &[u8]) -> bool {
     let (data, check) = block.split_at(block.len() - 2);
     crc16(data) == u16::from_be_bytes([check[0], check[1]])
 }
 
 /// CRC-32 over the first `nbits` bits of `buf` (MBT payloads), as op25
 /// computes it.
-pub fn crc32(buf: &[u8], nbits: usize) -> u32 {
+pub const fn crc32(buf: &[u8], nbits: usize) -> u32 {
     const G: u64 = 0x04c1_1db7;
     let mut crc: u64 = 0;
-    for i in 0..nbits {
+    let mut i = 0;
+    while i < nbits {
         crc <<= 1;
-        let b = u64::from((buf[i / 8] >> (7 - (i % 8))) & 1);
+        let b = ((buf[i / 8] >> (7 - (i % 8))) & 1) as u64;
         if ((crc >> 32) ^ b) & 1 == 1 {
             crc ^= G;
         }
+        i += 1;
     }
     #[allow(clippy::cast_possible_truncation)]
     let crc = ((crc & 0xffff_ffff) ^ 0xffff_ffff) as u32;
@@ -67,7 +73,8 @@ mod tests {
 
     #[test]
     fn crc16_is_crc16_gsm() {
-        assert_eq!(crc16(b"123456789"), 0xce3c);
+        const CHECK: u16 = crc16(b"123456789");
+        assert_eq!(CHECK, 0xce3c);
     }
 
     #[test]

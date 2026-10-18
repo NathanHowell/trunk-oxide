@@ -27,6 +27,12 @@ pub mod ffi {
         Op25 = 1,
     }
 
+    /// A call's voice decode errors (bits corrected) and op25-style spikes.
+    struct TrCallCounts {
+        errors: u64,
+        spikes: u64,
+    }
+
     /// A decoded control-channel message in op25's wire form: the message
     /// type (DUID, or 0xffff for a timeout) and the body (NAC, data).
     struct TrDecodedMessage {
@@ -414,6 +420,7 @@ pub mod ffi {
         fn tr_config_set_temp_dir(ctx: Pin<&mut TrContext>, dir: &str);
         fn tr_config_set_tap_dir(ctx: Pin<&mut TrContext>, dir: &str);
         fn tr_config_set_p25_decoder(ctx: Pin<&mut TrContext>, decoder: TrP25Decoder);
+        fn tr_config_set_p25_voice_decoder(ctx: Pin<&mut TrContext>, decoder: TrP25Decoder);
         fn tr_config_set_soft_vocoder(ctx: Pin<&mut TrContext>, enabled: bool);
         fn tr_config_set_debug_recorder(
             ctx: Pin<&mut TrContext>,
@@ -531,6 +538,22 @@ pub mod ffi {
     }
 
     // ── Shared FFT channelizer engine (called from the GR thread / control threads) ──
+
+    // ── trunk-p25 phase 1 voice regenerator (one per P25 recorder) ──
+
+    extern "Rust" {
+        type P25RegeneratorHandle;
+
+        fn p25_regenerator_new(rate: f64, recorder: i32) -> Box<P25RegeneratorHandle>;
+        /// `input`: interleaved IQ. `out` is replaced by the regenerated
+        /// symbols (ideal levels).
+        #[cxx_name = "process"]
+        fn regenerator_process(self: &mut P25RegeneratorHandle, input: &[f32], out: &mut Vec<f32>);
+        #[cxx_name = "start_call"]
+        fn regenerator_start_call(self: &mut P25RegeneratorHandle, qpsk: bool, system: &str);
+        #[cxx_name = "take_call_counts"]
+        fn regenerator_take_call_counts(self: &mut P25RegeneratorHandle) -> TrCallCounts;
+    }
 
     extern "Rust" {
         type SharedChannelizerHandle;
@@ -866,6 +889,26 @@ fn drop_event_handler_box(_handler: Box<EventHandlerBox>) {
 }
 
 // ── Shared FFT channelizer ──
+
+use p25::P25RegeneratorHandle;
+
+fn p25_regenerator_new(rate: f64, recorder: i32) -> Box<P25RegeneratorHandle> {
+    p25::regenerator_new(rate, recorder)
+}
+
+impl P25RegeneratorHandle {
+    fn regenerator_process(&mut self, input: &[f32], out: &mut Vec<f32>) {
+        self.process(as_complex(input), out);
+    }
+
+    fn regenerator_start_call(&mut self, qpsk: bool, system: &str) {
+        self.start_call(qpsk, system);
+    }
+
+    fn regenerator_take_call_counts(&mut self) -> ffi::TrCallCounts {
+        self.take_call_counts()
+    }
+}
 
 /// Rust half of the C++ `channelizer_backend` (see bridge.cpp).
 pub struct SharedChannelizerHandle {

@@ -68,7 +68,7 @@ pub fn with_status(data: &[u8], total: usize) -> Vec<u8> {
     let mut out = Vec::with_capacity(total);
     let mut it = data.iter();
     while out.len() < total {
-        if (out.len() + 1) % STATUS_PERIOD == 0 {
+        if (out.len() + 1).is_multiple_of(STATUS_PERIOD) {
             out.push(1);
         } else {
             out.push(it.next().copied().unwrap_or(0));
@@ -98,6 +98,67 @@ pub fn tsdu(nac: Nac, tsbks: &[[u8; 10]]) -> Vec<u8> {
         d.extend_from_slice(&trellis::encode(&tsbk_block(t, i + 1 == tsbks.len())));
     }
     with_status(&d, 360)
+}
+
+fn dibits_of(bits: &[bool]) -> Vec<u8> {
+    bits.chunks(2)
+        .map(|p| (u8::from(p[0]) << 1) | u8::from(p.get(1).copied().unwrap_or(false)))
+        .collect()
+}
+
+fn header_bits(nac: Nac, duid: Duid) -> Vec<bool> {
+    header(nac, duid)
+        .iter()
+        .flat_map(|&d| [d & 2 != 0, d & 1 != 0])
+        .collect()
+}
+
+/// Random IMBE parameters.
+pub fn random_imbe(rng: &mut Rng) -> crate::voice::ImbeParams {
+    const WIDTHS: [u32; 8] = [12, 12, 12, 12, 11, 11, 11, 7];
+    #[allow(clippy::cast_possible_truncation)]
+    crate::voice::ImbeParams(std::array::from_fn(|i| {
+        (rng.next_u64() & ((1 << WIDTHS[i]) - 1)) as u16
+    }))
+}
+
+/// An LDU1 or LDU2 (864 dibits): nine IMBE frames and the 240 signalling
+/// bits (link control or encryption sync, already encoded).
+pub fn ldu(
+    nac: Nac,
+    duid: Duid,
+    frames: &[crate::voice::ImbeParams; 9],
+    signalling: &[bool],
+) -> Vec<u8> {
+    use crate::voice::layout::{IMBE_BASE, IMBE_BITS, LDU_DATA_BITS, imbe_bit, signalling_bit};
+    let mut bits = vec![false; LDU_DATA_BITS];
+    bits[..112].copy_from_slice(&header_bits(nac, duid));
+    for (i, f) in frames.iter().enumerate() {
+        let cw = f.encode();
+        for j in 0..IMBE_BITS {
+            bits[imbe_bit(IMBE_BASE[i], j)] = cw.bit(j);
+        }
+    }
+    for (j, &b) in signalling.iter().enumerate() {
+        bits[signalling_bit(j)] = b;
+    }
+    with_status(&dibits_of(&bits), 864)
+}
+
+/// A header data unit (396 dibits).
+pub fn hdu(nac: Nac, mi: &[u8; 9], mfid: u8, algid: u8, keyid: u16, talkgroup: u16) -> Vec<u8> {
+    let mut bits = header_bits(nac, Duid::Hdu);
+    bits.extend(crate::voice::signalling::encode::header(
+        mi, mfid, algid, keyid, talkgroup,
+    ));
+    with_status(&dibits_of(&bits), 396)
+}
+
+/// A terminator with link control (216 dibits).
+pub fn tdulc(nac: Nac, lc: &[u8; 9]) -> Vec<u8> {
+    let mut bits = header_bits(nac, Duid::TduLc);
+    bits.extend(crate::voice::signalling::encode::link_control_tdulc(lc));
+    with_status(&dibits_of(&bits), 216)
 }
 
 /// A frame with only a header (TDU: 72 dibits).
@@ -324,6 +385,6 @@ impl Channel {
 }
 
 /// Info word of a NID, for tests that poke at BCH directly.
-pub fn nid_info(nac: Nac, duid: Duid) -> u16 {
+pub const fn nid_info(nac: Nac, duid: Duid) -> u16 {
     bch::info(nid_word(nac, duid) >> 1)
 }

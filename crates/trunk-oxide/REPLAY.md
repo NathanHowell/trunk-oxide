@@ -86,14 +86,25 @@ slightly run to run — ±1 call, ~1 s of audio — because the state machine is
 wall-clock driven, so compare those with a tolerance. Taps are big (~4 GB per
 10 minutes); `recorder.tap_dir` enables them outside replay.
 
-## Control-channel decoder A/B
+## P25 decoder A/B
 
-`recorder.p25_decoder` picks who decodes P25 control channels: `rust`
-(trunk-p25, the default) or `op25` (the GNU Radio chain). Run both with
-`--tap` and compare `taps/cc_*.msgs.jsonl`. Offline, without a replay,
-`cargo run --release -p trunk-p25 --example golden -- RUN/taps` decodes the
-tapped `.out.cf32` (and `.dibits`, if any) and scores the TSBKs against
-`.msgs.jsonl`.
+`recorder.p25_decoder` picks who decodes P25 control channels and
+`recorder.p25_voice_decoder` who decodes phase 1 voice: `rust` (trunk-p25,
+the default) or `op25` (the GNU Radio chains). Phase 2 (TDMA) voice is op25
+either way. Run both with `--tap` and compare `taps/cc_*.msgs.jsonl` and
+`summary.json`.
+
+Offline, without a replay:
+- `cargo run --release -p trunk-p25 --example golden -- RUN/taps` decodes the
+  control channels' `.out.cf32` (and `.dibits`, if any) and scores the TSBKs
+  against `.msgs.jsonl`;
+- `cargo run --release -p trunk-p25 --example voice_golden -- RUN/taps`
+  decodes every phase 1 call's `.symbols.f32` and `.out.cf32`, and compares
+  op25's decoding algorithms with trunk-p25's on the same frames.
+
+With the Rust voice decoder a call's `.symbols.f32` holds the regenerated
+symbols (what the op25 frame assembler received), not raw demodulator
+output; the sidecar says `"decoder":"rust"`.
 
 ## Notes
 

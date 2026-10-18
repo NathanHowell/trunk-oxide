@@ -20,11 +20,14 @@ pub mod bch;
 pub mod control;
 pub mod crc;
 pub mod demod;
+pub mod fec;
 pub mod framer;
+pub mod gf64;
 pub mod symbols;
 pub mod testgen;
 pub mod trellis;
 pub mod types;
+pub mod voice;
 
 pub use control::{ControlChannelDecoder, DecoderConfig, DecoderStats, Message, Received};
 pub use demod::{DemodConfig, Demodulator, Modulation};

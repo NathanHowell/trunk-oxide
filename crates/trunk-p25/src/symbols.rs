@@ -48,6 +48,18 @@ pub fn dist2(s: f32, dibit: u8) -> f32 {
     d * d
 }
 
+/// Max-log likelihood ratios of a soft symbol's two bits (first-sent bit
+/// first; positive favours 0): for each bit, the squared distance to the
+/// nearest level where it is 1, minus that where it is 0.
+pub fn bit_llrs(s: f32) -> [f32; 2] {
+    let d: [f32; 4] = [dist2(s, 0), dist2(s, 1), dist2(s, 2), dist2(s, 3)];
+    // dibit 0b(hi)(lo): hi set for 2, 3; lo set for 1, 3
+    [
+        d[2].min(d[3]) - d[0].min(d[1]),
+        d[1].min(d[3]) - d[0].min(d[2]),
+    ]
+}
+
 /// The dibits of [`FRAME_SYNC`] in transmission order.
 pub const fn sync_dibits() -> [u8; SYNC_DIBITS] {
     let mut out = [0u8; SYNC_DIBITS];
@@ -87,6 +99,17 @@ mod tests {
         assert!((dist2(4.0, 3) - 1.0).abs() < 1e-6);
         assert!((dist2(3.9, 3) - 1.21).abs() < 1e-5);
         assert_eq!(slice(4.2), 3);
+    }
+
+    #[test]
+    fn bit_llrs_agree_with_slicing() {
+        for s in [-3.5f32, -2.5, -1.2, -0.3, 0.4, 1.7, 2.6, 3.9] {
+            let d = slice(s);
+            let [hi, lo] = bit_llrs(s);
+            assert_eq!((u8::from(hi < 0.0) << 1) | u8::from(lo < 0.0), d, "{s}");
+        }
+        // Halfway between +1 and +3 the magnitude bit is a coin toss.
+        assert!(bit_llrs(2.0)[1].abs() < 1e-6);
     }
 
     #[test]

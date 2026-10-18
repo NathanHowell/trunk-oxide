@@ -92,11 +92,11 @@ impl Message {
     }
 }
 
-/// A message and the symbol index it was completed at.
+/// A decoder output and the symbol index it was completed at.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Received {
+pub struct Received<M = Message> {
     pub symbol: u64,
-    pub message: Message,
+    pub message: M,
 }
 
 #[derive(Clone, Copy, Debug)]

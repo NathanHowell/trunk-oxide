@@ -13,11 +13,13 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use num_complex::Complex32;
 use trunk_channelizer::ChannelDecoder;
+use trunk_p25::voice::Regenerator;
 use trunk_p25::{
     ControlChannelDecoder, DecoderConfig, DemodConfig, Message, Modulation, Nac, Received,
 };
 
 pub use trunk_p25::DecoderStats;
+pub use trunk_p25::voice::VoiceStats;
 
 use crate::ffi;
 
@@ -164,6 +166,112 @@ pub(crate) fn attach(
         }),
         shared,
     )
+}
+
+// ── Phase 1 voice: a regenerator per recorder ──
+
+/// A voice regenerator's counters at one instant.
+#[derive(Clone, Debug, PartialEq)]
+pub struct VoiceChannelReport {
+    pub recorder: i32,
+    /// The system of the call in progress (or last call).
+    pub system: String,
+    pub stats: VoiceStats,
+}
+
+struct VoiceShared {
+    recorder: i32,
+    snapshot: Mutex<(VoiceStats, String)>,
+}
+
+static VOICE_REGISTRY: Mutex<Vec<Weak<VoiceShared>>> = Mutex::new(Vec::new());
+
+/// Counters of every recorder's voice regenerator.
+pub fn voice_channels() -> Vec<VoiceChannelReport> {
+    let mut reg = VOICE_REGISTRY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner);
+    reg.retain(|w| w.strong_count() > 0);
+    reg.iter()
+        .filter_map(Weak::upgrade)
+        .map(|s| {
+            let (stats, system) = s
+                .snapshot
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            VoiceChannelReport {
+                recorder: s.recorder,
+                system,
+                stats,
+            }
+        })
+        .collect()
+}
+
+/// Rust half of the C++ `symbol_regenerator_backend` (see bridge.cpp). The
+/// GR block serialises every call.
+pub struct P25RegeneratorHandle {
+    regen: Regenerator,
+    rate: f64,
+    shared: Arc<VoiceShared>,
+    events: Vec<Received<trunk_p25::voice::VoiceEvent>>,
+}
+
+pub(crate) fn regenerator_new(rate: f64, recorder: i32) -> Box<P25RegeneratorHandle> {
+    let shared = Arc::new(VoiceShared {
+        recorder,
+        snapshot: Mutex::new((VoiceStats::default(), String::new())),
+    });
+    VOICE_REGISTRY
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .push(Arc::downgrade(&shared));
+    Box::new(P25RegeneratorHandle {
+        regen: Regenerator::new(DemodConfig::new(rate, Modulation::Cqpsk)),
+        rate,
+        shared,
+        events: Vec::new(),
+    })
+}
+
+impl P25RegeneratorHandle {
+    pub(crate) fn process(&mut self, iq: &[Complex32], out: &mut Vec<f32>) {
+        out.clear();
+        self.events.clear();
+        self.regen.process(iq, out, &mut self.events);
+        self.shared
+            .snapshot
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .0 = self.regen.stats();
+    }
+
+    pub(crate) fn start_call(&mut self, qpsk: bool, system: &str) {
+        let modulation = if qpsk {
+            Modulation::Cqpsk
+        } else {
+            Modulation::C4fm
+        };
+        self.regen
+            .start_call(DemodConfig::new(self.rate, modulation));
+        system.clone_into(
+            &mut self
+                .shared
+                .snapshot
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .1,
+        );
+    }
+
+    pub(crate) const fn take_call_counts(&mut self) -> ffi::TrCallCounts {
+        let c = self.regen.take_call_counts();
+        ffi::TrCallCounts {
+            errors: c.errors,
+            spikes: c.spikes,
+        }
+    }
 }
 
 impl TryFrom<ffi::TrControlDecoder> for Modulation {

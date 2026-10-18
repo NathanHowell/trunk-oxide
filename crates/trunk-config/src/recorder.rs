@@ -102,8 +102,12 @@ pub struct RecorderConfig {
     pub tap_dir: Option<String>,
     #[serde(default)]
     pub conditioner: ConditionerConfig,
+    /// Who decodes P25 control channels.
     #[serde(default)]
     pub p25_decoder: P25Decoder,
+    /// Who decodes P25 phase 1 voice (phase 2 is op25 either way).
+    #[serde(default)]
+    pub p25_voice_decoder: P25Decoder,
     #[serde(default = "default_true")]
     pub record_uu_v_calls: bool,
     #[serde(default = "default_true")]

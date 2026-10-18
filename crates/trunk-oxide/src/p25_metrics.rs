@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Gauge, Meter};
-use trunk_recorder_sys::p25::{ControlChannelReport, DecoderStats};
+use trunk_recorder_sys::p25::{ControlChannelReport, DecoderStats, VoiceChannelReport, VoiceStats};
 
 /// A decoder's identity across polls: (source, channelizer port).
 type Key = (i32, u32);
@@ -26,6 +26,88 @@ pub struct P25Metrics {
     residual_offset_hz: Gauge<f64>,
     clock_ppm: Gauge<f64>,
     prev: HashMap<Key, (DecoderStats, u64)>,
+    voice: VoiceMetrics,
+}
+
+/// Phase 1 voice regenerators, one per recorder.
+struct VoiceMetrics {
+    units: Counter<u64>,
+    imbe_frames: Counter<u64>,
+    imbe_bit_errors: Counter<u64>,
+    words: Counter<u64>,
+    symbol_snr_db: Gauge<f64>,
+    prev: HashMap<i32, VoiceStats>,
+}
+
+impl VoiceMetrics {
+    fn new(meter: &Meter) -> Self {
+        Self {
+            units: meter
+                .u64_counter("trunk.oxide.p25voice.units")
+                .with_description("Phase 1 voice-channel data units decoded by trunk-p25, by kind")
+                .build(),
+            imbe_frames: meter
+                .u64_counter("trunk.oxide.p25voice.imbe_frames")
+                .with_description("IMBE voice frames (20 ms each)")
+                .build(),
+            imbe_bit_errors: meter
+                .u64_counter("trunk.oxide.p25voice.imbe_bit_errors")
+                .with_description("Bits the Golay/Hamming decoders corrected in IMBE frames")
+                .build(),
+            words: meter
+                .u64_counter("trunk.oxide.p25voice.signalling")
+                .with_description("Reed-Solomon signalling words (link control, encryption sync, header): ok or failed")
+                .build(),
+            symbol_snr_db: meter
+                .f64_gauge("trunk.oxide.p25voice.symbol_snr_db")
+                .with_description("Eye quality of the voice channel being recorded")
+                .with_unit("dB")
+                .build(),
+            prev: HashMap::new(),
+        }
+    }
+
+    fn poll(&mut self) {
+        let reports = trunk_recorder_sys::p25::voice_channels();
+        for r in &reports {
+            self.export(r);
+        }
+    }
+
+    fn export(&mut self, r: &VoiceChannelReport) {
+        let base = [
+            KeyValue::new("recorder", i64::from(r.recorder)),
+            KeyValue::new("system", r.system.clone()),
+        ];
+        let was = self.prev.insert(r.recorder, r.stats).unwrap_or_default();
+        let now = &r.stats;
+        let d = |a: u64, b: u64| a.saturating_sub(b);
+        for (kind, n) in [
+            ("header", d(now.headers, was.headers)),
+            ("ldu1", d(now.ldu1, was.ldu1)),
+            ("ldu2", d(now.ldu2, was.ldu2)),
+            ("terminator", d(now.terminators, was.terminators)),
+        ] {
+            self.units.add(n, &with(&base, "kind", kind));
+        }
+        self.imbe_frames.add(d(now.imbe_frames, was.imbe_frames), &base);
+        self.imbe_bit_errors.add(d(now.imbe_errors, was.imbe_errors), &base);
+        for (word, ok, failed) in [
+            ("link_control", d(now.link_control, was.link_control), d(now.link_control_failed, was.link_control_failed)),
+            ("encryption_sync", d(now.encryption_sync, was.encryption_sync), d(now.encryption_sync_failed, was.encryption_sync_failed)),
+            ("header", d(now.headers, was.headers).saturating_sub(d(now.headers_failed, was.headers_failed)), d(now.headers_failed, was.headers_failed)),
+        ] {
+            let mut ok_attrs = with(&base, "word", word);
+            ok_attrs.push(KeyValue::new("result", "ok"));
+            self.words.add(ok, &ok_attrs);
+            let mut failed_attrs = with(&base, "word", word);
+            failed_attrs.push(KeyValue::new("result", "failed"));
+            self.words.add(failed, &failed_attrs);
+        }
+        if d(now.imbe_frames, was.imbe_frames) > 0 {
+            self.symbol_snr_db.record(f64::from(now.demod.symbol_snr_db()), &base);
+        }
+    }
 }
 
 /// How a TSBK came out, as the `result` label.
@@ -112,10 +194,12 @@ impl P25Metrics {
                 .with_description("Symbol clock error against 4800 baud")
                 .build(),
             prev: HashMap::new(),
+            voice: VoiceMetrics::new(meter),
         }
     }
 
     pub fn poll(&mut self) {
+        self.voice.poll();
         let reports = trunk_recorder_sys::p25::control_channels();
         self.prev
             .retain(|k, _| reports.iter().any(|r| (r.channel.source, r.channel.port) == *k));

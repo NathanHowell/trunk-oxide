@@ -10,7 +10,11 @@
 //!
 //! cargo run --release -p trunk-p25 --example golden -- <tap dir> [mf=0|1] [df=<memory>] [list=<n>]
 
-#![allow(clippy::cast_precision_loss, clippy::format_collect, clippy::too_many_lines)]
+#![allow(
+    clippy::cast_precision_loss,
+    clippy::format_collect,
+    clippy::too_many_lines
+)]
 
 use std::collections::HashMap;
 use std::fs;

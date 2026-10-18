@@ -35,16 +35,18 @@ const fn data_dibit(data: &[u8; DATA_BYTES], i: usize) -> u8 {
 }
 
 /// Encode and interleave 12 bytes into 98 dibits.
-pub fn encode(data: &[u8; DATA_BYTES]) -> [u8; BLOCK_DIBITS] {
+pub const fn encode(data: &[u8; DATA_BYTES]) -> [u8; BLOCK_DIBITS] {
     let mut out = [0u8; BLOCK_DIBITS];
     let mut state = 0usize;
-    for i in 0..STEPS {
+    let mut i = 0;
+    while i < STEPS {
         let input = if i < 48 { data_dibit(data, i) } else { 0 };
-        let cw = NEXT_WORDS[state][usize::from(input)];
+        let cw = NEXT_WORDS[state][input as usize];
         let p = interleave_pos(i);
         out[p] = cw >> 2;
         out[p + 1] = cw & 3;
-        state = usize::from(input);
+        state = input as usize;
+        i += 1;
     }
     out
 }

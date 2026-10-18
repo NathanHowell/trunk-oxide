@@ -103,7 +103,7 @@ pub const fn frame_dibits_for(blocks: usize) -> usize {
 }
 
 /// The 64-bit NID: BCH codeword of NAC and DUID, then the parity bit.
-pub fn nid_word(nac: Nac, duid: Duid) -> u64 {
+pub const fn nid_word(nac: Nac, duid: Duid) -> u64 {
     (bch::encode((nac.get() << 4) | duid as u16) << 1) | duid.parity()
 }
 
@@ -116,6 +116,9 @@ pub struct Frame {
     pub start: u64,
     /// Soft symbols after the NID, status symbols removed.
     pub body: Vec<f32>,
+    /// Every soft symbol of the frame from the first sync dibit, status
+    /// included (the coordinates of the TIA bit tables).
+    pub raw: Vec<f32>,
     pub nid_errors: u32,
     pub sync_errors: u32,
     /// The frame ended early (a new sync arrived first).
@@ -145,12 +148,15 @@ struct Collecting {
     nid: Vec<f32>,
     header: Option<(Duid, Nac, u32)>,
     body: Vec<f32>,
+    raw: Vec<f32>,
     total: usize,
 }
 
 pub struct Framer {
     n: u64,
     acc: u64,
+    /// The last `SYNC_DIBITS` soft symbols, a ring indexed by `n`.
+    recent: [f32; SYNC_DIBITS],
     cur: Option<Collecting>,
     /// Where the frame just finished says the next sync starts.
     expect_sync_at: Option<u64>,
@@ -172,6 +178,7 @@ impl Framer {
         Self {
             n: 0,
             acc: 0,
+            recent: [0.0; SYNC_DIBITS],
             cur: None,
             expect_sync_at: None,
             nac: None,
@@ -201,14 +208,16 @@ impl Framer {
         self.nac
     }
 
-    /// Forget timing and the learned NAC (after a retune).
+    /// Forget the frame in flight, timing and the learned NAC (after a
+    /// retune). The symbol count and the counters carry on.
     pub fn reset(&mut self) {
-        let required = self.required_nac;
-        let stats = self.stats;
-        *self = Self::new();
-        self.required_nac = required;
-        self.nac = required;
-        self.stats = stats;
+        *self = Self {
+            n: self.n,
+            stats: self.stats,
+            required_nac: self.required_nac,
+            nac: self.required_nac,
+            ..Self::new()
+        };
     }
 
     /// Feed one soft symbol; completed frames are appended to `out`.
@@ -216,10 +225,15 @@ impl Framer {
         let idx = self.n;
         self.n += 1;
         self.acc = ((self.acc << 2) | u64::from(slice(s))) & ((1 << 48) - 1);
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            self.recent[(idx % SYNC_DIBITS as u64) as usize] = s;
+        }
 
         if let Some(cur) = &mut self.cur {
             let k = cur.seen;
             cur.seen += 1;
+            cur.raw.push(s);
             if (NID_START..HEADER_DIBITS).contains(&k) {
                 if !is_status(k) {
                     cur.nid.push(s);
@@ -259,6 +273,7 @@ impl Framer {
                 nid: Vec::with_capacity(32),
                 header: None,
                 body: Vec::new(),
+                raw: self.recent_sync(),
                 total: 0,
             });
             return;
@@ -275,11 +290,37 @@ impl Framer {
         }
     }
 
+    /// The sync just received, oldest first.
+    fn recent_sync(&self) -> Vec<f32> {
+        #[allow(clippy::cast_possible_truncation)]
+        let start = (self.n % SYNC_DIBITS as u64) as usize;
+        self.recent[start..]
+            .iter()
+            .chain(&self.recent[..start])
+            .copied()
+            .collect()
+    }
+
     /// Lengthen the frame in flight (a PDU header announced its blocks).
     pub fn extend_current(&mut self, total_dibits: usize) {
         if let Some(cur) = &mut self.cur {
             cur.total = cur.total.max(total_dibits);
         }
+    }
+
+    /// The earliest symbol a frame may still claim: the start of the frame in
+    /// flight, or of a sync that may be arriving. Everything before it is
+    /// settled.
+    pub fn settled_before(&self) -> u64 {
+        self.cur.as_ref().map_or_else(
+            || self.n.saturating_sub(SYNC_DIBITS as u64 - 1),
+            |c| c.start,
+        )
+    }
+
+    /// Symbols seen so far.
+    pub const fn position(&self) -> u64 {
+        self.n
     }
 
     /// The frame in flight, once its header is known: (duid, body so far).
@@ -302,6 +343,7 @@ impl Framer {
             nac,
             start: cur.start,
             body: cur.body,
+            raw: cur.raw,
             nid_errors,
             sync_errors: cur.sync_errors,
             truncated,
@@ -463,6 +505,11 @@ mod tests {
         for (fr, t) in frames.iter().zip(&sent) {
             assert_eq!((fr.duid, fr.nac, fr.truncated), (Duid::Tsdu, NAC, false));
             assert_eq!(fr.body.len(), 3 * 98);
+            assert_eq!(fr.raw.len(), 360);
+            assert_eq!(
+                fr.raw[..SYNC_DIBITS],
+                ideal(&crate::symbols::sync_dibits())[..]
+            );
             let d = crate::trellis::decode(&fr.body.as_chunks().0[0]);
             assert_eq!(&d.data[..10], &testgen::tsbk_block(&t[0], false)[..10]);
         }

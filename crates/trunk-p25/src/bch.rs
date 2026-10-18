@@ -4,100 +4,60 @@
 //! transmitted first. The 16 information bits (NAC then DUID) occupy bits
 //! 62..47, the 47 parity bits 46..0.
 
-use std::sync::LazyLock;
+use crate::gf64::{self, Gf64};
 
 pub const N: u32 = 63;
 pub const K: u32 = 16;
 /// Designed error-correcting capability.
 pub const T: usize = 11;
 
-struct Gf {
-    exp: [u8; 126],
-    log: [u8; 64],
-}
-
-static GF: LazyLock<Gf> = LazyLock::new(|| {
-    let mut exp = [0u8; 126];
-    let mut log = [0u8; 64];
-    let mut x: u8 = 1;
-    for i in 0..63 {
-        exp[i] = x;
-        exp[i + 63] = x;
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            log[usize::from(x)] = i as u8;
-        }
-        x <<= 1;
-        if x & 0x40 != 0 {
-            x ^= 0x43; // x^6 = x + 1
-        }
-    }
-    Gf { exp, log }
-});
-
-fn mul(a: u8, b: u8) -> u8 {
-    if a == 0 || b == 0 {
-        return 0;
-    }
-    let gf = &*GF;
-    gf.exp[usize::from(gf.log[usize::from(a)]) + usize::from(gf.log[usize::from(b)])]
-}
-
-fn div(a: u8, b: u8) -> u8 {
-    debug_assert!(b != 0);
-    if a == 0 {
-        return 0;
-    }
-    let gf = &*GF;
-    gf.exp[usize::from(gf.log[usize::from(a)]) + 63 - usize::from(gf.log[usize::from(b)])]
-}
-
-fn alpha_pow(e: usize) -> u8 {
-    GF.exp[e % 63]
-}
-
-/// Generator polynomial: the product of the minimal polynomials of
-/// α^1 … α^22, as a bitmask (degree 47, so bit 47 is set).
-pub static GENERATOR: LazyLock<u64> = LazyLock::new(|| {
+/// Generator polynomial: ∏ (x − αʲ) over every j in the cyclotomic cosets of
+/// 1 … 2T, i.e. the product of their minimal polynomials. As a bitmask
+/// (degree 47, so bit 47 is set).
+pub const GENERATOR: u64 = {
     let mut covered = [false; 63];
-    // Polynomial with GF(64) coefficients, lowest degree first.
-    let mut g: Vec<u8> = vec![1];
-    for i in 1..=2 * T {
-        if covered[i] {
-            continue;
-        }
+    // GF(64) coefficients, lowest degree first.
+    let mut g = [Gf64::ZERO; 64];
+    g[0] = Gf64::ONE;
+    let mut degree = 0;
+    let mut i = 1;
+    while i <= 2 * T {
         let mut j = i;
-        loop {
+        while !covered[j] {
             covered[j] = true;
-            // g *= (x + α^j)
-            let root = alpha_pow(j);
-            let mut next = vec![0u8; g.len() + 1];
-            for (d, &c) in g.iter().enumerate() {
-                next[d + 1] ^= c;
-                next[d] ^= mul(c, root);
+            // g ← g · (x + αʲ)
+            let root = Gf64::alpha(j);
+            let mut d = degree + 1;
+            while d > 0 {
+                g[d] = g[d - 1].plus(g[d].times(root));
+                d -= 1;
             }
-            g = next;
+            g[0] = g[0].times(root);
+            degree += 1;
             j = (j * 2) % 63;
-            if j == i {
-                break;
-            }
         }
+        i += 1;
     }
-    g.iter().enumerate().fold(0u64, |acc, (d, &c)| {
-        assert!(c <= 1, "generator must be binary");
-        acc | (u64::from(c) << d)
-    })
-});
+    let mut mask = 0u64;
+    let mut d = 0;
+    while d <= degree {
+        assert!(g[d].get() <= 1, "generator must be binary");
+        mask |= (g[d].get() as u64) << d;
+        d += 1;
+    }
+    mask
+};
 
 /// Systematic encode of 16 information bits.
-pub fn encode(info: u16) -> u64 {
-    let g = *GENERATOR;
-    let shifted = u64::from(info) << (N - K);
+pub const fn encode(info: u16) -> u64 {
+    let shifted = (info as u64) << (N - K);
     let mut r = shifted;
-    for bit in (N - K..N).rev() {
+    let mut bit = N - 1;
+    while bit >= N - K {
         if (r >> bit) & 1 == 1 {
-            r ^= g << (bit - (N - K));
+            r ^= GENERATOR << (bit - (N - K));
         }
+        bit -= 1;
     }
     shifted | r
 }
@@ -114,44 +74,44 @@ pub const fn info(codeword: u64) -> u16 {
 #[allow(clippy::many_single_char_names)] // textbook Berlekamp–Massey names
 pub fn decode(word: u64) -> Option<(u64, u32)> {
     let word = word & ((1u64 << N) - 1);
-    let mut syn = [0u8; 2 * T];
+    let mut syn = [Gf64::ZERO; 2 * T];
     let mut any = false;
     for (j, s) in syn.iter_mut().enumerate() {
-        let mut acc = 0u8;
+        let mut acc = Gf64::ZERO;
         let mut w = word;
         while w != 0 {
             let i = w.trailing_zeros() as usize;
-            acc ^= alpha_pow(i * (j + 1));
+            acc += Gf64::alpha(i * (j + 1));
             w &= w - 1;
         }
         *s = acc;
-        any |= acc != 0;
+        any |= !acc.is_zero();
     }
     if !any {
         return Some((word, 0));
     }
 
     // Berlekamp–Massey.
-    let mut c = [0u8; 2 * T + 1];
-    let mut b = [0u8; 2 * T + 1];
-    c[0] = 1;
-    b[0] = 1;
+    let mut c = [Gf64::ZERO; 2 * T + 1];
+    let mut b = [Gf64::ZERO; 2 * T + 1];
+    c[0] = Gf64::ONE;
+    b[0] = Gf64::ONE;
     let mut l = 0usize;
     let mut m = 1usize;
-    let mut bb = 1u8;
+    let mut bb = Gf64::ONE;
     for n in 0..2 * T {
         let mut d = syn[n];
         for i in 1..=l {
-            d ^= mul(c[i], syn[n - i]);
+            d += c[i] * syn[n - i];
         }
-        if d == 0 {
+        if d.is_zero() {
             m += 1;
             continue;
         }
-        let coef = div(d, bb);
+        let coef = d / bb;
         let prev = c;
         for i in m..=2 * T {
-            c[i] ^= mul(coef, b[i - m]);
+            c[i] += coef * b[i - m];
         }
         if 2 * l <= n {
             l = n + 1 - l;
@@ -170,12 +130,7 @@ pub fn decode(word: u64) -> Option<(u64, u32)> {
     let mut fixed = word;
     let mut found = 0usize;
     for i in 0..N as usize {
-        let inv = (63 - i) % 63;
-        let mut v = 0u8;
-        for (k, &ck) in c.iter().enumerate().take(l + 1) {
-            v ^= mul(ck, alpha_pow(inv * k));
-        }
-        if v == 0 {
+        if gf64::eval(&c[..=l], Gf64::alpha(63 - i)).is_zero() {
             fixed ^= 1u64 << i;
             found += 1;
         }
@@ -199,7 +154,7 @@ mod tests {
             1, 1, 0, 1, 0, 1, 0, 0, 1, 1, 0, 1, 1, 1, 0, 0, 1, 0, 1, 1, 1, 0, 1, 1, 1, 1, 0, 1, 0,
             0, 0, 0, 1, 1, 0, 0, 1, 0, 0, 1, 1, 0, 1, 1, 0, 0, 1, 1,
         ];
-        let g = *GENERATOR;
+        let g = GENERATOR;
         assert_eq!(g.ilog2(), 47);
         let ours: Vec<u8> = (0..48).rev().map(|d| u8::from((g >> d) & 1 == 1)).collect();
         let reversed: Vec<u8> = BCH_G.iter().rev().copied().collect();

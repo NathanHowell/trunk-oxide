@@ -1,5 +1,6 @@
 #ifndef GLOBAL_STRUCTS_H
 #define GLOBAL_STRUCTS_H
+#include <functional>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -7,6 +8,7 @@
 const int DB_UNSET = 999;
 
 class EventSink;
+class symbol_regenerator_backend;
 
 struct Transmission {
   long source;
@@ -40,6 +42,10 @@ struct Config {
   // offline baselines (see channel_control::enable_tap).
   std::string tap_dir;
   P25DecoderImpl p25_decoder = P25DecoderImpl::Rust;
+  // Set by the host when trunk-p25 decodes phase 1 voice: makes the backend
+  // of a recorder's regenerator (conditioned rate, recorder number). Empty =
+  // op25's demodulators throughout.
+  std::function<std::shared_ptr<symbol_regenerator_backend>(double, int)> p25_voice_regenerator;
   std::shared_ptr<EventSink> event_sink;
 };
 

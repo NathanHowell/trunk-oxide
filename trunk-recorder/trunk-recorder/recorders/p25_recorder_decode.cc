@@ -56,6 +56,7 @@ void p25_recorder_decode::start(const RecorderConfig &config) {
     d_call_sources.clear();
   }
   d_last_notified_crypto = ~0u;
+  d_call_algid = 0x80;
   op25_frame_assembler->call_start();
 
   if (config.phase2_tdma) {
@@ -130,7 +131,7 @@ void p25_recorder_decode::initialize(int silence_frames, bool d_soft_vocoder) {
   // Wire callback to bypass the msg_queue — alias messages are processed
   // directly on the GR thread instead of being polled from Rust.
   op25_frame_assembler->set_msg_callback([this](gr::message::sptr msg) {
-    if (d_shadow || msg->type() != -3) return; // Only M_P25_JSON_DATA
+    if (msg->type() != -3) return; // Only M_P25_JSON_DATA
     try {
       auto j = nlohmann::json::parse(msg->to_string());
       // ESS crypto parameters ({"encrypted","algid","keyid"}, no "type"). Clear
@@ -140,13 +141,15 @@ void p25_recorder_decode::initialize(int silence_frames, bool d_soft_vocoder) {
         unsigned algid = j["algid"].get<unsigned>();
         unsigned keyid = j["keyid"].get<unsigned>();
         if (j.value("encrypted", 0) != 0 && algid != 0x80 && d_recorder) {
+          d_call_algid = static_cast<int>(algid);
           uint32_t packed = ((algid & 0xFFFF) << 16) | (keyid & 0xFFFF);
-          if (d_last_notified_crypto.exchange(packed) != packed) {
+          if (!d_shadow && d_forward_crypto && d_last_notified_crypto.exchange(packed) != packed) {
             d_recorder->notify_crypto(algid, keyid);
           }
         }
         return;
       }
+      if (d_shadow) return;
       if (!j.contains("type")) return;
       std::string t = j["type"];
       if (t == "motorola_alias_p1" || t == "motorola_alias_p2" ||

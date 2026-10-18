@@ -1,6 +1,7 @@
 //! P25 Phase 1 voice channels: header, voice frames (LDU1/LDU2) and
 //! terminators, decoded down to IMBE parameters and signalling words.
 
+pub mod crypto;
 pub mod imbe;
 pub mod layout;
 pub mod regenerate;
@@ -8,6 +9,7 @@ pub mod signalling;
 
 use num_complex::Complex32;
 
+pub use crypto::{Encryption, EncryptionTracker};
 pub use imbe::{ImbeCodeword, ImbeFrame, ImbeParams};
 pub use regenerate::{CallCounts, Regenerator};
 pub use signalling::{Checked, EncryptionSync, GroupVoice, Header, LcMessage, LinkControl};

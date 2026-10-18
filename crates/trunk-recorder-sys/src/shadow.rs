@@ -283,6 +283,8 @@ pub enum CallItem {
     Source,
     /// The call produced audio (≥ 0.5 s).
     Audio,
+    /// The call is encrypted (the same ALGID, when both say so).
+    Encrypted,
 }
 
 impl CallItem {
@@ -290,6 +292,7 @@ impl CallItem {
         match self {
             Self::Source => "source",
             Self::Audio => "audio",
+            Self::Encrypted => "encrypted",
         }
     }
 }
@@ -360,7 +363,19 @@ pub fn observe_call(report: &ffi::TrCallReport) {
         (false, true) => count(CallItem::Audio, Outcome::Only(si), 1),
         (false, false) => {}
     }
+    match (p.algid != ALGID_CLEAR, s.algid != ALGID_CLEAR) {
+        (true, true) if p.algid == s.algid => count(CallItem::Encrypted, Outcome::Both, 1),
+        (true, true) => {
+            count(CallItem::Encrypted, Outcome::Only(pi), 1);
+            count(CallItem::Encrypted, Outcome::Only(si), 1);
+        }
+        (true, false) => count(CallItem::Encrypted, Outcome::Only(pi), 1),
+        (false, true) => count(CallItem::Encrypted, Outcome::Only(si), 1),
+        (false, false) => {}
+    }
 }
+
+const ALGID_CLEAR: u8 = trunk_p25::voice::signalling::ALGID_CLEAR;
 
 /// Every voice call so far.
 pub fn voice_tally() -> VoiceTally {

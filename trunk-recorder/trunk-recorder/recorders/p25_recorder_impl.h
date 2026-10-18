@@ -3,6 +3,7 @@
 
 #define _USE_MATH_DEFINES
 
+#include <atomic>
 #include <optional>
 #include <cstdio>
 #include <iostream>
@@ -120,6 +121,8 @@ protected:
   // Which chain the call in progress uses; the selector feeds op25's.
   enum class Branch { Fsk4 = 0, Qpsk = 1, Rust = 2 };
   Branch active = Branch::Qpsk;
+  // trunk-p25 is primary on the call in progress: its ESS marks encryption.
+  std::atomic<bool> rust_crypto{false};
   // Shadow mode: the other implementation's chain, decoding the same call
   // with its audio discarded, reported to Config::p25_call_observer.
   std::optional<Branch> shadow;

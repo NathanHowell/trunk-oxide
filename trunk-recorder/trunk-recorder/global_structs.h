@@ -49,6 +49,7 @@ struct P25CallAccount {
   long errors;
   long spikes;
   std::vector<long> sources; // source units named in band, first appearance order
+  int algid;                 // encryption it found on the call; 0x80 = clear
 };
 
 // Every voice call's outcome, by decoder: one account, or two in shadow mode.

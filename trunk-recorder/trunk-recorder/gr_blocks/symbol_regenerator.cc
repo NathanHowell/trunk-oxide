@@ -15,10 +15,10 @@ p25_regenerator::p25_regenerator(std::shared_ptr<symbol_regenerator_backend> bac
   set_relative_rate(1.0 / d_samples_per_symbol);
 }
 
-void p25_regenerator::start_call(bool qpsk, bool tdma, const std::string &xor_mask, const std::string &system, bool primary) {
+void p25_regenerator::start_call(bool qpsk, bool tdma, const std::string &xor_mask, const std::string &system, bool primary, int slot) {
   std::lock_guard<std::mutex> l(d_mutex);
   d_samples_per_symbol = tdma ? 4 : 5;
-  d_backend->start_call(qpsk, tdma, xor_mask, system, primary);
+  d_backend->start_call(qpsk, tdma, xor_mask, system, primary, slot);
   d_new_call = true;
 }
 
@@ -55,10 +55,16 @@ int p25_regenerator::general_work(int noutput_items, gr_vector_int &ninput_items
     return 0;
   }
   if (n_in > 0) {
-    std::lock_guard<std::mutex> l(d_mutex);
-    d_scratch.clear();
-    d_backend->process(in, static_cast<size_t>(n_in), d_scratch);
-    d_pending.insert(d_pending.end(), d_scratch.begin(), d_scratch.end());
+    unsigned algid = 0, keyid = 0;
+    bool crypto = false;
+    {
+      std::lock_guard<std::mutex> l(d_mutex);
+      d_scratch.clear();
+      d_backend->process(in, static_cast<size_t>(n_in), d_scratch);
+      d_pending.insert(d_pending.end(), d_scratch.begin(), d_scratch.end());
+      crypto = d_backend->take_crypto(algid, keyid);
+    }
+    if (crypto && d_crypto_cb) d_crypto_cb(algid, keyid);
   }
   consume_each(n_in);
   const int n_out = std::min(noutput_items, static_cast<int>(d_pending.size()));

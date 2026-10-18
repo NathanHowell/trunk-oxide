@@ -30,13 +30,18 @@ public:
   // `xor_mask`).
   // `primary`: the call's audio comes from this receiver (else it is a
   // shadow, run only to be compared).
-  virtual void start_call(bool qpsk, bool tdma, const std::string &xor_mask, const std::string &system, bool primary) = 0;
+  // `slot`: the TDMA slot (logical channel) the call is on.
+  virtual void start_call(bool qpsk, bool tdma, const std::string &xor_mask, const std::string &system, bool primary, int slot) = 0;
+  // Encryption confirmed on the call's own slot since the last take (the ESS
+  // decoded alike in two superframes running).
+  virtual bool take_crypto(unsigned &algid, unsigned &keyid) = 0;
 
   // Bits corrected in voice frames and op25-style error spikes since the last
   // call, for the call's transmissions (the frame assembler sees none).
   struct CallCounts {
     long errors = 0;
     long spikes = 0;
+    int algid = 0x80; // confirmed on the call's slot; 0x80 = clear
   };
   virtual CallCounts take_call_counts() = 0;
 };
@@ -52,8 +57,10 @@ public:
 
   explicit p25_regenerator(std::shared_ptr<symbol_regenerator_backend> backend);
 
-  void start_call(bool qpsk, bool tdma, const std::string &xor_mask, const std::string &system, bool primary);
+  void start_call(bool qpsk, bool tdma, const std::string &xor_mask, const std::string &system, bool primary, int slot);
   symbol_regenerator_backend::CallCounts take_call_counts();
+  // Called on the GR thread with encryption the backend confirms.
+  void set_crypto_callback(std::function<void(unsigned algid, unsigned keyid)> cb) { d_crypto_cb = std::move(cb); }
   // Disabled, input is consumed and dropped without demodulating (the
   // recorder is idle or decoding with op25 alone).
   void set_enabled(bool enabled);
@@ -64,6 +71,7 @@ public:
 
 private:
   std::shared_ptr<symbol_regenerator_backend> d_backend;
+  std::function<void(unsigned, unsigned)> d_crypto_cb;
   // Samples per symbol of the call in progress (5 phase 1, 4 phase 2).
   int d_samples_per_symbol = 5;
   std::atomic<bool> d_enabled{false};

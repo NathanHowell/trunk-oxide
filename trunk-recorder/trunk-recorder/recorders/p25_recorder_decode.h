@@ -68,6 +68,11 @@ public:
   // A shadow decodes only to be compared: its audio, source changes, aliases
   // and crypto notices go nowhere.
   void set_shadow(bool shadow) { d_shadow = shadow; }
+  // Whether op25's ESS marks the call encrypted (it is primary), or is only
+  // recorded for comparison (trunk-p25 is).
+  void set_forward_crypto(bool forward) { d_forward_crypto = forward; }
+  // The ALGID op25 reported on this call (0x80: none).
+  int call_algid() const { return d_call_algid; }
   // Source units the call in progress (or last call) named in band, in
   // order of first appearance.
   std::vector<long> call_sources() const;
@@ -86,6 +91,8 @@ private:
   void handle_alias_message(const nlohmann::json& j);
   mutable std::mutex d_state_mutex;
   std::atomic<bool> d_shadow{false};
+  std::atomic<bool> d_forward_crypto{true};
+  std::atomic<int> d_call_algid{0x80};
   std::vector<long> d_call_sources; // guarded by d_state_mutex
 };
 #endif

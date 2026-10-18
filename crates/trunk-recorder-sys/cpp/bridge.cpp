@@ -337,14 +337,21 @@ public:
         h_->process(rust::Slice<const float>(reinterpret_cast<const float *>(in), 2 * n), out_);
         out.insert(out.end(), out_.begin(), out_.end());
     }
-    void start_call(bool qpsk, bool tdma, const std::string &xor_mask, const std::string &system, bool primary) override {
+    void start_call(bool qpsk, bool tdma, const std::string &xor_mask, const std::string &system, bool primary, int slot) override {
         h_->start_call(qpsk, tdma,
                        rust::Slice<const uint8_t>(reinterpret_cast<const uint8_t *>(xor_mask.data()), xor_mask.size()),
-                       rust::Str(system), primary);
+                       rust::Str(system), primary, slot);
+    }
+    bool take_crypto(unsigned &algid, unsigned &keyid) override {
+        const uint32_t c = h_->take_crypto();
+        if (c == 0) return false;
+        algid = (c >> 16) & 0xff;
+        keyid = c & 0xffff;
+        return true;
     }
     CallCounts take_call_counts() override {
         const TrCallCounts c = h_->take_call_counts();
-        return {static_cast<long>(c.errors), static_cast<long>(c.spikes)};
+        return {static_cast<long>(c.errors), static_cast<long>(c.spikes), static_cast<int>(c.algid)};
     }
 
 private:
@@ -402,6 +409,7 @@ void tr_config_set_p25_shadow(TrContext &ctx, bool control, bool phase1, bool ph
             t.transmissions = a.transmissions;
             t.errors = a.errors;
             t.spikes = a.spikes;
+            t.algid = static_cast<uint8_t>(a.algid);
             for (long s : a.sources) t.sources.push_back(s);
             out.accounts.push_back(std::move(t));
         }

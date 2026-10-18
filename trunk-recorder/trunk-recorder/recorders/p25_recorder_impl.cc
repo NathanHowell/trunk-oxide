@@ -65,6 +65,11 @@ void p25_recorder_impl::build_graph() {
   fsk4_p25_decode = make_p25_recorder_decode(self_recorder, config, silence_frames, d_soft_vocoder);
   if (config.p25_voice_regenerator) {
     rust_regen = p25_regenerator::make(config.p25_voice_regenerator(channel_control::phase1_samples_per_symbol * channel_control::phase1_symbol_rate, rec_num));
+    // With trunk-p25 primary, its ESS (confirmed on the call's own slot) is
+    // what marks a call encrypted; op25's is only compared.
+    rust_regen->set_crypto_callback([this](unsigned algid, unsigned keyid) {
+      if (rust_crypto) notify_crypto(algid, keyid);
+    });
     rust_p25_decode = make_p25_recorder_decode(self_recorder, config, silence_frames, d_soft_vocoder);
   }
 
@@ -314,7 +319,7 @@ void p25_recorder_impl::report_call() {
   if (!config.p25_call_observer) return;
   P25CallReport r{short_name, rec_num, talkgroup, chan_freq, call_phase2, {}};
   auto account = [this](Branch b, bool primary) {
-    P25CallAccount a{b == Branch::Rust ? P25DecoderImpl::Rust : P25DecoderImpl::Op25, primary, 0.0, 0, 0, 0, {}};
+    P25CallAccount a{b == Branch::Rust ? P25DecoderImpl::Rust : P25DecoderImpl::Op25, primary, 0.0, 0, 0, 0, {}, 0x80};
     for (const auto &t : transmissions_of(b)) {
       a.audio_seconds += static_cast<double>(t.sample_count) / 8000.0;
       a.transmissions++;
@@ -322,6 +327,7 @@ void p25_recorder_impl::report_call() {
       a.spikes += t.spike_count;
     }
     a.sources = decode_of(b)->call_sources();
+    a.algid = b == Branch::Rust ? rust_counts.algid : decode_of(b)->call_algid();
     return a;
   };
   r.accounts.push_back(account(active, true));
@@ -332,6 +338,7 @@ void p25_recorder_impl::report_call() {
 void p25_recorder_impl::stop() {
   if (state == REC_ACTIVE) {
     state = REC_INACTIVE;
+    rust_crypto = false;
     set_enabled(false);
     tap_end();
 
@@ -397,7 +404,7 @@ bool p25_recorder_impl::start(const RecorderConfig &config) {
     tap_begin(config);
 
     if (active == Branch::Rust || shadow == Branch::Rust) {
-      rust_regen->start_call(qpsk_mod, config.phase2_tdma, config.xor_mask, config.short_name, active == Branch::Rust);
+      rust_regen->start_call(qpsk_mod, config.phase2_tdma, config.xor_mask, config.short_name, active == Branch::Rust, config.phase2_tdma ? config.tdma_slot : 0);
       rust_regen->take_call_counts(); // anything before this call is not its
       rust_regen->set_enabled(true);
     }
@@ -407,6 +414,8 @@ bool p25_recorder_impl::start(const RecorderConfig &config) {
       modulation_selector->set_output_index(static_cast<int>(op25)); // enables that port only
     }
     decode()->set_shadow(false);
+    decode()->set_forward_crypto(active != Branch::Rust);
+    rust_crypto = active == Branch::Rust;
     decode()->start(config);
     if (shadow) {
       decode_of(*shadow)->set_shadow(true);

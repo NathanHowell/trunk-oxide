@@ -35,6 +35,8 @@ pub mod ffi {
     struct TrCallCounts {
         errors: u64,
         spikes: u64,
+        /// The ALGID confirmed on the call's own slot (0x80: clear).
+        algid: u8,
     }
 
     /// One P25 voice decoder's account of a call (see `P25CallAccount`).
@@ -47,6 +49,8 @@ pub mod ffi {
         spikes: i64,
         /// Source units named in band, in order of first appearance.
         sources: Vec<i64>,
+        /// The ALGID this decoder found on the call (0x80: clear).
+        algid: u8,
     }
 
     /// A P25 voice call's outcome: the primary decoder's account and, in
@@ -636,7 +640,12 @@ pub mod ffi {
             xor_mask: &[u8],
             system: &str,
             primary: bool,
+            slot: i32,
         );
+        /// Encryption confirmed on the call's own slot since the last call
+        /// (0: none; else `1 << 24 | algid << 16 | keyid`).
+        #[cxx_name = "take_crypto"]
+        fn regenerator_take_crypto(self: &mut P25RegeneratorHandle) -> u32;
         #[cxx_name = "take_call_counts"]
         fn regenerator_take_call_counts(self: &mut P25RegeneratorHandle) -> TrCallCounts;
     }
@@ -1018,8 +1027,16 @@ impl P25RegeneratorHandle {
         xor_mask: &[u8],
         system: &str,
         primary: bool,
+        slot: i32,
     ) {
-        self.start_call(qpsk, tdma, xor_mask, system, primary);
+        self.start_call(qpsk, tdma, xor_mask, system, primary, u8::try_from(slot).unwrap_or(0));
+    }
+
+    const fn regenerator_take_crypto(&mut self) -> u32 {
+        match self.take_crypto() {
+            Some(e) => 1 << 24 | (e.algid as u32) << 16 | e.keyid as u32,
+            None => 0,
+        }
     }
 
     const fn regenerator_take_call_counts(&mut self) -> ffi::TrCallCounts {

@@ -13,8 +13,8 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use num_complex::Complex32;
 use trunk_channelizer::ChannelDecoder;
-use trunk_p25::tdma::{Scrambler, TdmaEvent, TdmaRegenerator};
-use trunk_p25::voice::Regenerator;
+use trunk_p25::tdma::{BurstContent, Scrambler, TdmaEvent, TdmaRegenerator};
+use trunk_p25::voice::{Encryption, EncryptionTracker, Regenerator, VoiceEvent};
 use trunk_p25::{
     ControlChannelDecoder, DecoderConfig, DemodConfig, Message, Modulation, Nac, Received,
 };
@@ -269,6 +269,12 @@ pub struct P25RegeneratorHandle {
     tdma: TdmaRegenerator,
     /// The call in progress is phase 2.
     phase2: bool,
+    /// Its TDMA slot (the logical channel this recorder follows).
+    slot: u8,
+    /// Its encryption, from the ESS on its own slot.
+    crypto: EncryptionTracker,
+    /// Encryption confirmed but not yet taken by the recorder.
+    crypto_pending: Option<Encryption>,
     rate: f64,
     shared: Arc<VoiceShared>,
     events: Vec<Received<trunk_p25::voice::VoiceEvent>>,
@@ -288,6 +294,9 @@ pub(crate) fn regenerator_new(rate: f64, recorder: i32) -> Box<P25RegeneratorHan
         regen: Regenerator::new(DemodConfig::new(rate, Modulation::Cqpsk)),
         tdma: TdmaRegenerator::new(DemodConfig::phase2(rate), None),
         phase2: false,
+        slot: 0,
+        crypto: EncryptionTracker::default(),
+        crypto_pending: None,
         rate,
         shared,
         events: Vec::new(),
@@ -307,11 +316,53 @@ impl P25RegeneratorHandle {
             self.tdma_events.clear();
             self.tdma.process(iq, out, &mut self.tdma_events);
             snap.phase2 = self.tdma.stats();
+            for e in &self.tdma_events {
+                if e.message.channel != self.slot {
+                    continue;
+                }
+                if let BurstContent::Voice2 { encryption, .. } = &e.message.content {
+                    Self::track(
+                        &mut self.crypto,
+                        &mut self.crypto_pending,
+                        encryption.as_ref().map(|c| &c.value),
+                    );
+                }
+            }
         } else {
             self.events.clear();
             self.regen.process(iq, out, &mut self.events);
             snap.phase1 = self.regen.stats();
+            for e in &self.events {
+                if let VoiceEvent::Ldu2 { encryption, .. } = &e.message {
+                    Self::track(
+                        &mut self.crypto,
+                        &mut self.crypto_pending,
+                        encryption.as_ref().map(|c| &c.value),
+                    );
+                }
+            }
         }
+    }
+
+    /// One superframe's ESS (`None`: it did not decode).
+    fn track(
+        tracker: &mut EncryptionTracker,
+        pending: &mut Option<Encryption>,
+        es: Option<&trunk_p25::voice::EncryptionSync>,
+    ) {
+        match es {
+            Some(es) => {
+                if let Some(e) = tracker.observe(es) {
+                    *pending = Some(e);
+                }
+            }
+            None => tracker.missed(),
+        }
+    }
+
+    /// Encryption confirmed on this call's slot since the last take.
+    pub(crate) const fn take_crypto(&mut self) -> Option<Encryption> {
+        self.crypto_pending.take()
     }
 
     /// A new call. A phase 2 call needs the system's 2160-dibit scrambling
@@ -323,8 +374,12 @@ impl P25RegeneratorHandle {
         xor_mask: &[u8],
         system: &str,
         primary: bool,
+        slot: u8,
     ) {
         self.phase2 = tdma;
+        self.slot = slot;
+        self.crypto.reset();
+        self.crypto_pending = None;
         if tdma {
             self.tdma.start_call(
                 DemodConfig::phase2(self.rate),
@@ -357,6 +412,10 @@ impl P25RegeneratorHandle {
         ffi::TrCallCounts {
             errors: c.errors,
             spikes: c.spikes,
+            algid: match self.crypto.confirmed() {
+                Some(e) => e.algid,
+                None => trunk_p25::voice::signalling::ALGID_CLEAR,
+            },
         }
     }
 }

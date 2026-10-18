@@ -1566,13 +1566,19 @@ impl TrunkStateMachine {
         }
     }
 
-    /// The call's own decoded `ALGID`, else the last one seen on its talkgroup.
+    /// The call's own decoded `ALGID`; for a call rejected as encrypted at
+    /// the grant (never recorded, so none of its own), the last one seen on
+    /// its talkgroup. A clear call has none, whatever its talkgroup did before.
     pub(crate) fn alg_id_for(&self, call_id: CallId) -> Option<u8> {
         let entry = self.calls.iter().find(|e| e.id == call_id)?;
         entry.alg_id.or_else(|| {
-            self.known_alg_ids
-                .get(&(entry.sys_num, entry.talkgroup))
-                .copied()
+            (entry.state == CallState::Rejected(RejectReason::Encrypted))
+                .then(|| {
+                    self.known_alg_ids
+                        .get(&(entry.sys_num, entry.talkgroup))
+                        .copied()
+                })
+                .flatten()
         })
     }
 
@@ -2761,17 +2767,28 @@ mod tests {
         assert_eq!(sm.calls[0].alg_id, Some(0x84));
         assert_eq!(sm.alg_id_for(call_id), Some(0x84));
 
-        // A later call on the same talkgroup that never decoded an ESS (e.g.
-        // rejected at the grant) is labelled from the talkgroup cache.
+        // A later call on the same talkgroup rejected as encrypted at the
+        // grant (never recorded, so no ESS) is labelled from the talkgroup.
         let (sys, tg) = (sm.calls[0].sys_num, sm.calls[0].talkgroup);
+        sm.calls.push(CallEntry {
+            sys_num: sys,
+            talkgroup: tg,
+            state: CallState::Rejected(RejectReason::Encrypted),
+            ..CallEntry::default()
+        });
+        let rejected = sm.calls[1].id;
+        assert_eq!(sm.calls[1].alg_id, None);
+        assert_eq!(sm.alg_id_for(rejected), Some(0x84));
+
+        // A clear call on it is not: one ESS (perhaps a miscorrection) does
+        // not make the talkgroup's later calls encrypted.
         sm.calls.push(CallEntry {
             sys_num: sys,
             talkgroup: tg,
             ..CallEntry::default()
         });
-        let other = sm.calls[1].id;
-        assert_eq!(sm.calls[1].alg_id, None);
-        assert_eq!(sm.alg_id_for(other), Some(0x84));
+        let clear = sm.calls[2].id;
+        assert_eq!(sm.alg_id_for(clear), None);
     }
 
     #[test]

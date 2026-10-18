@@ -10,6 +10,7 @@ mod adaptive_squelch;
 mod calibrate;
 mod call_manager;
 mod call_state;
+pub mod clock;
 mod dedup;
 mod p25_lfsr;
 mod p25_metrics;
@@ -229,6 +230,9 @@ pub struct TrunkRecorderBuilder {
     source_ppms: Vec<f64>,
     /// Per-source software Hz tune correction, indexed by source position.
     source_freq_corrections_hz: Vec<f64>,
+    /// The call state machine's time ([`clock::Clock::system`] unless
+    /// [`Self::with_clock`] says otherwise).
+    clock: clock::Clock,
 }
 
 /// Talkgroup/channel metadata from a parsed config, keyed by `(short_name, id)`,
@@ -295,6 +299,7 @@ pub struct TrunkRecorder {
     source_ppms: Vec<f64>,
     /// Per-source software Hz tune correction, indexed by source position.
     source_freq_corrections_hz: Vec<f64>,
+    clock: clock::Clock,
     /// Conventional calls created before the flowgraph starts, pending
     /// registration with the [`CallManager`].
     pending_conventional_calls: Vec<PendingConventionalCall>,
@@ -672,7 +677,16 @@ impl TrunkRecorderBuilder {
             source_ranges,
             source_ppms,
             source_freq_corrections_hz,
+            clock: clock::Clock::system(),
         })
+    }
+
+    /// Run the call state machine on `clock` (a replay's, say) instead of
+    /// the system clock.
+    #[must_use]
+    pub fn with_clock(mut self, clock: clock::Clock) -> Self {
+        self.clock = clock;
+        self
     }
 
     /// Start the gnuradio flowgraph (without the C++ monitor thread).
@@ -748,6 +762,7 @@ impl TrunkRecorderBuilder {
             source_ranges: self.source_ranges,
             source_ppms: self.source_ppms,
             source_freq_corrections_hz: self.source_freq_corrections_hz,
+            clock: self.clock,
             pending_conventional_calls,
             gr_metrics: Arc::new(Mutex::new(GrMetricsSnapshot::default())),
             conv_metrics: Arc::new(Mutex::new(ConventionalMetricsSnapshot::default())),
@@ -795,6 +810,7 @@ impl TrunkRecorder {
             self.source_ppms.clone(),
             self.source_freq_corrections_hz.clone(),
             Arc::clone(&self.conv_metrics),
+            self.clock.clone(),
         );
 
         // Register conventional calls that were pre-created before the
@@ -836,7 +852,7 @@ impl TrunkRecorder {
                     self.pending.fetch_sub(1, Ordering::Relaxed);
                     match event {
                         GrEvent::TrunkMessages(messages) => {
-                            let now = std::time::Instant::now();
+                            let now = call_mgr.clock().now();
                             let messages: Vec<_> = messages
                                 .into_iter()
                                 .filter(|m| {

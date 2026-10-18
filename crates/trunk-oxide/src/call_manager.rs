@@ -54,7 +54,7 @@ const fn system_type_to_proto(st: SystemType) -> i32 {
     }
 }
 
-fn format_recorder_state(state: i32) -> &'static str {
+const fn format_recorder_state(state: i32) -> &'static str {
     match state {
         1 => "Recording",
         2 => "Inactive",
@@ -228,6 +228,7 @@ impl CallManager {
         source_ppms: Vec<f64>,
         source_freq_corrections_hz: Vec<f64>,
         conv_metrics: Arc<Mutex<ConventionalMetricsSnapshot>>,
+        clock: crate::clock::Clock,
     ) -> Self {
         // Pre-populate conventional channel metrics entries.
         if let Ok(mut snap) = conv_metrics.lock() {
@@ -259,7 +260,7 @@ impl CallManager {
         let source_count = source_ranges.len();
         let meter = opentelemetry::global::meter("trunk-oxide");
         Self {
-            state: TrunkStateMachine::new(config),
+            state: TrunkStateMachine::with_clock(config, clock),
             bridge,
             handles: HashMap::new(),
             call_spans: HashMap::new(),
@@ -463,7 +464,7 @@ impl CallManager {
 
     // ── Message conversion from CXX → pure Rust ──
 
-    fn convert_message(msg: &TrTrunkMessage) -> TrunkMessage {
+    const fn convert_message(msg: &TrTrunkMessage) -> TrunkMessage {
         let message_type = match msg.message_type {
             TrMessageType::Grant => MessageType::Grant,
             TrMessageType::Update => MessageType::Update,
@@ -560,8 +561,10 @@ impl CallManager {
                     // closed at conclude) and serialize its context into the
                     // CallStart event so discord parents its call span to ours.
                     let started = self.state.get_call_view(call_id).map(|view| {
-                        self.calls_started
-                            .add(1, &[KeyValue::new("short_name", view.short_name().to_string())]);
+                        self.calls_started.add(
+                            1,
+                            &[KeyValue::new("short_name", view.short_name().to_string())],
+                        );
                         let span = tracing::info_span!(
                             "call",
                             short_name = %view.short_name(),
@@ -943,7 +946,10 @@ impl CallManager {
         }
         if let (Some(s), Some(view)) = (&span, self.state.get_call_view(call_id)) {
             s.record("refreshes", view.refreshes());
-            s.record("since_update_s", view.since_update().as_secs_f64());
+            s.record(
+                "since_update_s",
+                view.since_update(self.state.clock().now()).as_secs_f64(),
+            );
             s.record(
                 "cut_mid_speech",
                 reason.can_cut_speech() && voice_age.is_some_and(|v| v < CUT_VOICE_AGE_S),
@@ -987,7 +993,9 @@ impl CallManager {
                 // open segment's elapsed; for a boundary cut at a regrant the
                 // prior speaker's audio is in a *closed* segment while the call
                 // is Idle, which `segment_start().elapsed()` would miss.
-                let recording_length = view.recording_duration().as_secs_f64();
+                let recording_length = view
+                    .recording_duration(self.state.clock().now())
+                    .as_secs_f64();
                 let segments = self.build_proto_segments_final(call_id, final_freq, rec_num);
 
                 // Per-speaker op25 decode metrics: read the recorder's cumulative
@@ -1108,12 +1116,12 @@ impl CallManager {
                     );
 
                     let segments = self.build_proto_segments_final(call_id, final_freq, rec_num.0);
-                    let recording_length = view.recording_duration().as_secs_f64();
+                    let recording_length = view
+                        .recording_duration(self.state.clock().now())
+                        .as_secs_f64();
 
-                    let elapsed = view
-                        .start_time()
-                        .elapsed()
-                        .map_or(0, |d| d.as_secs() as i64);
+                    let elapsed = view.start_time();
+                    let elapsed = self.state.clock().since(elapsed).as_secs() as i64;
                     tracing::info!(
                         short_name = %view.short_name(),
                         call_num = view.call_num(),
@@ -1321,18 +1329,26 @@ impl CallManager {
             .map_or_else(String::new, |p| p.short_name.clone())
     }
 
+    pub const fn clock(&self) -> &crate::clock::Clock {
+        self.state.clock()
+    }
+
     /// `msg` was dropped as a duplicate before reaching the state machine.
     pub fn note_duplicate(&self, msg: &TrTrunkMessage) {
-        self.control_channel_duplicates
-            .add(1, &[KeyValue::new("short_name", self.short_name_of(msg.sys_num))]);
+        self.control_channel_duplicates.add(
+            1,
+            &[KeyValue::new("short_name", self.short_name_of(msg.sys_num))],
+        );
     }
 
     pub fn handle_message(&mut self, mut ctx: Pin<&mut TrContext>, msg: &TrTrunkMessage) {
         let rust_msg = Self::convert_message(msg);
 
         if !matches!(rust_msg.message_type, MessageType::InvalidCcMessage) {
-            self.control_channel_messages
-                .add(1, &[KeyValue::new("short_name", self.short_name_of(msg.sys_num))]);
+            self.control_channel_messages.add(
+                1,
+                &[KeyValue::new("short_name", self.short_name_of(msg.sys_num))],
+            );
         }
 
         // Sysid/Status need FFI call before state machine processes them
@@ -1370,8 +1386,13 @@ impl CallManager {
             })
             .filter_map(|v| {
                 let handle = self.handles.get(&v.id())?;
-                let now = VoiceCounters::from_transmissions(&ffi::call_get_transmission_list(handle));
-                let then = self.voice_snapshots.get(&v.id()).copied().unwrap_or_default();
+                let now =
+                    VoiceCounters::from_transmissions(&ffi::call_get_transmission_list(handle));
+                let then = self
+                    .voice_snapshots
+                    .get(&v.id())
+                    .copied()
+                    .unwrap_or_default();
                 (now.term_events > then.term_events).then_some(v.id())
             })
             .collect();
@@ -1745,10 +1766,8 @@ impl CallManager {
     pub fn print_status(&self, _ctx: Pin<&mut TrContext>) {
         tracing::info!(count = self.state.call_count(), "Active Calls");
         for view in self.state.iter_calls() {
-            let elapsed = view
-                .start_time()
-                .elapsed()
-                .map_or(0, |d| d.as_secs() as i64);
+            let elapsed = view.start_time();
+            let elapsed = self.state.clock().since(elapsed).as_secs() as i64;
             let state = view.state().to_string();
 
             tracing::info!(
@@ -1789,7 +1808,7 @@ impl CallManager {
     // ── Helper: build TrCallInfo from CallView ──
 
     fn build_call_info_from_view(&self, view: &CallView<'_>) -> ffi::TrCallInfo {
-        let elapsed = view.start_time().elapsed().unwrap_or_default();
+        let elapsed = self.state.clock().since(view.start_time());
         ffi::TrCallInfo {
             talkgroup: view.talkgroup(),
             call_num: view.call_num(),
@@ -1809,7 +1828,9 @@ impl CallManager {
             duplex: view.duplex(),
             conversation_mode: view.trunked_fields().is_some_and(|t| t.conversation_mode),
             current_source_id: view.current_source_id(),
-            start_time: crate::call_state::system_time_to_unix(view.start_time()),
+            start_time: crate::call_state::system_time_to_unix(
+                self.state.clock().wall(view.start_time()),
+            ),
             elapsed: elapsed.as_secs_f64(),
             short_name: view.short_name().to_owned(),
             call_state: view.state().to_proto(),
@@ -1826,7 +1847,7 @@ impl CallManager {
             "digital"
         };
 
-        let now = crate::call_state::system_time_to_unix(std::time::SystemTime::now());
+        let now = crate::call_state::system_time_to_unix(self.state.clock().wall_now());
 
         TrCallData {
             talkgroup: view.talkgroup(),
@@ -1849,7 +1870,9 @@ impl CallManager {
             recorder_num: view.recorder().map_or(-1, |r| r.0),
             signal: trunk_recorder_sys::signal_to_ffi(view.signal()),
             noise: trunk_recorder_sys::signal_to_ffi(view.noise()),
-            start_time: crate::call_state::system_time_to_unix(view.start_time()),
+            start_time: crate::call_state::system_time_to_unix(
+                self.state.clock().wall(view.start_time()),
+            ),
             stop_time: now,
             error_count: 0,
             spike_count: 0,
@@ -1885,7 +1908,7 @@ impl CallManager {
         let mut segments: Vec<_> = view
             .segments()
             .iter()
-            .map(|s| Self::make_proto_segment(s.freq.as_hz(), s.start, s.rec_num.0))
+            .map(|s| self.make_proto_segment(s.freq.as_hz(), s.start, s.end, s.rec_num.0))
             .collect();
         // Append the still-open segment when concluding mid-recording. For
         // always-on conventional channels a transmission is concluded while
@@ -1893,9 +1916,10 @@ impl CallManager {
         // segment that represents the keyed transmission.
         if view.is_trunked() || !view.segments().is_empty() || view.state() == CallState::Recording
         {
-            segments.push(Self::make_proto_segment(
+            segments.push(self.make_proto_segment(
                 final_freq.as_hz(),
                 view.segment_start(),
+                self.state.clock().now(),
                 final_rec_num,
             ));
         }
@@ -1903,13 +1927,15 @@ impl CallManager {
     }
 
     fn make_proto_segment(
+        &self,
         freq: f64,
         start: Instant,
+        end: Instant,
         rec_num: i32,
     ) -> trunk_oxide_grpc::proto::CallSegment {
         use prost_types::{Duration as ProstDuration, Timestamp};
-        let elapsed = start.elapsed();
-        let wall_start = std::time::SystemTime::now() - elapsed;
+        let elapsed = end.saturating_duration_since(start);
+        let wall_start = self.state.clock().wall(start);
         let since_epoch = wall_start
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();

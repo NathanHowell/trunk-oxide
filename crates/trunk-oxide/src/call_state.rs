@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant, SystemTime};
 
+use crate::clock::Clock;
+
 use trunk_config::{DefaultMode, SystemType, TalkgroupMode};
 
 use crate::adaptive_squelch::AdaptiveSquelch;
@@ -14,104 +16,104 @@ use crate::adaptive_squelch::AdaptiveSquelch;
 pub(crate) struct CallView<'a>(&'a CallEntry);
 
 impl<'a> CallView<'a> {
-    pub(crate) fn id(&self) -> CallId {
+    pub(crate) const fn id(&self) -> CallId {
         self.0.id
     }
 
     /// Control channel grants and updates that refreshed the call.
-    pub(crate) fn refreshes(&self) -> u32 {
+    pub(crate) const fn refreshes(&self) -> u32 {
         self.0.refreshes
     }
 
     /// Since the control channel last mentioned the call.
-    pub(crate) fn since_update(&self) -> Duration {
-        self.0.last_update.elapsed()
+    pub(crate) fn since_update(&self, now: Instant) -> Duration {
+        now.saturating_duration_since(self.0.last_update)
     }
-    pub(crate) fn call_num(&self) -> i64 {
+    pub(crate) const fn call_num(&self) -> i64 {
         self.0.call_num
     }
-    pub(crate) fn talkgroup(&self) -> i64 {
+    pub(crate) const fn talkgroup(&self) -> i64 {
         self.0.talkgroup
     }
-    pub(crate) fn sys_num(&self) -> i32 {
+    pub(crate) const fn sys_num(&self) -> i32 {
         self.0.sys_num
     }
     pub(crate) fn short_name(&self) -> &str {
         &self.0.short_name
     }
-    pub(crate) fn tdma_slot(&self) -> i32 {
+    pub(crate) const fn tdma_slot(&self) -> i32 {
         self.0.tdma_slot
     }
-    pub(crate) fn phase2_tdma(&self) -> bool {
+    pub(crate) const fn phase2_tdma(&self) -> bool {
         self.0.phase2_tdma
     }
-    pub(crate) fn mode(&self) -> bool {
+    pub(crate) const fn mode(&self) -> bool {
         self.0.mode
     }
-    pub(crate) fn duplex(&self) -> bool {
+    pub(crate) const fn duplex(&self) -> bool {
         self.0.duplex
     }
-    pub(crate) fn emergency(&self) -> bool {
+    pub(crate) const fn emergency(&self) -> bool {
         self.0.emergency
     }
-    pub(crate) fn start_time(&self) -> SystemTime {
+    pub(crate) const fn start_time(&self) -> Instant {
         self.0.start_time
     }
-    pub(crate) fn freq(&self) -> Freq {
+    pub(crate) const fn freq(&self) -> Freq {
         self.0.freq
     }
-    pub(crate) fn state(&self) -> CallState {
+    pub(crate) const fn state(&self) -> CallState {
         self.0.state
     }
-    pub(crate) fn encrypted(&self) -> bool {
+    pub(crate) const fn encrypted(&self) -> bool {
         self.0.encrypted
     }
-    pub(crate) fn reject_reason(&self) -> Option<RejectReason> {
+    pub(crate) const fn reject_reason(&self) -> Option<RejectReason> {
         match self.0.state {
             CallState::Rejected(r) => Some(r),
             _ => None,
         }
     }
-    pub(crate) fn is_analog(&self) -> bool {
+    pub(crate) const fn is_analog(&self) -> bool {
         self.0.is_analog
     }
-    pub(crate) fn current_source_id(&self) -> i64 {
+    pub(crate) const fn current_source_id(&self) -> i64 {
         self.0.current_source_id
     }
-    pub(crate) fn signal(&self) -> Option<f64> {
+    pub(crate) const fn signal(&self) -> Option<f64> {
         self.0.signal
     }
-    pub(crate) fn noise(&self) -> Option<f64> {
+    pub(crate) const fn noise(&self) -> Option<f64> {
         self.0.noise
     }
-    pub(crate) fn priority(&self) -> i32 {
+    pub(crate) const fn priority(&self) -> i32 {
         self.0.priority
     }
-    pub(crate) fn recorder(&self) -> Option<RecorderNum> {
+    pub(crate) const fn recorder(&self) -> Option<RecorderNum> {
         self.0.recorder
     }
-    pub(crate) fn squelch_db(&self) -> f64 {
+    pub(crate) const fn squelch_db(&self) -> f64 {
         self.0.squelch_db
     }
-    pub(crate) fn signal_detection(&self) -> bool {
+    pub(crate) const fn signal_detection(&self) -> bool {
         self.0.signal_detection
     }
-    pub(crate) fn is_conventional(&self) -> bool {
+    pub(crate) const fn is_conventional(&self) -> bool {
         self.0.is_conventional()
     }
-    pub(crate) fn is_trunked(&self) -> bool {
+    pub(crate) const fn is_trunked(&self) -> bool {
         self.0.is_trunked()
     }
-    pub(crate) fn trunked_fields(&self) -> Option<&TrunkedFields> {
+    pub(crate) const fn trunked_fields(&self) -> Option<&TrunkedFields> {
         self.0.trunked_fields()
     }
-    pub(crate) fn recording_duration(&self) -> Duration {
-        self.0.recording_duration()
+    pub(crate) fn recording_duration(&self, now: Instant) -> Duration {
+        self.0.recording_duration(now)
     }
     pub(crate) fn segments(&self) -> &[CallSegment] {
         &self.0.segments
     }
-    pub(crate) fn segment_start(&self) -> Instant {
+    pub(crate) const fn segment_start(&self) -> Instant {
         self.0.segment_start
     }
     #[allow(dead_code)]
@@ -153,14 +155,14 @@ impl CallId {
         Self(NEXT_CALL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
     }
 
-    pub(crate) fn as_u64(self) -> u64 {
+    pub(crate) const fn as_u64(self) -> u64 {
         self.0
     }
 
     /// Reconstruct a `CallId` from the `rust_call_id` round-tripped through C++
     /// (set via [`Self::as_u64`] at recorder creation, returned on audio/source
     /// callbacks).
-    pub(crate) fn from_u64(id: u64) -> Self {
+    pub(crate) const fn from_u64(id: u64) -> Self {
         Self(id)
     }
 }
@@ -173,8 +175,7 @@ pub(crate) fn next_call_num() -> i64 {
 }
 
 pub(crate) fn system_time_to_unix(t: SystemTime) -> i64 {
-    t.duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_secs() as i64)
+    crate::clock::unix_seconds(t)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
@@ -187,11 +188,11 @@ pub(crate) struct RecorderNum(pub(crate) i32);
 pub struct Freq(pub(crate) u64);
 
 impl Freq {
-    pub fn from_hz(hz: f64) -> Self {
+    pub const fn from_hz(hz: f64) -> Self {
         Self(hz as u64)
     }
 
-    pub(crate) fn as_hz(self) -> f64 {
+    pub(crate) const fn as_hz(self) -> f64 {
         self.0 as f64
     }
 }
@@ -225,7 +226,7 @@ pub(crate) enum RejectReason {
 }
 
 impl CallState {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub(crate) const fn as_str(self) -> &'static str {
         match self {
             CallState::Recording => "Recording",
             CallState::Idle => "Idle",
@@ -234,7 +235,7 @@ impl CallState {
         }
     }
 
-    pub(crate) fn to_proto(self) -> i32 {
+    pub(crate) const fn to_proto(self) -> i32 {
         use trunk_oxide_grpc::proto::CallState as ProtoCallState;
         match self {
             CallState::Recording => ProtoCallState::Recording as i32,
@@ -307,12 +308,15 @@ impl std::fmt::Display for RejectReason {
 pub(crate) struct CallSegment {
     pub(crate) freq: Freq,
     pub(crate) start: Instant,
+    /// When it closed. (It used to be measured to "now", so a call's earlier
+    /// segments kept growing until it ended.)
+    pub(crate) end: Instant,
     pub(crate) rec_num: RecorderNum,
 }
 
 impl CallSegment {
     pub(crate) fn duration(&self) -> Duration {
-        self.start.elapsed()
+        self.end.saturating_duration_since(self.start)
     }
 }
 
@@ -415,8 +419,7 @@ impl PatchTable {
         }
     }
 
-    pub(crate) fn update(&mut self, sg: u64, ga1: u64, ga2: u64, ga3: u64) {
-        let now = Instant::now();
+    pub(crate) fn update(&mut self, sg: u64, ga1: u64, ga2: u64, ga3: u64, now: Instant) {
         let patch = self.patches.entry(sg).or_default();
         for &tg in &[sg, ga1, ga2, ga3] {
             if tg != 0 {
@@ -435,9 +438,11 @@ impl PatchTable {
         }
     }
 
-    pub(crate) fn clear_stale(&mut self) {
+    pub(crate) fn clear_stale(&mut self, now: Instant) {
         self.patches.retain(|_, patch| {
-            patch.retain(|_, last_update| last_update.elapsed().as_secs() < 10);
+            patch.retain(|_, last_update| {
+                now.saturating_duration_since(*last_update).as_secs() < 10
+            });
             !patch.is_empty()
         });
     }
@@ -478,7 +483,7 @@ pub(crate) struct CallEntry {
     pub(crate) mode: bool,
     pub(crate) duplex: bool,
     pub(crate) emergency: bool,
-    pub(crate) start_time: SystemTime,
+    pub(crate) start_time: Instant,
     pub(crate) freq: Freq,
     pub(crate) state: CallState,
     pub(crate) encrypted: bool,
@@ -528,7 +533,7 @@ impl Default for CallEntry {
             mode: false,
             duplex: false,
             emergency: false,
-            start_time: SystemTime::now(),
+            start_time: Instant::now(),
             freq: Freq::from_hz(0.0),
             state: CallState::Idle,
             encrypted: false,
@@ -557,15 +562,15 @@ impl Default for CallEntry {
 }
 
 impl CallEntry {
-    pub(crate) fn is_conventional(&self) -> bool {
+    pub(crate) const fn is_conventional(&self) -> bool {
         matches!(self.call_mode, CallMode::Conventional)
     }
 
-    pub(crate) fn is_trunked(&self) -> bool {
+    pub(crate) const fn is_trunked(&self) -> bool {
         matches!(self.call_mode, CallMode::Trunked(_))
     }
 
-    pub(crate) fn trunked_fields(&self) -> Option<&TrunkedFields> {
+    pub(crate) const fn trunked_fields(&self) -> Option<&TrunkedFields> {
         match &self.call_mode {
             CallMode::Trunked(t) => Some(t),
             _ => None,
@@ -577,16 +582,17 @@ impl CallEntry {
     /// → Idle. Shared by the conventional squelch-debounce finalize and the
     /// trunked TDULC PTT-end — both close the transmission in place and leave a
     /// later trigger (squelch open / grant) to resume or conclude the call.
-    fn close_segment_and_idle(&mut self) {
+    fn close_segment_and_idle(&mut self, now: Instant) {
         let rec_num = self.recorder.unwrap_or(RecorderNum(-1));
         self.segments.push(CallSegment {
             freq: self.freq,
             start: self.segment_start,
+            end: now,
             rec_num,
         });
-        self.segment_start = Instant::now();
+        self.segment_start = now;
         self.state = CallState::Idle;
-        self.idle_since = Some(Instant::now());
+        self.idle_since = Some(now);
     }
 
     /// Rotation bookkeeping shared by a trunked soft boundary
@@ -594,31 +600,31 @@ impl CallEntry {
     /// ([`Effect::ConventionalRestart`]): start a fresh logical `call_num` /
     /// `start_time` and clear the segment list. Recorder ownership and state
     /// transition are the caller's job (they differ by [`RecorderPolicy`]).
-    fn rotate_bookkeeping(&mut self) {
+    fn rotate_bookkeeping(&mut self, now: Instant) {
         self.call_num = next_call_num();
-        self.start_time = SystemTime::now();
+        self.start_time = now;
         self.segments.clear();
-        self.segment_start = Instant::now();
+        self.segment_start = now;
         self.ptt_ended = false;
         self.refreshes = 0;
     }
 
     /// If a squelch close is pending debounce, finalize it now: push the
     /// in-progress segment and transition to Idle.
-    pub(crate) fn finalize_squelch_debounce(&mut self) {
+    pub(crate) fn finalize_squelch_debounce(&mut self, now: Instant) {
         if self.squelch_closed_at.take().is_some()
             && self.state == CallState::Recording
             && self.recorder.is_some()
         {
-            self.close_segment_and_idle();
+            self.close_segment_and_idle(now);
         }
     }
 
     /// Total time spent in the Recording state: completed segments + current segment.
-    pub(crate) fn recording_duration(&self) -> Duration {
-        let completed: Duration = self.segments.iter().map(|s| s.duration()).sum();
+    pub(crate) fn recording_duration(&self, now: Instant) -> Duration {
+        let completed: Duration = self.segments.iter().map(CallSegment::duration).sum();
         if self.state == CallState::Recording {
-            completed + self.segment_start.elapsed()
+            completed + now.saturating_duration_since(self.segment_start)
         } else {
             completed
         }
@@ -970,10 +976,20 @@ pub(crate) struct TrunkStateMachine {
     /// can still be labelled with what an earlier recorded call on the same
     /// talkgroup revealed.
     known_alg_ids: HashMap<(i32, i64), u8>,
+    /// Every time the state machine reads (see [`crate::clock`]).
+    clock: Clock,
 }
 
 impl TrunkStateMachine {
     pub(crate) fn new(config: CallManagerConfig) -> Self {
+        Self::with_clock(config, Clock::system())
+    }
+
+    pub(crate) const fn clock(&self) -> &Clock {
+        &self.clock
+    }
+
+    pub(crate) fn with_clock(config: CallManagerConfig, clock: Clock) -> Self {
         let patch_tables = config
             .systems
             .iter()
@@ -998,6 +1014,7 @@ impl TrunkStateMachine {
             })
             .collect();
         Self {
+            clock,
             calls: Vec::new(),
             config,
             patch_tables,
@@ -1009,6 +1026,7 @@ impl TrunkStateMachine {
     // ── Top-level message dispatch ──
 
     pub(crate) fn on_message(&mut self, msg: &TrunkMessage) -> Effects {
+        let now = self.clock.now();
         match msg.message_type {
             MessageType::InvalidCcMessage => Effects::new(),
 
@@ -1020,7 +1038,13 @@ impl TrunkStateMachine {
 
             MessageType::PatchAdd => {
                 if let Some(pt) = self.patch_tables.get_mut(&msg.sys_num) {
-                    pt.update(msg.patch_sg, msg.patch_ga1, msg.patch_ga2, msg.patch_ga3);
+                    pt.update(
+                        msg.patch_sg,
+                        msg.patch_ga1,
+                        msg.patch_ga2,
+                        msg.patch_ga3,
+                        now,
+                    );
                 }
                 Effects::new()
             }
@@ -1141,6 +1165,7 @@ impl TrunkStateMachine {
     // ── Grant handling ──
 
     fn on_grant(&mut self, msg: &TrunkMessage, is_grant_message: bool) -> Effects {
+        let now = self.clock.now();
         let mut effects = Effects::new();
 
         let existing_idx = self.calls.iter().position(|entry| {
@@ -1197,7 +1222,7 @@ impl TrunkStateMachine {
                     && entry.is_trunked()
                     && entry.state == CallState::Recording
                     && (other_handset || entry.ptt_ended)
-                    && entry.segment_start.elapsed() >= MIN_TRANSMISSION
+                    && now.saturating_duration_since(entry.segment_start) >= MIN_TRANSMISSION
                 {
                     let call_id = entry.id;
                     let source_id = if msg.source > 0 {
@@ -1220,7 +1245,7 @@ impl TrunkStateMachine {
                 if resuming_idle {
                     entry.state = CallState::Recording;
                     entry.idle_since = None;
-                    entry.segment_start = Instant::now();
+                    entry.segment_start = now;
                     tracing::trace!(
                         short_name = %entry.short_name,
                         talkgroup = entry.talkgroup,
@@ -1244,12 +1269,13 @@ impl TrunkStateMachine {
                 // (TDULC already closed the segment on PTT end)
                 if entry.state == CallState::Recording {
                     entry.segments.push(CallSegment {
+                        end: now,
                         freq: old_freq,
                         start: entry.segment_start,
                         rec_num,
                     });
                 }
-                entry.segment_start = Instant::now();
+                entry.segment_start = now;
                 entry.idle_since = None;
 
                 if entry.recorder.is_some() {
@@ -1266,7 +1292,7 @@ impl TrunkStateMachine {
                     call_id: entry.id,
                     freq: msg.freq,
                 });
-                entry.last_update = Instant::now();
+                entry.last_update = now;
 
                 // Evaluate recording policy for new freq
                 let policy_effects = self.evaluate_recording_policy(idx, msg);
@@ -1284,6 +1310,9 @@ impl TrunkStateMachine {
             .unwrap_or(&DEFAULT_POLICY);
 
         let new_entry = CallEntry {
+            start_time: now,
+            last_update: now,
+            segment_start: now,
             talkgroup: msg.talkgroup,
             sys_num: msg.sys_num,
             short_name: policy.short_name.clone(),
@@ -1356,6 +1385,7 @@ impl TrunkStateMachine {
     // ── Update handling ──
 
     fn on_update(&mut self, msg: &TrunkMessage) -> Effects {
+        let now = self.clock.now();
         let mut effects = Effects::new();
 
         for entry in self.calls.iter_mut() {
@@ -1371,7 +1401,7 @@ impl TrunkStateMachine {
 
                 // Source changed: re-route only (SetSource + EmitSignal). No
                 // EmitCallStart for an already-started call — see on_grant.
-                Self::update_call_source_entry(entry, msg.source, &mut effects);
+                Self::update_call_source_entry(entry, msg.source, &mut effects, now);
             }
         }
 
@@ -1381,6 +1411,7 @@ impl TrunkStateMachine {
     // ── TDULC handling (P25 Terminator Data Unit) ──
 
     fn on_tdulc(&mut self, sys_num: i32, talkgroup: i64) -> Effects {
+        let now = self.clock.now();
         for entry in &mut self.calls {
             if entry.sys_num != sys_num || entry.talkgroup != talkgroup {
                 continue;
@@ -1397,7 +1428,7 @@ impl TrunkStateMachine {
             // merging across the PTT gap into one transmission. Routing TDULC
             // through `cut_transmission` would change that semantics, so it
             // stays a plain in-place close (see per-speaker-boundaries note).
-            entry.close_segment_and_idle();
+            entry.close_segment_and_idle(now);
 
             tracing::trace!(
                 short_name = %entry.short_name,
@@ -1414,12 +1445,18 @@ impl TrunkStateMachine {
     // ── Source tracking ──
 
     fn update_call_source(&mut self, idx: usize, source: i64, effects: &mut Effects) -> bool {
+        let now = self.clock.now();
         let entry = &mut self.calls[idx];
-        Self::update_call_source_entry(entry, source, effects)
+        Self::update_call_source_entry(entry, source, effects, now)
     }
 
-    fn update_call_source_entry(entry: &mut CallEntry, source: i64, effects: &mut Effects) -> bool {
-        entry.last_update = Instant::now();
+    fn update_call_source_entry(
+        entry: &mut CallEntry,
+        source: i64,
+        effects: &mut Effects,
+        now: Instant,
+    ) -> bool {
+        entry.last_update = now;
         entry.refreshes += 1;
 
         if source == -1 || source == entry.current_source_id {
@@ -1482,6 +1519,7 @@ impl TrunkStateMachine {
     }
 
     pub(crate) fn on_source_change(&mut self, call_id: CallId, source: i64) -> Effects {
+        let now = self.clock.now();
         let mut effects = Effects::new();
         let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) else {
             return effects;
@@ -1503,8 +1541,8 @@ impl TrunkStateMachine {
         // Below the minimum transmission length, treat it as a plain re-route
         // (SetSource + EmitSignal) rather than fragmenting rapid A↔B↔A hand-offs
         // into sub-second transmissions.
-        if entry.segment_start.elapsed() < MIN_TRANSMISSION {
-            Self::update_call_source_entry(entry, source, &mut effects);
+        if now.saturating_duration_since(entry.segment_start) < MIN_TRANSMISSION {
+            Self::update_call_source_entry(entry, source, &mut effects, now);
             return effects;
         }
 
@@ -1565,8 +1603,9 @@ impl TrunkStateMachine {
     /// reset `segment_start` — but stays `Recording` and leaves the recorder
     /// untouched.
     pub(crate) fn on_transmission_rotated(&mut self, call_id: CallId, source_id: i64) {
+        let now = self.clock.now();
         if let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) {
-            entry.rotate_bookkeeping();
+            entry.rotate_bookkeeping(now);
             // Recorder spans the call (RecorderPolicy::Span): recorder untouched.
             // Force Recording so a Span cut originating from a TDULC-parked
             // (Idle) call completes the Idle → Recording transition *here* —
@@ -1800,6 +1839,7 @@ impl TrunkStateMachine {
     // ── Periodic tick ──
 
     pub(crate) fn tick(&mut self) -> Effects {
+        let now = self.clock.now();
         let mut effects = Effects::new();
         let timeout = self.config.call_timeout;
         let mut ended_call = false;
@@ -1809,7 +1849,9 @@ impl TrunkStateMachine {
                 continue;
             }
 
-            let since_update = entry.last_update.elapsed().as_secs_f64();
+            let since_update = now
+                .saturating_duration_since(entry.last_update)
+                .as_secs_f64();
             if since_update <= timeout {
                 continue;
             }
@@ -1846,6 +1888,7 @@ impl TrunkStateMachine {
     }
 
     fn tick_conventional(&mut self) -> Effects {
+        let now = self.clock.now();
         let timeout = self.config.call_timeout;
         let mut debounce_always_on = Vec::new();
         let mut debounce_sig_det = Vec::new();
@@ -1865,7 +1908,7 @@ impl TrunkStateMachine {
             // wait for the idle timeout to conclude the detection cycle.
             if entry
                 .squelch_closed_at
-                .is_some_and(|t| t.elapsed() >= SQUELCH_DEBOUNCE)
+                .is_some_and(|t| now.saturating_duration_since(t) >= SQUELCH_DEBOUNCE)
             {
                 if entry.signal_detection {
                     debounce_sig_det.push(entry.id);
@@ -1880,9 +1923,11 @@ impl TrunkStateMachine {
 
             let idle_timed_out = entry
                 .idle_since
-                .is_some_and(|t| t.elapsed().as_secs_f64() > timeout);
+                .is_some_and(|t| now.saturating_duration_since(t).as_secs_f64() > timeout);
 
-            let elapsed = entry.start_time.elapsed().map_or(0.0, |d| d.as_secs_f64());
+            let elapsed = now
+                .saturating_duration_since(entry.start_time)
+                .as_secs_f64();
             let max_duration_exceeded = entry.max_duration > 0.0 && elapsed > entry.max_duration;
 
             // Safety backstop: if recording continuously without any squelch
@@ -1890,7 +1935,7 @@ impl TrunkStateMachine {
             let stuck_recording = entry.state == CallState::Recording
                 && entry.segments.is_empty()
                 && entry.squelch_closed_at.is_none()
-                && entry.segment_start.elapsed() > STUCK_RECORDING_BACKSTOP;
+                && now.saturating_duration_since(entry.segment_start) > STUCK_RECORDING_BACKSTOP;
 
             if idle_timed_out || max_duration_exceeded || stuck_recording {
                 timed_out.push(entry.id);
@@ -1903,7 +1948,7 @@ impl TrunkStateMachine {
         // the idle timeout conclude the detection cycle.
         for call_id in debounce_sig_det {
             if let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) {
-                entry.finalize_squelch_debounce();
+                entry.finalize_squelch_debounce(now);
             }
         }
 
@@ -1949,9 +1994,10 @@ impl TrunkStateMachine {
     // ── Conventional callbacks from executor ──
 
     pub(crate) fn on_conventional_idle_timeout(&mut self, call_id: CallId) -> Effects {
+        let now = self.clock.now();
         let signal_detection = match self.calls.iter_mut().find(|e| e.id == call_id) {
             Some(entry) => {
-                entry.finalize_squelch_debounce();
+                entry.finalize_squelch_debounce(now);
                 entry.signal_detection
             }
             None => return Effects::new(),
@@ -1997,12 +2043,13 @@ impl TrunkStateMachine {
         call_id: CallId,
         recorder: Option<RecorderNum>,
     ) {
+        let now = self.clock.now();
         if let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) {
-            entry.rotate_bookkeeping();
+            entry.rotate_bookkeeping(now);
             // Recorder recycles (RecorderPolicy::Recycle): adopt the freshly
             // assigned recorder and re-arm to await the next keyed transmission.
             entry.recorder = recorder;
-            entry.last_update = Instant::now();
+            entry.last_update = now;
             entry.idle_since = None;
             entry.squelch_closed_at = None;
             // Re-arm to Idle (not Recording): an always-on channel waits for the
@@ -2026,6 +2073,7 @@ impl TrunkStateMachine {
         muted: bool,
         pwr_db: f64,
     ) -> Effects {
+        let now = self.clock.now();
         for entry in &mut self.calls {
             if !entry.is_conventional() {
                 continue;
@@ -2057,7 +2105,7 @@ impl TrunkStateMachine {
                 if entry.state == CallState::Recording {
                     entry.squelch_closed_at.get_or_insert_with(Instant::now);
                 } else if entry.idle_since.is_none() {
-                    entry.idle_since = Some(Instant::now());
+                    entry.idle_since = Some(now);
                 }
             } else {
                 // Squelch open
@@ -2071,7 +2119,7 @@ impl TrunkStateMachine {
                     if entry.state == CallState::Idle {
                         let first_open = entry.segments.is_empty();
                         entry.state = CallState::Recording;
-                        entry.segment_start = Instant::now();
+                        entry.segment_start = now;
                         if first_open {
                             effects.push(Effect::EmitCallStart { call_id: entry.id });
                             effects.push(Effect::EmitCallsActive);
@@ -2142,6 +2190,7 @@ impl TrunkStateMachine {
         policy: &SystemPolicy,
         recorder: Option<RecorderNum>,
     ) -> (CallId, Effects) {
+        let now = self.clock.now();
         let state = if channel.signal_detection {
             CallState::Disabled
         } else {
@@ -2153,6 +2202,9 @@ impl TrunkStateMachine {
             None
         };
         let entry = CallEntry {
+            start_time: now,
+            last_update: now,
+            segment_start: now,
             talkgroup: channel.talkgroup.0,
             sys_num,
             short_name: policy.short_name.clone(),
@@ -2187,8 +2239,9 @@ impl TrunkStateMachine {
     // ── Patch maintenance ──
 
     pub(crate) fn clear_stale_patches(&mut self) {
+        let now = self.clock.now();
         for pt in self.patch_tables.values_mut() {
-            pt.clear_stale();
+            pt.clear_stale(now);
         }
     }
 
@@ -2239,7 +2292,7 @@ impl TrunkStateMachine {
         self.calls.iter().map(CallView)
     }
 
-    pub(crate) fn call_count(&self) -> usize {
+    pub(crate) const fn call_count(&self) -> usize {
         self.calls.len()
     }
 
@@ -2572,7 +2625,11 @@ mod tests {
         let call_id = recording_trunked_call(&mut sm);
         sm.calls[0].segment_start = Instant::now() - Duration::from_secs(2);
         // A repeated grant within one key-up: no boundary.
-        assert!(!key_up(&mut sm, 100).iter().any(|e| matches!(e, Effect::EmitCallEnd { .. })));
+        assert!(
+            !key_up(&mut sm, 100)
+                .iter()
+                .any(|e| matches!(e, Effect::EmitCallEnd { .. }))
+        );
         // The voice channel saw a terminator; the next grant is a new key-up.
         sm.on_ptt_ended(call_id);
         assert!(cut_at_key_up(&key_up(&mut sm, 100), 100));
@@ -2586,7 +2643,11 @@ mod tests {
         let mut sm = TrunkStateMachine::new(test_config());
         let _ = recording_trunked_call(&mut sm);
         let effects = key_up(&mut sm, 2002);
-        assert!(!effects.iter().any(|e| matches!(e, Effect::EmitCallEnd { .. })));
+        assert!(
+            !effects
+                .iter()
+                .any(|e| matches!(e, Effect::EmitCallEnd { .. }))
+        );
         assert_eq!(sm.calls[0].current_source_id, 2002);
     }
 
@@ -3112,7 +3173,7 @@ mod tests {
         assert!(sm.calls[0].squelch_closed_at.is_some());
 
         // Finalize debounce → transitions to Idle with segment pushed
-        sm.calls[0].finalize_squelch_debounce();
+        sm.calls[0].finalize_squelch_debounce(Instant::now());
         assert_eq!(sm.calls[0].state, CallState::Idle);
         assert_eq!(sm.calls[0].segments.len(), 1);
     }
@@ -3744,7 +3805,7 @@ mod tests {
             .iter_mut()
             .find(|e| e.id == call_id)
             .unwrap()
-            .finalize_squelch_debounce();
+            .finalize_squelch_debounce(Instant::now());
         assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Idle);
         assert!(sm.get_call(call_id).unwrap().idle_since.is_some());
 
@@ -3987,6 +4048,7 @@ mod tests {
             Instant::now() - STUCK_RECORDING_BACKSTOP - Duration::from_secs(1);
         sm.calls[0].segments.push(CallSegment {
             start: Instant::now() - Duration::from_secs(60),
+            end: Instant::now() - Duration::from_secs(30),
             freq: Freq::from_hz(488_000_000.0),
             rec_num: RecorderNum(5),
         });

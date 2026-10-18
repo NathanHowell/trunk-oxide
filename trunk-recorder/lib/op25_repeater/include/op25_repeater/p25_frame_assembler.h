@@ -64,6 +64,8 @@ namespace gr {
       virtual void crypt_key(uint16_t keyid, uint8_t algid, const std::vector<uint8_t> &key) {}
       virtual void set_phase2_tdma(bool p) {}
       virtual void clear() {};
+      // Called as a recorder starts a call: forget the last call's encryption.
+      virtual void call_start() {}
       virtual void clear_silence_frame_count() {};
       virtual void set_msg_callback(std::function<void(gr::message::sptr)> cb) {}
     };

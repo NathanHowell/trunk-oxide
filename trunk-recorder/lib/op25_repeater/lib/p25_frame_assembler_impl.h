@@ -91,6 +91,7 @@ public:
 
       void clear_silence_frame_count();
       void clear();
+      void call_start();
       void set_msg_callback(std::function<void(gr::message::sptr)> cb) override;
       log_ts logts;
     };

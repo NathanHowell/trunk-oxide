@@ -283,6 +283,11 @@ void p25p2_tdma::handle_mac_ptt(const uint8_t byte_buf[], const unsigned int len
         }
         ess_algid = byte_buf[10];
         ess_keyid = (byte_buf[11] << 8) + byte_buf[12];
+        // The PTT carries this transmission's ESS: it stands until a voice
+        // superframe decodes one (a 2V promotes next_* to current).
+        next_algid = ess_algid;
+        next_keyid = ess_keyid;
+        memcpy(next_mi, ess_mi, sizeof(next_mi));
         if (d_debug >= 10) {
                 fprintf(stderr, ", algid=%x, keyid=%x, mi=%02x %02x %02x %02x %02x %02x %02x %02x %02x, rs_errs=%d\n",
 			ess_algid, ess_keyid,
@@ -932,7 +937,14 @@ void p25p2_tdma::handle_4V2V_ess(const uint8_t dibits[])
 		for (int i=0; i < 12; i += 3) { // ESS-B is 4 hexbits / 12 dibits
 			ESS_B[(4 * burst_id) + (i / 3)] = (uint8_t) ((dibits[i] << 4) + (dibits[i+1] << 2) + dibits[i+2]);
 		}
+		ess_b_parts |= 1 << burst_id;
+	} else if (ess_b_parts != 0xf) {
+		// This superframe's 4V bursts did not all arrive: ESS-B holds another
+		// superframe's parts (or none), and with up to 14 corrections the RS
+		// decode can "correct" them into that one's ESS. Wait for a full set.
+		ess_b_parts = 0;
 	} else {
+		ess_b_parts = 0;
 		int i, j;
 
 		j = 0;

@@ -67,6 +67,8 @@ private:
   // Samples per symbol of the call in progress (5 phase 1, 4 phase 2).
   int d_samples_per_symbol = 5;
   std::atomic<bool> d_enabled{false};
+  // Set by start_call; the GR thread drops the last call's pending symbols.
+  std::atomic<bool> d_new_call{false};
   std::mutex d_mutex; // the backend is driven by the GR thread and by call start/stop
   std::vector<float> d_scratch;
   std::deque<float> d_pending;

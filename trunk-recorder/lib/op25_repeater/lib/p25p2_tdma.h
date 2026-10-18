@@ -22,6 +22,7 @@
 #define INCLUDED_P25P2_TDMA_H
 
 #include <stdint.h>
+#include <algorithm>
 #include <deque>
 #include <vector>
 #include <functional>
@@ -49,6 +50,8 @@ public:
 	void set_slotid(int slotid);
 	void set_msg_callback(std::function<void(gr::message::sptr)> cb);
 	void call_end();
+	// A recorder starting a call: no encryption carried over from its last.
+	void call_start() { reset_ess(); }
 	void crypt_reset();
 	void crypt_key(uint16_t keyid, uint8_t algid, const std::vector<uint8_t> &key);
 	uint8_t* tdma_xormask;
@@ -125,6 +128,8 @@ private:
 	uint16_t next_keyid;
 	uint8_t next_algid;
 	uint8_t next_mi[9] = {0};
+	// ESS-B parts (one per 4V burst, bit = burst_id) filled since the last 2V.
+	uint8_t ess_b_parts = 0;
 
 	p25p2_framer p2framer;
     p25_crypt_algs crypt_algs;
@@ -142,7 +147,15 @@ private:
     void convert_abbrev_msg(const uint8_t byte_buf[], const uint16_t nac, const uint8_t mfid = 0x00);
 	void handle_4V2V_ess(const uint8_t dibits[]);
 	inline bool encrypted() { return (ess_algid != 0x80); }
-    inline void reset_ess() { ess_algid = 0x80; memset(ess_mi, 0, sizeof(ess_mi)); }
+    // Also forgets the ESS decoded but not yet in force: a 2V burst promotes
+    // next_* to the current parameters, so leftovers would mark the next
+    // transmission (or call, on a reused recorder) with the last one's.
+    inline void reset_ess() {
+        ess_algid = 0x80; memset(ess_mi, 0, sizeof(ess_mi));
+        next_algid = 0x80; next_keyid = 0; memset(next_mi, 0, sizeof(next_mi));
+        std::fill(ESS_B.begin(), ESS_B.end(), 0);
+        ess_b_parts = 0;
+    }
 
 	void send_msg(const std::string msg_str, long msg_type);
 };

@@ -56,6 +56,7 @@ void p25_recorder_decode::start(const RecorderConfig &config) {
     d_call_sources.clear();
   }
   d_last_notified_crypto = ~0u;
+  op25_frame_assembler->call_start();
 
   if (config.phase2_tdma) {
     wav_sink->start_recording(config, config.tdma_slot);

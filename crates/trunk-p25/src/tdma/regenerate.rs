@@ -84,11 +84,15 @@ impl TdmaRegenerator {
         }
     }
 
-    /// Start a new call: loops and sync start over; symbols already taken in
-    /// are still released.
+    /// Start a new call: loops and sync start over, and symbols still held
+    /// from the last call are dropped. They came from its channel (up to
+    /// six bursts of them), so let out they would open this call with the last
+    /// one's bursts: on another slot's recorder, its encryption sync too.
     pub fn start_call(&mut self, demod: DemodConfig, scrambler: Option<Scrambler>) {
         self.demod = Demodulator::new(demod);
         self.framer.reset();
+        self.line.clear();
+        self.line_start = self.framer.position();
         self.decoder.reset();
         self.decoder.set_scrambler(scrambler.clone());
         self.scrambler = scrambler;
@@ -324,6 +328,33 @@ mod tests {
             back.len(),
             d.len()
         );
+    }
+
+    #[test]
+    fn a_new_call_drops_the_last_calls_held_symbols() {
+        // An encrypted call on one channel, then the recorder moves to a
+        // clear call elsewhere: nothing of the first may open the second.
+        let mut rng = Rng::new(33);
+        let mut sent = Sent::default();
+        let encrypted = EncryptionSync {
+            algid: 0x84,
+            keyid: 0xa100,
+            ..ES
+        };
+        let first = call(&mut rng, &scrambler(), &encrypted, 2, 4, &mut sent);
+        let second = call(&mut rng, &scrambler(), &ES, 2, 4, &mut sent);
+        let mut r = TdmaRegenerator::new(DemodConfig::phase2(24000.0), Some(scrambler()));
+        let (mut out, mut events) = (Vec::new(), Vec::new());
+        r.process_symbols(&ideal(&first), &mut out, &mut events);
+        assert!(out.len() < first.len(), "some of the first call is held");
+
+        r.start_call(DemodConfig::phase2(24000.0), Some(scrambler()));
+        out.clear();
+        r.flush(&mut out);
+        assert_eq!(out, [], "the first call's held symbols are gone");
+        r.process_symbols(&ideal(&second), &mut out, &mut events);
+        let back: Vec<u8> = out.iter().map(|&s| slice(s)).collect();
+        assert_eq!(back[..], second[..back.len()]);
     }
 
     #[test]

@@ -63,6 +63,10 @@ namespace gr {
 		p2tdma.set_slotid(slotid);
     }
 
+    void p25_frame_assembler_impl::call_start() {
+		p2tdma.call_start();
+    }
+
     void p25_frame_assembler_impl::set_slotkey(int key) {
     }
 

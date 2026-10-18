@@ -165,18 +165,20 @@ impl Regenerator {
     }
 
     /// Start a new call with `demod` (the modulation may differ from the
-    /// last call's): loops and NAC start over; symbols already taken in are
-    /// still released.
+    /// last call's): loops and NAC start over.
     pub fn start_call(&mut self, demod: DemodConfig) {
         self.demod = Demodulator::new(demod);
         self.reset();
     }
 
-    /// Start a new call: loops and NAC start over; symbols already taken in
-    /// are still released.
+    /// Start a new call: loops and NAC start over, and symbols still held
+    /// from the last call are dropped. They came from its channel, so let
+    /// out they would open this call with the last one's frames.
     pub fn reset(&mut self) {
         self.demod.reset();
         self.framer.reset();
+        self.line.clear();
+        self.line_start = self.framer.position();
         self.spikes = SpikeDetector::default();
         self.call = CallCounts::default();
     }
@@ -317,6 +319,25 @@ mod tests {
             back.len(),
             dibits.len()
         );
+    }
+
+    #[test]
+    fn a_new_call_drops_the_last_calls_held_symbols() {
+        let mut rng = Rng::new(93);
+        let (first, _) = call(&mut rng, 2);
+        let (second, _) = call(&mut rng, 2);
+        let mut r = Regenerator::new(DemodConfig::new(24000.0, Modulation::Cqpsk));
+        let (mut out, mut events) = (Vec::new(), Vec::new());
+        // The recorder leaves mid-frame, with some of it held back.
+        let cut = &first[..first.len() / 2];
+        r.process_symbols(&crate::framer::ideal(cut), &mut out, &mut events);
+        assert!(out.len() < cut.len(), "some of the first call is held");
+
+        r.start_call(DemodConfig::new(24000.0, Modulation::Cqpsk));
+        let before = out.len();
+        r.process_symbols(&crate::framer::ideal(&second), &mut out, &mut events);
+        let back: Vec<u8> = out[before..].iter().map(|&s| slice(s)).collect();
+        assert_eq!(back[..], second[..back.len()]);
     }
 
     #[test]

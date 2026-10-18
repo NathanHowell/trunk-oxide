@@ -115,6 +115,15 @@ impl VoiceCounters {
 /// Voice this recent when a timeout stops a call means it was cut mid-speech.
 const CUT_VOICE_AGE_S: f64 = 0.5;
 
+/// What a recorder last recorded, and when it stopped.
+#[derive(Clone, Copy, Debug)]
+struct RecorderUse {
+    talkgroup: i64,
+    freq: Freq,
+    slot: i32,
+    stopped: Instant,
+}
+
 /// Executor: processes effects from the state machine against real FFI/bridge.
 pub struct CallManager {
     state: TrunkStateMachine,
@@ -131,6 +140,9 @@ pub struct CallManager {
     /// (`Span`) transmissions of a call, keyed by CallId. Lets each per-speaker
     /// CallEnd report only its own delta; removed when the call concludes.
     voice_snapshots: HashMap<CallId, VoiceCounters>,
+    /// Each recorder's last call, for the next call's span: a recorder reused
+    /// from another channel can carry that channel into its next call.
+    recorder_last: HashMap<i32, RecorderUse>,
     /// Per-source frequency coverage, indexed by source position.
     source_ranges: Vec<RangeInclusive<f64>>,
     /// Per-source configured ppm correction, indexed by source position.
@@ -264,6 +276,7 @@ impl CallManager {
             bridge,
             handles: HashMap::new(),
             call_spans: HashMap::new(),
+            recorder_last: HashMap::new(),
             voice_snapshots: HashMap::new(),
             source_ranges,
             source_ppms,
@@ -595,6 +608,19 @@ impl CallManager {
                             since_update_s = tracing::field::Empty,
                             after_term_ms = tracing::field::Empty,
                             voice_samples = tracing::field::Empty,
+                            // The recorder, and what it recorded before this.
+                            rec_num = tracing::field::Empty,
+                            rec_prev_talkgroup = tracing::field::Empty,
+                            rec_prev_freq = tracing::field::Empty,
+                            rec_prev_slot = tracing::field::Empty,
+                            rec_idle_s = tracing::field::Empty,
+                            // Encryption: the flag at conclude; the voice
+                            // channel's ESS report (ALGID/KeyID) and how long
+                            // after the call started it came.
+                            encrypted = tracing::field::Empty,
+                            alg_id = tracing::field::Empty,
+                            key_id = tracing::field::Empty,
+                            crypto_after_ms = tracing::field::Empty,
                         );
                         let traceparent = traceparent_of(&span);
                         let info = self.build_call_info_from_view(&view);
@@ -603,6 +629,7 @@ impl CallManager {
                     if let Some((span, traceparent, info)) = started {
                         self.bridge.call_start(&info, traceparent);
                         self.call_spans.insert(call_id, span);
+                        self.record_recorder(call_id);
                     }
                 }
                 Effect::EmitCallEnd { call_id, reason } => {
@@ -864,7 +891,32 @@ impl CallManager {
         }
 
         let followup = self.state.on_recording_result(call_id, result);
+        // A retune starts another recorder under the same span.
+        self.record_recorder(call_id);
         self.process_effects(followup, ctx);
+    }
+
+    /// Records the call's recorder, and what it recorded last, on its span.
+    fn record_recorder(&self, call_id: CallId) {
+        let (Some(span), Some(view)) = (
+            self.call_spans.get(&call_id),
+            self.state.get_call_view(call_id),
+        ) else {
+            return;
+        };
+        let Some(rec) = view.recorder() else {
+            return;
+        };
+        span.record("rec_num", rec.0);
+        if let Some(last) = self.recorder_last.get(&rec.0) {
+            span.record("rec_prev_talkgroup", last.talkgroup);
+            span.record("rec_prev_freq", tracing::field::display(last.freq));
+            span.record("rec_prev_slot", last.slot);
+            span.record(
+                "rec_idle_s",
+                self.state.clock().since(last.stopped).as_secs_f64(),
+            );
+        }
     }
 
     fn exec_stop_recorder(&mut self, call_id: CallId) {
@@ -889,6 +941,15 @@ impl CallManager {
         let mut was_idle = false;
         if let Some(view) = self.state.get_call_view(call_id) {
             was_idle = view.state() == CallState::Idle;
+            self.recorder_last.insert(
+                rec_num,
+                RecorderUse {
+                    talkgroup: view.talkgroup(),
+                    freq: view.freq(),
+                    slot: view.tdma_slot(),
+                    stopped: self.state.clock().now(),
+                },
+            );
             let pref_ppm = self
                 .preferred_ppm(view.freq().as_hz(), metrics.freq_error)
                 .unwrap_or(f64::NAN);
@@ -946,6 +1007,7 @@ impl CallManager {
         }
         if let (Some(s), Some(view)) = (&span, self.state.get_call_view(call_id)) {
             s.record("refreshes", view.refreshes());
+            s.record("encrypted", view.encrypted());
             s.record(
                 "since_update_s",
                 view.since_update(self.state.clock().now()).as_secs_f64(),
@@ -1639,11 +1701,33 @@ impl CallManager {
     /// call so the `calls_ended` metric can facet by algorithm.
     pub fn handle_crypto(&mut self, rust_call_id: u64, alg_id: u32, key_id: u32) {
         // ALGID is 8 bits and KeyID 16 on the wire; the decoder already masks.
-        self.state.on_crypto(
-            CallId::from_u64(rust_call_id),
+        let call_id = CallId::from_u64(rust_call_id);
+        let (alg_id, key_id) = (
             u8::try_from(alg_id & 0xFF).unwrap_or(0),
             u16::try_from(key_id & 0xFFFF).unwrap_or(0),
         );
+        if let (Some(span), Some(view)) = (
+            self.call_spans.get(&call_id),
+            self.state.get_call_view(call_id),
+        ) {
+            let after_ms = self.state.clock().since(view.start_time()).as_millis();
+            span.record("alg_id", format_args!("0x{alg_id:02x}"));
+            span.record("key_id", key_id);
+            span.record(
+                "crypto_after_ms",
+                u64::try_from(after_ms).unwrap_or(u64::MAX),
+            );
+            span.in_scope(|| {
+                tracing::info!(
+                    alg_id = format_args!("0x{alg_id:02x}"),
+                    key_id,
+                    freq = %view.freq(),
+                    slot = view.tdma_slot(),
+                    "voice channel reports encryption"
+                );
+            });
+        }
+        self.state.on_crypto(call_id, alg_id, key_id);
     }
 
     pub fn handle_signals_detected(

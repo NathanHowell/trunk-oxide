@@ -19,6 +19,7 @@ void p25_regenerator::start_call(bool qpsk, bool tdma, const std::string &xor_ma
   std::lock_guard<std::mutex> l(d_mutex);
   d_samples_per_symbol = tdma ? 4 : 5;
   d_backend->start_call(qpsk, tdma, xor_mask, system, primary);
+  d_new_call = true;
 }
 
 void p25_regenerator::set_enabled(bool enabled) {
@@ -42,6 +43,12 @@ int p25_regenerator::general_work(int noutput_items, gr_vector_int &ninput_items
   const auto *in = static_cast<const gr_complex *>(input_items[0]);
   auto *out = static_cast<float *>(output_items[0]);
   const int n_in = ninput_items[0];
+  // Symbols regenerated for the last call but not yet sent came from its
+  // channel: sent now, they would open this call with them (and, on a TDMA
+  // recorder moved to the other slot, with that slot's encryption sync).
+  if (d_new_call.exchange(false)) {
+    d_pending.clear();
+  }
   if (!d_enabled) {
     consume_each(n_in);
     d_pending.clear();

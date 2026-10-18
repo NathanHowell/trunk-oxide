@@ -577,6 +577,20 @@ impl CallEntry {
         }
     }
 
+    /// The grant names exactly this call's channel and slot.
+    fn on_channel(&self, msg: &TrunkMessage) -> bool {
+        self.freq == msg.freq
+            && self.phase2_tdma == msg.phase2_tdma
+            && self.tdma_slot == msg.tdma_slot
+    }
+
+    /// The grant needs this call's channel: the same frequency, and the same
+    /// slot when both are TDMA (a phase 1 grant takes both slots).
+    fn shares_channel(&self, msg: &TrunkMessage) -> bool {
+        self.freq == msg.freq
+            && (!(self.phase2_tdma && msg.phase2_tdma) || self.tdma_slot == msg.tdma_slot)
+    }
+
     /// End the current keyed transmission *without* emitting a boundary: push
     /// the in-progress segment, reset `segment_start`, and transition Recording
     /// → Idle. Shared by the conventional squelch-debounce finalize and the
@@ -676,6 +690,10 @@ pub(crate) enum CallEndReason {
     /// the voice channel ended its transmission). Logical, like
     /// [`Self::SourceChange`].
     KeyUp,
+    /// The control channel granted the call's channel (and TDMA slot) to
+    /// another talkgroup, so the call is over: left running, its recorder
+    /// would record the new talkgroup until a timeout.
+    ChannelReassigned,
     /// Process shutdown drained all calls.
     Shutdown,
 }
@@ -686,7 +704,11 @@ impl CallEndReason {
     pub(crate) const fn can_cut_speech(self) -> bool {
         matches!(
             self,
-            Self::GrantTimeout | Self::IdleTimeout | Self::WriteTimeout | Self::Superseded
+            Self::GrantTimeout
+                | Self::IdleTimeout
+                | Self::WriteTimeout
+                | Self::Superseded
+                | Self::ChannelReassigned
         )
     }
 
@@ -700,6 +722,7 @@ impl CallEndReason {
             Self::Conventional => "conventional",
             Self::SourceChange => "source_change",
             Self::KeyUp => "key_up",
+            Self::ChannelReassigned => "channel_reassigned",
             Self::Shutdown => "shutdown",
         }
     }
@@ -1164,20 +1187,71 @@ impl TrunkStateMachine {
 
     // ── Grant handling ──
 
-    fn on_grant(&mut self, msg: &TrunkMessage, is_grant_message: bool) -> Effects {
+    /// Ends the calls whose channel a grant gives to another talkgroup. The
+    /// site only reassigns a channel once the call on it has ended, so these
+    /// calls are over; left alone, their recorders would record the new
+    /// talkgroup until a timeout. Talkgroups patched together share a channel
+    /// legitimately and are left alone.
+    fn end_reassigned_calls(&self, msg: &TrunkMessage) -> Effects {
         let now = self.clock.now();
         let mut effects = Effects::new();
+        let patched = self
+            .patch_tables
+            .get(&msg.sys_num)
+            .map(|pt| pt.get_patch(Talkgroup(msg.talkgroup)))
+            .unwrap_or_default();
+        for entry in &self.calls {
+            if !entry.is_trunked()
+                || entry.sys_num != msg.sys_num
+                || entry.talkgroup == msg.talkgroup
+                || !entry.shares_channel(msg)
+                || patched.contains(&Talkgroup(entry.talkgroup))
+            {
+                continue;
+            }
+            tracing::info!(
+                short_name = %entry.short_name,
+                talkgroup = entry.talkgroup,
+                to_talkgroup = msg.talkgroup,
+                freq = %entry.freq,
+                slot = entry.tdma_slot,
+                since_update_s = now.saturating_duration_since(entry.last_update).as_secs_f64(),
+                "channel granted to another talkgroup: ending call"
+            );
+            effects.push(Effect::EmitCallEnd {
+                call_id: entry.id,
+                reason: CallEndReason::ChannelReassigned,
+            });
+            if entry.state == CallState::Recording {
+                effects.push(Effect::EmitSetupRecorder { call_id: entry.id });
+            }
+            effects.push(Effect::RemoveCall { call_id: entry.id });
+        }
+        if !effects.is_empty() {
+            effects.push(Effect::EmitCallsActive);
+        }
+        effects
+    }
 
-        let existing_idx = self.calls.iter().position(|entry| {
-            entry.talkgroup == msg.talkgroup
-                && entry.sys_num == msg.sys_num
-                && entry.tdma_slot == msg.tdma_slot
-                && entry.phase2_tdma == msg.phase2_tdma
-        });
+    fn on_grant(&mut self, msg: &TrunkMessage, is_grant_message: bool) -> Effects {
+        let now = self.clock.now();
+        let mut effects = if is_grant_message {
+            self.end_reassigned_calls(msg)
+        } else {
+            Effects::new()
+        };
+
+        // A talkgroup has one call per system. A grant on another channel or
+        // TDMA slot moves it there (the retune below), rather than starting a
+        // second call and leaving the first running on the old channel.
+        let existing_idx = self
+            .calls
+            .iter()
+            .position(|entry| entry.talkgroup == msg.talkgroup && entry.sys_num == msg.sys_num);
 
         if let Some(idx) = existing_idx {
-            let same_freq = self.calls[idx].freq == msg.freq;
-            if same_freq {
+            let same_channel = self.calls[idx].on_channel(msg);
+            if same_channel {
                 let entry = &mut self.calls[idx];
                 let resuming_idle = entry.state == CallState::Idle && entry.is_trunked();
                 let source_changed = msg.source > 0 && msg.source != entry.current_source_id;
@@ -1260,7 +1334,8 @@ impl TrunkStateMachine {
                 // downstream embed (it is keyed by talkgroup, not call id).
                 self.update_call_source(idx, msg.source, &mut effects);
             } else {
-                // Retune: close current segment (if Recording), start new one
+                // Retune to the new channel or slot: close the current segment
+                // (if Recording), start a new one
                 let entry = &mut self.calls[idx];
                 let old_freq = entry.freq;
                 let rec_num = entry.recorder.unwrap_or(RecorderNum(-1));
@@ -1284,6 +1359,8 @@ impl TrunkStateMachine {
                 }
 
                 entry.freq = msg.freq;
+                entry.tdma_slot = msg.tdma_slot;
+                entry.phase2_tdma = msg.phase2_tdma;
                 // Refresh the tracked source for the new freq so the next grant
                 // on it isn't misread as a source change (which would emit a
                 // spurious SetSource/EmitSignal).
@@ -1665,7 +1742,13 @@ impl TrunkStateMachine {
             if !sys_policy.monitor_encrypted {
                 entry.state = CallState::Rejected(RejectReason::Encrypted);
                 if !sys_policy.hide_encrypted {
-                    tracing::info!(talkgroup = tg.0, sys_num, "not recording: encrypted");
+                    tracing::info!(
+                        talkgroup = tg.0,
+                        sys_num,
+                        freq = %msg.freq,
+                        slot = msg.tdma_slot,
+                        "not recording: encrypted"
+                    );
                 }
                 return Effects::new();
             }
@@ -2489,6 +2572,141 @@ mod tests {
         let effects = sm.on_message(&msg2);
 
         assert_effects_contain_ordered(&effects, &["StopRecording", "SetFreq", "RequestRecording"]);
+    }
+
+    // ── A channel granted to another talkgroup ends the call on it ──
+
+    fn tdma_grant(talkgroup: i64, freq_hz: f64, slot: i32) -> TrunkMessage {
+        TrunkMessage {
+            phase2_tdma: true,
+            tdma_slot: slot,
+            ..grant_msg(talkgroup, freq_hz)
+        }
+    }
+
+    fn start(sm: &mut TrunkStateMachine, msg: &TrunkMessage) -> CallId {
+        let call_id = extract_create_call_id(&sm.on_message(msg));
+        let _ = sm.on_recording_result(
+            call_id,
+            RecordingResult::Started {
+                rec_num: RecorderNum(5),
+            },
+        );
+        call_id
+    }
+
+    fn ended(effects: &[Effect]) -> Vec<(CallId, CallEndReason)> {
+        effects
+            .iter()
+            .filter_map(|e| match e {
+                Effect::EmitCallEnd { call_id, reason } => Some((*call_id, *reason)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn grant_of_the_channel_to_another_talkgroup_ends_the_call() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let a = start(&mut sm, &grant_msg(100, 851_000_000.0));
+
+        let effects = sm.on_message(&grant_msg(200, 851_000_000.0));
+
+        assert_eq!(ended(&effects), [(a, CallEndReason::ChannelReassigned)]);
+        // The old call ends, and frees its recorder, before the new one asks.
+        assert_effects_contain_ordered(
+            &effects,
+            &[
+                "EmitCallEnd",
+                "RemoveCall",
+                "CreateCall",
+                "RequestRecording",
+            ],
+        );
+    }
+
+    #[test]
+    fn tdma_reassignment_ends_only_the_call_on_that_slot() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let slot0 = start(&mut sm, &tdma_grant(100, 851_000_000.0, 0));
+        let _slot1 = start(&mut sm, &tdma_grant(101, 851_000_000.0, 1));
+
+        let effects = sm.on_message(&tdma_grant(200, 851_000_000.0, 0));
+        assert_eq!(ended(&effects), [(slot0, CallEndReason::ChannelReassigned)]);
+
+        // A phase 1 grant takes the whole channel.
+        let mut sm = TrunkStateMachine::new(test_config());
+        let slot0 = start(&mut sm, &tdma_grant(100, 851_000_000.0, 0));
+        let slot1 = start(&mut sm, &tdma_grant(101, 851_000_000.0, 1));
+        let effects = sm.on_message(&grant_msg(200, 851_000_000.0));
+        assert_eq!(
+            ended(&effects),
+            [
+                (slot0, CallEndReason::ChannelReassigned),
+                (slot1, CallEndReason::ChannelReassigned)
+            ]
+        );
+    }
+
+    #[test]
+    fn patched_talkgroups_share_a_channel() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        sm.patch_tables.insert(1, PatchTable::new());
+        let now = sm.clock().now();
+        sm.patch_tables
+            .get_mut(&1)
+            .unwrap()
+            .update(900, 100, 200, 0, now);
+        let _ = start(&mut sm, &grant_msg(100, 851_000_000.0));
+
+        let effects = sm.on_message(&grant_msg(200, 851_000_000.0));
+
+        assert_eq!(ended(&effects), []);
+    }
+
+    #[test]
+    fn an_update_naming_the_channel_does_not_end_the_call() {
+        // Updates repeat for calls already set up, so one for another
+        // talkgroup can be stale; only a grant says the channel moved.
+        let mut config = test_config();
+        config.new_call_from_update = true;
+        let mut sm = TrunkStateMachine::new(config);
+        let _ = start(&mut sm, &grant_msg(100, 851_000_000.0));
+
+        let update = TrunkMessage {
+            message_type: MessageType::Update,
+            ..grant_msg(200, 851_000_000.0)
+        };
+        assert_eq!(ended(&sm.on_message(&update)), []);
+    }
+
+    #[test]
+    fn a_talkgroup_moving_to_another_slot_retunes_its_call() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let a = start(&mut sm, &tdma_grant(100, 851_000_000.0, 0));
+
+        let effects = sm.on_message(&tdma_grant(100, 852_000_000.0, 1));
+
+        assert_eq!(ended(&effects), []);
+        assert_effects_contain_ordered(&effects, &["StopRecording", "SetFreq", "RequestRecording"]);
+        assert_eq!(sm.calls.len(), 1);
+        let entry = sm.get_call(a).unwrap();
+        assert_eq!(
+            (entry.freq, entry.tdma_slot),
+            (Freq::from_hz(852_000_000.0), 1)
+        );
+
+        // Same frequency, other slot: still a retune, not a second call.
+        let _ = sm.on_recording_result(
+            a,
+            RecordingResult::Started {
+                rec_num: RecorderNum(6),
+            },
+        );
+        let effects = sm.on_message(&tdma_grant(100, 852_000_000.0, 0));
+        assert_effects_contain_ordered(&effects, &["StopRecording", "RequestRecording"]);
+        assert_eq!(sm.calls.len(), 1);
+        assert_eq!(sm.get_call(a).unwrap().tdma_slot, 0);
     }
 
     // ── Recording result updates state ──

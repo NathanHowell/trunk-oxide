@@ -497,6 +497,9 @@ pub(crate) struct CallEntry {
     pub(crate) last_update: Instant,
     /// Control channel grants and updates that refreshed `last_update`.
     pub(crate) refreshes: u32,
+    /// The voice channel ended a transmission (terminator) since this one
+    /// began: the next grant is a new key-up, even from the same handset.
+    pub(crate) ptt_ended: bool,
     pub(crate) max_duration: f64,
     pub(crate) segments: Vec<CallSegment>,
     pub(crate) segment_start: Instant,
@@ -539,6 +542,7 @@ impl Default for CallEntry {
             recorder: None,
             last_update: Instant::now(),
             refreshes: 0,
+            ptt_ended: false,
             max_duration: 0.0,
             segments: Vec::new(),
             segment_start: Instant::now(),
@@ -595,6 +599,8 @@ impl CallEntry {
         self.start_time = SystemTime::now();
         self.segments.clear();
         self.segment_start = Instant::now();
+        self.ptt_ended = false;
+        self.refreshes = 0;
     }
 
     /// If a squelch close is pending debounce, finalize it now: push the
@@ -659,6 +665,11 @@ pub(crate) enum CallEndReason {
     /// continuous; only the CallEnd/CallStart event pair is emitted. Distinct
     /// from [`Self::Conventional`] (which stops/restarts the recorder).
     SourceChange,
+    /// Trunked per-PTT boundary: a control channel grant for a call already
+    /// recording, i.e. a new key-up (another handset, or the same one after
+    /// the voice channel ended its transmission). Logical, like
+    /// [`Self::SourceChange`].
+    KeyUp,
     /// Process shutdown drained all calls.
     Shutdown,
 }
@@ -682,6 +693,7 @@ impl CallEndReason {
             Self::WriteTimeout => "write_timeout",
             Self::Conventional => "conventional",
             Self::SourceChange => "source_change",
+            Self::KeyUp => "key_up",
             Self::Shutdown => "shutdown",
         }
     }
@@ -706,6 +718,8 @@ pub(crate) enum RecorderPolicy {
     /// same recorder (`rust_call_id` unchanged → audio routing + Discord
     /// coalescing carry across).
     Span { source_id: i64 },
+    /// As [`Self::Span`], cut at a new key-up the control channel granted.
+    KeyUp { source_id: i64 },
     /// Recorder recycles per transmission (conventional keyed transmission). The
     /// cut stops the recorder, reads its metrics, and restarts it with a fresh
     /// `rec_num`; no eager `EmitCallStart` — the next squelch open begins the
@@ -718,6 +732,7 @@ impl RecorderPolicy {
     const fn end_reason(self) -> CallEndReason {
         match self {
             Self::Span { .. } => CallEndReason::SourceChange,
+            Self::KeyUp { .. } => CallEndReason::KeyUp,
             Self::Recycle => CallEndReason::Conventional,
         }
     }
@@ -1172,6 +1187,35 @@ impl TrunkStateMachine {
                     );
                 }
 
+                // A grant for a call already recording is a new key-up: from
+                // another handset (the grant names it), or from the same one
+                // after the voice channel ended its transmission. Each is its
+                // own transmission. The grant usually beats the in-band source
+                // change, which then matches and is ignored, so cut here.
+                let other_handset = msg.source > 0 && msg.source != entry.current_source_id;
+                if is_grant_message
+                    && entry.is_trunked()
+                    && entry.state == CallState::Recording
+                    && (other_handset || entry.ptt_ended)
+                    && entry.segment_start.elapsed() >= MIN_TRANSMISSION
+                {
+                    let call_id = entry.id;
+                    let source_id = if msg.source > 0 {
+                        msg.source
+                    } else {
+                        entry.current_source_id
+                    };
+                    entry.current_source_id = source_id;
+                    tracing::info!(
+                        short_name = %entry.short_name,
+                        talkgroup = entry.talkgroup,
+                        source = source_id,
+                        other_handset,
+                        "new key-up on a recording call: cutting per-PTT transmission boundary"
+                    );
+                    return self.cut_transmission(call_id, RecorderPolicy::KeyUp { source_id });
+                }
+
                 // TDULC may have moved this call to Idle — resume recording.
                 if resuming_idle {
                     entry.state = CallState::Recording;
@@ -1426,6 +1470,17 @@ impl TrunkStateMachine {
     /// conventional keyed transmission, but on a continuously-running recorder
     /// (no stop/retune; `rust_call_id` is unchanged so audio routing and Discord
     /// coalescing carry across the boundary).
+    /// The voice channel ended a transmission on `call_id` (a terminator):
+    /// the next grant for it is a new key-up.
+    pub(crate) fn on_ptt_ended(&mut self, call_id: CallId) {
+        if let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id)
+            && entry.is_trunked()
+            && entry.state == CallState::Recording
+        {
+            entry.ptt_ended = true;
+        }
+    }
+
     pub(crate) fn on_source_change(&mut self, call_id: CallId, source: i64) -> Effects {
         let mut effects = Effects::new();
         let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) else {
@@ -1484,7 +1539,7 @@ impl TrunkStateMachine {
             reason: policy.end_reason(),
         });
         match policy {
-            RecorderPolicy::Span { source_id } => {
+            RecorderPolicy::Span { source_id } | RecorderPolicy::KeyUp { source_id } => {
                 // Recorder keeps running: rotate bookkeeping only, re-route the
                 // source, and open the next transmission eagerly.
                 effects.push(Effect::RotateTransmission { call_id, source_id });
@@ -2473,6 +2528,66 @@ mod tests {
         assert!(sm.on_source_change(call_id, 2002).is_empty());
         // Unknown source (encrypted / no-LC) must not cut a boundary.
         assert!(sm.on_source_change(call_id, -1).is_empty());
+    }
+
+    // ── Control channel grant on a recording call → per-PTT boundary ──
+
+    fn key_up(sm: &mut TrunkStateMachine, source: i64) -> Effects {
+        sm.on_message(&TrunkMessage {
+            source,
+            ..grant_msg(100, 851_000_000.0)
+        })
+    }
+
+    fn cut_at_key_up(effects: &Effects, source: i64) -> bool {
+        matches!(
+            effects.as_ref(),
+            [
+                Effect::EmitCallEnd {
+                    reason: CallEndReason::KeyUp,
+                    ..
+                },
+                Effect::RotateTransmission { source_id, .. },
+                Effect::SetSource { .. },
+                Effect::EmitSignal { .. },
+                Effect::EmitCallStart { .. },
+            ] if *source_id == source
+        )
+    }
+
+    #[test]
+    fn a_grant_naming_another_handset_cuts_a_transmission() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let call_id = recording_trunked_call(&mut sm);
+        sm.calls[0].segment_start = Instant::now() - Duration::from_secs(2);
+        assert!(cut_at_key_up(&key_up(&mut sm, 2002), 2002));
+        assert_eq!(sm.calls[0].current_source_id, 2002);
+        // The in-band source change that follows matches and adds nothing.
+        assert!(sm.on_source_change(call_id, 2002).is_empty());
+    }
+
+    #[test]
+    fn the_same_handset_keying_again_cuts_only_after_its_transmission_ended() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let call_id = recording_trunked_call(&mut sm);
+        sm.calls[0].segment_start = Instant::now() - Duration::from_secs(2);
+        // A repeated grant within one key-up: no boundary.
+        assert!(!key_up(&mut sm, 100).iter().any(|e| matches!(e, Effect::EmitCallEnd { .. })));
+        // The voice channel saw a terminator; the next grant is a new key-up.
+        sm.on_ptt_ended(call_id);
+        assert!(cut_at_key_up(&key_up(&mut sm, 100), 100));
+        // As the executor applies the RotateTransmission effect.
+        sm.on_transmission_rotated(call_id, 100);
+        assert!(!sm.calls[0].ptt_ended, "a new transmission starts unended");
+    }
+
+    #[test]
+    fn key_ups_within_the_minimum_transmission_only_reroute() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let _ = recording_trunked_call(&mut sm);
+        let effects = key_up(&mut sm, 2002);
+        assert!(!effects.iter().any(|e| matches!(e, Effect::EmitCallEnd { .. })));
+        assert_eq!(sm.calls[0].current_source_id, 2002);
     }
 
     #[test]

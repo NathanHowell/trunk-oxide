@@ -976,7 +976,7 @@ impl CallManager {
         // mid-recording, so we attribute this speaker's *delta* to the boundary
         // (see `voice_snapshots`). This is the seam where "end the transmission"
         // is separated from "stop the recorder".
-        if reason == CallEndReason::SourceChange {
+        if matches!(reason, CallEndReason::SourceChange | CallEndReason::KeyUp) {
             let mut new_snapshot: Option<VoiceCounters> = None;
             if let Some(view) = self.state.get_call_view(call_id) {
                 let final_freq = view.freq();
@@ -1345,8 +1345,39 @@ impl CallManager {
             return;
         }
 
+        if matches!(
+            rust_msg.message_type,
+            MessageType::Grant | MessageType::UuVGrant
+        ) {
+            self.note_ptt_ends(&rust_msg);
+        }
         let effects = self.state.on_message(&rust_msg);
         self.process_effects(effects, &mut ctx);
+    }
+
+    /// Before a grant reaches the state machine: tell it which of the
+    /// granted talkgroup's recording calls had their voice channel end a
+    /// transmission (a terminator since the current transmission began), so
+    /// the grant can be read as a new key-up even from the same handset.
+    fn note_ptt_ends(&mut self, msg: &TrunkMessage) {
+        let ended: Vec<CallId> = self
+            .state
+            .iter_calls()
+            .filter(|v| {
+                v.sys_num() == msg.sys_num
+                    && v.talkgroup() == msg.talkgroup
+                    && v.state() == CallState::Recording
+            })
+            .filter_map(|v| {
+                let handle = self.handles.get(&v.id())?;
+                let now = VoiceCounters::from_transmissions(&ffi::call_get_transmission_list(handle));
+                let then = self.voice_snapshots.get(&v.id()).copied().unwrap_or_default();
+                (now.term_events > then.term_events).then_some(v.id())
+            })
+            .collect();
+        for id in ended {
+            self.state.on_ptt_ended(id);
+        }
     }
 
     /// Read every shared channelizer's counters (called at the 1 Hz tick),

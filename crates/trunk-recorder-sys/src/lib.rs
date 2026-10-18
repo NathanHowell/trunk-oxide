@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 pub mod p25;
+pub mod p25_parse;
 pub mod shadow;
 
 // cxx derives `Clone` field by field for shared structs.
@@ -125,7 +126,7 @@ pub mod ffi {
 
     // ── Shared structs (POD, copied across the boundary) ──
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq)]
     struct TrPatchData {
         pub sg: u64,
         pub ga1: u64,
@@ -133,7 +134,7 @@ pub mod ffi {
         pub ga3: u64,
     }
 
-    #[derive(Debug, Clone)]
+    #[derive(Debug, Clone, PartialEq)]
     struct TrTrunkMessage {
         pub message_type: TrMessageType,
         pub meta: String,
@@ -460,7 +461,20 @@ pub mod ffi {
             phase1: bool,
             phase2: bool,
         );
+        /// Parse P25 control channel messages with trunk-p25 (`true`) or
+        /// trunk-recorder's `P25Parser`.
+        fn tr_config_set_p25_parser(ctx: Pin<&mut TrContext>, rust: bool);
         fn tr_config_set_soft_vocoder(ctx: Pin<&mut TrContext>, enabled: bool);
+
+        /// trunk-recorder's `P25Parser`, as the reference the Rust parser
+        /// is checked against.
+        type P25ReferenceParser;
+        fn tr_p25_reference_parser_new(sys_num: i32) -> UniquePtr<P25ReferenceParser>;
+        fn tr_p25_reference_parse(
+            parser: Pin<&mut P25ReferenceParser>,
+            msg_type: i64,
+            payload: &[u8],
+        ) -> Vec<TrTrunkMessage>;
         fn tr_config_set_debug_recorder(
             ctx: Pin<&mut TrContext>,
             enabled: bool,
@@ -592,6 +606,16 @@ pub mod ffi {
         );
         /// A P25 voice call ended.
         fn p25_observe_call(report: &TrCallReport);
+    }
+
+    // ── trunk-p25 control channel parser (one per P25 control channel decoder) ──
+
+    extern "Rust" {
+        type P25TrunkParser;
+
+        fn p25_trunk_parser_new(sys_num: i32, system: &str) -> Box<P25TrunkParser>;
+        /// op25's message form: its type and the NAC-prefixed payload.
+        fn parse(self: &mut P25TrunkParser, msg_type: i64, payload: &[u8]) -> Vec<TrTrunkMessage>;
     }
 
     // ── trunk-p25 voice regenerator, phase 1 and 2 (one per P25 recorder) ──
@@ -954,6 +978,7 @@ fn drop_event_handler_box(_handler: Box<EventHandlerBox>) {
 // ── Shared FFT channelizer ──
 
 use p25::P25RegeneratorHandle;
+use p25_parse::{P25TrunkParser, p25_trunk_parser_new};
 
 fn p25_observe_cc_message(
     system: &str,

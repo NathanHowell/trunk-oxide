@@ -3812,6 +3812,7 @@ dependencies = [
  "cxx-build",
  "num-complex",
  "pkg-config",
+ "serde_json",
  "tokio",
  "tracing",
  "trunk-channelizer",

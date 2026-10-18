@@ -344,6 +344,10 @@ impl TrunkRecorderBuilder {
                 decoder(rec.p25_voice_decoder),
                 decoder(rec.p25_tdma_decoder),
             );
+            ffi::tr_config_set_p25_parser(
+                ctx.pin_mut(),
+                rec.p25_parser == trunk_config::P25Parser::Rust,
+            );
             let shadow = &rec.p25_shadow;
             ffi::tr_config_set_p25_shadow(ctx.pin_mut(), shadow.control, shadow.voice, shadow.tdma);
             let c = &rec.conditioner;

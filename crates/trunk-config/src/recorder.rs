@@ -36,6 +36,18 @@ pub enum P25Decoder {
     Op25,
 }
 
+/// Who turns P25 control channel messages into trunking messages.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum P25Parser {
+    /// trunk-p25's typed parser, with channel plans shared across a
+    /// system's control channels.
+    #[default]
+    Rust,
+    /// trunk-recorder's `P25Parser`, kept for A/B replays.
+    TrunkRecorder,
+}
+
 /// Shadow mode: run the other P25 implementation too, for comparison.
 ///
 /// Per decoder, the implementation not chosen by `p25_decoder` /
@@ -125,6 +137,9 @@ pub struct RecorderConfig {
     /// Who decodes P25 control channels.
     #[serde(default)]
     pub p25_decoder: P25Decoder,
+    /// Who parses P25 control channel messages.
+    #[serde(default)]
+    pub p25_parser: P25Parser,
     /// Who decodes P25 phase 1 voice.
     #[serde(default)]
     pub p25_voice_decoder: P25Decoder,

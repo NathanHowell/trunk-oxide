@@ -11,6 +11,7 @@ use opentelemetry::metrics::{Counter, Gauge, Meter};
 use trunk_recorder_sys::p25::{
     ControlChannelReport, DecoderStats, Impl, Role, TdmaStats, VoiceChannelReport, VoiceStats,
 };
+use trunk_recorder_sys::p25_parse::{self, ParseStats};
 use trunk_recorder_sys::shadow::{self, CallTally, Outcome, VoiceTally};
 
 /// A decoder's identity across polls: (source, channelizer port).
@@ -31,6 +32,89 @@ pub struct P25Metrics {
     prev: HashMap<Key, (DecoderStats, u64)>,
     voice: VoiceMetrics,
     shadow: ShadowMetrics,
+    parser: ParserMetrics,
+}
+
+/// The control channel parser, per system.
+struct ParserMetrics {
+    osp: Counter<u64>,
+    channels: Counter<u64>,
+    invalid: Counter<u64>,
+    plan_conflicts: Counter<u64>,
+    held_grants: Counter<u64>,
+    prev: HashMap<i32, ParseStats>,
+}
+
+impl ParserMetrics {
+    fn new(meter: &Meter) -> Self {
+        Self {
+            osp: meter
+                .u64_counter("trunk.oxide.p25cc.osp")
+                .with_description("Control channel packets parsed, by system and kind")
+                .build(),
+            channels: meter
+                .u64_counter("trunk.oxide.p25cc.channels")
+                .with_description(
+                    "Channel numbers resolved to a frequency: by the control channel's own \
+                     plans, another control channel of the system's (shared), or not at all",
+                )
+                .build(),
+            invalid: meter
+                .u64_counter("trunk.oxide.p25cc.invalid")
+                .with_description(
+                    "Invalid or empty control channel messages (op25 timeouts are empty)",
+                )
+                .build(),
+            plan_conflicts: meter
+                .u64_counter("trunk.oxide.p25cc.plan_conflicts")
+                .with_description(
+                    "Sites of one system announcing different plans for one identifier",
+                )
+                .build(),
+            held_grants: meter
+                .u64_counter("trunk.oxide.p25cc.held_grants")
+                .with_description(
+                    "Grants held until their channel's plan arrived (held), \
+                     and those whose plan never came (expired)",
+                )
+                .build(),
+            prev: HashMap::new(),
+        }
+    }
+
+    fn poll(&mut self) {
+        let d = |now: u64, was: u64| now.saturating_sub(was);
+        for r in p25_parse::parse_stats() {
+            let was = self
+                .prev
+                .insert(r.sys_num, r.stats.clone())
+                .unwrap_or_default();
+            let now = &r.stats;
+            let base = [KeyValue::new("system", r.system.clone())];
+            for (&kind, &n) in &now.kinds {
+                let w = was.kinds.get(kind).copied().unwrap_or(0);
+                self.osp.add(d(n, w), &with(&base, "kind", kind));
+            }
+            for (plan, n, w) in [
+                ("own", now.own_plans, was.own_plans),
+                ("shared", now.shared_plans, was.shared_plans),
+                ("unknown", now.unknown_channels, was.unknown_channels),
+            ] {
+                self.channels.add(d(n, w), &with(&base, "plan", plan));
+            }
+            self.invalid.add(d(now.invalid, was.invalid), &base);
+            self.plan_conflicts
+                .add(d(now.conflicts, was.conflicts), &base);
+            self.held_grants.add(
+                d(now.deferred, was.deferred),
+                &with(&base, "result", "held"),
+            );
+            self.held_grants.add(
+                d(now.expired, was.expired),
+                &with(&base, "result", "expired"),
+            );
+        }
+    }
 }
 
 /// Voice regenerators, one per recorder.
@@ -490,12 +574,14 @@ impl P25Metrics {
             prev: HashMap::new(),
             voice: VoiceMetrics::new(meter),
             shadow: ShadowMetrics::new(meter),
+            parser: ParserMetrics::new(meter),
         }
     }
 
     pub fn poll(&mut self) {
         self.voice.poll();
         self.shadow.poll();
+        self.parser.poll();
         let reports = trunk_recorder_sys::p25::control_channels();
         self.prev.retain(|k, _| {
             reports

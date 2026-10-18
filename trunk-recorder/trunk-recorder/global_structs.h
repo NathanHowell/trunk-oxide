@@ -78,6 +78,8 @@ struct Config {
   bool p25_rust_phase1 = false;
   bool p25_rust_phase2 = false;
   P25Shadow p25_shadow;
+  // Control channel messages parsed by trunk-p25 (else P25Parser).
+  bool p25_rust_parser = true;
   // Every message any P25 control-channel decoder emits (system, frequency,
   // implementation, primary?, op25 message type and payload).
   std::function<void(const std::string &, double, P25DecoderImpl, bool, long, const std::string &)> p25_cc_observer;

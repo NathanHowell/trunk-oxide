@@ -154,7 +154,24 @@ pub fn decoder_tallies() -> Value {
             )
         })
         .collect();
-    json!({ "control": control, "voice": { "calls": calls, "agreement": agreement } })
+    let parser: Vec<Value> = trunk_recorder_sys::p25_parse::parse_stats()
+        .into_iter()
+        .map(|r| {
+            let s = r.stats;
+            let kinds: BTreeMap<&str, u64> = s.kinds.into_iter().collect();
+            json!({
+                "system": r.system, "kinds": kinds,
+                "channels": { "own": s.own_plans, "shared": s.shared_plans, "unknown": s.unknown_channels },
+                "invalid": s.invalid, "plan_conflicts": s.conflicts,
+                "held_grants": { "held": s.deferred, "expired": s.expired },
+            })
+        })
+        .collect();
+    json!({
+        "control": control,
+        "voice": { "calls": calls, "agreement": agreement },
+        "parser": parser,
+    })
 }
 
 struct OpenCall {

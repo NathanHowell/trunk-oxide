@@ -12,7 +12,9 @@
 //! - [`trellis`]: the rate-1/2 trellis code with a soft-decision Viterbi
 //!   decoder, in place of op25's greedy hard-decision walk.
 //! - [`control`]: frames to the same messages op25 emits (TSBK, MBT, TDU,
-//!   TDULC, timeout), so the existing parser keeps working.
+//!   TDULC, timeout).
+//! - [`trunking`]: what those messages say (typed OSPs) and the channel
+//!   plans, shared across a system's control channels, that place grants.
 //!
 //! Voice channels:
 //! - [`voice`]: phase 1 (HDU, LDU1/2, terminators, IMBE) and its
@@ -34,6 +36,7 @@ pub mod symbols;
 pub mod tdma;
 pub mod testgen;
 pub mod trellis;
+pub mod trunking;
 pub mod types;
 pub mod voice;
 

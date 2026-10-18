@@ -145,6 +145,23 @@ The trunk-p25 stage metrics (`p25cc`, `p25voice`, `p25tdma`) carry
 `impl=rust` and the role too. A replay writes the same tallies to
 `summary.json` under `decoders`.
 
+## Control channel parser
+
+`recorder.p25_parser = "rust" | "trunk-recorder"` picks who turns control
+channel messages into trunking messages. The Rust parser (`trunk_p25::trunking`,
+`trunk_recorder_sys::p25_parse`) shares channel plans across a system's
+control channels and fixes trunk-recorder's misreadings (listed in
+`p25_parse.rs`); `summary.json` `decoders.parser` has its per-system counts
+(packet kinds; channels resolved by the control channel's own plans, another
+one's, or not at all). To check it against trunk-recorder's on a capture's
+taps, message by message:
+
+```sh
+TRUNK_P25_MSGS=RUN/taps cargo test -p trunk-recorder-sys --lib capture_matches -- --ignored --nocapture
+```
+
+Every difference must be one of the named divergences; anything else fails.
+
 ## Notes
 
 - A conventional channel with no explicit `squelch_db` uses the system squelch,

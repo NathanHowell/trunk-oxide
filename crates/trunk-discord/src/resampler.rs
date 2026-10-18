@@ -46,7 +46,7 @@ impl Resampler {
         if self.input_buffer.is_empty() {
             return Ok(Vec::new());
         }
-        let chunk: Vec<f32> = self.input_buffer.drain(..).collect();
+        let chunk = std::mem::take(&mut self.input_buffer);
         let result = self.inner.process_partial(Some(&[&chunk]), None)?;
         Ok(result[0].clone())
     }

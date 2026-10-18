@@ -143,6 +143,9 @@ pub struct CallHandler {
     ogg_encoder: Option<OggOpusEncoder>,
 
     embed_message_id: Option<MessageId>,
+    /// Trace ids of the later transmissions coalesced into this embed, for
+    /// the flag registry (the first is the embed's own trace).
+    transmission_traces: Vec<String>,
 
     /// Per-channel serialized writer for this call's embed: send/edit/delete and
     /// the audio attach all go through it. Coalescing of transcript-stream edits
@@ -250,6 +253,7 @@ impl CallHandler {
             post_channel,
             ogg_encoder,
             embed_message_id: None,
+            transmission_traces: Vec::new(),
             writer,
             indicator_shown: false,
             metrics,
@@ -401,7 +405,14 @@ impl CallHandler {
                 // Later transmissions coalesced into this embed are separate
                 // traces on the recorder side; link the embed's span to each so
                 // every transmission is one click away in Jaeger.
-                link_transmission(&call_info.traceparent, self.state.ptt_count());
+                if let Some(trace) =
+                    link_transmission(&call_info.traceparent, self.state.ptt_count())
+                {
+                    if let Some(msg_id) = self.embed_message_id {
+                        crate::reactions::FLAGS.add_transmission(msg_id, trace.clone());
+                    }
+                    self.transmission_traces.push(trace);
+                }
                 let effects = self.state.on_ptt_start(call_info.as_ref());
                 if let Err(e) = self.process_effects(effects).await {
                     tracing::error!(error = %e, "PTT start handling error");
@@ -436,6 +447,7 @@ impl CallHandler {
                             tdma: self.tdma,
                             talkgroup: self.talkgroup,
                             trace_id: current_trace_id(),
+                            transmission_traces: self.transmission_traces.clone(),
                         },
                     );
                 }
@@ -587,7 +599,7 @@ impl CallHandler {
         // far above any real transmission.
         let buffer_len = self.audio_buffer.len();
         let audio_drain: Vec<f32> = if buffer_len >= buffer_threshold(self.config.max_segment_ms) {
-            self.audio_buffer.drain(..).collect()
+            std::mem::take(&mut self.audio_buffer)
         } else {
             Vec::new()
         };
@@ -681,9 +693,7 @@ impl CallHandler {
         }
         let peak_rms = peak_window_rms(&audio);
         let kept = peak_rms >= SILENCE_RMS_THRESHOLD;
-        self.metrics
-            .audio_peak_rms
-            .record(peak_rms, &self.labels());
+        self.metrics.audio_peak_rms.record(peak_rms, &self.labels());
 
         // Shape metrics cover every segment, including gated ones: a "silent"
         // segment is exactly where a clipped lead-in or tail would hide.
@@ -967,13 +977,13 @@ fn current_trace_id() -> String {
 }
 
 /// Link the current (embed) span to a later transmission's recorder-side call
-/// span, given its W3C `traceparent`. No-op when the traceparent is empty or
-/// invalid.
-fn link_transmission(traceparent: &str, index: u32) {
+/// span, given its W3C `traceparent`, and return that trace's id. `None` when
+/// the traceparent is empty or invalid.
+fn link_transmission(traceparent: &str, index: u32) -> Option<String> {
     use opentelemetry::trace::TraceContextExt;
     use tracing_opentelemetry::OpenTelemetrySpanExt;
     if traceparent.is_empty() {
-        return;
+        return None;
     }
     let cx = opentelemetry::global::get_text_map_propagator(|prop| {
         let mut carrier = std::collections::HashMap::new();
@@ -981,10 +991,15 @@ fn link_transmission(traceparent: &str, index: u32) {
         prop.extract(&carrier)
     });
     let span_context = cx.span().span_context().clone();
+    if !span_context.is_valid() {
+        return None;
+    }
+    let trace = span_context.trace_id().to_string();
     tracing::Span::current().add_link_with_attributes(
         span_context,
         vec![KeyValue::new("transmission", i64::from(index))],
     );
+    Some(trace)
 }
 
 fn shape_labels(short_name: &str, is_conventional: bool, tdma: bool) -> [KeyValue; 3] {
@@ -1098,10 +1113,9 @@ fn peak_window_rms(samples: &[f32]) -> f64 {
 
 fn decode_audio(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .chunks_exact(2)
-        .map(|chunk| {
-            let sample = i16::from_le_bytes([chunk[0], chunk[1]]);
-            f32::from(sample) / 32768.0
-        })
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .map(|&pair| f32::from(i16::from_le_bytes(pair)) / 32768.0)
         .collect()
 }

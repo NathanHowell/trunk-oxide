@@ -31,6 +31,8 @@ pub struct FlagInfo {
     /// Trace id of the embed (shared with its first transmission). Later
     /// transmissions are attached to the embed's span as OTel links.
     pub trace_id: String,
+    /// The later transmissions' trace ids, so a flag names every trace.
+    pub transmission_traces: Vec<String>,
 }
 
 #[derive(Default)]
@@ -49,6 +51,14 @@ impl FlagRegistry {
             if let Some(old) = order.pop_front() {
                 map.remove(&old);
             }
+        }
+    }
+
+    /// A later transmission was coalesced into `message`'s embed.
+    pub fn add_transmission(&self, message: MessageId, trace_id: String) {
+        let mut guard = self.inner.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(info) = guard.0.get_mut(&message) {
+            info.transmission_traces.push(trace_id);
         }
     }
 
@@ -131,6 +141,7 @@ impl EventHandler for Handler {
             talkgroup = info.talkgroup,
             tdma = info.tdma,
             trace_id = %info.trace_id,
+            transmission_traces = %info.transmission_traces.join(","),
             message = %reaction.message_id,
             "call flagged by reaction"
         );
@@ -177,6 +188,7 @@ mod tests {
             tdma: false,
             talkgroup: 1,
             trace_id: String::new(),
+            transmission_traces: Vec::new(),
         };
         for i in 1..=(CAPACITY as u64 + 10) {
             r.register(MessageId::new(i), info.clone());

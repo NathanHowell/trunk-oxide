@@ -806,7 +806,10 @@ impl TrunkRecorder {
             call_mgr.add_call(self.ctx.pin_mut(), pending.call, channel, pending.sys_num);
         }
 
-        let mut trunk_dedup = dedup::WindowedDedup::new(64);
+        // The same packet decoded by several control channel decoders arrives
+        // within milliseconds; the control channel's own repeats (call
+        // refreshes) a second or so apart.
+        let mut trunk_dedup = dedup::TimedDedup::new(Duration::from_millis(500));
 
         let mut tick = delayed_interval(Duration::from_secs(1));
         let mut status = delayed_interval(Duration::from_secs(200));
@@ -833,9 +836,16 @@ impl TrunkRecorder {
                     self.pending.fetch_sub(1, Ordering::Relaxed);
                     match event {
                         GrEvent::TrunkMessages(messages) => {
+                            let now = std::time::Instant::now();
                             let messages: Vec<_> = messages
                                 .into_iter()
-                                .filter(|m| trunk_dedup.admit(&TrunkMsgKey::from(m)))
+                                .filter(|m| {
+                                    let fresh = trunk_dedup.admit(&TrunkMsgKey::from(m), now);
+                                    if !fresh {
+                                        call_mgr.note_duplicate(m);
+                                    }
+                                    fresh
+                                })
                                 .collect();
                             if !messages.is_empty() {
                                 let mut by_system: HashMap<i32, Vec<usize>> = HashMap::new();

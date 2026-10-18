@@ -112,6 +112,9 @@ impl VoiceCounters {
     }
 }
 
+/// Voice this recent when a timeout stops a call means it was cut mid-speech.
+const CUT_VOICE_AGE_S: f64 = 0.5;
+
 /// Executor: processes effects from the state machine against real FFI/bridge.
 pub struct CallManager {
     state: TrunkStateMachine,
@@ -161,6 +164,7 @@ pub struct CallManager {
     /// with zeros while nobody is talking, which keeps `call_stop_audio_age`
     /// near 0. A grant-timeout stop with a small *voice* age cut speech.
     call_stop_voice_age: Histogram<f64>,
+    calls_cut: Counter<u64>,
     terminator_after_ms: Histogram<f64>,
     /// Per-call FLL frequency error (Hz) at recorder stop, bucketed by source.
     /// Distribution (not last value) so the per-dongle median = clock bias and
@@ -189,6 +193,7 @@ pub struct CallManager {
     call_chz: HashMap<CallId, CallChz>,
     recorder_denied: Counter<u64>,
     control_channel_messages: Counter<u64>,
+    control_channel_duplicates: Counter<u64>,
     active_calls_gauge: Gauge<u64>,
     conv_metrics: Arc<Mutex<ConventionalMetricsSnapshot>>,
 }
@@ -290,6 +295,14 @@ impl CallManager {
                 .with_unit("s")
                 .with_boundaries(vec![0.1, 0.25, 0.5, 1.0, 1.5, 2.0, 2.5, 3.0, 4.0, 6.0])
                 .build(),
+            calls_cut: meter
+                .u64_counter("trunk.oxide.calls_cut")
+                .with_description(
+                    "Calls stopped by a timeout or supersession while voice was still \
+                     arriving (< 0.5 s before), by reason and whether the control \
+                     channel had refreshed the call at all",
+                )
+                .build(),
             call_stop_voice_age: meter
                 .f64_histogram("trunk.oxide.call_stop_voice_age_seconds")
                 .with_description(
@@ -363,6 +376,13 @@ impl CallManager {
             control_channel_messages: meter
                 .u64_counter("trunk.oxide.control_channel_messages")
                 .with_description("Total control channel messages decoded")
+                .build(),
+            control_channel_duplicates: meter
+                .u64_counter("trunk.oxide.control_channel_duplicates")
+                .with_description(
+                    "Control channel messages dropped as copies of one admitted < 500 ms \
+                     earlier (the same packet through several decoders)",
+                )
                 .build(),
             active_calls_gauge: meter
                 .u64_gauge("trunk.oxide.active_calls")
@@ -564,6 +584,12 @@ impl CallManager {
                             term_events = tracing::field::Empty,
                             stop_audio_age_s = tracing::field::Empty,
                             stop_voice_age_s = tracing::field::Empty,
+                            // Stopped by a timeout with voice still arriving.
+                            cut_mid_speech = tracing::field::Empty,
+                            // Control channel grants/updates that refreshed the
+                            // call, and how long since the last one at stop.
+                            refreshes = tracing::field::Empty,
+                            since_update_s = tracing::field::Empty,
                             after_term_ms = tracing::field::Empty,
                             voice_samples = tracing::field::Empty,
                         );
@@ -909,6 +935,19 @@ impl CallManager {
             ];
             self.call_stop_audio_age.record(age, &labels);
             self.call_stop_voice_age.record(voice, &labels);
+            if reason.can_cut_speech() && voice < CUT_VOICE_AGE_S {
+                let mut labels = labels.to_vec();
+                labels.push(KeyValue::new("refreshed", view.refreshes() > 0));
+                self.calls_cut.add(1, &labels);
+            }
+        }
+        if let (Some(s), Some(view)) = (&span, self.state.get_call_view(call_id)) {
+            s.record("refreshes", view.refreshes());
+            s.record("since_update_s", view.since_update().as_secs_f64());
+            s.record(
+                "cut_mid_speech",
+                reason.can_cut_speech() && voice_age.is_some_and(|v| v < CUT_VOICE_AGE_S),
+            );
         }
         if let Some(s) = &span {
             if let Some(age) = audio_age {
@@ -1274,18 +1313,26 @@ impl CallManager {
 
     // ── Public API (delegates to state machine + processes effects) ──
 
+    fn short_name_of(&self, sys_num: i32) -> String {
+        self.state
+            .config
+            .systems
+            .get(&sys_num)
+            .map_or_else(String::new, |p| p.short_name.clone())
+    }
+
+    /// `msg` was dropped as a duplicate before reaching the state machine.
+    pub fn note_duplicate(&self, msg: &TrTrunkMessage) {
+        self.control_channel_duplicates
+            .add(1, &[KeyValue::new("short_name", self.short_name_of(msg.sys_num))]);
+    }
+
     pub fn handle_message(&mut self, mut ctx: Pin<&mut TrContext>, msg: &TrTrunkMessage) {
         let rust_msg = Self::convert_message(msg);
 
         if !matches!(rust_msg.message_type, MessageType::InvalidCcMessage) {
-            let short_name = self
-                .state
-                .config
-                .systems
-                .get(&msg.sys_num)
-                .map_or_else(String::new, |p| p.short_name.clone());
             self.control_channel_messages
-                .add(1, &[KeyValue::new("short_name", short_name)]);
+                .add(1, &[KeyValue::new("short_name", self.short_name_of(msg.sys_num))]);
         }
 
         // Sysid/Status need FFI call before state machine processes them

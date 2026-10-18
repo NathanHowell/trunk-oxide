@@ -17,6 +17,16 @@ impl<'a> CallView<'a> {
     pub(crate) fn id(&self) -> CallId {
         self.0.id
     }
+
+    /// Control channel grants and updates that refreshed the call.
+    pub(crate) fn refreshes(&self) -> u32 {
+        self.0.refreshes
+    }
+
+    /// Since the control channel last mentioned the call.
+    pub(crate) fn since_update(&self) -> Duration {
+        self.0.last_update.elapsed()
+    }
     pub(crate) fn call_num(&self) -> i64 {
         self.0.call_num
     }
@@ -485,6 +495,8 @@ pub(crate) struct CallEntry {
     pub(crate) priority: i32,
     pub(crate) recorder: Option<RecorderNum>,
     pub(crate) last_update: Instant,
+    /// Control channel grants and updates that refreshed `last_update`.
+    pub(crate) refreshes: u32,
     pub(crate) max_duration: f64,
     pub(crate) segments: Vec<CallSegment>,
     pub(crate) segment_start: Instant,
@@ -526,6 +538,7 @@ impl Default for CallEntry {
             priority: 0,
             recorder: None,
             last_update: Instant::now(),
+            refreshes: 0,
             max_duration: 0.0,
             segments: Vec::new(),
             segment_start: Instant::now(),
@@ -651,6 +664,15 @@ pub(crate) enum CallEndReason {
 }
 
 impl CallEndReason {
+    /// Ends that stop the recorder whether or not anyone is talking: with
+    /// voice still arriving, the transmission was cut short.
+    pub(crate) const fn can_cut_speech(self) -> bool {
+        matches!(
+            self,
+            Self::GrantTimeout | Self::IdleTimeout | Self::WriteTimeout | Self::Superseded
+        )
+    }
+
     /// Low-cardinality label for spans and metrics.
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
@@ -1354,6 +1376,7 @@ impl TrunkStateMachine {
 
     fn update_call_source_entry(entry: &mut CallEntry, source: i64, effects: &mut Effects) -> bool {
         entry.last_update = Instant::now();
+        entry.refreshes += 1;
 
         if source == -1 || source == entry.current_source_id {
             return false;

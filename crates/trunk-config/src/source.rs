@@ -88,10 +88,12 @@ pub struct SourceConfig {
     pub silence_frames: i32,
     #[serde(default)]
     pub signal_detector_threshold: Option<f32>,
+    /// Gone: channels are shared by every source, up to `[recorder]
+    /// max_channels`. trunk-oxide refuses a config that still sets these.
     #[serde(default)]
-    pub digital_recorders: i32,
+    pub digital_recorders: Option<i32>,
     #[serde(default)]
-    pub analog_recorders: i32,
+    pub analog_recorders: Option<i32>,
     #[serde(default)]
     pub sigmf_recorders: i32,
     #[serde(default)]

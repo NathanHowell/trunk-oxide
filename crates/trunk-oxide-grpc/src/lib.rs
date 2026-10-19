@@ -43,9 +43,9 @@ fn system_info_from(info: &SystemInfo) -> proto::SystemInfo {
     }
 }
 
-const fn recorder_info(rec_num: i32) -> proto::RecorderInfo {
+fn recorder_info(channel: trunk_radio::ChannelNum) -> proto::RecorderInfo {
     proto::RecorderInfo {
-        id: rec_num,
+        id: i32::try_from(channel.0).unwrap_or(i32::MAX),
         freq_error: 0,
     }
 }
@@ -59,7 +59,7 @@ fn convert_call_data(cd: &CallData) -> proto::CallData {
         freq: cd.freq,
         freq_error: cd.freq_error,
         source_num: cd.source_num,
-        recorder_num: cd.recorder_num,
+        channel: cd.channel.map(|c| c.0),
         signal: trunk_radio::signal_from_ffi(cd.signal),
         noise: trunk_radio::signal_from_ffi(cd.noise),
         start_time: cd.start_time,
@@ -72,7 +72,7 @@ fn convert_call_data(cd: &CallData) -> proto::CallData {
         mode: cd.mode,
         duplex: cd.duplex,
         short_name: cd.short_name.clone(),
-        audio_type: cd.audio_type.clone(),
+        kind: cd.kind.to_owned(),
         tdma_slot: cd.tdma_slot,
         length: cd.length,
         phase2_tdma: cd.phase2_tdma,
@@ -344,7 +344,7 @@ impl EventBridge {
             freq_error: info.freq_error,
             encrypted: info.encrypted,
             emergency: info.emergency,
-            is_analog: info.is_analog,
+            kind: info.kind.to_owned(),
             is_conventional: info.is_conventional,
             phase2_tdma: info.phase2_tdma,
             tdma_slot: info.tdma_slot,
@@ -459,12 +459,14 @@ impl EventBridge {
         call_data: &CallData,
         segments: &[proto::CallSegment],
         is_conventional: bool,
+        reason: proto::CallEndReason,
     ) {
         let mut data = convert_call_data(call_data);
         data.segments = segments.to_vec();
         data.is_conventional = is_conventional;
         self.send_event(proto::plugin_event::Event::CallEnd(proto::CallEndEvent {
             call_data: Some(data),
+            reason: reason as i32,
         }));
     }
 
@@ -476,10 +478,10 @@ impl EventBridge {
         ));
     }
 
-    pub fn setup_recorder(&self, rec_num: i32) {
+    pub fn setup_recorder(&self, channel: trunk_radio::ChannelNum) {
         self.send_event(proto::plugin_event::Event::SetupRecorder(
             proto::SetupRecorderEvent {
-                recorder: Some(recorder_info(rec_num)),
+                recorder: Some(recorder_info(channel)),
             },
         ));
     }

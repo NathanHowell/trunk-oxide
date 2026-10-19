@@ -1,21 +1,25 @@
-//! The radio as the call state machine drives it: sources with their
-//! recorder pools, systems with their control-channel decoders, and the
-//! calls that bind a recorder for a while.
+//! The radio as the call state machine drives it: sources, the systems
+//! their channels decode for, and the channels themselves.
+//!
+//! A channel is a channelizer slot with a decoder on it, opened for one
+//! call (or one control channel) with [`Radio::open`] and freed with
+//! [`Radio::close`]. Slots are reused: a free slot of the covering source
+//! that last held the same kind first (its conditioner carries on, as a
+//! recorder's did from one call to the next), then any free slot, then a
+//! new one.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, bail};
 use trunk_channelizer::ConditioningSettings;
-use trunk_p25::Modulation;
 use trunk_sdr::{Running, Stream};
 
-use crate::recorder::{DB_UNSET, Kind, Recorder, Slot, SystemParams};
+use crate::kind::{Call, Cmd, Kind, OpenError, Opening};
+use crate::p25_lfsr::compute_xor_mask;
+use crate::recording::{Accounting, Recording, Tape};
 use crate::source::Source;
-use crate::types::{
-    AudioSink, CallId, ChannelConfig, EventSender, RecorderConfig, RecorderStatus, StopReport,
-    Transmission,
-};
+use crate::types::{AudioSink, CallId, ChannelNum, ChannelStatus, EventSender, Transmission};
 
 #[derive(Clone, Debug, Default)]
 pub struct RadioConfig {
@@ -24,26 +28,21 @@ pub struct RadioConfig {
     pub conditioning: ConditioningSettings,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SystemKind {
-    /// Trunked P25: control channels decoded, voice on pool recorders.
-    P25,
-    /// Conventional analog channels, each with its own recorder.
-    Conventional,
-    /// Conventional P25 channels, each with its own recorder.
-    ConventionalP25,
-}
-
+/// What a system's channels are decoded with.
+#[derive(Clone, Debug, PartialEq)]
 pub struct SystemSetup {
     pub sys_num: i32,
     pub short_name: String,
-    pub kind: SystemKind,
     /// CQPSK (else C4FM) on the control and voice channels.
     pub qpsk: bool,
-    pub control_channels: Vec<f64>,
     pub max_dev: i32,
     pub analog_levels: f64,
     pub digital_levels: f64,
+    /// The P25 identity as configured (zeros if not): it gives the phase 2
+    /// scrambling mask until the control channel names the system.
+    pub nac: u64,
+    pub sys_id: u64,
+    pub wacn: u64,
 }
 
 pub struct SourceSetup {
@@ -52,44 +51,114 @@ pub struct SourceSetup {
     pub rate_hz: f64,
     pub stream: Stream,
     pub running: Box<dyn Running>,
-    pub digital_recorders: i32,
-    pub analog_recorders: i32,
     pub signal_detector_threshold: Option<f32>,
 }
 
 struct System {
     setup: SystemSetup,
-    /// (source, slot, frequency) of each control channel decoder.
-    decoders: Vec<(usize, usize, f64)>,
-    current_control_channel: usize,
+    /// The phase 2 scrambling mask (empty while the identity is unknown).
+    xor_mask: Vec<u8>,
     sysid_received: bool,
     status_received: bool,
 }
 
-impl System {
-    fn params(&self) -> SystemParams {
-        SystemParams {
-            sys_num: self.setup.sys_num,
-            short_name: self.setup.short_name.clone(),
-            qpsk: self.setup.qpsk,
-            max_dev: self.setup.max_dev,
-            analog_levels: self.setup.analog_levels,
-            digital_levels: self.setup.digital_levels,
-        }
-    }
+/// A channelizer slot the radio has used.
+struct Slot {
+    source: usize,
+    port: usize,
+    /// The kind it was last opened as.
+    kind: &'static str,
+    holder: Option<CallId>,
 }
 
-struct Call {
-    sys_num: i32,
-    /// Index into `recorders`.
-    recorder: Option<usize>,
+/// An open channel.
+struct Open {
+    call: CallId,
+    num: ChannelNum,
+    kind: &'static str,
+    tape: Tape,
+    finished: fn(&Accounting),
+}
+
+/// A channel's state: while it is open, or as it was when it was closed
+/// (or its recording rotated).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ChannelReport {
+    pub num: ChannelNum,
+    pub kind: &'static str,
+    /// What it recorded; `None` on a channel that records nothing.
+    pub recording: Option<Accounting>,
+    /// The slot's smoothed power, dB, once it has a reading.
+    pub power_db: Option<f64>,
+    /// The FLL's frequency error, Hz.
+    pub freq_error: i32,
+}
+
+impl ChannelReport {
+    /// What it recorded, as the wire lists it.
+    #[must_use]
+    pub fn transmissions(&self) -> Vec<Transmission> {
+        self.recording
+            .as_ref()
+            .and_then(Accounting::transmission)
+            .into_iter()
+            .collect()
+    }
 }
 
 struct Inner {
     sources: Vec<Source>,
     systems: Vec<System>,
-    recorders: Vec<Recorder>,
-    calls: HashMap<CallId, Call>,
+    /// By [`ChannelNum`].
+    slots: Vec<Slot>,
+    open: HashMap<CallId, Open>,
+}
+
+impl Inner {
+    fn system_mut(&mut self, sys_num: i32) -> Option<&mut System> {
+        usize::try_from(sys_num)
+            .ok()
+            .and_then(|n| self.systems.get_mut(n))
+    }
+
+    /// A free slot of source `src` for a `kind` channel.
+    fn take_slot(&mut self, src: usize, kind: &'static str) -> ChannelNum {
+        let free = |s: &Slot| s.source == src && s.holder.is_none();
+        let found = self
+            .slots
+            .iter()
+            .position(|s| free(s) && s.kind == kind)
+            .or_else(|| self.slots.iter().position(free));
+        let idx = found.unwrap_or_else(|| {
+            let port = self.sources[src].alloc_port();
+            self.slots.push(Slot {
+                source: src,
+                port,
+                kind,
+                holder: None,
+            });
+            self.slots.len() - 1
+        });
+        ChannelNum(u32::try_from(idx).unwrap_or(u32::MAX))
+    }
+
+    fn slot(&self, num: ChannelNum) -> &Slot {
+        &self.slots[num.0 as usize]
+    }
+
+    /// The channel's readings, with `recording` for what it recorded.
+    fn report(&self, open: &Open, recording: Option<Accounting>) -> ChannelReport {
+        let slot = self.slot(open.num);
+        let chz = &self.sources[slot.source].channelizer;
+        let power = chz.slot_power_db(slot.port);
+        ChannelReport {
+            num: open.num,
+            kind: open.kind,
+            recording,
+            power_db: (!power.is_nan()).then_some(power),
+            freq_error: chz.slot_freq_error_hz(slot.port),
+        }
+    }
 }
 
 pub struct Radio {
@@ -105,8 +174,8 @@ impl std::fmt::Debug for Radio {
         f.debug_struct("Radio")
             .field("sources", &i.sources.len())
             .field("systems", &i.systems.len())
-            .field("recorders", &i.recorders.len())
-            .field("calls", &i.calls.len())
+            .field("slots", &i.slots.len())
+            .field("open", &i.open.len())
             .finish()
     }
 }
@@ -117,8 +186,8 @@ impl Radio {
             inner: Mutex::new(Inner {
                 sources: Vec::new(),
                 systems: Vec::new(),
-                recorders: Vec::new(),
-                calls: HashMap::new(),
+                slots: Vec::new(),
+                open: HashMap::new(),
             }),
             events,
             sink,
@@ -132,14 +201,17 @@ impl Radio {
 
     // ── Setup ──
 
-    /// Start a source and its recorder pool; returns its index.
+    /// Start a source; returns its index.
+    ///
+    /// # Errors
+    /// If its channelizer or thread cannot be started.
     pub fn add_source(&self, setup: SourceSetup) -> Result<i32> {
         let mut i = self.lock();
         let idx = i32::try_from(i.sources.len()).unwrap_or(i32::MAX);
         let mut source = Source::start(
             idx,
             crate::source::SourceSpec {
-                device: setup.device.clone(),
+                device: setup.device,
                 center_hz: setup.center_hz,
                 rate_hz: setup.rate_hz,
             },
@@ -150,54 +222,14 @@ impl Radio {
             Arc::clone(&self.sink),
         )?;
         source.set_detector_threshold(setup.signal_detector_threshold);
-        if setup.analog_recorders > 0 && !source.has_wide() {
-            bail!(
-                "source '{}' at {} S/s cannot carry analog channels; raise its rate",
-                setup.device,
-                setup.rate_hz
-            );
-        }
-        let source_idx = i.sources.len();
         i.sources.push(source);
-        for (count, kind) in [
-            (setup.digital_recorders, Kind::P25),
-            (setup.analog_recorders, Kind::Analog),
-        ] {
-            for _ in 0..count.max(0) {
-                Self::add_recorder(&mut i, source_idx, kind, false, 0.0);
-            }
-        }
         Ok(idx)
     }
 
-    fn add_recorder(
-        i: &mut Inner,
-        source_idx: usize,
-        kind: Kind,
-        conventional: bool,
-        tone_hz: f64,
-    ) -> usize {
-        let num = i32::try_from(i.recorders.len()).unwrap_or(i32::MAX);
-        let source = &mut i.sources[source_idx];
-        let port = source.alloc_port();
-        let rec = Recorder::new(
-            num,
-            &Slot {
-                source: source_idx,
-                port,
-                channelizer: &source.channelizer,
-                center_hz: source.center_hz,
-            },
-            kind,
-            conventional,
-            tone_hz,
-        );
-        i.recorders.push(rec);
-        i.recorders.len() - 1
-    }
-
-    /// Add a system; a trunked one gets a decoder on every control channel
-    /// some source covers. Returns its number (its position).
+    /// Add a system (numbered by its position).
+    ///
+    /// # Errors
+    /// If it is not the next number.
     pub fn add_system(&self, setup: SystemSetup) -> Result<i32> {
         let mut i = self.lock();
         let sys_num = i32::try_from(i.systems.len()).unwrap_or(i32::MAX);
@@ -207,72 +239,38 @@ impl Radio {
                 setup.sys_num
             );
         }
-        let mut decoders = Vec::new();
-        if setup.kind == SystemKind::P25 {
-            let modulation = if setup.qpsk {
-                Modulation::Cqpsk
-            } else {
-                Modulation::C4fm
-            };
-            for &freq in &setup.control_channels {
-                let Some(src_idx) = i.sources.iter().position(|s| s.covers(freq)) else {
-                    tracing::warn!(
-                        system = %setup.short_name, freq_hz = freq,
-                        "no source covers the control channel; skipping"
-                    );
-                    continue;
-                };
-                #[allow(clippy::cast_possible_truncation)]
-                let tap_base = self.cfg.tap_dir.as_ref().map_or_else(String::new, |d| {
-                    format!("{d}/cc_{}_{}", setup.short_name, freq as i64)
-                });
-                let port = i.sources[src_idx].add_control_channel(
-                    freq,
-                    modulation,
-                    sys_num,
-                    &setup.short_name,
-                    &tap_base,
-                );
-                tracing::info!(system = %setup.short_name, freq_hz = freq, source = src_idx, port, "control channel decoder started");
-                decoders.push((src_idx, port, freq));
-            }
-            if decoders.len() > 1 {
-                tracing::warn!(system = %setup.short_name, decoders = decoders.len(), "decoders active");
-            }
-        }
+        let xor_mask = compute_xor_mask(setup.nac, setup.sys_id, setup.wacn);
         i.systems.push(System {
             setup,
-            decoders,
-            current_control_channel: 0,
+            xor_mask,
             sysid_received: false,
             status_received: false,
         });
         Ok(sys_num)
     }
 
-    // ── Systems ──
-
-    pub fn add_control_channel(&self, sys_num: i32, freq: f64) {
+    /// Run the wideband signal detector on the source covering `freq_hz`.
+    ///
+    /// # Errors
+    /// If no source covers it.
+    pub fn detect_signals(&self, freq_hz: f64) -> Result<()> {
         let mut i = self.lock();
-        if let Some(s) = usize::try_from(sys_num)
-            .ok()
-            .and_then(|n| i.systems.get_mut(n))
-            && !s.setup.control_channels.contains(&freq)
-        {
-            s.setup.control_channels.push(freq);
-        }
+        let Some(source) = i.sources.iter_mut().find(|s| s.covers(freq_hz)) else {
+            bail!("no source covers {freq_hz} Hz");
+        };
+        source.attach_detector();
+        Ok(())
     }
+
+    // ── Systems ──
 
     /// Note a system's site (first time only); true if this was it.
     pub fn update_sysid(&self, sys_num: i32, rfss: u8, site: u8) -> bool {
         let mut i = self.lock();
-        let Some(s) = usize::try_from(sys_num)
-            .ok()
-            .and_then(|n| i.systems.get_mut(n))
-        else {
+        let Some(s) = i.system_mut(sys_num) else {
             return false;
         };
-        if s.setup.kind == SystemKind::Conventional || s.sysid_received {
+        if s.sysid_received {
             return false;
         }
         s.sysid_received = true;
@@ -283,19 +281,18 @@ impl Radio {
         true
     }
 
-    /// Note a system's id and WACN (first time only); true if this was it.
+    /// Note a system's id and WACN, and with them its scrambling mask
+    /// (first time only); true if this was it.
     pub fn update_status(&self, sys_num: i32, sys_id: u16, wacn: u32, nac: u16) -> bool {
         let mut i = self.lock();
-        let Some(s) = usize::try_from(sys_num)
-            .ok()
-            .and_then(|n| i.systems.get_mut(n))
-        else {
+        let Some(s) = i.system_mut(sys_num) else {
             return false;
         };
         if s.status_received {
             return false;
         }
         s.status_received = true;
+        s.xor_mask = compute_xor_mask(u64::from(nac), u64::from(sys_id), u64::from(wacn));
         tracing::info!(
             system = %s.setup.short_name,
             sys_id = format_args!("{sys_id:X}"),
@@ -306,285 +303,163 @@ impl Radio {
         true
     }
 
-    pub fn current_control_channel(&self, sys_num: i32) -> f64 {
-        let i = self.lock();
-        usize::try_from(sys_num)
+    // ── Channels ──
+
+    /// Open a `K` channel for `call` on the first source that covers it
+    /// with `K`'s profile. It decodes from the next block on.
+    ///
+    /// # Errors
+    /// If the call has a channel already, its system is unknown, no source
+    /// carries the channel, or the kind cannot decode it (see
+    /// [`OpenError`]).
+    pub fn open<K: Kind>(&self, call: &Call, params: &K::Params) -> Result<ChannelNum, OpenError> {
+        let mut i = self.lock();
+        if i.open.contains_key(&call.id) {
+            return Err(OpenError::AlreadyOpen(call.id));
+        }
+        let sys = usize::try_from(call.sys_num)
             .ok()
-            .and_then(|n| i.systems.get(n))
-            .and_then(|s| {
-                s.setup
-                    .control_channels
-                    .get(s.current_control_channel)
-                    .copied()
-            })
-            .unwrap_or(0.0)
-    }
-
-    /// The strongest control channel decoder's power (dB), NaN with none.
-    pub fn control_channel_pwr(&self, sys_num: i32) -> f64 {
-        let i = self.lock();
-        let Some(s) = usize::try_from(sys_num).ok().and_then(|n| i.systems.get(n)) else {
-            return f64::NAN;
-        };
-        s.decoders
+            .filter(|&n| n < i.systems.len())
+            .ok_or(OpenError::NoSystem(call.sys_num))?;
+        let freq_hz = call.channel.freq_hz;
+        let src = i
+            .sources
             .iter()
-            .map(|&(src, port, _)| i.sources[src].channelizer.slot_power_db(port))
-            .filter(|p| !p.is_nan())
-            .fold(
-                f64::NAN,
-                |best, p| if best.is_nan() || p > best { p } else { best },
-            )
-    }
-
-    // ── Calls ──
-
-    /// A trunked call, with no recorder yet.
-    pub fn create_call(&self, call_id: CallId, sys_num: i32) {
-        self.lock().calls.insert(
-            call_id,
-            Call {
-                sys_num,
-                recorder: None,
+            .position(|s| s.covers(freq_hz) && s.offers(K::PROFILE))
+            .ok_or(OpenError::NoSource {
+                freq_hz,
+                kind: K::NAME,
+            })?;
+        let num = i.take_slot(src, K::NAME);
+        let port = i.slot(num).port;
+        let (source, system) = (&i.sources[src], &i.systems[sys]);
+        let at = Opening::<K> {
+            call,
+            params,
+            system: &system.setup,
+            xor_mask: &system.xor_mask,
+            channelizer: source.channelizer.config(),
+            num,
+            source: source.idx,
+            port,
+            tap_dir: self.cfg.tap_dir.as_deref(),
+        };
+        let tape = Tape::new(K::AUDIO_RATE.map(|rate| {
+            Recording::new(Accounting::new(
+                &system.setup.short_name,
+                call.talkgroup,
+                freq_hz,
+                call.channel.slot.is_some(),
+                rate,
+            ))
+        }));
+        let decoder = K::decoder(&at, tape.clone())?;
+        let tuning = K::tuning(&at);
+        let chz = &source.channelizer;
+        chz.set_slot_conditioning(port, tuning.conditioning);
+        if let Some((cutoff, transition)) = tuning.filter {
+            chz.set_slot_filter(port, cutoff, transition);
+        }
+        if let Some(db) = tuning.squelch_db {
+            chz.set_slot_squelch_db(port, db);
+        }
+        chz.set_slot_decoder(port, Some(Box::new(decoder)));
+        chz.set_slot(port, K::PROFILE, freq_hz - source.center_hz);
+        let slot = &mut i.slots[num.0 as usize];
+        slot.holder = Some(call.id);
+        slot.kind = K::NAME;
+        i.open.insert(
+            call.id,
+            Open {
+                call: call.id,
+                num,
+                kind: K::NAME,
+                tape,
+                finished: K::finished,
             },
         );
+        Ok(num)
     }
 
-    /// A recorder of its own for a conventional channel on `source_idx`,
-    /// for a system of that kind; returns the recorder's number. The call
-    /// is bound to it with [`Self::bind_conventional_call`] once the state
-    /// machine has numbered it.
-    pub fn add_conventional_recorder(
-        &self,
-        sys_num: i32,
-        source_idx: i32,
-        channel: &ChannelConfig,
-    ) -> Result<i32> {
+    /// Close the call's channel: what it was, with the audio its
+    /// audibility hold still kept already sent under the call (so it
+    /// precedes the call's end). `None` if it had none.
+    pub fn close(&self, id: CallId) -> Option<ChannelReport> {
         let mut i = self.lock();
-        let kind = match usize::try_from(sys_num)
-            .ok()
-            .and_then(|n| i.systems.get(n))
-            .map(|s| s.setup.kind)
-        {
-            Some(SystemKind::Conventional) => Kind::Analog,
-            Some(SystemKind::ConventionalP25) => Kind::P25,
-            Some(SystemKind::P25) => bail!("system {sys_num} is trunked"),
-            None => bail!("no system {sys_num}"),
-        };
-        let src = usize::try_from(source_idx)
-            .ok()
-            .filter(|&s| s < i.sources.len())
-            .ok_or_else(|| anyhow!("no source {source_idx}"))?;
-        if kind == Kind::Analog && !i.sources[src].has_wide() {
-            bail!(
-                "source {source_idx} at {} S/s cannot carry an analog channel; raise its rate",
-                i.sources[src].rate_hz
-            );
-        }
-        i.sources[src].attach_detector();
-        let rec = Self::add_recorder(&mut i, src, kind, true, channel.tone);
-        Ok(i.recorders[rec].num)
+        let open = i.open.remove(&id)?;
+        let recording = self.finish(&open, open.tape.close());
+        let report = i.report(&open, recording);
+        let slot = &mut i.slots[open.num.0 as usize];
+        slot.holder = None;
+        let (src, port) = (slot.source, slot.port);
+        i.sources[src].channelizer.release_slot(port);
+        Some(report)
     }
 
-    /// Bind a conventional call to the recorder made for its channel.
-    pub fn bind_conventional_call(&self, call_id: CallId, sys_num: i32, rec_num: i32) {
-        let mut i = self.lock();
-        let recorder = i.recorders.iter().position(|r| r.num == rec_num);
-        i.calls.insert(call_id, Call { sys_num, recorder });
-    }
-
-    pub fn remove_call(&self, call_id: CallId) {
-        self.lock().calls.remove(&call_id);
-    }
-
-    /// Pool recorders of a kind free on a source.
-    pub fn available_recorders(&self, source_idx: i32, analog: bool) -> i32 {
+    /// End the recording on the call's channel and start the next, the
+    /// channel staying open (a conventional channel's transmission is
+    /// over): what was recorded, its held audio already sent.
+    pub fn rotate(&self, id: CallId) -> Option<ChannelReport> {
         let i = self.lock();
-        let kind = if analog { Kind::Analog } else { Kind::P25 };
-        let n = i
-            .recorders
-            .iter()
-            .filter(|r| {
-                !r.conventional
-                    && r.kind == kind
-                    && i32::try_from(r.source).is_ok_and(|s| s == source_idx)
-                    && r.available()
-            })
-            .count();
-        i32::try_from(n).unwrap_or(i32::MAX)
+        let open = i.open.get(&id)?;
+        let recording = self.finish(open, open.tape.rotate());
+        Some(i.report(open, recording))
     }
 
-    /// Take a free pool recorder on `source_idx` for `call_id` and start
-    /// it; returns its number.
-    pub fn start_recording(
-        &self,
-        source_idx: i32,
-        call_id: CallId,
-        analog: bool,
-        cfg: &RecorderConfig,
-    ) -> Option<i32> {
-        let mut i = self.lock();
-        let sys_num = i.calls.get(&call_id)?.sys_num;
-        let params = usize::try_from(sys_num)
-            .ok()
-            .and_then(|n| i.systems.get(n))?
-            .params();
-        let kind = if analog { Kind::Analog } else { Kind::P25 };
-        let idx = i.recorders.iter().position(|r| {
-            !r.conventional
-                && r.kind == kind
-                && i32::try_from(r.source).is_ok_and(|s| s == source_idx)
-                && r.available()
-        })?;
-        if !i.recorders[idx].start(cfg, &params) {
-            return None;
+    /// A recording ended: send its held audio, tell its kind.
+    fn finish(&self, open: &Open, done: Option<(Accounting, Vec<i16>)>) -> Option<Accounting> {
+        let (acct, tail) = done?;
+        if !tail.is_empty() {
+            self.sink.audio(open.call, &tail);
         }
-        let num = i.recorders[idx].num;
-        if let Some(c) = i.calls.get_mut(&call_id) {
-            c.recorder = Some(idx);
+        (open.finished)(&acct);
+        Some(acct)
+    }
+
+    /// The call's channel as it is now.
+    pub fn reading(&self, id: CallId) -> Option<ChannelReport> {
+        let i = self.lock();
+        let open = i.open.get(&id)?;
+        Some(i.report(open, open.tape.accounting()))
+    }
+
+    /// The unit the state machine says is talking on the call.
+    pub fn set_source(&self, id: CallId, src: i64) {
+        let i = self.lock();
+        if let Some(open) = i.open.get(&id) {
+            let slot = i.slot(open.num);
+            i.sources[slot.source]
+                .channelizer
+                .send(slot.port, Cmd::Source(src));
         }
-        Some(num)
-    }
-
-    /// Stop `rec`, sending the audio its audibility hold still kept under
-    /// the call before the state machine ends it.
-    fn stop_recorder(&self, rec: &mut Recorder) -> StopReport {
-        let s = rec.stop();
-        if let Some((call, tail)) = &s.tail
-            && !tail.is_empty()
-        {
-            self.sink.audio(*call, tail);
-        }
-        s.result
-    }
-
-    /// The recorder recording `call_id`, if one is bound to it.
-    fn bound(i: &Inner, call_id: CallId) -> Option<usize> {
-        i.calls.get(&call_id)?.recorder
-    }
-
-    /// The call is known to the radio (created, not yet removed).
-    pub fn has_call(&self, call_id: CallId) -> bool {
-        self.lock().calls.contains_key(&call_id)
-    }
-
-    pub fn has_recorder(&self, call_id: CallId) -> bool {
-        Self::bound(&self.lock(), call_id).is_some()
-    }
-
-    pub fn recorder_num(&self, call_id: CallId) -> i32 {
-        let i = self.lock();
-        Self::bound(&i, call_id).map_or(0, |r| i.recorders[r].num)
-    }
-
-    /// Stop the call's recorder (the binding stays until the call is removed
-    /// so its transmission list can still be read).
-    pub fn stop_recording(&self, call_id: CallId) -> StopReport {
-        let mut i = self.lock();
-        let Some(r) = Self::bound(&i, call_id) else {
-            return StopReport::default();
-        };
-        let rec = &mut i.recorders[r];
-        if rec.call() == Some(call_id) {
-            self.stop_recorder(rec)
-        } else {
-            // Stopped already (and possibly recording another call now).
-            StopReport {
-                freq_error: rec.freq_error(),
-                recorder_pwr: rec.pwr_db(),
-                has_recorder: true,
-            }
-        }
-    }
-
-    pub fn transmission_list(&self, call_id: CallId) -> Vec<Transmission> {
-        let i = self.lock();
-        Self::bound(&i, call_id).map_or_else(Vec::new, |r| {
-            let rec = &i.recorders[r];
-            if rec.call().is_some_and(|c| c != call_id) {
-                Vec::new()
-            } else {
-                rec.transmission_list()
-            }
-        })
-    }
-
-    /// Start a conventional call's recorder (the first time, and again
-    /// after each idle timeout).
-    pub fn restart(&self, call_id: CallId, cfg: &RecorderConfig) {
-        let mut i = self.lock();
-        let Some(r) = Self::bound(&i, call_id) else {
-            return;
-        };
-        let Some(params) = i
-            .calls
-            .get(&call_id)
-            .and_then(|c| usize::try_from(c.sys_num).ok())
-            .and_then(|n| i.systems.get(n))
-            .map(System::params)
-        else {
-            return;
-        };
-        let rec = &mut i.recorders[r];
-        if rec.call().is_some() {
-            self.stop_recorder(rec);
-        }
-        rec.start(cfg, &params);
-    }
-
-    pub fn set_recorder_enabled(&self, call_id: CallId, enabled: bool) {
-        let i = self.lock();
-        if let Some(r) = Self::bound(&i, call_id) {
-            i.recorders[r].set_enabled(enabled);
-        }
-    }
-
-    pub fn set_source(&self, call_id: CallId, src: i64) {
-        let i = self.lock();
-        if let Some(r) = Self::bound(&i, call_id) {
-            i.recorders[r].set_source(src);
-        }
-    }
-
-    /// The recorder's channel power (dB; [`DB_UNSET`] without one).
-    pub fn pwr_db(&self, call_id: CallId) -> f64 {
-        let i = self.lock();
-        Self::bound(&i, call_id).map_or(DB_UNSET, |r| i.recorders[r].pwr_db())
-    }
-
-    pub fn since_last_write_secs(&self, call_id: CallId) -> f64 {
-        let i = self.lock();
-        Self::bound(&i, call_id).map_or(1e9, |r| i.recorders[r].since_last_write_secs())
-    }
-
-    pub fn since_last_voice_secs(&self, call_id: CallId) -> f64 {
-        let i = self.lock();
-        Self::bound(&i, call_id).map_or(1e9, |r| i.recorders[r].since_last_voice_secs())
     }
 
     // ── Status ──
 
-    pub fn recorder_status(&self) -> Vec<RecorderStatus> {
+    /// Every slot the radio has used, by number.
+    pub fn channels(&self) -> Vec<ChannelStatus> {
         let i = self.lock();
-        let mut out: Vec<RecorderStatus> = i
-            .recorders
+        i.slots
             .iter()
-            .map(|r| {
-                let s = &i.sources[r.source];
-                RecorderStatus {
+            .enumerate()
+            .map(|(n, slot)| {
+                let s = &i.sources[slot.source];
+                ChannelStatus {
+                    num: ChannelNum(u32::try_from(n).unwrap_or(u32::MAX)),
                     source_num: s.idx,
                     source_center: s.center_hz,
                     source_device: s.device.clone(),
-                    rec_num: r.num,
-                    rec_type: r.type_string().into(),
-                    rec_state: r.state(),
+                    kind: slot.kind,
+                    call: slot.holder,
                 }
             })
-            .collect();
-        out.sort_by_key(|r| (r.source_num, r.rec_num));
-        out
+            .collect()
     }
 
     /// Every source delivered samples since the last check.
+    ///
+    /// # Errors
+    /// Naming the first that did not.
     pub fn check_sources(&self) -> Result<()> {
         let i = self.lock();
         for s in &i.sources {
@@ -613,7 +488,10 @@ impl Drop for Radio {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{RadioEvent, RecorderState};
+    use crate::analog::{AnalogFm, AnalogParams};
+    use crate::p25::P25Control;
+    use crate::p25_voice::{Keying, P25Voice};
+    use crate::types::{Channel, RadioEvent};
     use num_complex::Complex32;
 
     struct NoAudio;
@@ -631,7 +509,8 @@ mod tests {
     }
 
     /// A silent 2 s cf32 file as a source.
-    fn silent_source(rate_hz: f64) -> SourceSetup {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn silent_source(rate_hz: f64, center_hz: f64) -> SourceSetup {
         let path =
             std::env::temp_dir().join(format!("trunk-radio-{}-{rate_hz}.cf32", std::process::id()));
         let n = (rate_hz * 2.0) as usize;
@@ -652,139 +531,136 @@ mod tests {
         .unwrap();
         SourceSetup {
             device: "file".into(),
-            center_hz: 771_496_500.0,
+            center_hz,
             rate_hz,
             stream,
             running,
-            digital_recorders: 2,
-            analog_recorders: 1,
             signal_detector_threshold: None,
         }
     }
 
-    #[test]
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    fn pool_recorders_are_taken_started_stopped_and_freed() {
-        let (radio, _rx) = radio();
-        let src = radio.add_source(silent_source(2_496_000.0)).unwrap();
-        assert_eq!(src, 0);
-        radio
-            .add_system(SystemSetup {
-                sys_num: 0,
-                short_name: "smco".into(),
-                kind: SystemKind::P25,
-                qpsk: true,
-                control_channels: vec![772_031_250.0, 900e6],
-                max_dev: 2500,
-                analog_levels: 1.0,
-                digital_levels: 1.0,
-            })
-            .unwrap();
-        assert_eq!(radio.available_recorders(0, false), 2);
-        assert_eq!(radio.available_recorders(0, true), 1);
-        radio.create_call(CallId(11), 0);
-        let cfg = RecorderConfig {
-            talkgroup: 929,
-            call_num: 1,
-            freq: 771_881_250.0,
-            short_name: "smco".into(),
-            temp_dir: String::new(),
-            phase2_tdma: false,
-            tdma_slot: 0,
-            xor_mask: vec![],
-            squelch_db: 0.0,
+    fn system(sys_num: i32, wacn: u64) -> SystemSetup {
+        SystemSetup {
+            sys_num,
+            short_name: format!("s{sys_num}"),
+            qpsk: true,
+            max_dev: 5000,
+            analog_levels: 1.0,
             digital_levels: 1.0,
-            call_id: CallId(11),
+            nac: 0x38d * u64::from(wacn != 0),
+            sys_id: 0x3a2 * u64::from(wacn != 0),
+            wacn,
+        }
+    }
+
+    fn call(id: u64, sys_num: i32, freq_hz: f64, slot: Option<u8>) -> Call {
+        Call {
+            id: CallId(id),
+            sys_num,
+            talkgroup: 929,
+            channel: Channel { freq_hz, slot },
+        }
+    }
+
+    #[test]
+    fn channels_open_on_a_covering_slot_and_slots_are_reused_by_kind() {
+        let (radio, _rx) = radio();
+        radio
+            .add_source(silent_source(2_496_000.0, 771_496_500.0))
+            .unwrap();
+        radio.add_system(system(0, 0)).unwrap();
+        radio.add_system(system(1, 0xbee00)).unwrap();
+        let open_p25 = |id, sys, freq, slot| {
+            radio.open::<P25Voice>(&call(id, sys, freq, slot), &Keying::Trunked)
         };
-        let num = radio.start_recording(0, CallId(11), false, &cfg).unwrap();
-        assert_eq!(radio.recorder_num(CallId(11)), num);
-        assert!(radio.has_recorder(CallId(11)));
-        assert_eq!(radio.available_recorders(0, false), 1);
-        // TDMA without a mask is refused
-        radio.create_call(CallId(12), 0);
-        assert!(
-            radio
-                .start_recording(
-                    0,
-                    CallId(12),
-                    false,
-                    &RecorderConfig {
-                        phase2_tdma: true,
-                        call_id: CallId(12),
-                        ..cfg
-                    }
-                )
-                .is_none()
+        assert_eq!(
+            radio.open::<P25Control>(&call(1, 0, 772_031_250.0, None), &()),
+            Ok(ChannelNum(0))
         );
-        assert_eq!(radio.available_recorders(0, false), 1);
-        let r = radio.stop_recording(CallId(11));
-        assert!(r.has_recorder);
-        assert_eq!(radio.available_recorders(0, false), 2);
-        assert!(
-            radio.transmission_list(CallId(11)).is_empty(),
-            "no audio was decoded"
+        assert_eq!(open_p25(2, 0, 771_881_250.0, None), Ok(ChannelNum(1)));
+        assert_eq!(
+            open_p25(2, 0, 771_881_250.0, None),
+            Err(OpenError::AlreadyOpen(CallId(2)))
         );
-        radio.remove_call(CallId(11));
-        assert!(!radio.has_recorder(CallId(11)));
-        assert_eq!(radio.current_control_channel(0), 772_031_250.0);
-        let status = radio.recorder_status();
-        assert_eq!(status.len(), 3);
+        assert_eq!(
+            open_p25(3, 0, 771_431_250.0, Some(1)),
+            Err(OpenError::NoScramblingMask),
+            "phase 2 without the system's identity"
+        );
+        assert_eq!(
+            open_p25(3, 1, 771_431_250.0, Some(1)),
+            Ok(ChannelNum(2)),
+            "a failed open gave its slot back"
+        );
+        assert_eq!(
+            open_p25(4, 0, 900e6, None),
+            Err(OpenError::NoSource {
+                freq_hz: 900e6,
+                kind: "p25"
+            })
+        );
+        assert_eq!(
+            open_p25(5, 7, 771_431_250.0, None),
+            Err(OpenError::NoSystem(7))
+        );
+
+        let report = radio.close(CallId(2)).unwrap();
+        assert_eq!((report.num, report.kind), (ChannelNum(1), "p25"));
+        assert!(report.transmissions().is_empty(), "no audio was decoded");
+        assert!(radio.close(CallId(2)).is_none());
         assert!(
+            radio.reading(CallId(1)).unwrap().recording.is_none(),
+            "control: none"
+        );
+        assert!(radio.reading(CallId(3)).unwrap().recording.is_some());
+        // a P25 call takes the slot P25 last had, not a fresh one
+        assert_eq!(open_p25(6, 0, 770_306_250.0, None), Ok(ChannelNum(1)));
+        let rotated = radio.rotate(CallId(6)).unwrap();
+        assert_eq!(rotated.num, ChannelNum(1));
+        assert!(radio.reading(CallId(6)).is_some(), "still open");
+        radio.set_source(CallId(6), 1234);
+
+        let status = radio.channels();
+        assert_eq!(
             status
                 .iter()
-                .all(|s| s.rec_state == RecorderState::Available)
+                .map(|c| (c.num.0, c.kind, c.call.map(|c| c.0)))
+                .collect::<Vec<_>>(),
+            vec![
+                (0, "p25-control", Some(1)),
+                (1, "p25", Some(6)),
+                (2, "p25", Some(3))
+            ]
         );
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(radio.check_sources().is_ok());
     }
 
     #[test]
-    fn conventional_calls_get_their_own_recorder_and_the_detector() {
+    fn a_kind_needs_a_source_with_its_profile() {
         let (radio, _rx) = radio();
-        radio.add_source(silent_source(912_000.0)).unwrap();
+        // too narrow for a wide (analog) channel, wide enough for P25
         radio
-            .add_system(SystemSetup {
-                sys_num: 0,
-                short_name: "conv".into(),
-                kind: SystemKind::Conventional,
-                qpsk: false,
-                control_channels: vec![],
-                max_dev: 5000,
-                analog_levels: 1.0,
-                digital_levels: 1.0,
-            })
+            .add_source(silent_source(120_000.0, 488_661_750.0))
             .unwrap();
-        let ch = ChannelConfig {
-            id: 2,
-            freq: 771_600_000.0,
-            tone: 162.2,
-            squelch_db: -50.0,
-            signal_detection: false,
-        };
-        let num = radio.add_conventional_recorder(0, 0, &ch).unwrap();
-        radio.bind_conventional_call(CallId(5), 0, num);
-        assert_eq!(radio.recorder_num(CallId(5)), num);
-        // the pool is untouched
-        assert_eq!(radio.available_recorders(0, true), 1);
-        let cfg = RecorderConfig {
-            talkgroup: 2,
-            call_num: 1,
-            freq: ch.freq,
-            short_name: "conv".into(),
-            temp_dir: String::new(),
-            phase2_tdma: false,
-            tdma_slot: 0,
-            xor_mask: vec![],
-            squelch_db: -50.0,
-            digital_levels: 1.0,
-            call_id: CallId(5),
-        };
-        radio.restart(CallId(5), &cfg);
-        radio.set_recorder_enabled(CallId(5), true);
-        radio.restart(CallId(5), &cfg); // the idle timeout's restart stops and starts
-        assert!(radio.has_recorder(CallId(5)));
-        assert!(radio.pwr_db(CallId(5)) >= DB_UNSET || radio.pwr_db(CallId(5)) < 0.0);
-        assert!(radio.since_last_write_secs(CallId(5)) < 10.0);
-        assert!(radio.add_conventional_recorder(9, 0, &ch).is_err());
+        radio.add_system(system(0, 0)).unwrap();
+        let freq = 488_670_000.0;
+        assert_eq!(
+            radio.open::<AnalogFm>(&call(1, 0, freq, None), &AnalogParams::default()),
+            Err(OpenError::NoSource {
+                freq_hz: freq,
+                kind: "analog"
+            })
+        );
+        assert!(
+            radio
+                .open::<P25Voice>(
+                    &call(2, 0, freq, None),
+                    &Keying::Carrier { squelch_db: -50.0 }
+                )
+                .is_ok()
+        );
+        radio.detect_signals(freq).unwrap();
+        assert!(radio.detect_signals(900e6).is_err());
     }
 }

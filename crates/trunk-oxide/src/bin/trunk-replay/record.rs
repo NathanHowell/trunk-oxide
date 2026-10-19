@@ -169,7 +169,7 @@ fn call_info_json(c: &proto::CallInfo) -> Value {
     json!({
         "system": c.short_name, "talkgroup": c.talkgroup, "call_num": c.call_num,
         "freq": c.freq, "signal": c.signal, "noise": c.noise, "freq_error": c.freq_error,
-        "encrypted": c.encrypted, "emergency": c.emergency, "analog": c.is_analog,
+        "encrypted": c.encrypted, "emergency": c.emergency, "kind": c.kind,
         "conventional": c.is_conventional, "tdma": c.phase2_tdma, "slot": c.tdma_slot,
         "source_id": c.current_source_id, "tag": c.talkgroup_alpha_tag,
     })

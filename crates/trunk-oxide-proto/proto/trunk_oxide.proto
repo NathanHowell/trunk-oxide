@@ -93,7 +93,7 @@ message CallInfo {
   int32 freq_error = 7;
   bool encrypted = 8;
   bool emergency = 9;
-  bool is_analog = 10;
+  reserved 10; // was is_analog: see kind
   bool is_conventional = 11;
   bool phase2_tdma = 12;
   int32 tdma_slot = 13;
@@ -115,6 +115,9 @@ message CallInfo {
   // the recorder's trace — the EventBridge is one server stream multiplexing all
   // calls, so per-call context can't ride gRPC metadata and travels here.
   string traceparent = 27;
+  // The kind of channel the call has: "p25", "analog" (empty while it has
+  // none).
+  string kind = 28;
 }
 
 // ── Call state ──
@@ -123,10 +126,11 @@ enum CallState {
   CALL_STATE_UNSPECIFIED = 0;
   CALL_STATE_RECORDING = 1;
   CALL_STATE_IDLE = 2;
+  CALL_STATE_WAITING = 3; // wants a channel; all are held by calls that outrank it
   CALL_STATE_REJECTED_UNKNOWN_TG = 10;
   CALL_STATE_REJECTED_IGNORED_TG = 11;
   CALL_STATE_REJECTED_NO_SOURCE = 12;
-  CALL_STATE_REJECTED_NO_RECORDER = 13;
+  CALL_STATE_REJECTED_NO_CHANNEL = 13; // no channel could be opened for it
   CALL_STATE_REJECTED_ENCRYPTED = 14;
   CALL_STATE_REJECTED_DUPLICATE = 15;
   CALL_STATE_REJECTED_SUPERSEDED = 16;
@@ -166,8 +170,9 @@ message SystemInfo {
 
 // ── Recorder info ──
 
+// A channel (a channelizer slot the radio has used).
 message RecorderInfo {
-  int32 id = 1;
+  int32 id = 1; // the channel number
   reserved 2;  // was type
   reserved 3;  // was freq, now known in Rust CallEntry
   int32 freq_error = 4;
@@ -196,8 +201,7 @@ message SourceInfo {
   double pga_gain = 11;
   double vga1_gain = 12;
   double vga2_gain = 13;
-  int32 analog_recorders = 14;
-  int32 digital_recorders = 15;
+  reserved 14, 15; // were analog_recorders, digital_recorders: channels are shared
   int32 debug_recorders = 16;
   int32 sigmf_recorders = 17;
 }
@@ -213,7 +217,7 @@ message CallData {
   double freq = 10;
   int32 freq_error = 11;
   int32 source_num = 12;
-  int32 recorder_num = 13;
+  optional uint32 channel = 13; // the channel it ended on, if it had one
   optional double signal = 14;
   optional double noise = 15;
   int64 start_time = 16;
@@ -227,7 +231,7 @@ message CallData {
   bool duplex = 24;
   reserved 25; // was sys_num: unstable across restarts, use short_name
   string short_name = 26;
-  string audio_type = 27;
+  reserved 27; // was audio_type: see kind and phase2_tdma
   int32 tdma_slot = 28;
   double length = 29;
   bool phase2_tdma = 30;
@@ -237,6 +241,7 @@ message CallData {
   int32 status = 34;
   repeated CallSegment segments = 35;
   bool is_conventional = 36;
+  string kind = 37; // as CallInfo.kind
 }
 
 message Transmission {
@@ -265,7 +270,7 @@ message CallSegment {
   double freq = 1;
   google.protobuf.Timestamp start_time = 2;
   google.protobuf.Duration duration = 3;
-  int32 rec_num = 4;
+  optional uint32 channel = 4; // the channel it was recorded on, if any
 }
 
 message CallError {
@@ -337,6 +342,22 @@ message CallStartEvent {
 
 message CallEndEvent {
   CallData call_data = 1;
+  CallEndReason reason = 2;
+}
+
+// Why a call (or one transmission of it) ended.
+enum CallEndReason {
+  CALL_END_REASON_UNSPECIFIED = 0;
+  CALL_END_REASON_GRANT_TIMEOUT = 1;      // the control channel stopped refreshing it
+  CALL_END_REASON_IDLE_TIMEOUT = 2;       // it aged out without recording
+  CALL_END_REASON_SUPERSEDED = 3;         // another site's grant superseded it
+  CALL_END_REASON_WRITE_TIMEOUT = 4;      // its channel stopped producing audio
+  CALL_END_REASON_CONVENTIONAL = 5;       // a conventional transmission ended
+  CALL_END_REASON_SOURCE_CHANGE = 6;      // another unit is talking (the call goes on)
+  CALL_END_REASON_KEY_UP = 7;             // a new key-up was granted (the call goes on)
+  CALL_END_REASON_CHANNEL_REASSIGNED = 8; // its channel was granted to another talkgroup
+  CALL_END_REASON_EVICTED = 9;            // a call that outranks it took its channel
+  CALL_END_REASON_SHUTDOWN = 10;
 }
 
 message CallsActiveEvent {

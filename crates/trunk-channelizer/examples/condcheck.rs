@@ -19,11 +19,14 @@ fn field(json: &str, key: &str) -> Option<f64> {
 
 fn load(path: &str) -> Vec<Complex32> {
     let b = fs::read(path).expect(path);
-    b.chunks_exact(8)
+    let (pairs, _) = b.as_chunks::<8>();
+    pairs
+        .iter()
         .map(|c| {
+            let (re, im) = c.split_at(4);
             Complex32::new(
-                f32::from_le_bytes(c[..4].try_into().unwrap()),
-                f32::from_le_bytes(c[4..].try_into().unwrap()),
+                f32::from_le_bytes(re.try_into().unwrap()),
+                f32::from_le_bytes(im.try_into().unwrap()),
             )
         })
         .collect()

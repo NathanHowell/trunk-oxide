@@ -247,17 +247,14 @@ impl SignalDetector {
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
 mod tests {
     use super::*;
+    use rand::{Rng as _, SeedableRng as _};
+    use rand_chacha::ChaCha8Rng;
     use std::f64::consts::TAU;
 
     fn noise(n: usize, amp: f32, seed: u64) -> Vec<Complex32> {
-        // A 64-bit LCG's top 24 bits: uniform in [-1, 1) with no DC.
-        let mut s = seed;
-        let mut next = || {
-            s = s
-                .wrapping_mul(6_364_136_223_846_793_005)
-                .wrapping_add(1_442_695_040_888_963_407);
-            (s >> 40) as f32 / (1u32 << 24) as f32 * 2.0 - 1.0
-        };
+        // Uniform in [-1, 1) with no DC.
+        let mut rng = ChaCha8Rng::seed_from_u64(seed);
+        let mut next = || rng.random_range(-1.0f32..1.0);
         (0..n)
             .map(|_| Complex32::new(next() * amp, next() * amp))
             .collect()

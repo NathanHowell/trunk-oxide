@@ -2,7 +2,7 @@ use anyhow::{Result, bail};
 use z3::ast::{Bool, Int};
 
 use crate::device::{Device, SampleRate};
-use crate::{CHANNEL_HALFWIDTH, Channel, Signal, Source};
+use crate::{CHANNEL_HALFWIDTH, Channel, Source};
 
 /// Replicate trunk-recorder's `Source::set_min_max()` decimation logic.
 ///
@@ -196,6 +196,26 @@ fn valid_rates(device: &Device) -> impl Iterator<Item = i64> + '_ {
         .filter(|&rate| decimation_guard(rate) >= MIN_GUARD)
 }
 
+/// The `[recorder] max_channels` that lets every channel `sources` cover be
+/// open at once: control, voice and conventional channels alike, each
+/// frequency once however many sources cover it.
+#[must_use]
+pub fn max_channels(channels: &[Channel], sources: &[Source]) -> usize {
+    channels
+        .iter()
+        .filter(|c| {
+            sources.iter().any(|s| {
+                let guard = decimation_guard(s.rate);
+                let lower = s.center - s.rate / 2 + guard;
+                let upper = s.center + s.rate / 2 - guard;
+                (lower..=upper).contains(&c.frequency)
+            })
+        })
+        .map(|c| c.frequency)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+}
+
 pub fn solve(channels: &[Channel], devices: &[Device]) -> Result<Vec<Source>> {
     let opt = z3::Optimize::new();
 
@@ -234,13 +254,12 @@ pub fn solve(channels: &[Channel], devices: &[Device]) -> Result<Vec<Source>> {
         .get_model()
         .ok_or_else(|| anyhow::anyhow!("Failed to get model"))?;
 
-    extract_sources(&model, &problem, channels, devices)
+    extract_sources(&model, &problem, devices)
 }
 
 fn extract_sources(
     model: &z3::Model,
     problem: &Problem,
-    channels: &[Channel],
     devices: &[Device],
 ) -> Result<Vec<Source>> {
     let mut sources = Vec::new();
@@ -263,32 +282,6 @@ fn extract_sources(
 
         if lower != upper {
             let rate = upper - lower;
-            let guard = decimation_guard(rate);
-
-            // Usable range after decimation guard
-            let usable_lower = lower + guard;
-            let usable_upper = upper - guard;
-
-            let analog_recorders = channels
-                .iter()
-                .filter(|c| {
-                    c.signal == Signal::Analog
-                        && c.frequency >= usable_lower
-                        && c.frequency <= usable_upper
-                })
-                .count();
-
-            // Count digital frequencies that are not control channels
-            let digital_recorders = channels
-                .iter()
-                .filter(|c| {
-                    c.signal == Signal::Digital
-                        && c.tag.is_none()
-                        && c.frequency >= usable_lower
-                        && c.frequency <= usable_upper
-                })
-                .count();
-
             sources.push(Source {
                 center: i64::midpoint(upper, lower),
                 rate,
@@ -297,8 +290,6 @@ fn extract_sources(
                 driver: device.driver.clone(),
                 device: device.device_template.replace("{}", &i.to_string()),
                 error: 0,
-                analog_recorders: i64::try_from(analog_recorders)?,
-                digital_recorders: i64::try_from(digital_recorders)?,
             });
         }
     }
@@ -329,6 +320,36 @@ mod tests {
                 ch.frequency as f64 / 1e6
             );
         }
+    }
+
+    #[test]
+    fn max_channels_counts_every_covered_frequency_once() {
+        let source = |center| Source {
+            center,
+            rate: 912_000,
+            gain: 0,
+            ppm: 0,
+            driver: "rtlsdr".into(),
+            device: String::new(),
+            error: 0,
+        };
+        let channel = |frequency, tag| Channel {
+            frequency,
+            signal: Signal::Digital,
+            tag,
+            system: None,
+        };
+        // two overlapping sources; a control channel, two voice channels
+        // (one in the overlap) and one no source covers
+        let sources = [source(771_000_000), source(771_400_000)];
+        let channels = [
+            channel(771_100_000, Some(crate::Tag::Primary)),
+            channel(771_200_000, None),
+            channel(771_500_000, None),
+            channel(790_000_000, None),
+        ];
+        assert_eq!(max_channels(&channels, &sources), 3);
+        assert_eq!(max_channels(&channels, &[]), 0);
     }
 
     #[test]

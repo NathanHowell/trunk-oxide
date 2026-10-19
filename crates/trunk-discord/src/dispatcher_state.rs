@@ -67,6 +67,9 @@ pub enum DispatchEffect {
 /// Maximum time a call can be active before being reaped.
 const MAX_CALL_AGE: Duration = Duration::from_secs(10 * 60);
 
+/// The line an evicted call's embed gets.
+const EVICTED: &str = "✂️ cut short: a higher-priority call took the channel";
+
 // ── State machine ────────────────────────────────────────────────────────────
 
 /// Pure state machine for the event dispatcher.
@@ -234,6 +237,14 @@ impl DispatcherState {
         if self.active_calls.remove(&key).is_none() {
             return vec![];
         }
+        // A call that outranks it took its channel: say so on the embed.
+        let mut effects = Vec::new();
+        if event.reason() == proto::CallEndReason::Evicted {
+            effects.push(DispatchEffect::SendEvent {
+                key: key.clone(),
+                text: EVICTED.to_owned(),
+            });
+        }
 
         // Coalescing enabled: transition to coalescing state. Both trunked and
         // conventional calls coalesce identically — trunk-oxide now emits one
@@ -245,17 +256,19 @@ impl DispatcherState {
         // that would have kept the handler alive forever; that loop is gone.)
         if !self.coalesce_timeout.is_zero() {
             self.coalescing_calls.insert(key.clone(), Instant::now());
-            return vec![DispatchEffect::PttEnd {
+            effects.push(DispatchEffect::PttEnd {
                 key,
                 call_data: event.call_data.map(Box::new),
-            }];
+            });
+            return effects;
         }
 
         // No coalescing: end the call immediately
-        vec![DispatchEffect::EndCall {
+        effects.push(DispatchEffect::EndCall {
             key,
             call_data: event.call_data.map(Box::new),
-        }]
+        });
+        effects
     }
 
     fn on_signal(&self, event: proto::SignalEvent) -> Vec<DispatchEffect> {
@@ -434,6 +447,7 @@ mod tests {
                     length: 5.0,
                     ..Default::default()
                 }),
+                ..Default::default()
             })),
         }
     }
@@ -926,8 +940,34 @@ mod tests {
                     is_conventional: true,
                     ..Default::default()
                 }),
+                ..Default::default()
             })),
         }
+    }
+
+    #[test]
+    fn an_evicted_call_says_so_on_its_embed_then_ends() {
+        let mut s = DispatcherState::new(10_000);
+        s.on_event(make_call_start("smco", 12345));
+        let mut end = make_call_end("smco", 12345);
+        if let Some(proto::plugin_event::Event::CallEnd(e)) = &mut end.event {
+            e.reason = proto::CallEndReason::Evicted as i32;
+        }
+        let effects = s.on_event(end);
+        assert!(matches!(
+            effects.as_slice(),
+            [
+                DispatchEffect::SendEvent { text, .. },
+                DispatchEffect::PttEnd { .. }
+            ] if text == EVICTED
+        ));
+        // any other end says nothing
+        s.on_event(make_call_start("smco", 12345));
+        let effects = s.on_event(make_call_end("smco", 12345));
+        assert!(matches!(
+            effects.as_slice(),
+            [DispatchEffect::PttEnd { .. }]
+        ));
     }
 
     #[test]

@@ -1,24 +1,36 @@
-//! The radio: sources streaming into shared channelizers, decoders on their
-//! slots, and the recorders and call handles the call state machine drives.
+//! The radio: sources streaming into shared channelizers, and the channels
+//! the call state machine opens on them.
 //!
 //! Every DSP runs on a source's own thread (see [`source`]); everything the
 //! monitor loop needs comes out as a [`RadioEvent`] or through the
-//! [`AudioSink`], and everything it decides goes in through [`Radio`].
+//! [`AudioSink`], and everything it decides goes in through [`Radio`]. A
+//! channel's [`Kind`] (P25 voice, analog FM, P25 control) is chosen once,
+//! when the configuration is read, as a [`Recipe`].
 
 pub mod alias;
+pub mod analog;
 pub mod audible;
 pub mod carrier;
 pub mod fm;
+pub mod kind;
 pub mod p25;
 pub mod p25_calls;
+pub mod p25_lfsr;
 pub mod p25_parse;
 pub mod p25_voice;
 pub mod radio;
-pub mod recorder;
+pub mod recording;
+pub mod registry;
 pub mod source;
 pub mod types;
 
-pub use radio::{Radio, RadioConfig, SourceSetup, SystemSetup};
+pub use analog::{AnalogFm, AnalogParams};
+pub use kind::{Call, Kind, OpenError, Opener, Recipe};
+pub use p25::P25Control;
+pub use p25_voice::{Keying, P25Voice};
+pub use radio::{ChannelReport, Radio, RadioConfig, SourceSetup, SystemSetup};
+pub use recording::Accounting;
+pub use registry::Entry;
 pub use types::*;
 
 pub use trunk_channelizer::Counters as ChannelizerCounters;

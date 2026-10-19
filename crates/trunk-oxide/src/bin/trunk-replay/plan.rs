@@ -134,6 +134,66 @@ fn expand(root: &toml::Value, ov: &Override) -> Vec<Override> {
     }
 }
 
+/// A capture from before channel budgets sized recorders per source
+/// (`digital_recorders`, `analog_recorders`) and gave every control and
+/// conventional channel its own. Fold that into the one budget the live
+/// config would carry: the recorders, plus a channel for each control and
+/// conventional channel.
+fn migrate_recorder_counts(root: &mut toml::Value, capture_dir: &Path) -> Result<()> {
+    let mut recorders = 0;
+    for src in root
+        .get_mut("source")
+        .and_then(toml::Value::as_array_mut)
+        .into_iter()
+        .flatten()
+        .filter_map(toml::Value::as_table_mut)
+    {
+        for key in ["digital_recorders", "analog_recorders"] {
+            recorders += src.remove(key).and_then(|v| v.as_integer()).unwrap_or(0);
+        }
+    }
+    let has_budget = root
+        .get("recorder")
+        .and_then(|r| r.get("max_channels"))
+        .is_some();
+    if recorders == 0 || has_budget {
+        return Ok(());
+    }
+    let mut standing = 0;
+    for sys in root
+        .get("system")
+        .and_then(toml::Value::as_table)
+        .into_iter()
+        .flatten()
+        .map(|(_, s)| s)
+    {
+        let len = |key| {
+            sys.get(key)
+                .and_then(toml::Value::as_array)
+                .map_or(0, Vec::len)
+        };
+        standing += len("control_channels");
+        standing += match sys.get("channel_file").and_then(toml::Value::as_str) {
+            Some(file) => {
+                let path = capture_dir.join(file);
+                std::fs::read_to_string(&path)
+                    .with_context(|| format!("reading {}", path.display()))?
+                    .lines()
+                    .skip(1)
+                    .filter(|l| !l.trim().is_empty())
+                    .count()
+            }
+            None => len("channel"),
+        };
+    }
+    let budget = recorders + i64::try_from(standing)?;
+    eprintln!(
+        "capture predates channel budgets: {recorders} recorders + {standing} control and \
+         conventional channels -> recorder.max_channels = {budget}"
+    );
+    set_path(root, "recorder.max_channels", &budget.into())
+}
+
 pub struct Plan {
     pub config_path: PathBuf,
     /// Wall-clock length of the longest source file, in seconds.
@@ -157,6 +217,8 @@ pub fn build(
         .parse()
         .with_context(|| format!("parsing {}", base.display()))?;
     let capture_dir = capture_dir.canonicalize()?;
+
+    migrate_recorder_counts(&mut root, &capture_dir)?;
 
     let mut duration_s = 0.0_f64;
     let mut skipped = Vec::new();

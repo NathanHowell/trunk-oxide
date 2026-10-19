@@ -7,7 +7,8 @@ use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Gauge, Histogram};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use trunk_radio::{
-    CallData, CallDataStatus, DetectedSignal, Radio, RecorderConfig, TrunkMessage, Trunking,
+    CallData, CallDataStatus, ChannelNum, ChannelReport, DetectedSignal, Radio, TrunkMessage,
+    Trunking,
 };
 use trunk_radio::{Squelch, SystemInfo};
 
@@ -18,8 +19,7 @@ use trunk_oxide_grpc::proto::SystemType as ProtoSystemType;
 use crate::ConventionalMetricsSnapshot;
 
 use crate::call_state::{
-    CallEndReason, CallId, CallState, CallView, Effect, Effects, Freq, RecorderNum,
-    RecordingResult, RejectReason, Talkgroup, TrunkStateMachine,
+    CallEndReason, CallId, CallState, CallView, Effect, Effects, Freq, Talkgroup, TrunkStateMachine,
 };
 
 pub use crate::call_state::{
@@ -51,11 +51,10 @@ const fn system_type_to_proto(st: SystemType) -> i32 {
     }
 }
 
-/// op25 decode-quality counters (errored / spiked voice codewords and total
-/// samples) summed from a recorder's transmission list. The headless sink
-/// accumulates these for the whole recording, so for a `Span` boundary — where
-/// the recorder runs continuously across per-speaker transmissions — they are
-/// cumulative; we snapshot at each boundary and report the delta so each
+/// Voice decode-quality counters (errored / spiked voice codewords and total
+/// samples) summed over a call's transmissions. A channel's recording runs
+/// across a trunked call's per-speaker boundaries, so they are cumulative;
+/// each boundary reports the change since the last (see [`Tally`]) so each
 /// per-speaker CallEnd carries only its own slice and the slices still sum to
 /// the call total.
 #[derive(Default, Clone, Copy)]
@@ -83,8 +82,7 @@ impl VoiceCounters {
         c
     }
 
-    /// This transmission's slice since the prior snapshot (clamped at 0 so a
-    /// recorder restart that zeroed the cumulative counters can't go negative).
+    /// This transmission's slice since the prior snapshot (clamped at 0).
     fn since(self, prior: Self) -> Self {
         Self {
             errors: (self.errors - prior.errors).max(0),
@@ -99,20 +97,39 @@ impl VoiceCounters {
 /// Voice this recent when a timeout stops a call means it was cut mid-speech.
 const CUT_VOICE_AGE_S: f64 = 0.5;
 
-/// What a recorder last recorded, and when it stopped.
+/// What a channel last carried, and when it closed.
 #[derive(Clone, Copy, Debug)]
-struct RecorderUse {
+struct ChannelUse {
     talkgroup: i64,
     freq: Freq,
     slot: i32,
-    stopped: Instant,
+    closed: Instant,
+}
+
+/// What a call's channels recorded, until its (or its transmission's) end
+/// reports it.
+#[derive(Default)]
+struct Tally {
+    /// What its closed (and rotated) recordings recorded.
+    transmissions: Vec<trunk_radio::Transmission>,
+    /// The last channel that closed (or rotated) for it.
+    last: Option<ChannelReport>,
+    /// The counters per-speaker boundaries already reported.
+    reported: VoiceCounters,
+}
+
+impl Tally {
+    fn add(&mut self, report: ChannelReport) {
+        self.transmissions.extend(report.transmissions());
+        self.last = Some(report);
+    }
 }
 
 /// Executor: processes effects from the state machine against real FFI/bridge.
 pub struct CallManager {
     state: TrunkStateMachine,
     bridge: Arc<EventBridge>,
-    /// The radio: sources, recorders and the calls bound to them.
+    /// The radio: sources and the channels open on them.
     radio: Arc<Radio>,
     /// Recorder-side tracing spans, opened at `EmitCallStart` and closed at
     /// conclude. Held (not entered) so each span's lifetime tracks the call's
@@ -120,13 +137,11 @@ pub struct CallManager {
     /// downstream (discord) call span parents to it, and its stop_reason /
     /// recording_length / segments are recorded at close.
     call_spans: HashMap<CallId, tracing::Span>,
-    /// Cumulative op25 decode counters already attributed to earlier per-speaker
-    /// (`Span`) transmissions of a call, keyed by CallId. Lets each per-speaker
-    /// CallEnd report only its own delta; removed when the call concludes.
-    voice_snapshots: HashMap<CallId, VoiceCounters>,
-    /// Each recorder's last call, for the next call's span: a recorder reused
-    /// from another channel can carry that channel into its next call.
-    recorder_last: HashMap<i32, RecorderUse>,
+    /// What each call's channels recorded, until its end reports it.
+    tallies: HashMap<CallId, Tally>,
+    /// What each channel last carried, for the next call's span: a slot
+    /// reused from another frequency can carry that into its next call.
+    channel_last: HashMap<ChannelNum, ChannelUse>,
     /// Per-source frequency coverage, indexed by source position.
     source_ranges: Vec<RangeInclusive<f64>>,
     /// Per-source configured ppm correction, indexed by source position.
@@ -195,7 +210,15 @@ pub struct CallManager {
     chz_overruns_total: HashMap<i32, u64>,
     /// Per-call channelizer context, for the call span (see `exec_conclude_call`).
     call_chz: HashMap<CallId, CallChz>,
-    recorder_denied: Counter<u64>,
+    /// Channels that could not be opened, by reason.
+    channel_open_failed: Counter<u64>,
+    /// Calls that had to wait for a channel, and calls evicted from theirs,
+    /// by system and talkgroup.
+    channel_waits: Counter<u64>,
+    channel_evictions: Counter<u64>,
+    /// Channels held and claims waiting, of `max_channels`.
+    channels_held: Gauge<u64>,
+    channels_waiting: Gauge<u64>,
     control_channel_messages: Counter<u64>,
     control_channel_duplicates: Counter<u64>,
     active_calls_gauge: Gauge<u64>,
@@ -268,8 +291,8 @@ impl CallManager {
             bridge,
             radio,
             call_spans: HashMap::new(),
-            recorder_last: HashMap::new(),
-            voice_snapshots: HashMap::new(),
+            channel_last: HashMap::new(),
+            tallies: HashMap::new(),
             source_ranges,
             source_ppms,
             source_freq_corrections_hz,
@@ -397,9 +420,28 @@ impl CallManager {
             fm_metrics: crate::fm_metrics::FmMetrics::new(&meter),
             chz_overruns_total: HashMap::new(),
             call_chz: HashMap::new(),
-            recorder_denied: meter
-                .u64_counter("trunk.oxide.recorder_denied")
-                .with_description("Calls denied a recorder")
+            channel_open_failed: meter
+                .u64_counter("trunk.oxide.channel_open_failed")
+                .with_description("Channels that could not be opened, by reason")
+                .build(),
+            channel_waits: meter
+                .u64_counter("trunk.oxide.channel_waits")
+                .with_description(
+                    "Calls that started without a channel: every one was held by calls \
+                     that outrank them",
+                )
+                .build(),
+            channel_evictions: meter
+                .u64_counter("trunk.oxide.channel_evictions")
+                .with_description("Calls whose channel a call that outranks them took")
+                .build(),
+            channels_held: meter
+                .u64_gauge("trunk.oxide.channels_held")
+                .with_description("Channels open (control channels included)")
+                .build(),
+            channels_waiting: meter
+                .u64_gauge("trunk.oxide.channels_waiting")
+                .with_description("Claims on a channel waiting for one")
                 .build(),
             control_channel_messages: meter
                 .u64_counter("trunk.oxide.control_channel_messages")
@@ -493,13 +535,15 @@ impl CallManager {
 
     fn register_audio_meta(&self, call_id: CallId) {
         if let Some(view) = self.state.get_call_view(call_id) {
+            #[allow(clippy::cast_possible_truncation)]
+            let sample_rate = view.audio_rate().map_or(8_000, |r| r as i32);
             self.bridge.register_audio_meta(
                 call_id,
                 AudioMeta {
                     talkgroup: view.talkgroup(),
                     short_name: Arc::from(view.short_name()),
                     freq: view.freq().as_hz(),
-                    sample_rate: if view.is_analog() { 16_000 } else { 8_000 },
+                    sample_rate,
                 },
             );
         }
@@ -510,19 +554,18 @@ impl CallManager {
     fn process_effects(&mut self, effects: Effects) {
         for effect in effects {
             match effect {
-                Effect::CreateCall { call_id } => {
-                    self.exec_create_call(call_id);
+                Effect::CreateCall { call_id } => self.register_audio_meta(call_id),
+                Effect::Open { call_id } => self.exec_open(call_id),
+                Effect::Close { call_id } => {
+                    if let Some(report) = self.radio.close(call_id) {
+                        self.bridge.setup_recorder(report.num);
+                        self.channel_ended(call_id, report);
+                    }
                 }
-                Effect::RequestRecording {
-                    call_id,
-                    freq,
-                    is_analog,
-                    priority,
-                } => {
-                    self.exec_request_recording(call_id, freq, is_analog, priority);
-                }
-                Effect::StopRecording { call_id } => {
-                    self.exec_stop_recorder(call_id);
+                Effect::Rotate { call_id } => {
+                    if let Some(report) = self.radio.rotate(call_id) {
+                        self.channel_ended(call_id, report);
+                    }
                 }
                 Effect::SetFreq { call_id, freq } => {
                     self.bridge.update_audio_meta_freq(call_id, freq.as_hz());
@@ -535,10 +578,11 @@ impl CallManager {
                     // closed at conclude) and serialize its context into the
                     // CallStart event so discord parents its call span to ours.
                     let started = self.state.get_call_view(call_id).map(|view| {
-                        self.calls_started.add(
-                            1,
-                            &[KeyValue::new("short_name", view.short_name().to_string())],
-                        );
+                        let labels = [KeyValue::new("short_name", view.short_name().to_string())];
+                        self.calls_started.add(1, &labels);
+                        if view.state() == CallState::Waiting {
+                            self.channel_waits.add(1, &Self::talkgroup_labels(&view));
+                        }
                         let span = tracing::info_span!(
                             "call",
                             short_name = %view.short_name(),
@@ -569,12 +613,12 @@ impl CallManager {
                             since_update_s = tracing::field::Empty,
                             after_term_ms = tracing::field::Empty,
                             voice_samples = tracing::field::Empty,
-                            // The recorder, and what it recorded before this.
-                            rec_num = tracing::field::Empty,
-                            rec_prev_talkgroup = tracing::field::Empty,
-                            rec_prev_freq = tracing::field::Empty,
-                            rec_prev_slot = tracing::field::Empty,
-                            rec_idle_s = tracing::field::Empty,
+                            // The channel, and what it carried before this.
+                            channel = tracing::field::Empty,
+                            channel_prev_talkgroup = tracing::field::Empty,
+                            channel_prev_freq = tracing::field::Empty,
+                            channel_prev_slot = tracing::field::Empty,
+                            channel_idle_s = tracing::field::Empty,
                             // Encryption: the flag at conclude; the voice
                             // channel's ESS report (ALGID/KeyID) and how long
                             // after the call started it came.
@@ -590,7 +634,7 @@ impl CallManager {
                     if let Some((span, traceparent, info)) = started {
                         self.bridge.call_start(&info, traceparent);
                         self.call_spans.insert(call_id, span);
-                        self.record_recorder(call_id);
+                        self.record_channel(call_id);
                     }
                 }
                 Effect::EmitCallEnd { call_id, reason } => {
@@ -612,14 +656,20 @@ impl CallManager {
                             attrs.push(KeyValue::new("algid", format!("0x{alg:02x}")));
                         }
                         self.calls_ended.add(1, &attrs);
+                        if reason == CallEndReason::Evicted {
+                            self.channel_evictions
+                                .add(1, &Self::talkgroup_labels(&view));
+                        }
                     }
                     self.exec_conclude_call(call_id, reason);
                 }
-                Effect::RotateTransmission { call_id, source_id } => {
-                    // Soft boundary: advance to the next logical transmission on
-                    // the same (still-running) recorder. No C++ recorder call —
-                    // unlike ConventionalRestart, which rotates the WAV.
-                    self.state.on_transmission_rotated(call_id, source_id);
+                Effect::NextTransmission { call_id, source_id } => {
+                    self.state.on_next_transmission(call_id, source_id);
+                    if source_id.is_none() {
+                        // A conventional transmission's recordings were
+                        // reported with its end; the next starts afresh.
+                        self.tallies.remove(&call_id);
+                    }
                 }
                 Effect::EmitCallsActive => {
                     let infos: Vec<trunk_radio::CallInfo> = self
@@ -648,65 +698,8 @@ impl CallManager {
                     let info = self.get_system_info(sys_num);
                     self.bridge.setup_system(&info);
                 }
-                Effect::EmitSetupRecorder { call_id } => {
-                    if let Some(view) = self.state.get_call_view(call_id)
-                        && let Some(rec) = view.recorder()
-                    {
-                        self.bridge.setup_recorder(rec.0);
-                    }
-                }
-                Effect::AddControlChannel { sys_num, freq } => {
-                    self.radio.add_control_channel(sys_num, freq.as_hz());
-                }
-                Effect::ConventionalRestart { call_id } => {
-                    if let Some(view) = self.state.get_call_view(call_id) {
-                        self.update_conv_metric(view.talkgroup(), view.freq(), |m| {
-                            m.idle_timeout_count += 1;
-                        });
-                        let cfg = self.build_recorder_config_from_view(&view);
-                        self.radio.restart(call_id, &cfg);
-                        let rec_num = self
-                            .radio
-                            .has_recorder(call_id)
-                            .then(|| RecorderNum(self.radio.recorder_num(call_id)));
-                        self.state.on_conventional_restarted(call_id, rec_num);
-                    }
-                }
-                Effect::InitRecorder { call_id } => {
-                    if let Some(view) = self.state.get_call_view(call_id) {
-                        let cfg = self.build_recorder_config_from_view(&view);
-                        self.radio.restart(call_id, &cfg);
-                    }
-                }
-                Effect::EnableRecorder { call_id } => {
-                    if let Some(view) = self.state.get_call_view(call_id) {
-                        tracing::info!(
-                            freq = %view.freq(),
-                            talkgroup = view.talkgroup(),
-                            "enabling recorder (signal detected)"
-                        );
-                        self.update_conv_metric(view.talkgroup(), view.freq(), |m| {
-                            m.enable_count += 1;
-                        });
-                    }
-                    self.radio.set_recorder_enabled(call_id, true);
-                }
-                Effect::DisableRecorder { call_id } => {
-                    if let Some(view) = self.state.get_call_view(call_id) {
-                        tracing::info!(
-                            freq = %view.freq(),
-                            talkgroup = view.talkgroup(),
-                            "disabling recorder (signal lost)"
-                        );
-                        self.update_conv_metric(view.talkgroup(), view.freq(), |m| {
-                            m.disable_count += 1;
-                        });
-                    }
-                    self.radio.set_recorder_enabled(call_id, false);
-                }
                 Effect::RemoveCall { call_id } => {
-                    self.radio.remove_call(call_id);
-                    self.voice_snapshots.remove(&call_id);
+                    self.tallies.remove(&call_id);
                     self.state.remove_call(call_id);
                     // Unregister audio meta last: the write lock waits for any
                     // in-flight audio_stream() read lock, ensuring the final
@@ -717,182 +710,156 @@ impl CallManager {
         }
     }
 
-    // ── Effect executors ──
-
-    fn exec_create_call(&mut self, call_id: CallId) {
-        let Some(sys_num) = self.state.get_call_view(call_id).map(|v| v.sys_num()) else {
-            return;
-        };
-        self.radio.create_call(call_id, sys_num);
-        self.register_audio_meta(call_id);
+    /// Labels for a per-talkgroup channel metric.
+    fn talkgroup_labels(view: &CallView<'_>) -> [KeyValue; 2] {
+        [
+            KeyValue::new("short_name", view.short_name().to_string()),
+            KeyValue::new("talkgroup", view.talkgroup()),
+        ]
     }
 
-    fn exec_request_recording(
-        &mut self,
-        call_id: CallId,
-        freq: Freq,
-        is_analog: bool,
-        priority: i32,
-    ) {
-        let view = match self.state.get_call_view(call_id) {
-            Some(v) => v,
-            None => {
-                tracing::error!(?call_id, "exec_request_recording: CallEntry missing");
-                return;
-            }
-        };
+    // ── Effect executors ──
 
-        // Build recorder config from Rust state (replaces C++ build_recorder_config)
-        let cfg = self.build_recorder_config_from_view(&view);
-        // Capture values we need after the view borrow ends
-        let talkgroup = view.talkgroup();
-        let sys_num = view.sys_num();
-
-        let freq_hz = freq.as_hz();
-        let source_idx = self.find_source(freq_hz);
-
-        if !self.radio.has_call(call_id) {
+    /// Open the channel the state machine gave `id`, tuned with its
+    /// source's clock correction, and tell the state machine how it went.
+    fn exec_open(&mut self, id: CallId) {
+        let Some((recipe, mut call)) = self.state.opening(id) else {
+            tracing::error!(?id, "opening a channel for nothing the state machine knows");
             return;
-        }
-
-        let result = if let Some(source_idx) = source_idx {
-            let available = self.radio.available_recorders(source_idx, is_analog);
-            if priority > available {
-                tracing::error!(
-                    talkgroup,
-                    sys_num,
-                    priority,
-                    available,
-                    "not recording: priority exceeds available recorders"
-                );
-                RecordingResult::NoRecorder
-            } else if let Some(rec_num) = self
-                .radio
-                .start_recording(source_idx, call_id, is_analog, &cfg)
-            {
-                RecordingResult::Started {
-                    rec_num: RecorderNum(rec_num),
-                }
-            } else {
-                RecordingResult::NoRecorder
-            }
-        } else {
-            RecordingResult::NoSource
         };
-
-        if matches!(
-            result,
-            RecordingResult::NoRecorder | RecordingResult::NoSource
-        ) {
-            let short_name = self
-                .state
-                .config
-                .systems
-                .get(&sys_num)
-                .map_or_else(String::new, |p| p.short_name.clone());
-            self.recorder_denied
-                .add(1, &[KeyValue::new("short_name", short_name)]);
+        call.channel.freq_hz += self.correction_hz(call.channel.freq_hz);
+        let opened = recipe.open(&self.radio, &call);
+        match &opened {
+            Ok(num) => self.bridge.setup_recorder(*num),
+            Err(e) => self.channel_open_failed.add(
+                1,
+                &[
+                    KeyValue::new("short_name", self.short_name_of(call.sys_num)),
+                    KeyValue::new("kind", recipe.kind()),
+                    KeyValue::new("reason", crate::call_state::RejectReason::from(e).as_str()),
+                ],
+            ),
         }
-
-        let followup = self.state.on_recording_result(call_id, result);
-        // A retune starts another recorder under the same span.
-        self.record_recorder(call_id);
+        let followup = self.state.on_opened(id, opened);
+        self.record_channel(id);
         self.process_effects(followup);
     }
 
-    /// Records the call's recorder, and what it recorded last, on its span.
-    fn record_recorder(&self, call_id: CallId) {
+    /// The software clock correction (Hz) of the source covering `freq_hz`:
+    /// the everyday sub-ppm knob (the integer hardware ppm handles only the
+    /// coarse part), which the adaptive loop moves. Only the tuning shifts;
+    /// the call's displayed frequency does not.
+    fn correction_hz(&self, freq_hz: f64) -> f64 {
+        self.find_source(freq_hz)
+            .and_then(|i| usize::try_from(i).ok())
+            .and_then(|i| self.source_freq_corrections_hz.get(i))
+            .copied()
+            .unwrap_or(0.0)
+    }
+
+    /// Records the call's channel, and what it carried last, on its span.
+    fn record_channel(&self, call_id: CallId) {
         let (Some(span), Some(view)) = (
             self.call_spans.get(&call_id),
             self.state.get_call_view(call_id),
         ) else {
             return;
         };
-        let Some(rec) = view.recorder() else {
+        let Some(num) = view.channel() else {
             return;
         };
-        span.record("rec_num", rec.0);
-        if let Some(last) = self.recorder_last.get(&rec.0) {
-            span.record("rec_prev_talkgroup", last.talkgroup);
-            span.record("rec_prev_freq", tracing::field::display(last.freq));
-            span.record("rec_prev_slot", last.slot);
+        span.record("channel", num.0);
+        if let Some(last) = self.channel_last.get(&num) {
+            span.record("channel_prev_talkgroup", last.talkgroup);
+            span.record("channel_prev_freq", tracing::field::display(last.freq));
+            span.record("channel_prev_slot", last.slot);
             span.record(
-                "rec_idle_s",
-                self.state.clock().since(last.stopped).as_secs_f64(),
+                "channel_idle_s",
+                self.state.clock().since(last.closed).as_secs_f64(),
             );
         }
     }
 
-    fn exec_stop_recorder(&mut self, call_id: CallId) {
-        // Consult the radio — not the state machine — to decide whether a
-        // recorder is attached. On retune, on_grant clears entry.recorder
-        // *before* this StopRecording effect is processed, so a
-        // `view.recorder().is_some()` guard here would always be false and the
-        // old digital recorder would never be stopped, leaking the slot until
-        // the source's recorder pool is exhausted.
-        let id = call_id;
-        if !self.radio.has_recorder(id) {
-            return;
-        }
-        let rec_num = self.radio.recorder_num(id);
-
-        let metrics = self.radio.stop_recording(id);
-
-        let mut was_idle = false;
-        if let Some(view) = self.state.get_call_view(call_id) {
-            was_idle = view.state() == CallState::Idle;
-            self.recorder_last.insert(
-                rec_num,
-                RecorderUse {
-                    talkgroup: view.talkgroup(),
-                    freq: view.freq(),
-                    slot: view.tdma_slot(),
-                    stopped: self.state.clock().now(),
-                },
-            );
-            let pref_ppm = self
-                .preferred_ppm(view.freq().as_hz(), metrics.freq_error)
-                .unwrap_or(f64::NAN);
-            tracing::info!(
-                short_name = %view.short_name(),
-                rec_num,
-                talkgroup = view.talkgroup(),
-                freq = %view.freq(),
-                tdma = view.phase2_tdma(),
-                slot = view.tdma_slot(),
-                freq_error = format_args!("{:+.0} Hz", metrics.freq_error),
-                preferred_ppm = format_args!("{pref_ppm:.2}"),
-                "stopping recorder"
-            );
-        }
-
-        // Update signal/noise from the recorder's power probe. Works for every
-        // recorder type (analog/P25/DMR all read xlat_channelizer::get_pwr);
-        // a DB_UNSET reading is mapped to None inside feed_recorder_power.
+    /// A call's channel closed, or its recording rotated: note what it
+    /// carried, take its power reading, and keep what it recorded for the
+    /// call's next end.
+    fn channel_ended(&mut self, call_id: CallId, report: ChannelReport) {
+        let Some(view) = self.state.get_call_view(call_id) else {
+            return; // a control channel
+        };
+        let was_idle = view.state() == CallState::Idle;
+        self.channel_last.insert(
+            report.num,
+            ChannelUse {
+                talkgroup: view.talkgroup(),
+                freq: view.freq(),
+                slot: view.tdma_slot(),
+                closed: self.state.clock().now(),
+            },
+        );
+        let pref_ppm = self
+            .preferred_ppm(view.freq().as_hz(), report.freq_error)
+            .unwrap_or(f64::NAN);
+        tracing::info!(
+            short_name = %view.short_name(),
+            channel = %report.num,
+            talkgroup = view.talkgroup(),
+            freq = %view.freq(),
+            tdma = view.phase2_tdma(),
+            slot = view.tdma_slot(),
+            freq_error = format_args!("{:+.0} Hz", report.freq_error),
+            preferred_ppm = format_args!("{pref_ppm:.2}"),
+            "stopping recorder"
+        );
         self.state
-            .feed_recorder_power(call_id, metrics.recorder_pwr, was_idle);
-
-        self.state.on_recorder_stopped(call_id);
+            .feed_channel_power(call_id, report.power_db, was_idle);
+        self.tallies.entry(call_id).or_default().add(report);
     }
 
+    #[allow(clippy::too_many_lines)]
     fn exec_conclude_call(&mut self, call_id: CallId, reason: CallEndReason) {
         // Take ownership of the call span so it closes (and is exported) on every
         // exit path of this function; record the stop reason up front.
         let span = self.call_spans.remove(&call_id);
-        // How stale the audio was at the moment we concluded the call.
-        let id = call_id;
-        let has_call = self.radio.has_call(id);
-        let audio_age = has_call.then(|| self.radio.since_last_write_secs(id));
-        let voice_age = has_call.then(|| self.radio.since_last_voice_secs(id));
-        if let (Some(age), Some(voice), Some(view)) =
-            (audio_age, voice_age, self.state.get_call_view(call_id))
-        {
-            let labels = [
-                KeyValue::new("reason", reason.as_str()),
-                KeyValue::new("short_name", view.short_name().to_string()),
-                KeyValue::new("tdma", view.phase2_tdma()),
-                KeyValue::new("is_conventional", view.is_conventional()),
-            ];
+        // A boundary ends a transmission on a channel that runs on: what it
+        // recorded so far is live. Any other end follows its channel's close
+        // (or rotation), which the tally kept.
+        let boundary = reason.is_boundary();
+        let live = if boundary {
+            self.radio.reading(call_id)
+        } else {
+            None
+        };
+        let mut tally = self.tallies.remove(&call_id).unwrap_or_default();
+        let last = live.as_ref().or(tally.last.as_ref());
+        let recording = last.and_then(|r| r.recording.as_ref());
+        let audio_age = recording.map(trunk_radio::Accounting::since_write_s);
+        let voice_age = recording.map(trunk_radio::Accounting::since_voice_s);
+        let freq_error = last.map_or(0, |r| r.freq_error);
+        let channel = last.map(|r| r.num);
+        let mut transmissions = std::mem::take(&mut tally.transmissions);
+        if let Some(live) = &live {
+            transmissions.extend(live.transmissions());
+        }
+        let counters = VoiceCounters::from_transmissions(&transmissions);
+        let delta = counters.since(tally.reported);
+
+        let chz = if boundary {
+            self.call_chz.get(&call_id).copied()
+        } else {
+            self.call_chz.remove(&call_id)
+        };
+
+        let Some(view) = self.state.get_call_view(call_id) else {
+            return;
+        };
+        let labels = [
+            KeyValue::new("reason", reason.as_str()),
+            KeyValue::new("short_name", view.short_name().to_string()),
+            KeyValue::new("tdma", view.phase2_tdma()),
+            KeyValue::new("is_conventional", view.is_conventional()),
+        ];
+        if let (Some(age), Some(voice)) = (audio_age, voice_age) {
             self.call_stop_audio_age.record(age, &labels);
             self.call_stop_voice_age.record(voice, &labels);
             if reason.can_cut_speech() && voice < CUT_VOICE_AGE_S {
@@ -901,7 +868,15 @@ impl CallManager {
                 self.calls_cut.add(1, &labels);
             }
         }
-        if let (Some(s), Some(view)) = (&span, self.state.get_call_view(call_id)) {
+        let recorded = last.is_some();
+        let final_freq = view.freq();
+        let is_conventional = view.is_conventional();
+        let segments = self.build_proto_segments_final(call_id, final_freq, channel);
+        let recording_length = view
+            .recording_duration(self.state.clock().now())
+            .as_secs_f64();
+        let elapsed = self.state.clock().since(view.start_time()).as_secs();
+        if let Some(s) = &span {
             s.record("refreshes", view.refreshes());
             s.record("encrypted", view.encrypted());
             s.record(
@@ -912,8 +887,6 @@ impl CallManager {
                 "cut_mid_speech",
                 reason.can_cut_speech() && voice_age.is_some_and(|v| v < CUT_VOICE_AGE_S),
             );
-        }
-        if let Some(s) = &span {
             if let Some(age) = audio_age {
                 s.record("stop_audio_age_s", age);
             }
@@ -921,7 +894,7 @@ impl CallManager {
                 s.record("stop_voice_age_s", age);
             }
             s.record("stop_reason", reason.as_str());
-            if let Some(c) = self.call_chz.get(&call_id) {
+            if let Some(c) = chz {
                 let now = self.chz_overruns_total.get(&c.source).copied().unwrap_or(0);
                 s.record(
                     "channelizer_overruns",
@@ -929,297 +902,108 @@ impl CallManager {
                 );
                 s.record("channelizer_max_block_us", c.max_ns / 1000);
             }
+            if recorded {
+                s.record("recording_length", recording_length);
+                s.record(
+                    "segments",
+                    u64::try_from(segments.len()).unwrap_or(u64::MAX),
+                );
+                s.record("elapsed", elapsed);
+                s.record("voice_errors", delta.errors);
+                s.record("voice_spikes", delta.spikes);
+                s.record("term_events", delta.term_events);
+                s.record("after_term_ms", delta.after_term_samples / 8);
+                s.record("voice_samples", delta.samples);
+            }
         }
-        self.call_chz.remove(&call_id);
 
-        // Logical (soft) transmission boundary: the in-band source changed
-        // mid-call. End this transmission on the wire WITHOUT stopping the C++
-        // recorder — the audio stream is continuous and `RotateTransmission`
-        // opens the next transmission on the same recorder. The recorder is NOT
-        // stopped, but its op25 decode counters are cumulative and readable
-        // mid-recording, so we attribute this speaker's *delta* to the boundary
-        // (see `voice_snapshots`). This is the seam where "end the transmission"
-        // is separated from "stop the recorder".
-        if matches!(reason, CallEndReason::SourceChange | CallEndReason::KeyUp) {
-            let mut new_snapshot: Option<VoiceCounters> = None;
-            if let Some(view) = self.state.get_call_view(call_id) {
-                let final_freq = view.freq();
-                let rec_num = view.recorder().map_or(-1, |r| r.0);
-                // `recording_duration()` sums the closed segments plus the open
-                // one (when Recording). For a mid-keyup source change segments
-                // is empty and the call is still Recording, so this equals the
-                // open segment's elapsed; for a boundary cut at a regrant the
-                // prior speaker's audio is in a *closed* segment while the call
-                // is Idle, which `segment_start().elapsed()` would miss.
-                let recording_length = view
-                    .recording_duration(self.state.clock().now())
-                    .as_secs_f64();
-                let segments = self.build_proto_segments_final(call_id, final_freq, rec_num);
-
-                // Per-speaker op25 decode metrics: read the recorder's cumulative
-                // counters (cheap lock-free atomics; valid mid-recording) and
-                // subtract what earlier per-speaker transmissions already claimed.
-                let delta = if has_call {
-                    let cumulative =
-                        VoiceCounters::from_transmissions(&self.radio.transmission_list(id));
-                    new_snapshot = Some(cumulative);
-                    cumulative.since(
-                        self.voice_snapshots
-                            .get(&call_id)
-                            .copied()
-                            .unwrap_or_default(),
-                    )
-                } else {
-                    VoiceCounters::default()
-                };
-
-                if let Some(s) = &span {
-                    s.record("recording_length", recording_length);
-                    s.record(
-                        "segments",
-                        u64::try_from(segments.len()).unwrap_or(u64::MAX),
-                    );
-                    s.record("voice_errors", delta.errors);
-                    s.record("voice_spikes", delta.spikes);
-                    s.record("term_events", delta.term_events);
-                    s.record("after_term_ms", delta.after_term_samples / 8);
-                    s.record("voice_samples", delta.samples);
-                }
-                let voice_attrs = [
-                    KeyValue::new("short_name", view.short_name().to_string()),
-                    KeyValue::new("tdma", view.phase2_tdma()),
-                    KeyValue::new(
-                        "source",
-                        i64::from(self.find_source(view.freq().as_hz()).unwrap_or(-1)),
-                    ),
-                ];
-                self.voice_frame_errors
-                    .add(u64::try_from(delta.errors).unwrap_or(0), &voice_attrs);
-                self.voice_frame_spikes
-                    .add(u64::try_from(delta.spikes).unwrap_or(0), &voice_attrs);
-                self.terminator_events
-                    .add(u64::try_from(delta.term_events).unwrap_or(0), &voice_attrs);
-                if delta.term_events > 0 {
-                    self.terminator_after_ms
-                        .record(delta.after_term_samples as f64 / 8.0, &voice_attrs);
-                }
-
-                let mut data = self.build_call_data(call_id);
-                data.length = recording_length;
-                data.error_count = delta.errors;
-                data.spike_count = delta.spikes;
-                self.bridge.call_end(&data, &segments, false);
+        if !recorded {
+            // Never on a channel (rejected, or still waiting): it ends all
+            // the same, so the wire can finalize it.
+            if view.state() == CallState::Recording {
+                tracing::warn!(
+                    talkgroup = view.talkgroup(),
+                    "concluding a recording call with no channel"
+                );
             }
-            // Advance the snapshot AFTER the view borrow drops (needs &mut self).
-            if let Some(cumulative) = new_snapshot {
-                self.voice_snapshots.insert(call_id, cumulative);
-            }
+            let data = self.build_call_data(call_id);
+            self.bridge
+                .call_end(&data, &segments, is_conventional, reason.to_proto());
             return;
         }
 
-        // Captured under the view borrow below, applied after it drops (the
-        // adaptive update needs &mut self).
-        let mut adaptive_input: Option<(usize, f64)> = None;
-
-        let view = match self.state.get_call_view(call_id) {
-            Some(v) => v,
-            None => return,
-        };
-
-        let state = view.state();
-        let final_freq = view.freq();
-        let is_conventional = view.is_conventional();
-        let rec_num = view.recorder();
-
-        // Signal-detection conventional channels transition to Disabled
-        // inside on_conventional_idle_timeout() *before* effects are
-        // processed, so we must also accept Disabled for conventional calls.
-        let should_stop_recording = matches!(
-            state,
-            CallState::Recording | CallState::Idle | CallState::Rejected(RejectReason::Superseded)
-        ) || (is_conventional && state == CallState::Disabled);
-
-        if should_stop_recording {
-            if !has_call {
-                return;
+        if !boundary {
+            tracing::info!(
+                short_name = %view.short_name(),
+                call_num = view.call_num(),
+                talkgroup = view.talkgroup(),
+                elapsed,
+                recording_length,
+                segments = segments.len(),
+                "concluding recorded call"
+            );
+            if is_conventional {
+                self.update_conv_metric(view.talkgroup(), view.freq(), |m| {
+                    m.recordings_completed += 1;
+                });
             }
-            // Stop recorder and collect metrics
-            if let Some(rec_num) = rec_num {
-                let metrics = self.radio.stop_recording(id);
-
-                // Feed recorder power back into state machine (all recorder
-                // types; DB_UNSET maps to None inside feed_recorder_power).
-                let was_idle = state == CallState::Idle;
-                self.state
-                    .feed_recorder_power(call_id, metrics.recorder_pwr, was_idle);
-
-                let pref_ppm = self
-                    .preferred_ppm(final_freq.as_hz(), metrics.freq_error)
-                    .unwrap_or(f64::NAN);
-                if let Some(view) = self.state.get_call_view(call_id) {
-                    tracing::info!(
-                        short_name = %view.short_name(),
-                        rec_num = rec_num.0,
-                        talkgroup = view.talkgroup(),
-                        freq = %view.freq(),
-                        tdma = view.phase2_tdma(),
-                        slot = view.tdma_slot(),
-                        freq_error = format_args!("{:+.0} Hz", metrics.freq_error),
-                        preferred_ppm = format_args!("{pref_ppm:.2}"),
-                        "stopping recorder"
-                    );
-
-                    let segments = self.build_proto_segments_final(call_id, final_freq, rec_num.0);
-                    let recording_length = view
-                        .recording_duration(self.state.clock().now())
-                        .as_secs_f64();
-
-                    let elapsed = view.start_time();
-                    let elapsed = self.state.clock().since(elapsed).as_secs() as i64;
-                    tracing::info!(
-                        short_name = %view.short_name(),
-                        call_num = view.call_num(),
-                        talkgroup = view.talkgroup(),
-                        elapsed,
-                        recording_length,
-                        segments = segments.len(),
-                        "concluding recorded call"
-                    );
-
-                    // Surface the call's outcome on its span (parent of the
-                    // downstream discord/transcribe spans).
-                    if let Some(s) = &span {
-                        s.record("recording_length", recording_length);
-                        s.record(
-                            "segments",
-                            u64::try_from(segments.len()).unwrap_or(u64::MAX),
-                        );
-                        s.record("elapsed", elapsed);
-                    }
-
-                    if is_conventional {
-                        self.update_conv_metric(view.talkgroup(), view.freq(), |m| {
-                            m.recordings_completed += 1;
-                        });
-                    }
-
-                    // Sum the decoder's quality counters across the call's
-                    // transmissions to expose P25 audio loss (clipping).
-                    let (mut tx_errors, mut tx_spikes, mut tx_samples) = (0i64, 0i64, 0i64);
-                    let (mut tx_terms, mut tx_after) = (0i64, 0i64);
-                    let mut tally = |list: &[trunk_radio::Transmission]| {
-                        for t in list {
-                            tx_errors += t.error_count;
-                            tx_spikes += t.spike_count;
-                            tx_samples += t.sample_count;
-                            tx_terms += t.term_events;
-                            tx_after += t.after_term_samples;
-                        }
-                    };
-                    {
-                        let mut data = self.build_call_data(call_id);
-                        data.length = recording_length;
-                        data.freq_error = metrics.freq_error;
-                        data.transmission_list = self.radio.transmission_list(id);
-                        tally(&data.transmission_list);
-                        self.bridge.call_end(&data, &segments, is_conventional);
-                    }
-
-                    // Subtract whatever earlier per-speaker (Span) boundaries of
-                    // this call already attributed, so this final CallEnd carries
-                    // only the last speaker's slice and the per-speaker slices
-                    // sum to the call total (not N×). For a single-speaker call
-                    // the snapshot is zero, so the delta is the full tally.
-                    let prior = self
-                        .voice_snapshots
-                        .get(&call_id)
-                        .copied()
-                        .unwrap_or_default();
-                    let delta = VoiceCounters {
-                        errors: tx_errors,
-                        spikes: tx_spikes,
-                        samples: tx_samples,
-                        term_events: tx_terms,
-                        after_term_samples: tx_after,
-                    }
-                    .since(prior);
-                    if let Some(s) = &span {
-                        s.record("voice_errors", delta.errors);
-                        s.record("voice_spikes", delta.spikes);
-                        s.record("term_events", delta.term_events);
-                        s.record("after_term_ms", delta.after_term_samples / 8);
-                        s.record("voice_samples", delta.samples);
-                    }
-                    let voice_attrs = [
-                        KeyValue::new("short_name", view.short_name().to_string()),
-                        KeyValue::new("tdma", view.phase2_tdma()),
-                        KeyValue::new(
-                            "source",
-                            i64::from(self.find_source(view.freq().as_hz()).unwrap_or(-1)),
-                        ),
-                    ];
-                    self.voice_frame_errors
-                        .add(u64::try_from(delta.errors).unwrap_or(0), &voice_attrs);
-                    self.voice_frame_spikes
-                        .add(u64::try_from(delta.spikes).unwrap_or(0), &voice_attrs);
-                    self.terminator_events
-                        .add(u64::try_from(delta.term_events).unwrap_or(0), &voice_attrs);
-                    if delta.term_events > 0 {
-                        self.terminator_after_ms
-                            .record(delta.after_term_samples as f64 / 8.0, &voice_attrs);
-                    }
-
-                    // Per-source clock-error distribution: median = TCXO bias,
-                    // spread = decode margin; both trendable to watch drift.
-                    let source = i64::from(self.find_source(view.freq().as_hz()).unwrap_or(-1));
-                    self.freq_error_hz.record(
-                        f64::from(metrics.freq_error),
-                        &[
-                            KeyValue::new("source", source),
-                            KeyValue::new("short_name", view.short_name().to_string()),
-                        ],
-                    );
-                    if let Ok(idx) = usize::try_from(source) {
-                        adaptive_input = Some((idx, f64::from(metrics.freq_error)));
-                    }
-                }
-            } else {
-                // A call in a should-conclude state but with no recorder tracked
-                // by the state machine (e.g. the recorder was dropped on a
-                // retune that never re-acquired one). Audio for this call has
-                // already streamed live to subscribers, so we MUST still emit
-                // call_end or the call never finalizes downstream — it lingers
-                // showing only a partial transcription. Stop any recorder the
-                // C++ side still holds first, so we don't re-leak the slot.
-                if self.radio.has_recorder(id) {
-                    let _ = self.radio.stop_recording(id);
-                }
-                let talkgroup = self
-                    .state
-                    .get_call_view(call_id)
-                    .map_or(0, |v| v.talkgroup());
-                tracing::warn!(talkgroup, ?state, "concluding call with no recorder");
-                let segments = self.build_proto_segments_final(call_id, final_freq, -1);
-                let data = self.build_call_data(call_id);
-                self.bridge.call_end(&data, &segments, is_conventional);
-            }
-        } else if matches!(state, CallState::Rejected(_)) {
-            let segments = self.build_proto_segments_final(call_id, final_freq, -1);
-            let data = self.build_call_data(call_id);
-            self.bridge.call_end(&data, &segments, is_conventional);
+        }
+        let source = i64::from(self.find_source(final_freq.as_hz()).unwrap_or(-1));
+        let voice_attrs = [
+            KeyValue::new("short_name", view.short_name().to_string()),
+            KeyValue::new("tdma", view.phase2_tdma()),
+            KeyValue::new("source", source),
+        ];
+        self.voice_frame_errors
+            .add(u64::try_from(delta.errors).unwrap_or(0), &voice_attrs);
+        self.voice_frame_spikes
+            .add(u64::try_from(delta.spikes).unwrap_or(0), &voice_attrs);
+        self.terminator_events
+            .add(u64::try_from(delta.term_events).unwrap_or(0), &voice_attrs);
+        if delta.term_events > 0 {
+            #[allow(clippy::cast_precision_loss)]
+            self.terminator_after_ms
+                .record(delta.after_term_samples as f64 / 8.0, &voice_attrs);
         }
 
-        // Adaptive frequency correction (view borrow is dropped by here).
+        let mut data = self.build_call_data(call_id);
+        data.channel = channel;
+        data.length = recording_length;
+        if boundary {
+            data.error_count = delta.errors;
+            data.spike_count = delta.spikes;
+        } else {
+            data.freq_error = freq_error;
+            data.transmission_list = transmissions;
+        }
+        self.bridge.call_end(
+            &data,
+            &segments,
+            is_conventional && !boundary,
+            reason.to_proto(),
+        );
+
+        if boundary {
+            // The call goes on: its later boundaries report from here.
+            tally.reported = counters;
+            self.tallies.insert(call_id, tally);
+            return;
+        }
+
+        // Per-source clock-error distribution: median = TCXO bias,
+        // spread = decode margin; both trendable to watch drift.
+        self.freq_error_hz.record(
+            f64::from(freq_error),
+            &[
+                KeyValue::new("source", source),
+                KeyValue::new("short_name", view.short_name().to_string()),
+            ],
+        );
         if self.adaptive_freq_correction
-            && let Some((source_idx, freq_error_hz)) = adaptive_input
+            && let Ok(idx) = usize::try_from(source)
         {
-            self.update_adaptive_correction(source_idx, freq_error_hz);
+            self.update_adaptive_correction(idx, f64::from(freq_error));
         }
-
-        // The call is fully concluded here (the SourceChange soft-boundary path
-        // returns earlier and intentionally keeps its snapshot). Drop it so the
-        // map doesn't grow without bound.
-        self.voice_snapshots.remove(&call_id);
     }
 
     /// Nudge a source's software tune correction toward whatever zeroes the FLL
@@ -1324,12 +1108,15 @@ impl CallManager {
                     && v.state() == CallState::Recording
             })
             .filter_map(|v| {
-                let now = VoiceCounters::from_transmissions(&self.radio.transmission_list(v.id()));
-                let then = self
-                    .voice_snapshots
-                    .get(&v.id())
-                    .copied()
-                    .unwrap_or_default();
+                let tally = self.tallies.get(&v.id());
+                let mut transmissions = tally.map_or_else(Vec::new, |t| t.transmissions.clone());
+                transmissions.extend(
+                    self.radio
+                        .reading(v.id())
+                        .map_or_else(Vec::new, |r| r.transmissions()),
+                );
+                let now = VoiceCounters::from_transmissions(&transmissions);
+                let then = tally.map_or_else(VoiceCounters::default, |t| t.reported);
                 (now.term_events > then.term_events).then_some(v.id())
             })
             .collect();
@@ -1426,8 +1213,8 @@ impl CallManager {
         self.poll_channelizers();
         self.p25_metrics.poll();
         self.fm_metrics.poll();
-        // First, check recorder write times for recording calls (needs FFI).
-        // The state machine can't check this, so we do it here.
+        // First, check how long each recording call's channel has gone
+        // without audio: only the radio knows.
         let timeout = self.state.config.call_timeout;
         let mut timed_out_ids = Vec::new();
 
@@ -1435,8 +1222,11 @@ impl CallManager {
             if view.is_conventional() || view.state() != CallState::Recording {
                 continue;
             }
-            if self.radio.has_recorder(view.id()) {
-                let since_write = self.radio.since_last_write_secs(view.id());
+            if let Some(reading) = self.radio.reading(view.id()) {
+                let since_write = reading
+                    .recording
+                    .as_ref()
+                    .map_or(f64::INFINITY, trunk_radio::Accounting::since_write_s);
                 if since_write > timeout {
                     timed_out_ids.push(view.id());
                 }
@@ -1452,7 +1242,7 @@ impl CallManager {
                     None
                 };
                 if let Some(hist) = hist
-                    && let Some(pwr_db) = trunk_radio::signal_from_ffi(self.radio.pwr_db(view.id()))
+                    && let Some(pwr_db) = reading.power_db
                 {
                     hist.record(
                         pwr_db,
@@ -1481,17 +1271,22 @@ impl CallManager {
 
         self.active_calls_gauge
             .record(self.state.call_count() as u64, &[]);
+        self.channels_held
+            .record(self.state.channels_held() as u64, &[]);
+        self.channels_waiting
+            .record(self.state.waiting() as u64, &[]);
         self.sync_conv_states();
     }
 
-    /// A conventional channel's call: a recorder of its own on `source_idx`,
-    /// then the state machine's call bound to it.
-    pub fn add_conventional_call(
-        &mut self,
-        channel: &ConventionalChannel,
-        sys_num: i32,
-        source_idx: i32,
-    ) {
+    /// Open the control channels: the first allocation.
+    pub fn start(&mut self) {
+        let effects = self.state.start();
+        self.process_effects(effects);
+    }
+
+    /// A conventional channel's call: it claims its channel at once, or
+    /// (with signal detection) once the detector finds something there.
+    pub fn add_conventional_call(&mut self, channel: &ConventionalChannel, sys_num: i32) {
         let policy = self
             .state
             .config
@@ -1499,65 +1294,51 @@ impl CallManager {
             .get(&sys_num)
             .cloned()
             .unwrap_or_else(|| crate::call_state::DEFAULT_POLICY.clone());
-
-        let rec_num = match self.radio.add_conventional_recorder(
-            sys_num,
-            source_idx,
-            &trunk_radio::ChannelConfig {
-                id: channel.talkgroup.0,
-                freq: channel.freq.as_hz(),
-                tone: channel.tone,
-                squelch_db: channel.squelch_db,
-                signal_detection: channel.signal_detection,
-            },
-        ) {
-            Ok(n) => n,
-            Err(e) => {
-                tracing::error!(
-                    sys_num, freq = %channel.freq, talkgroup = channel.talkgroup.0, error = %e,
-                    "cannot create the conventional channel's recorder"
-                );
-                return;
-            }
-        };
-
-        let (call_id, effects) =
-            self.state
-                .add_conventional_call(channel, sys_num, &policy, Some(RecorderNum(rec_num)));
-        self.radio.bind_conventional_call(call_id, sys_num, rec_num);
+        if channel.signal_detection
+            && let Err(e) = self.radio.detect_signals(channel.freq.as_hz())
+        {
+            tracing::error!(
+                sys_num, freq = %channel.freq, talkgroup = channel.talkgroup.0, error = %e,
+                "cannot watch the conventional channel for signals"
+            );
+        }
+        let (call_id, effects) = self.state.add_conventional_call(channel, sys_num, &policy);
         self.register_audio_meta(call_id);
-
         self.process_effects(effects);
     }
 
     /// A conventional channel's transmission detector opened or closed.
-    pub fn handle_squelch_event(&mut self, recorder_num: i32, squelch: Squelch, pwr_db: f64) {
+    pub fn handle_squelch_event(
+        &mut self,
+        call_id: CallId,
+        squelch: Squelch,
+        power_db: Option<f64>,
+    ) {
         // Record signal quality metrics before mutating state
         if let Some(view) = self
             .state
-            .iter_calls()
-            .find(|v| v.is_conventional() && v.recorder() == Some(RecorderNum(recorder_num)))
+            .get_call_view(call_id)
+            .filter(CallView::is_conventional)
         {
             let tg = view.talkgroup();
             let freq = view.freq();
+            let db = power_db.unwrap_or(f64::NAN);
             match squelch {
                 Squelch::Open => self.update_conv_metric(tg, freq, |m| {
-                    m.signal_power_db = pwr_db;
+                    m.signal_power_db = db;
                     m.squelch_open_count += 1;
                 }),
                 Squelch::Close(reason) => {
-                    tracing::debug!(talkgroup = tg, freq = %freq, ?reason, pwr_db, "squelch closed");
+                    tracing::debug!(talkgroup = tg, freq = %freq, ?reason, ?power_db, "squelch closed");
                     self.update_conv_metric(tg, freq, |m| {
-                        m.noise_floor_db = pwr_db;
+                        m.noise_floor_db = db;
                         m.squelch_close_count += 1;
                     });
                 }
             }
         }
 
-        let effects = self
-            .state
-            .on_squelch(RecorderNum(recorder_num), squelch, pwr_db);
+        let effects = self.state.on_squelch(call_id, squelch, power_db);
         self.process_effects(effects);
     }
 
@@ -1670,49 +1451,6 @@ impl CallManager {
         }
     }
 
-    /// Build a `RecorderConfig` from a [`CallView`] and system metadata.
-    fn build_recorder_config_from_view(&self, view: &CallView<'_>) -> RecorderConfig {
-        let policy = self
-            .state
-            .config
-            .systems
-            .get(&view.sys_num())
-            .unwrap_or(&crate::call_state::DEFAULT_POLICY);
-
-        let xor_mask = self
-            .state
-            .system_identities
-            .get(&view.sys_num())
-            .map_or_else(Vec::new, |id| id.xor_mask.clone());
-
-        // Software clock correction: a per-source Hz tune offset (the everyday
-        // sub-ppm knob; the integer hardware ppm handles only coarse/wideband).
-        // Real-time adaptive deltas will add to this term. Only the physical tune
-        // shifts — the displayed call frequency stays view.freq().
-        let true_freq = view.freq().as_hz();
-        let correction_hz = self
-            .find_source(true_freq)
-            .and_then(|i| usize::try_from(i).ok())
-            .and_then(|i| self.source_freq_corrections_hz.get(i))
-            .copied()
-            .unwrap_or(0.0);
-        let tune_freq = true_freq + correction_hz;
-
-        RecorderConfig {
-            talkgroup: view.talkgroup(),
-            call_num: view.call_num(),
-            freq: tune_freq,
-            short_name: view.short_name().to_owned(),
-            temp_dir: self.state.config.temp_dir.clone(),
-            phase2_tdma: view.phase2_tdma(),
-            tdma_slot: view.tdma_slot(),
-            xor_mask,
-            squelch_db: view.squelch_db(),
-            digital_levels: policy.digital_levels,
-            call_id: view.id(),
-        }
-    }
-
     pub fn print_status(&self) {
         tracing::info!(count = self.state.call_count(), "Active Calls");
         for view in self.state.iter_calls() {
@@ -1727,30 +1465,38 @@ impl CallManager {
                 freq = %view.freq(),
                 elapsed,
                 state,
-                rec_num = view.recorder().map(|r| r.0),
+                channel = view.channel().map(|c| c.0),
                 "call status"
             );
         }
+        tracing::info!(
+            held = self.state.channels_held(),
+            max = self.state.config.max_channels,
+            waiting = self.state.waiting(),
+            "channels"
+        );
     }
 
-    pub fn print_recorder_status(&self) {
-        let recorders = self.radio.recorder_status();
+    pub fn print_channel_status(&self) {
+        let channels = self.radio.channels();
         let mut current_source = -1i32;
-        for r in &recorders {
-            if r.source_num != current_source {
-                current_source = r.source_num;
+        for c in &channels {
+            if c.source_num != current_source {
+                current_source = c.source_num;
                 tracing::info!(
-                    source = r.source_num,
-                    freq = %Freq::from_hz(r.source_center),
-                    device = %r.source_device,
+                    source = c.source_num,
+                    freq = %Freq::from_hz(c.source_center),
+                    device = %c.source_device,
                     "source"
                 );
             }
+            let control = c.call.and_then(|id| self.state.control(id));
             tracing::info!(
-                rec_num = r.rec_num,
-                rec_type = %r.rec_type,
-                rec_state = ?r.rec_state,
-                "  recorder"
+                channel = c.num.0,
+                kind = c.kind,
+                call = c.call.map(|id| id.0),
+                control_channel = control.map(|cc| tracing::field::display(cc.freq)),
+                "  channel"
             );
         }
     }
@@ -1769,7 +1515,7 @@ impl CallManager {
             freq_error: 0,
             encrypted: view.encrypted(),
             emergency: view.emergency(),
-            is_analog: view.is_analog(),
+            kind: view.kind(),
             is_conventional: view.is_conventional(),
             phase2_tdma: view.phase2_tdma(),
             tdma_slot: view.tdma_slot(),
@@ -1789,13 +1535,6 @@ impl CallManager {
 
     fn build_call_data(&self, call_id: CallId) -> CallData {
         let view = self.state.get_call_view(call_id).unwrap();
-        let audio_type = if view.is_analog() {
-            "analog"
-        } else if view.phase2_tdma() {
-            "digital tdma"
-        } else {
-            "digital"
-        };
 
         let now = crate::call_state::system_time_to_unix(self.state.clock().wall_now());
 
@@ -1817,7 +1556,7 @@ impl CallManager {
             freq: view.freq().as_hz(),
             freq_error: 0,
             source_num: 0,
-            recorder_num: view.recorder().map_or(-1, |r| r.0),
+            channel: view.channel(),
             signal: trunk_radio::signal_to_ffi(view.signal()),
             noise: trunk_radio::signal_to_ffi(view.noise()),
             start_time: crate::call_state::system_time_to_unix(
@@ -1833,7 +1572,7 @@ impl CallManager {
             duplex: view.duplex(),
             sys_num: view.sys_num(),
             short_name: view.short_name().to_owned(),
-            audio_type: audio_type.into(),
+            kind: view.kind(),
             tdma_slot: view.tdma_slot(),
             length: 0.0,
             phase2_tdma: view.phase2_tdma(),
@@ -1848,7 +1587,7 @@ impl CallManager {
         &self,
         call_id: CallId,
         final_freq: Freq,
-        final_rec_num: i32,
+        final_channel: Option<ChannelNum>,
     ) -> Vec<trunk_oxide_grpc::proto::CallSegment> {
         let view = match self.state.get_call_view(call_id) {
             Some(v) => v,
@@ -1858,7 +1597,7 @@ impl CallManager {
         let mut segments: Vec<_> = view
             .segments()
             .iter()
-            .map(|s| self.make_proto_segment(s.freq.as_hz(), s.start, s.end, s.rec_num.0))
+            .map(|s| self.make_proto_segment(s.freq.as_hz(), s.start, s.end, s.channel))
             .collect();
         // Append the still-open segment when concluding mid-recording. For
         // always-on conventional channels a transmission is concluded while
@@ -1870,7 +1609,7 @@ impl CallManager {
                 final_freq.as_hz(),
                 view.segment_start(),
                 self.state.clock().now(),
-                final_rec_num,
+                final_channel,
             ));
         }
         segments
@@ -1881,7 +1620,7 @@ impl CallManager {
         freq: f64,
         start: Instant,
         end: Instant,
-        rec_num: i32,
+        channel: Option<ChannelNum>,
     ) -> trunk_oxide_grpc::proto::CallSegment {
         use prost_types::{Duration as ProstDuration, Timestamp};
         let elapsed = end.saturating_duration_since(start);
@@ -1899,7 +1638,7 @@ impl CallManager {
                 seconds: elapsed.as_secs() as i64,
                 nanos: elapsed.subsec_nanos() as i32,
             }),
-            rec_num,
+            channel: channel.map(|c| c.0),
         }
     }
 }
@@ -1973,8 +1712,8 @@ mod tests {
 
     #[test]
     fn since_clamps_when_counters_reset() {
-        // A recorder restart (e.g. ConventionalRestart) zeroes the cumulative
-        // counters; a stale higher snapshot must not produce a negative delta.
+        // A call's tally only grows, but should a snapshot ever be ahead of
+        // the counters, the delta is zero, not negative.
         let after_reset = VoiceCounters {
             errors: 1,
             spikes: 0,

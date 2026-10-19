@@ -199,7 +199,8 @@ pub struct CallData {
     pub freq: f64,
     pub freq_error: i32,
     pub source_num: i32,
-    pub recorder_num: i32,
+    /// The channel it ended on, if it had one.
+    pub channel: Option<ChannelNum>,
     pub signal: f64,
     pub noise: f64,
     pub start_time: i64,
@@ -213,7 +214,8 @@ pub struct CallData {
     pub duplex: bool,
     pub sys_num: i32,
     pub short_name: String,
-    pub audio_type: String,
+    /// The [`crate::Kind::NAME`] of its channel; empty if it had none.
+    pub kind: &'static str,
     pub tdma_slot: i32,
     pub length: f64,
     pub phase2_tdma: bool,
@@ -236,7 +238,8 @@ pub struct CallInfo {
     pub freq_error: i32,
     pub encrypted: bool,
     pub emergency: bool,
-    pub is_analog: bool,
+    /// The [`crate::Kind::NAME`] of its channel; empty if it has none.
+    pub kind: &'static str,
     pub is_conventional: bool,
     pub phase2_tdma: bool,
     pub tdma_slot: i32,
@@ -262,66 +265,34 @@ impl std::fmt::Display for CallId {
     }
 }
 
-/// What a recorder needs to know to start a call.
-#[derive(Debug, Clone, PartialEq)]
-pub struct RecorderConfig {
-    pub talkgroup: i64,
-    pub call_num: i64,
-    /// Where to tune (software clock correction already applied).
-    pub freq: f64,
-    pub short_name: String,
-    pub temp_dir: String,
-    pub phase2_tdma: bool,
-    pub tdma_slot: i32,
-    pub xor_mask: Vec<u8>,
-    pub squelch_db: f64,
-    pub digital_levels: f64,
-    pub call_id: CallId,
+/// A channel the radio opened, by number: a channelizer slot of one
+/// source, numbered in the order the radio first used it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct ChannelNum(pub u32);
+
+impl std::fmt::Display for ChannelNum {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
 }
 
-/// What stopping a recorder reports.
-#[derive(Debug, Clone, Default, PartialEq)]
-pub struct StopReport {
-    pub freq_error: i32,
-    pub recorder_pwr: f64,
-    pub has_recorder: bool,
-}
-
+/// A channel slot as the status report shows it.
 #[derive(Debug, Clone, PartialEq)]
-pub struct RecorderStatus {
+pub struct ChannelStatus {
+    pub num: ChannelNum,
     pub source_num: i32,
     pub source_center: f64,
     pub source_device: String,
-    pub rec_num: i32,
-    pub rec_type: String,
-    pub rec_state: RecorderState,
-}
-
-/// What a recorder is doing.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RecorderState {
-    /// Started on a call, no audio yet.
-    Idle,
-    Recording,
-    /// Free for a call.
-    Available,
-}
-
-/// A conventional channel, for a dedicated recorder.
-#[derive(Debug, Clone, PartialEq)]
-pub struct ChannelConfig {
-    pub id: i64,
-    pub freq: f64,
-    pub tone: f64,
-    pub squelch_db: f64,
-    pub signal_detection: bool,
+    /// The kind it was last opened as.
+    pub kind: &'static str,
+    /// Who holds it: `None` while it is free.
+    pub call: Option<CallId>,
 }
 
 /// A P25 voice call's outcome, when it ends (metrics).
 #[derive(Debug, Clone, PartialEq)]
 pub struct CallReport {
     pub system: String,
-    pub recorder: i32,
     pub talkgroup: i64,
     pub freq: f64,
     pub phase2: bool,
@@ -464,14 +435,14 @@ impl From<trunk_fm::gate::CloseReason> for CloseReason {
 pub enum RadioEvent {
     /// Parsed trunk messages from a control channel.
     TrunkMessages(Vec<TrunkMessage>),
-    /// A recorder's transmission detector (the power squelch of a digital
-    /// channel, trunk-fm's gate on an analog one) opened or closed.
+    /// A conventional channel's transmission detector (the power squelch
+    /// of a digital channel, trunk-fm's gate on an analog one) opened or
+    /// closed.
     Squelch {
-        recorder_num: i32,
+        call_id: CallId,
         squelch: Squelch,
-        /// The slot's power at the transition ([`crate::recorder::DB_UNSET`]
-        /// without a reading).
-        pwr_db: f64,
+        /// The slot's power at the transition, if it has a reading.
+        power_db: Option<f64>,
     },
     /// An in-band P25 source change on a voice channel.
     SourceChange { call_id: CallId, src_id: i64 },

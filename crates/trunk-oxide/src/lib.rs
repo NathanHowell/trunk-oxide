@@ -4,13 +4,13 @@
 //! Events flow: SDR → trunk-radio (channelizer, decoders) → `RadioEvent` →
 //! call state machine → EventBridge (gRPC)
 
+mod allocation;
 pub mod calibrate;
 mod call_manager;
 mod call_state;
 pub mod clock;
 mod dedup;
 mod fm_metrics;
-mod p25_lfsr;
 mod p25_metrics;
 pub mod proc_stats;
 
@@ -20,12 +20,12 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context as _;
-use trunk_radio::radio::SystemKind;
 use trunk_radio::{
-    ConditioningSettings, EventSender, Radio, RadioConfig, RadioEvent, SourceSetup, SystemSetup,
-    TrunkMessage, Trunking,
+    AnalogFm, AnalogParams, ConditioningSettings, EventSender, Keying, P25Control, P25Voice, Radio,
+    RadioConfig, RadioEvent, Recipe, SourceSetup, SystemSetup, TrunkMessage, Trunking,
 };
 
+pub use allocation::Priority;
 pub use call_manager::{CallManagerConfig, ConventionalChannel, SystemPolicy, TalkgroupPolicy};
 pub use call_state::{Freq, Talkgroup};
 
@@ -363,7 +363,8 @@ pub fn talkgroup_meta_map(
                     alpha_tag: tg.alpha_tag.clone(),
                     tag: tg.tag.clone(),
                     group: tg.group.clone(),
-                    priority: Some(tg.priority),
+                    // Discord's transcription order: 0 sorts last.
+                    priority: Some(tg.priority.unwrap_or(0)),
                 },
             );
         }
@@ -374,7 +375,7 @@ pub fn talkgroup_meta_map(
                     alpha_tag: ch.alpha_tag.clone(),
                     tag: ch.tag.clone(),
                     group: ch.group.clone(),
-                    priority: Some(ch.priority),
+                    priority: Some(ch.priority.unwrap_or(0)),
                 },
             );
         }
@@ -415,17 +416,11 @@ pub struct TrunkRecorder {
     source_freq_corrections_hz: Vec<f64>,
     clock: clock::Clock,
     /// Conventional channels whose calls the [`CallManager`] creates when
-    /// it starts.
-    pending_conventional_calls: Vec<PendingConventionalCall>,
+    /// it starts: (system, channel index).
+    pending_conventional_calls: Vec<(i32, usize)>,
     /// Shared snapshot of conventional-channel metrics, updated on the
     /// monitor thread and read by OTel observable callbacks.
     conv_metrics: Arc<Mutex<ConventionalMetricsSnapshot>>,
-}
-
-struct PendingConventionalCall {
-    sys_num: i32,
-    channel_idx: usize,
-    source_idx: i32,
 }
 
 impl TrunkRecorderBuilder {
@@ -437,6 +432,21 @@ impl TrunkRecorderBuilder {
     /// Returns an error if an SDR source fails to open or system setup fails.
     pub fn from_config(config: &Config, bridge: Arc<EventBridge>) -> anyhow::Result<Self> {
         let rec = config.recorder.as_ref();
+        if let Some(src) = config
+            .source
+            .iter()
+            .find(|s| s.digital_recorders.is_some() || s.analog_recorders.is_some())
+        {
+            anyhow::bail!(
+                "source '{}': digital_recorders and analog_recorders are gone: channels are \
+                 shared by every source; set [recorder] max_channels instead (trunk-solver \
+                 sizes it)",
+                src.device
+            );
+        }
+        let max_channels = rec
+            .and_then(|r| r.max_channels)
+            .context("set [recorder] max_channels: how many channels may be open at once")?;
         let pending = Arc::new(AtomicUsize::new(0));
         let (event_tx, event_rx) = tokio::sync::mpsc::channel(256);
         let events = EventSender::new(event_tx, Arc::clone(&pending));
@@ -568,8 +578,6 @@ impl TrunkRecorderBuilder {
                     rate_hz: rate,
                     stream,
                     running,
-                    digital_recorders: src.digital_recorders,
-                    analog_recorders: src.analog_recorders,
                     signal_detector_threshold: src.signal_detector_threshold,
                 })
                 .with_context(|| format!("starting source '{}'", src.device))?;
@@ -586,31 +594,31 @@ impl TrunkRecorderBuilder {
         systems.sort_by_key(|(name, _)| name.as_str());
         let mut system_policies = HashMap::new();
         for (sys_idx, (short_name, sys)) in (0i32..).zip(systems) {
-            let kind = match sys.system_type {
-                SystemType::P25 => SystemKind::P25,
-                SystemType::Conventional => SystemKind::Conventional,
-                SystemType::ConventionalP25 => SystemKind::ConventionalP25,
-                SystemType::Smartnet
-                | SystemType::ConventionalDMR
-                | SystemType::ConventionalSigmf => {
-                    anyhow::bail!(
-                        "system '{short_name}': {:?} is not supported by the Rust radio (see beads trunk-oxide-a2m and trunk-oxide-map)",
-                        sys.system_type
-                    )
-                }
-            };
+            if !matches!(
+                sys.system_type,
+                SystemType::P25 | SystemType::Conventional | SystemType::ConventionalP25
+            ) {
+                anyhow::bail!(
+                    "system '{short_name}': {:?} is not supported by the Rust radio (see beads trunk-oxide-a2m and trunk-oxide-map)",
+                    sys.system_type
+                );
+            }
             radio.add_system(SystemSetup {
                 sys_num: sys_idx,
                 short_name: short_name.clone(),
-                kind,
                 qpsk: sys.modulation == Modulation::Qpsk,
-                control_channels: sys.control_channels.clone(),
                 max_dev: sys.max_dev,
                 analog_levels: sys.analog_levels,
                 digital_levels: sys.digital_levels,
+                nac: sys.nac,
+                sys_id: sys.sys_id,
+                wacn: sys.wacn,
             })?;
 
-            // Build recording policy for this system
+            // How each kind of call is opened: chosen here, once.
+            let p25 = Recipe::<P25Voice>::opener(Keying::Trunked);
+            let analog = Recipe::<AnalogFm>::opener(AnalogParams::default());
+            let default_priority = Priority::or_unset(sys.default_priority);
             let talkgroups = sys
                 .talkgroup
                 .iter()
@@ -619,8 +627,13 @@ impl TrunkRecorderBuilder {
                         Talkgroup(tg.id),
                         TalkgroupPolicy {
                             mode: tg.mode,
-                            priority: tg.priority,
+                            priority: tg.priority.map_or(default_priority, Priority).0,
                             preferred_nac: tg.preferred_nac,
+                            recipe: Arc::clone(if tg.mode == trunk_config::TalkgroupMode::Analog {
+                                &analog
+                            } else {
+                                &p25
+                            }),
                         },
                     )
                 })
@@ -630,24 +643,36 @@ impl TrunkRecorderBuilder {
                 .channel
                 .iter()
                 .map(|ch| {
-                    let is_analog = sys.system_type == SystemType::Conventional;
-                    let priority = sys
-                        .talkgroup
-                        .iter()
-                        .find(|tg| tg.id == ch.id)
-                        .map_or(0, |tg| tg.priority);
+                    let squelch_db = ch.squelch_db.unwrap_or(sys.squelch);
+                    let recipe = if sys.system_type == SystemType::Conventional {
+                        let params = AnalogParams::with_tone_hz(ch.tone);
+                        if ch.tone > 0.0 && params.tone.is_none() {
+                            tracing::warn!(
+                                system = %short_name, channel = ch.id, tone_hz = ch.tone,
+                                "not a CTCSS tone; the channel is gated without one"
+                            );
+                        }
+                        Recipe::<AnalogFm>::opener(params)
+                    } else {
+                        Recipe::<P25Voice>::opener(Keying::Carrier { squelch_db })
+                    };
+                    let row = sys.talkgroup.iter().find(|tg| tg.id == ch.id);
                     ConventionalChannel {
                         talkgroup: Talkgroup(ch.id),
                         freq: Freq::from_hz(ch.freq),
-                        is_analog,
-                        priority,
+                        priority: ch
+                            .priority
+                            .or_else(|| row.and_then(|tg| tg.priority))
+                            .map_or(default_priority, Priority),
                         signal_detection: ch.signal_detection,
-                        squelch_db: ch.squelch_db.unwrap_or(sys.squelch),
-                        tone: ch.tone,
+                        squelch_db,
+                        recipe,
                     }
                 })
                 .collect();
 
+            let trunked = sys.system_type == SystemType::P25;
+            let default_mode = rec.map_or(DefaultMode::default(), |r| r.default_mode);
             system_policies.insert(
                 sys_idx,
                 SystemPolicy {
@@ -666,6 +691,17 @@ impl TrunkRecorderBuilder {
                         .iter()
                         .map(|&f| Freq::from_hz(f))
                         .collect(),
+                    control_recipe: trunked.then(|| Recipe::<P25Control>::opener(())),
+                    control_priority: Priority(sys.control_channel_priority),
+                    emergency_priority: Priority(sys.emergency_priority),
+                    default_recipe: trunked.then(|| {
+                        if default_mode == DefaultMode::Analog {
+                            Arc::clone(&analog)
+                        } else {
+                            Arc::clone(&p25)
+                        }
+                    }),
+                    default_priority,
                     talkgroups,
                     channels,
                     squelch_db: sys.squelch,
@@ -726,7 +762,7 @@ impl TrunkRecorderBuilder {
             call_timeout: rec.map_or(3.0, |r| r.call_timeout),
             new_call_from_update: rec.is_none_or(|r| r.new_call_from_update),
             record_uu_v_calls: rec.is_none_or(|r| r.record_uu_v_calls),
-            default_mode: rec.map_or(DefaultMode::default(), |r| r.default_mode),
+            max_channels,
             temp_dir,
             systems: system_policies,
             adaptive_freq_correction: rec.is_some_and(|r| r.adaptive_freq_correction),
@@ -764,12 +800,7 @@ impl TrunkRecorderBuilder {
         for (&sys_num, policy) in systems {
             for (ch_idx, channel) in policy.channels.iter().enumerate() {
                 let freq_hz = channel.freq.as_hz();
-                let Some(source_idx) = self
-                    .source_ranges
-                    .iter()
-                    .position(|r| r.contains(&freq_hz))
-                    .map(|i| i as i32)
-                else {
+                if !self.source_ranges.iter().any(|r| r.contains(&freq_hz)) {
                     tracing::error!(
                         sys_num,
                         freq = freq_hz,
@@ -777,12 +808,8 @@ impl TrunkRecorderBuilder {
                         "no source covers conventional channel frequency"
                     );
                     continue;
-                };
-                pending_conventional_calls.push(PendingConventionalCall {
-                    sys_num,
-                    channel_idx: ch_idx,
-                    source_idx,
-                });
+                }
+                pending_conventional_calls.push((sys_num, ch_idx));
             }
         }
 
@@ -840,12 +867,12 @@ impl TrunkRecorder {
             self.clock.clone(),
         );
 
-        // Create the conventional channels' calls and recorders.
+        // The control channels, then the conventional channels' calls.
+        call_mgr.start();
         let pending_calls = std::mem::take(&mut self.pending_conventional_calls);
-        for pending in pending_calls {
-            let channel =
-                &self.call_mgr_config.systems[&pending.sys_num].channels[pending.channel_idx];
-            call_mgr.add_conventional_call(channel, pending.sys_num, pending.source_idx);
+        for (sys_num, channel_idx) in pending_calls {
+            let channel = &self.call_mgr_config.systems[&sys_num].channels[channel_idx];
+            call_mgr.add_conventional_call(channel, sys_num);
         }
 
         // The same packet decoded by several control channel decoders arrives
@@ -905,11 +932,11 @@ impl TrunkRecorder {
                             }
                         }
                         RadioEvent::Squelch {
-                            recorder_num,
+                            call_id,
                             squelch,
-                            pwr_db,
+                            power_db,
                         } => {
-                            call_mgr.handle_squelch_event(recorder_num, squelch, pwr_db);
+                            call_mgr.handle_squelch_event(call_id, squelch, power_db);
                         }
                         RadioEvent::SourceChange { call_id, src_id } => {
                             call_mgr.handle_source_change(call_id, src_id);
@@ -953,7 +980,7 @@ impl TrunkRecorder {
                 _ = status.tick() => {
                     call_mgr.print_status();
                     call_mgr.print_active_patches();
-                    call_mgr.print_recorder_status();
+                    call_mgr.print_channel_status();
                 },
             }
         }

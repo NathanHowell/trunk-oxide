@@ -1,12 +1,13 @@
-//! What trunk-fm's analog recorders report, readable from any thread for
+//! What the analog channels' decoders report, readable from any thread for
 //! the `trunk.oxide.fm.*` metrics. The decoding itself is in
-//! [`crate::recorder`].
+//! [`crate::analog`].
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use trunk_fm::Tone;
 use trunk_fm::gate::{CloseReason, Event};
+
+use crate::registry::{Entry, Registry};
 
 /// Which channel a decoder serves.
 #[derive(Clone, Debug, PartialEq)]
@@ -47,56 +48,30 @@ pub struct AnalogReport {
 }
 
 pub(crate) struct Shared {
-    channel: Mutex<AnalogChannel>,
-    tone: Mutex<Option<Tone>>,
+    channel: AnalogChannel,
+    tone: Option<Tone>,
     stats: Mutex<AnalogStats>,
-    /// Blocks processed, for liveness.
-    blocks: AtomicU64,
 }
 
-static REGISTRY: Mutex<Vec<Weak<Shared>>> = Mutex::new(Vec::new());
+static REGISTRY: Registry<Shared> = Registry::new();
 
-/// Counters of every running analog decoder.
-pub fn analog_channels() -> Vec<AnalogReport> {
-    let mut reg = REGISTRY.lock().unwrap_or_else(PoisonError::into_inner);
-    reg.retain(|w| w.strong_count() > 0);
-    reg.iter()
-        .filter_map(Weak::upgrade)
-        .map(|s| AnalogReport {
-            channel: s
-                .channel
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone(),
-            tone: *s.tone.lock().unwrap_or_else(PoisonError::into_inner),
-            stats: *s.stats.lock().unwrap_or_else(PoisonError::into_inner),
-        })
-        .collect()
+/// Counters of every analog decoder (see [`crate::registry`]).
+pub fn analog_channels() -> Vec<Entry<AnalogReport>> {
+    REGISTRY.read(|s| AnalogReport {
+        channel: s.channel.clone(),
+        tone: s.tone,
+        stats: *s.stats.lock().unwrap_or_else(PoisonError::into_inner),
+    })
 }
 
 impl Shared {
-    pub(crate) fn register(channel: AnalogChannel) -> Arc<Self> {
-        let shared = Arc::new(Self {
-            channel: Mutex::new(channel),
-            tone: Mutex::new(None),
+    /// A decoder of `channel`, gating on `tone`.
+    pub(crate) fn register(channel: AnalogChannel, tone: Option<Tone>) -> Arc<Self> {
+        REGISTRY.register(Self {
+            channel,
+            tone,
             stats: Mutex::new(AnalogStats::default()),
-            blocks: AtomicU64::new(0),
-        });
-        REGISTRY
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(Arc::downgrade(&shared));
-        shared
-    }
-
-    /// A new call on the channel: what it is and the tone it gates on.
-    pub(crate) fn call(&self, system: &str, talkgroup: i64, freq_hz: f64, tone: Option<Tone>) {
-        let mut c = self.channel.lock().unwrap_or_else(PoisonError::into_inner);
-        system.clone_into(&mut c.system);
-        c.talkgroup = talkgroup;
-        c.freq_hz = freq_hz;
-        drop(c);
-        *self.tone.lock().unwrap_or_else(PoisonError::into_inner) = tone;
+        })
     }
 
     /// Count a block's hops and events, and keep its last measurement.
@@ -107,7 +82,6 @@ impl Shared {
         events: &[Event],
         cfg: &trunk_fm::gate::Config,
     ) {
-        self.blocks.fetch_add(1, Ordering::Relaxed);
         let Some(last) = measurements.last() else {
             return;
         };

@@ -8,8 +8,8 @@ use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Gauge, Meter};
 use trunk_radio::fm::{AnalogReport, AnalogStats, analog_channels};
 
-/// A decoder's identity across polls: (source, channelizer port).
-type Key = (i32, u32);
+/// A decoder's identity across polls (see [`trunk_radio::registry`]).
+type Key = u64;
 
 pub struct FmMetrics {
     hops: Counter<u64>,
@@ -61,18 +61,15 @@ impl FmMetrics {
 
     pub fn poll(&mut self) {
         let reports = analog_channels();
-        self.prev.retain(|k, _| {
-            reports
-                .iter()
-                .any(|r| (r.channel.source, r.channel.port) == *k)
-        });
-        for r in &reports {
-            self.export(r);
+        for e in &reports {
+            self.export(e.id, &e.value);
         }
+        self.prev
+            .retain(|k, _| reports.iter().any(|e| e.id == *k && e.live));
     }
 
     #[allow(clippy::cast_possible_truncation)]
-    fn export(&mut self, r: &AnalogReport) {
+    fn export(&mut self, key: Key, r: &AnalogReport) {
         let base = [
             KeyValue::new("system", r.channel.system.clone()),
             KeyValue::new("talkgroup", r.channel.talkgroup),
@@ -83,7 +80,6 @@ impl FmMetrics {
             a.push(KeyValue::new(k, v));
             a
         };
-        let key = (r.channel.source, r.channel.port);
         let was = self.prev.insert(key, r.stats).unwrap_or_default();
         let now = &r.stats;
         let d = |a: u64, b: u64| a.saturating_sub(b);

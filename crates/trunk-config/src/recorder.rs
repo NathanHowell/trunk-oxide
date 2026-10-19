@@ -85,6 +85,11 @@ pub struct RecorderConfig {
     pub temp_dir: String,
     #[serde(default = "default_call_timeout")]
     pub call_timeout: f64,
+    /// How many channels may be open at once: every control channel,
+    /// trunked call and conventional channel holds one. Required by
+    /// trunk-oxide (trunk-solver sizes it).
+    #[serde(default)]
+    pub max_channels: Option<usize>,
     /// DMR vocodes with op25's software IMBE decoder rather than its
     /// full-rate one. P25 always uses trunk-p25's port of the software one.
     #[serde(default)]

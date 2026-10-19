@@ -1,10 +1,12 @@
 //! P25 voice end to end in trunk-p25: demodulate, decode, assemble the call
 //! ([`trunk_p25::assemble`]), and vocode each frame
-//! ([`trunk_p25::vocoder`]).
+//! ([`trunk_p25::vocoder`]); and [`P25Voice`], the kind of channel it
+//! decodes.
 
 use std::sync::Arc;
 
 use num_complex::Complex32;
+use trunk_channelizer::{ChannelDecoder, ConditioningSpec, NARROW, Reading, SquelchMode};
 use trunk_p25::assemble::{CallCounter, CallEvent, Phase1Assembler, Phase2Assembler, Vocode};
 use trunk_p25::control::Received;
 use trunk_p25::tdma::{BurstContent, Scrambler, TdmaDecoder, op25_view};
@@ -13,8 +15,38 @@ use trunk_p25::voice::signalling::ALGID_CLEAR;
 use trunk_p25::voice::{Encryption, EncryptionTracker, VoiceDecoder, VoiceEvent};
 use trunk_p25::{DemodConfig, Modulation};
 
+use crate::alias;
+use crate::carrier::Carrier;
+use crate::kind::{Cmd, Kind, OpenError, Opening, Tuning};
 use crate::p25::{VoiceShared, packed_encryption, track_encryption};
-use crate::types::{CallCounts, VoiceTag, VoiceTagKind};
+use crate::p25_calls;
+use crate::recording::{Accounting, Tape};
+use crate::types::{CallCounts, CallId, ChannelNum, Decoded, RadioEvent, VoiceTag, VoiceTagKind};
+
+/// Conditioned rate of a P25 slot: 5 × 4800 (phase 1) = 4 × 6000 (phase 2).
+pub const NARROW_RATE: f64 = 24_000.0;
+/// trunk-p25's vocoded audio rate.
+const AUDIO_RATE: f64 = 8_000.0;
+/// Conditioner roll-off, as `channel_control` set it.
+pub(crate) const EXCESS_BW: f32 = 0.2;
+
+/// How a P25 slot of `cfg`'s channelizer is conditioned: 5 samples per
+/// symbol for phase 1 (4800 baud), 4 for phase 2 (6000), and the power
+/// squelch only on a conventional channel (a trunked call has the control
+/// channel to say when it ends).
+pub(crate) fn p25_conditioning(
+    cfg: &trunk_channelizer::Config,
+    phase2: bool,
+    squelch: bool,
+) -> ConditioningSpec {
+    ConditioningSpec {
+        sps: if phase2 { 4 } else { 5 },
+        excess_bw: EXCESS_BW,
+        in_rate: cfg.out_rate(NARROW),
+        out_rate: NARROW_RATE,
+        squelch: squelch.then_some(SquelchMode::DIGITAL),
+    }
+}
 
 /// What a call produced, in order.
 #[derive(Clone, Debug, PartialEq)]
@@ -56,12 +88,12 @@ pub struct VoicePipeline {
 impl VoicePipeline {
     /// `rate`: the conditioned channel rate.
     pub fn new(rate: f64) -> Self {
-        Self::for_recorder(rate, -1)
+        Self::for_channel(rate, None)
     }
 
-    /// For recorder `recorder`, whose decoder counters it reports
+    /// For channel `channel`, whose decoder counters it reports
     /// ([`crate::p25::voice_channels`]).
-    pub fn for_recorder(rate: f64, recorder: i32) -> Self {
+    pub fn for_channel(rate: f64, channel: Option<ChannelNum>) -> Self {
         Self {
             rate,
             phase2: false,
@@ -76,7 +108,7 @@ impl VoicePipeline {
             counter: CallCounter::default(),
             crypto: EncryptionTracker::default(),
             crypto_pending: None,
-            shared: VoiceShared::register(recorder),
+            shared: VoiceShared::register(channel),
             repeated: 0,
             muted: 0,
         }
@@ -251,9 +283,9 @@ impl Phase2State<'_> {
     }
 }
 
-// ── A recorder's voice decoder, as the recorder drives it ──
+// ── A channel's voice decoder ──
 
-/// A recorder's voice decoder: audio out, with the in-band tags at their
+/// A voice channel's decoder: audio out, with the in-band tags at their
 /// sample offsets.
 pub struct P25VoiceHandle {
     pipeline: VoicePipeline,
@@ -264,10 +296,10 @@ pub struct P25VoiceHandle {
 }
 
 impl P25VoiceHandle {
-    /// For recorder `recorder` at the conditioned channel `rate`.
-    pub fn new(rate: f64, recorder: i32) -> Self {
+    /// For channel `channel` at the conditioned channel `rate`.
+    pub fn new(rate: f64, channel: Option<ChannelNum>) -> Self {
         Self {
-            pipeline: VoicePipeline::for_recorder(rate, recorder),
+            pipeline: VoicePipeline::for_channel(rate, channel),
             out: Vec::new(),
             terminated: false,
         }
@@ -357,6 +389,215 @@ impl P25VoiceHandle {
             muted: std::mem::take(&mut self.pipeline.muted),
         }
     }
+}
+
+// ── The kind ──
+
+/// What says when a P25 voice channel's transmission is on.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Keying {
+    /// The control channel: a trunked call.
+    Trunked,
+    /// The carrier, by power squelch at `squelch_db`: a conventional
+    /// channel. Its transitions are reported as [`RadioEvent::Squelch`].
+    Carrier { squelch_db: f64 },
+}
+
+/// P25 voice, phase 1 or (on a slot) phase 2, trunked or conventional.
+#[derive(Debug)]
+pub enum P25Voice {}
+
+impl Kind for P25Voice {
+    type Params = Keying;
+    type Decoder = P25VoiceChannel;
+    const NAME: &'static str = "p25";
+    const PROFILE: trunk_channelizer::ProfileId = NARROW;
+    const AUDIO_RATE: Option<f64> = Some(AUDIO_RATE);
+
+    fn tuning(at: &Opening<'_, Self>) -> Tuning {
+        let squelch_db = match *at.params {
+            Keying::Trunked => None,
+            Keying::Carrier { squelch_db } => Some(squelch_db),
+        };
+        Tuning {
+            conditioning: p25_conditioning(
+                at.channelizer,
+                at.call.channel.slot.is_some(),
+                squelch_db.is_some(),
+            ),
+            filter: None,
+            squelch_db,
+        }
+    }
+
+    fn decoder(at: &Opening<'_, Self>, tape: Tape) -> Result<P25VoiceChannel, OpenError> {
+        let slot = at.call.channel.slot;
+        if slot.is_some() && at.xor_mask.is_empty() {
+            return Err(OpenError::NoScramblingMask);
+        }
+        let mut voice = P25VoiceHandle::new(NARROW_RATE, Some(at.num));
+        voice.start_call(
+            at.system.qpsk,
+            slot.is_some(),
+            at.xor_mask,
+            &at.system.short_name,
+            slot.map_or(0, i32::from),
+        );
+        Ok(P25VoiceChannel {
+            call: at.call.id,
+            sys_num: at.system.sys_num,
+            num: at.num,
+            voice,
+            tape,
+            audio: Vec::new(),
+            tags: Vec::new(),
+            levels: at.system.digital_levels,
+            source_id: -1,
+            carrier: matches!(at.params, Keying::Carrier { .. }).then(|| Carrier::new(NARROW_RATE)),
+        })
+    }
+
+    fn finished(recording: &Accounting) {
+        p25_calls::observe_call(&recording.report());
+    }
+}
+
+/// Level, then PCM: `k` is the system's `digital_levels`.
+#[allow(clippy::cast_possible_truncation)]
+fn level(s: i16, k: f64) -> i16 {
+    (f64::from(s) * k).round().clamp(-32768.0, 32767.0) as i16
+}
+
+/// A P25 voice channel's decoder, recording one call.
+pub struct P25VoiceChannel {
+    call: CallId,
+    sys_num: i32,
+    num: ChannelNum,
+    voice: P25VoiceHandle,
+    tape: Tape,
+    audio: Vec<i16>,
+    tags: Vec<VoiceTag>,
+    levels: f64,
+    /// The unit talking, as last heard in band or told by the state machine.
+    source_id: i64,
+    /// The transmission detector of a conventional channel.
+    carrier: Option<Carrier>,
+}
+
+impl std::fmt::Debug for P25VoiceChannel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("P25VoiceChannel")
+            .field("call", &self.call)
+            .field("num", &self.num)
+            .finish_non_exhaustive()
+    }
+}
+
+impl ChannelDecoder for P25VoiceChannel {
+    type Output = Decoded;
+    type Command = Cmd;
+
+    fn command(&mut self, cmd: Cmd) {
+        match cmd {
+            Cmd::Source(src) => self.source_id = src,
+        }
+    }
+
+    fn process(&mut self, iq: &[Complex32], reading: &Reading, out: &mut Decoded) {
+        if let Some(squelch) = self
+            .carrier
+            .as_mut()
+            .and_then(|c| c.push(reading.squelch_open, iq.len()))
+        {
+            out.events.push(RadioEvent::Squelch {
+                call_id: self.call,
+                squelch,
+                power_db: (!reading.power_db.is_nan()).then_some(reading.power_db),
+            });
+        }
+        self.audio.clear();
+        self.tags.clear();
+        self.voice.process(iq, &mut self.audio, &mut self.tags);
+        let crypto = self.voice.take_crypto();
+        if crypto != 0 {
+            out.events.push(RadioEvent::Crypto {
+                call_id: self.call,
+                alg_id: (crypto >> 16) & 0xff,
+                key_id: crypto & 0xffff,
+            });
+        }
+        let counts = self.voice.take_call_counts();
+        let Self {
+            call,
+            sys_num,
+            tape,
+            audio,
+            tags,
+            levels,
+            source_id,
+            ..
+        } = self;
+        let pcm = tape.with(|rec| {
+            let acct = &mut rec.acct;
+            acct.counts.errors += counts.errors;
+            acct.counts.spikes += counts.spikes;
+            acct.counts.repeated += counts.repeated;
+            acct.counts.muted += counts.muted;
+            acct.counts.algid = counts.algid;
+            for t in tags.iter() {
+                match t.kind {
+                    VoiceTagKind::Source => {
+                        if t.value > 0 {
+                            if !acct.sources.contains(&t.value) {
+                                acct.sources.push(t.value);
+                            }
+                            if t.value != *source_id {
+                                *source_id = t.value;
+                                out.events.push(RadioEvent::SourceChange {
+                                    call_id: *call,
+                                    src_id: t.value,
+                                });
+                            }
+                        }
+                    }
+                    VoiceTagKind::Terminate => {
+                        acct.term_events += 1;
+                        acct.after_term_samples +=
+                            i64::try_from(audio.len()).unwrap_or(0) - i64::from(t.offset);
+                    }
+                    VoiceTagKind::Alias => {
+                        if let Some(a) = &t.alias
+                            && let Some(alias) = alias::decode(a, *source_id)
+                        {
+                            tracing::info!(
+                                radio_id = alias.radio_id,
+                                alias = %alias.alias,
+                                source = %alias.source,
+                                "new unit alias"
+                            );
+                            out.events.push(RadioEvent::UnitAlias {
+                                sys_num: *sys_num,
+                                alias,
+                            });
+                        }
+                    }
+                    VoiceTagKind::Group => {}
+                }
+            }
+            if audio.is_empty() {
+                return Vec::new();
+            }
+            if (*levels - 1.0).abs() > f64::EPSILON {
+                for s in audio.iter_mut() {
+                    *s = level(*s, *levels);
+                }
+            }
+            rec.deliver(audio)
+        });
+        out.audio(*call, &pcm.unwrap_or_default());
+    }
+
+    fn retune(&mut self) {}
 }
 
 #[cfg(test)]

@@ -11,6 +11,10 @@ rayon = "1"
 rustfft = { workspace = true }
 anyhow = { workspace = true }
 
+[dev-dependencies]
+rand.workspace = true
+rand_chacha.workspace = true
+
 [features]
 # Comparison-only FFTW backend (unsafe FFI to libfftw3f); used by the bench.
 fftw = []

@@ -72,6 +72,10 @@ fn main() -> Result<()> {
             source.device,
         );
     }
+    println!(
+        "[recorder] max_channels = {}",
+        trunk_solver::solver::max_channels(&channels, &sources)
+    );
 
     Ok(())
 }

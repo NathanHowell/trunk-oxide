@@ -5,17 +5,8 @@ use num_complex::{Complex32, Complex64};
 use super::*;
 use crate::config::{NARROW, WIDE};
 
-/// Deterministic LCG in [-1, 1).
-struct Rng(u64);
-impl Rng {
-    fn next(&mut self) -> f64 {
-        self.0 = self
-            .0
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        ((self.0 >> 11) as f64 / (1u64 << 53) as f64) * 2.0 - 1.0
-    }
-}
+use rand::{Rng as _, SeedableRng as _};
+use rand_chacha::ChaCha8Rng;
 
 struct Tone {
     off_hz: f64, // relative to the channel centre
@@ -272,9 +263,14 @@ fn parallel_matches_serial() {
     let mut par = serial.clone();
     par.threads = 3;
     let hop = serial.hop();
-    let mut rng = Rng(7);
+    let mut rng = ChaCha8Rng::seed_from_u64(7);
     let input: Vec<Complex32> = (0..hop * 4)
-        .map(|_| Complex32::new(rng.next() as f32, rng.next() as f32))
+        .map(|_| {
+            Complex32::new(
+                rng.random_range(-1.0f32..1.0),
+                rng.random_range(-1.0f32..1.0),
+            )
+        })
         .collect();
     let mut a = Channelizer::new(serial).unwrap();
     let mut b = Channelizer::new(par).unwrap();
@@ -421,9 +417,14 @@ fn rejects_filters_that_do_not_fit() {
 fn mixed_profiles_do_not_interact() {
     let cfg = Config::standard(1_872_000.0).unwrap();
     let hop = cfg.hop();
-    let mut rng = Rng(11);
+    let mut rng = ChaCha8Rng::seed_from_u64(11);
     let input: Vec<Complex32> = (0..hop * 5)
-        .map(|_| Complex32::new(rng.next() as f32, rng.next() as f32))
+        .map(|_| {
+            Complex32::new(
+                rng.random_range(-1.0f32..1.0),
+                rng.random_range(-1.0f32..1.0),
+            )
+        })
         .collect();
     let chans = [
         (NARROW, -300_000.0),

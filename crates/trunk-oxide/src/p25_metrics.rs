@@ -14,8 +14,8 @@ use trunk_radio::p25::{
 use trunk_radio::p25_calls::{self, CallTally, Phase};
 use trunk_radio::p25_parse::{self, ParseStats};
 
-/// A decoder's identity across polls: (source, channelizer port).
-type Key = (i32, u32);
+/// A decoder's identity across polls (see [`trunk_radio::registry`]).
+type Key = u64;
 
 pub struct P25Metrics {
     tsbk: Counter<u64>,
@@ -125,7 +125,7 @@ struct VoiceMetrics {
     words: Counter<u64>,
     symbol_snr_db: Gauge<f64>,
     /// By recorder and implementation (a recorder can run two).
-    prev: HashMap<i32, VoiceStats>,
+    prev: HashMap<Key, VoiceStats>,
     tdma: TdmaMetrics,
 }
 
@@ -138,7 +138,7 @@ struct TdmaMetrics {
     encryption_sync: Counter<u64>,
     sync: Counter<u64>,
     symbol_snr_db: Gauge<f64>,
-    prev: HashMap<i32, TdmaStats>,
+    prev: HashMap<Key, TdmaStats>,
 }
 
 impl TdmaMetrics {
@@ -177,7 +177,7 @@ impl TdmaMetrics {
         }
     }
 
-    fn export(&mut self, key: i32, base: &[KeyValue], now: &TdmaStats) {
+    fn export(&mut self, key: Key, base: &[KeyValue], now: &TdmaStats) {
         let was = self.prev.insert(key, *now).unwrap_or_default();
         let d = |a: u64, b: u64| a.saturating_sub(b);
         let mac_total = d(now.mac + now.mac_failed, was.mac + was.mac_failed);
@@ -260,17 +260,21 @@ impl VoiceMetrics {
 
     fn poll(&mut self) {
         let reports = trunk_radio::p25::voice_channels();
-        for r in &reports {
-            self.export(r);
+        for e in &reports {
+            self.export(e.id, &e.value);
         }
+        self.prev
+            .retain(|k, _| reports.iter().any(|e| e.id == *k && e.live));
+        self.tdma
+            .prev
+            .retain(|k, _| reports.iter().any(|e| e.id == *k && e.live));
     }
 
-    fn export(&mut self, r: &VoiceChannelReport) {
+    fn export(&mut self, key: Key, r: &VoiceChannelReport) {
         let base = [
-            KeyValue::new("recorder", i64::from(r.recorder)),
+            KeyValue::new("channel", r.channel.map_or(-1, |c| i64::from(c.0))),
             KeyValue::new("system", r.system.clone()),
         ];
-        let key = r.recorder;
         let was = self.prev.insert(key, r.stats).unwrap_or_default();
         let now = &r.stats;
         let d = |a: u64, b: u64| a.saturating_sub(b);
@@ -504,23 +508,19 @@ impl P25Metrics {
         self.calls.poll();
         self.parser.poll();
         let reports = trunk_radio::p25::control_channels();
-        self.prev.retain(|k, _| {
-            reports
-                .iter()
-                .any(|r| (r.channel.source, r.channel.port) == *k)
-        });
-        for r in &reports {
-            self.export(r);
+        for e in &reports {
+            self.export(e.id, &e.value);
         }
+        self.prev
+            .retain(|k, _| reports.iter().any(|e| e.id == *k && e.live));
     }
 
     #[allow(clippy::cast_possible_truncation)]
-    fn export(&mut self, r: &ControlChannelReport) {
+    fn export(&mut self, key: Key, r: &ControlChannelReport) {
         let base = [
             KeyValue::new("system", r.channel.system.clone()),
             KeyValue::new("freq_hz", r.channel.freq_hz as i64),
         ];
-        let key = (r.channel.source, r.channel.port);
         let (prev, prev_dropped) = self
             .prev
             .insert(key, (r.stats, r.dropped))

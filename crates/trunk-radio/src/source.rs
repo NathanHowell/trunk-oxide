@@ -9,13 +9,11 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use num_complex::Complex32;
-use trunk_channelizer::{ConditioningSettings, DetectorConfig, NARROW};
-use trunk_p25::Modulation;
+use trunk_channelizer::{ConditioningSettings, DetectorConfig, NARROW, ProfileId};
 use trunk_sdr::{Running, Stream};
 
 use crate::ChannelizerStats;
-use crate::p25::{ControlChannel, ControlSlot};
-use crate::recorder::{Chz, NARROW_RATE, p25_conditioning};
+use crate::kind::Chz;
 use crate::types::{AudioSink, Decoded, DetectedSignal, EventSender, RadioEvent};
 
 /// How long a block read waits before the thread checks for a stop.
@@ -205,16 +203,16 @@ impl Source {
         })
     }
 
-    /// The next free channelizer slot.
+    /// A channelizer slot no one has used.
     pub const fn alloc_port(&mut self) -> usize {
         let p = self.next_port;
         self.next_port += 1;
         p
     }
 
-    /// Whether the channelizer can carry analog (wide) channels at this rate.
-    pub fn has_wide(&self) -> bool {
-        self.channelizer.config().profiles.len() > 1
+    /// Whether the channelizer can carry `profile` channels at this rate.
+    pub fn offers(&self, profile: ProfileId) -> bool {
+        profile < self.channelizer.config().profiles.len()
     }
 
     pub fn covers(&self, freq_hz: f64) -> bool {
@@ -236,43 +234,6 @@ impl Source {
             threshold_db: self.detector_threshold,
             ..DetectorConfig::default()
         }));
-    }
-
-    /// Decode a P25 control channel at `freq_hz` for system `sys_num` on a
-    /// new slot; with a `tap_base`, every message is written to
-    /// `<tap_base>.msgs.jsonl`. Returns the slot.
-    pub fn add_control_channel(
-        &mut self,
-        freq_hz: f64,
-        modulation: Modulation,
-        sys_num: i32,
-        system: &str,
-        tap_base: &str,
-    ) -> usize {
-        let port = self.alloc_port();
-        self.channelizer.set_slot_conditioning(
-            port,
-            p25_conditioning(self.channelizer.config(), false, false),
-        );
-        let channel = ControlChannel {
-            system: system.to_owned(),
-            freq_hz,
-            source: self.idx,
-            port: u32::try_from(port).unwrap_or(u32::MAX),
-        };
-        let slot = ControlSlot::new(channel, modulation, NARROW_RATE, sys_num, tap_base);
-        self.channelizer
-            .set_slot_decoder(port, Some(Box::new(slot)));
-        self.channelizer
-            .set_slot(port, NARROW, freq_hz - self.center_hz);
-        port
-    }
-
-    /// Retune a control channel's slot (its decoder resets itself on a
-    /// real jump).
-    pub fn tune_control_channel(&self, port: usize, freq_hz: f64) {
-        self.channelizer
-            .set_slot(port, NARROW, freq_hz - self.center_hz);
     }
 
     /// True if samples flowed since the last call.

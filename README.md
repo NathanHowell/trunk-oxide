@@ -25,6 +25,7 @@ Example `config.toml` for trunk-oxide:
 temp_dir = "/dev/shm"
 call_timeout = 3.0
 soft_vocoder = true
+max_channels = 8       # channels open at once, across every source (see below)
 
 [[source]]
 driver = "rtlsdr"      # an RTL-SDR, opened with librtlsdr ("iqfile" replays a capture)
@@ -32,13 +33,15 @@ device = "rtl=00000001" # the dongle's USB serial
 center = 771496500.0
 rate = 2496000.0
 gain = 40.0
-digital_recorders = 6
 
 [system.smco]
 type = "p25"
 control_channels = [772031250.0, 772406250.0]
 modulation = "qpsk"
 talkgroup_file = "smco-talkgroups.csv"
+# control_channel_priority = 0   # the control channels' claim (default 0)
+# emergency_priority = 0         # an emergency's claim, if better than its talkgroup's
+# default_priority = 4           # talkgroups without one (default: after every listed one)
 
 [system.conv]
 type = "conventional"
@@ -49,7 +52,11 @@ channel_file = "conventional-channels.csv"
 listen_path = "/run/service/grpc.sock"
 ```
 
-Supported system types: `p25`, `smartnet`, `conventional`, `dmr`.
+Supported system types: `p25`, `conventional`, `conventionalP25` (Smartnet and DMR are not ported yet).
+
+### Channels and priority
+
+Every control channel, trunked call and conventional channel holds one channel while it is open, and there are `max_channels` of them, shared by all sources (`trunk-solver` sizes it). Each claims a channel at a priority, lower numbers first: a talkgroup's from its CSV `Priority` column or TOML overlay, a conventional channel's from its `priority`, a control channel's from `control_channel_priority`. `-1` never records. When every channel is held, a call that outranks a holder evicts it (the holder's call ends as evicted, and Discord marks it); an equal or lower claim waits for one to free, and is admitted when one does. A holder keeps its channel against an equal newcomer.
 
 ## Deployment
 
@@ -96,7 +103,7 @@ RTL-SDR dongles (librtlsdr)        IQ captures (replay)
 trunk-channelizer: shared FFT channelizer per source, one DSP thread each
     |
     v  slot decoders: trunk-p25 (control + voice), trunk-fm (analog)
-trunk-radio: recorder pool, control channels, call handles
+trunk-radio: channels opened per call (P25 voice, analog FM, P25 control)
     |
     v  RadioEvents + audio
 trunk-oxide: call state machine, EventBridge

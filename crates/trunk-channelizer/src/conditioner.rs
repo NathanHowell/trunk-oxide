@@ -498,6 +498,8 @@ impl Conditioner {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rand::{Rng as _, SeedableRng as _};
+    use rand_chacha::ChaCha8Rng;
 
     fn tone(f: f64, rate: f64, n: usize, amp: f32) -> Vec<Complex32> {
         (0..n)
@@ -518,11 +520,8 @@ mod tests {
     fn fll_pulls_a_carrier_offset_toward_zero() {
         // A pure offset carrier has no band-edge asymmetry for the FLL to
         // lock on, so use a modulated one: random QPSK at 4.8 kbaud, 5 sps.
-        let mut s = 12345u64;
-        let mut next = move || {
-            s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
-            (s >> 33) & 3
-        };
+        let mut rng = ChaCha8Rng::seed_from_u64(12345);
+        let mut next = move || rng.random_range(0u64..4);
         let mut sym = Vec::new();
         for _ in 0..8_000 {
             let q = next();
@@ -549,14 +548,13 @@ mod tests {
     fn smartnet_channel_resamples_and_tracks_an_offset() {
         // Smartnet: 3600 baud FSK2, 5 sps (18 kHz) out of a 24 kHz channel.
         let (fin, fout) = (24_000.0, 18_000.0);
-        let mut s = 777u64;
+        let mut rng = ChaCha8Rng::seed_from_u64(777);
         let mut dev = 0.0f64;
         let mut ph = 0.0f64;
         let x: Vec<Complex32> = (0..240_000)
             .map(|i| {
                 if i % 20 == 0 {
-                    s = s.wrapping_mul(6364136223846793005).wrapping_add(1);
-                    dev = if (s >> 40) & 1 == 0 { 700.0 } else { -700.0 };
+                    dev = if rng.random() { 700.0 } else { -700.0 };
                 }
                 ph += TAU * (dev + 250.0) / fin;
                 Complex32::from_polar(0.05, ph as f32)

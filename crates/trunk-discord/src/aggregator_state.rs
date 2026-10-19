@@ -83,12 +83,10 @@ impl FormatEmbed for proto::SetupSourcesEvent {
         for src in &self.sources {
             let _ = writeln!(
                 text,
-                "Source {}: {} @ {:.3} MHz (analog={}, digital={})",
+                "Source {}: {} @ {:.3} MHz",
                 src.src_num,
                 src.driver,
                 src.center_freq / 1_000_000.0,
-                src.analog_recorders,
-                src.digital_recorders
             );
         }
         text

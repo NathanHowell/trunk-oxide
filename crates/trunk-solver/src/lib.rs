@@ -39,6 +39,4 @@ pub struct Source {
     pub driver: String,
     pub device: String,
     pub error: i64,
-    pub analog_recorders: i64,
-    pub digital_recorders: i64,
 }

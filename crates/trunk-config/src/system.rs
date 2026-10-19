@@ -113,6 +113,18 @@ pub struct SystemConfig {
     #[serde(default)]
     pub bandplan_offset: i32,
 
+    // Channel claims (lower wins)
+    /// Its control channels' claim on a channel.
+    #[serde(default)]
+    pub control_channel_priority: i32,
+    /// An emergency call's claim, when better than its talkgroup's.
+    #[serde(default)]
+    pub emergency_priority: i32,
+    /// The claim of talkgroups and channels that set none (unset: after
+    /// every configured one).
+    #[serde(default)]
+    pub default_priority: Option<i32>,
+
     // Filtering
     #[serde(default)]
     pub hide_encrypted: bool,
@@ -249,8 +261,11 @@ pub struct TalkgroupConfig {
     pub tag: String,
     #[serde(default)]
     pub group: String,
+    /// Its calls' claim on a channel (lower wins; -1: never recorded).
+    /// Unset, the system's `default_priority`. Discord also orders
+    /// transcription by it.
     #[serde(default)]
-    pub priority: i32,
+    pub priority: Option<i32>,
     #[serde(default)]
     pub preferred_nac: u64,
 }
@@ -276,12 +291,12 @@ pub struct ChannelConfig {
     pub squelch_db: Option<f64>,
     #[serde(default)]
     pub signal_detection: bool,
-    /// Transcription admission priority (lower = more important; 0 = unset,
-    /// sorts last). Conventional channels carry no CSV priority, so this is set
-    /// via TOML overlay only — important dispatch channels should set it so they
-    /// aren't starved behind trunked traffic at the whisperer.
+    /// The channel's claim on a channel to record on (lower wins), and its
+    /// transcription admission order at Discord. Conventional channels carry
+    /// no CSV priority, so this is set via TOML overlay only; unset, the
+    /// channel's talkgroup row's, else the system's `default_priority`.
     #[serde(default)]
-    pub priority: i32,
+    pub priority: Option<i32>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -386,10 +401,9 @@ pub(crate) fn load_talkgroups_csv(path: &Path) -> Result<HashMap<i64, TalkgroupC
             }
         };
 
-        let priority: i32 = col_priority
+        let priority: Option<i32> = col_priority
             .and_then(|i| record.get(i))
-            .and_then(|s| s.trim().parse().ok())
-            .unwrap_or(0);
+            .and_then(|s| s.trim().parse().ok());
 
         let preferred_nac: u64 = col_preferred_nac
             .and_then(|i| record.get(i))
@@ -433,8 +447,8 @@ fn apply_overlay(tg: &mut TalkgroupConfig, table: &toml::Table) {
         tg.group = v.to_string();
     }
     if let Some(v) = table.get("priority").and_then(toml::Value::as_integer) {
-        // Out-of-range value is a config typo; fall back to unset (0).
-        tg.priority = i32::try_from(v).unwrap_or_default();
+        // An out-of-range value is a config typo: unset.
+        tg.priority = i32::try_from(v).ok();
     }
     if let Some(v) = table.get("preferred_nac").and_then(toml::Value::as_integer) {
         tg.preferred_nac = v.cast_unsigned();
@@ -474,7 +488,7 @@ pub(crate) fn resolve_talkgroups(
             description: String::new(),
             tag: String::new(),
             group: String::new(),
-            priority: 0,
+            priority: None,
             preferred_nac: 0,
         });
 
@@ -564,7 +578,7 @@ pub(crate) fn load_channels_csv(path: &Path) -> Result<HashMap<i64, ChannelConfi
                 group: get(col_category),
                 squelch_db: None,
                 signal_detection: false,
-                priority: 0,
+                priority: None,
             },
         );
     }
@@ -599,10 +613,8 @@ fn apply_channel_overlay(ch: &mut ChannelConfig, table: &toml::Table) {
         ch.signal_detection = v;
     }
     if let Some(v) = table.get("priority").and_then(toml::Value::as_integer) {
-        // Priorities are small (0 = unset, 1 = most important). An out-of-range
-        // value is a config typo; fall back to unset rather than saturating to a
-        // magic sentinel.
-        ch.priority = i32::try_from(v).unwrap_or_default();
+        // An out-of-range value is a config typo: unset.
+        ch.priority = i32::try_from(v).ok();
     }
 }
 
@@ -640,7 +652,7 @@ pub(crate) fn resolve_channels(
             group: String::new(),
             squelch_db: None,
             signal_detection: false,
-            priority: 0,
+            priority: None,
         });
 
         apply_channel_overlay(ch, table);

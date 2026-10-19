@@ -146,6 +146,15 @@ impl SlotStats {
         self.squelch_open.store(r.squelch_open, Ordering::Relaxed);
     }
 
+    /// Back to no reading, no transitions queued.
+    fn forget(&self) {
+        self.record(&Reading::default());
+        self.events
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clear();
+    }
+
     /// Queue a block's squelch transitions for [`Self::next_event`].
     fn record_events(&self, ev: impl Iterator<Item = SquelchEvent>) {
         let mut ev = ev.peekable();
@@ -172,6 +181,10 @@ enum Cmd<O, C> {
         transition_hz: f64,
     },
     Clear {
+        slot: usize,
+    },
+    /// Disable the slot, drop its decoder, forget its filter.
+    Release {
         slot: usize,
     },
     /// Condition the slot's output (or change its samples per symbol).
@@ -396,6 +409,15 @@ impl<O, C: Send> SharedChannelizer<O, C> {
         self.post(Cmd::Clear { slot });
     }
 
+    /// Free `slot` for another consumer: disable it, drop its decoder (on
+    /// the data thread, before the next block) and forget its filter and
+    /// readings. Its conditioner stays, so a consumer that conditions the
+    /// slot alike carries its AGC and FLL on, as a slot that was only
+    /// disabled would.
+    pub fn release_slot(&self, slot: usize) {
+        self.post(Cmd::Release { slot });
+    }
+
     fn post(&self, cmd: Cmd<O, C>) {
         self.mailbox
             .lock()
@@ -607,6 +629,18 @@ impl<O, C: Send> SharedChannelizer<O, C> {
                         ch.remove_channel(id);
                     }
                 }
+                Cmd::Release { slot } => {
+                    if let Some(s) = slots.get_mut(slot) {
+                        if let Some(id) = s.id.take() {
+                            ch.remove_channel(id);
+                        }
+                        s.filter = None;
+                        s.decoder = None;
+                        if let Some((_, _, stats)) = &s.cond {
+                            stats.forget();
+                        }
+                    }
+                }
                 Cmd::Detector(cfg) => {
                     *detector = cfg.map(|c| SignalDetector::new(self.cfg.sample_rate, c));
                 }
@@ -780,6 +814,73 @@ mod tests {
         level(&sc, &mut out, &mut produced);
         assert_eq!(produced[0] as usize, cfg.out_per_block(NARROW));
         assert_eq!(sc.counters().rejected, 0);
+    }
+
+    #[derive(Debug)]
+    struct Count(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+    impl ChannelDecoder for Count {
+        type Output = ();
+        type Command = ();
+        fn process(&mut self, _: &[Complex32], _: &Reading, (): &mut ()) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+        fn retune(&mut self) {}
+    }
+
+    #[test]
+    fn a_released_slot_forgets_its_filter_decoder_and_readings() {
+        let cfg = Config::standard(912_000.0).unwrap();
+        let (hop, stride) = (cfg.hop(), cfg.max_out_per_block());
+        let sc: SharedChannelizer = SharedChannelizer::new(cfg.clone()).unwrap();
+        let mut out = vec![Complex32::ZERO; 2 * stride];
+        let mut produced = [0u32; 2];
+        let blocks = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        // slot 0 plain (its level shows the filter), slot 1 conditioned
+        sc.set_slot_filter(0, 2_000.0, 1_500.0);
+        sc.set_slot(0, NARROW, 50_000.0);
+        sc.set_slot_conditioning(
+            1,
+            ConditioningSpec {
+                sps: 5,
+                excess_bw: 0.2,
+                in_rate: cfg.out_rate(NARROW),
+                out_rate: cfg.out_rate(NARROW),
+                squelch: None,
+            },
+        );
+        sc.set_slot_decoder(1, Some(Box::new(Count(std::sync::Arc::clone(&blocks)))));
+        sc.set_slot(1, NARROW, 50_000.0);
+        // 3.5 kHz off the channels: outside the 2 kHz filter, inside the default
+        let mut blk = 0;
+        let mut level = |sc: &SharedChannelizer, out: &mut [Complex32], produced: &mut [u32]| {
+            sc.process(
+                &tone(&cfg, 53_500.0, blk * hop, hop),
+                out,
+                produced,
+                &mut (),
+            );
+            blk += 1;
+            let n = produced[0] as usize;
+            out[n / 2..n]
+                .iter()
+                .map(|c| f64::from(c.norm()))
+                .sum::<f64>()
+                / (n - n / 2).max(1) as f64
+        };
+        assert!(level(&sc, &mut out, &mut produced) < 1e-3, "filtered");
+        assert_eq!(blocks.load(Ordering::Relaxed), 1);
+        assert!(!sc.slot_power_db(1).is_nan());
+        sc.release_slot(0);
+        sc.release_slot(1);
+        level(&sc, &mut out, &mut produced);
+        assert_eq!(produced, [0, 0], "released: disabled");
+        assert_eq!(blocks.load(Ordering::Relaxed), 1, "released: no decoder");
+        assert!(sc.slot_power_db(1).is_nan(), "released: no reading");
+        sc.set_slot(0, NARROW, 50_000.0);
+        assert!(
+            level(&sc, &mut out, &mut produced) > 0.9,
+            "the next holder gets the default filter"
+        );
     }
 
     #[test]

@@ -11,16 +11,8 @@ use num_complex::Complex32;
 use rustfft::FftPlanner;
 use trunk_channelizer::{Channelizer, Config, NARROW, WIDE};
 
-struct Rng(u64);
-impl Rng {
-    fn next(&mut self) -> f32 {
-        self.0 = self
-            .0
-            .wrapping_mul(6364136223846793005)
-            .wrapping_add(1442695040888963407);
-        ((self.0 >> 40) as f32 / (1u64 << 24) as f32) * 2.0 - 1.0
-    }
-}
+use rand::{Rng as _, SeedableRng as _};
+use rand_chacha::ChaCha8Rng;
 
 fn us(d: Duration) -> f64 {
     d.as_secs_f64() * 1e6
@@ -34,7 +26,7 @@ fn raw_fft_compare(sizes: &[usize]) {
         "N", "fftw_meas us", "rustfft us", "rf/fftw"
     );
     for &n in sizes {
-        let mut rng = Rng(1);
+        let mut rng = ChaCha8Rng::seed_from_u64(1);
         let time = |f: &mut dyn FnMut()| {
             for _ in 0..20 {
                 f();
@@ -54,15 +46,24 @@ fn raw_fft_compare(sizes: &[usize]) {
             use trunk_channelizer::fftw::{AlignedBuf, Direction, Effort, Plan};
             let plan = Plan::new(n, Direction::Forward, Effort::Measure).unwrap();
             let mut buf = AlignedBuf::new(n);
-            buf.iter_mut()
-                .for_each(|c| *c = Complex32::new(rng.next(), rng.next()));
+            buf.iter_mut().for_each(|c| {
+                *c = Complex32::new(
+                    rng.random_range(-1.0f32..1.0),
+                    rng.random_range(-1.0f32..1.0),
+                )
+            });
             time(&mut || plan.execute(&mut buf))
         };
         #[cfg(not(feature = "fftw"))]
         let m = f64::NAN;
         let rf = FftPlanner::<f32>::new().plan_fft_forward(n);
         let mut buf: Vec<Complex32> = (0..n)
-            .map(|_| Complex32::new(rng.next(), rng.next()))
+            .map(|_| {
+                Complex32::new(
+                    rng.random_range(-1.0f32..1.0),
+                    rng.random_range(-1.0f32..1.0),
+                )
+            })
             .collect();
         let mut scratch = vec![Complex32::ZERO; rf.get_inplace_scratch_len()];
         let r = time(&mut || rf.process_with_scratch(black_box(&mut buf), &mut scratch));
@@ -91,9 +92,14 @@ fn run(
         let f = -span / 2.0 + span * (i as f64 + 0.37) / nch as f64;
         ch.add_channel(NARROW, f).unwrap();
     }
-    let mut rng = Rng(42);
+    let mut rng = ChaCha8Rng::seed_from_u64(42);
     let input: Vec<Complex32> = (0..hop)
-        .map(|_| Complex32::new(rng.next(), rng.next()))
+        .map(|_| {
+            Complex32::new(
+                rng.random_range(-1.0f32..1.0),
+                rng.random_range(-1.0f32..1.0),
+            )
+        })
         .collect();
     for _ in 0..20 {
         ch.process_block(&input);
@@ -207,9 +213,14 @@ fn mixed(quick: bool) {
                 ch.add_channel(if i < nn { NARROW } else { WIDE }, f)
                     .unwrap();
             }
-            let mut rng = Rng(42);
+            let mut rng = ChaCha8Rng::seed_from_u64(42);
             let input: Vec<Complex32> = (0..hop)
-                .map(|_| Complex32::new(rng.next(), rng.next()))
+                .map(|_| {
+                    Complex32::new(
+                        rng.random_range(-1.0f32..1.0),
+                        rng.random_range(-1.0f32..1.0),
+                    )
+                })
                 .collect();
             for _ in 0..20 {
                 ch.process_block(&input);

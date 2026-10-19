@@ -223,7 +223,7 @@ device = "rtl=0"
 center = 771226551.0
 rate = 2472000.0
 gain = 36.0
-digital_recorders = 8
+
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         assert_eq!(config.source.len(), 1);
@@ -231,7 +231,7 @@ digital_recorders = 8
         assert_eq!(src.driver, SourceDriver::Osmosdr);
         assert_eq!(src.device, "rtl=0");
         assert!((src.gain - 36.0).abs() < f64::EPSILON);
-        assert_eq!(src.digital_recorders, 8);
+        assert_eq!(src.digital_recorders, None);
     }
 
     #[test]
@@ -263,7 +263,7 @@ priority = 1
         assert_eq!(tg.id, 865);
         assert_eq!(tg.mode, crate::TalkgroupMode::Digital);
         assert_eq!(tg.alpha_tag, "SMC SO Pat 1");
-        assert_eq!(tg.priority, 1);
+        assert_eq!(tg.priority, Some(1));
     }
 
     #[test]
@@ -302,7 +302,7 @@ device = "rtl=0"
 center = 771226551.0
 rate = 2472000.0
 gain = 36.0
-digital_recorders = 8
+
 
 [system.smco]
 type = "p25"
@@ -344,7 +344,7 @@ channel_id = 123456789
         assert_eq!(tg865.alpha_tag, "SMC SO Pat 1");
         assert_eq!(tg865.tag, "Law Dispatch");
         assert_eq!(tg865.group, "County Sheriff");
-        assert_eq!(tg865.priority, 1);
+        assert_eq!(tg865.priority, Some(1));
     }
 
     #[test]
@@ -391,7 +391,7 @@ alpha_tag = "New TG"
 
         // TG 100: priority overridden, other fields from CSV
         let tg100 = sys.talkgroup.iter().find(|t| t.id == 100).unwrap();
-        assert_eq!(tg100.priority, 0); // overridden
+        assert_eq!(tg100.priority, Some(0)); // overridden
         assert_eq!(tg100.alpha_tag, "TG 100"); // from CSV
         assert_eq!(tg100.description, "Test talkgroup 100"); // from CSV
         assert_eq!(tg100.tag, "Law Dispatch"); // from CSV
@@ -401,13 +401,13 @@ alpha_tag = "New TG"
         // TG 200: untouched, all from CSV
         let tg200 = sys.talkgroup.iter().find(|t| t.id == 200).unwrap();
         assert_eq!(tg200.alpha_tag, "TG 200");
-        assert_eq!(tg200.priority, 3);
+        assert_eq!(tg200.priority, Some(3));
 
         // TG 999: new entry from TOML only
         let tg999 = sys.talkgroup.iter().find(|t| t.id == 999).unwrap();
         assert_eq!(tg999.mode, crate::TalkgroupMode::Encrypted);
         assert_eq!(tg999.alpha_tag, "New TG");
-        assert_eq!(tg999.priority, 0); // default
+        assert_eq!(tg999.priority, None); // unset
 
         // Sorted by ID
         let ids: Vec<i64> = sys.talkgroup.iter().map(|t| t.id).collect();
@@ -433,7 +433,7 @@ priority = 1
         assert_eq!(sys.talkgroup.len(), 1);
         assert_eq!(sys.talkgroup[0].id, 42);
         assert_eq!(sys.talkgroup[0].alpha_tag, "Direct TG");
-        assert_eq!(sys.talkgroup[0].priority, 1);
+        assert_eq!(sys.talkgroup[0].priority, Some(1));
     }
 
     #[test]
@@ -464,7 +464,7 @@ talkgroup_file = "talkgroups.csv"
         assert_eq!(sys.talkgroup.len(), 1);
         assert_eq!(sys.talkgroup[0].id, 300);
         assert_eq!(sys.talkgroup[0].alpha_tag, "TG 300");
-        assert_eq!(sys.talkgroup[0].priority, 2);
+        assert_eq!(sys.talkgroup[0].priority, Some(2));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

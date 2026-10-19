@@ -87,17 +87,25 @@ const PANELS: &[PanelSpec] = &[
         }],
     },
     PanelSpec {
-        title: "Recorder load",
-        y_desc: "calls / denials per min",
+        title: "Channel load",
+        y_desc: "channels / calls per min",
         zero_floor: true,
         queries: &[
             QuerySpec {
-                query: "trunk.oxide.active_calls",
-                label: Label::Fixed("active calls"),
+                query: "trunk.oxide.channels_held",
+                label: Label::Fixed("channels held"),
             },
             QuerySpec {
-                query: "sum(rate(trunk.oxide.recorder_denied{short_name!=\"\"}[5m]))*60",
-                label: Label::Fixed("denied/min (no recorder)"),
+                query: "trunk.oxide.channels_waiting",
+                label: Label::Fixed("claims waiting"),
+            },
+            QuerySpec {
+                query: "sum(rate(trunk.oxide.channel_waits{short_name!=\"\"}[5m]))*60",
+                label: Label::Fixed("waited/min"),
+            },
+            QuerySpec {
+                query: "sum(rate(trunk.oxide.channel_evictions{short_name!=\"\"}[5m]))*60",
+                label: Label::Fixed("evicted/min"),
             },
         ],
     },

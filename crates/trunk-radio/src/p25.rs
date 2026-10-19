@@ -1,4 +1,5 @@
-//! P25 control-channel decoders hosted on shared-channelizer slots.
+//! P25 control channels ([`P25Control`]) hosted on shared-channelizer
+//! slots, and the P25 decoders' counters.
 //!
 //! The decoder runs on the channelizer's DSP thread, on the slot's
 //! conditioned output (see [`trunk_channelizer::ChannelDecoder`]), parses
@@ -10,11 +11,11 @@ use std::fmt;
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{LineWriter, Write as _};
-use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use num_complex::Complex32;
-use trunk_channelizer::{ChannelDecoder, Reading};
+use trunk_channelizer::{ChannelDecoder, NARROW, Reading};
 use trunk_p25::voice::{Encryption, EncryptionTracker};
 use trunk_p25::{
     ControlChannelDecoder, DecoderConfig, DemodConfig, Message, Modulation, Nac, Received,
@@ -24,9 +25,57 @@ pub use trunk_p25::DecoderStats;
 pub use trunk_p25::tdma::TdmaStats;
 pub use trunk_p25::voice::VoiceStats;
 
+use crate::kind::{Cmd, Kind, OpenError, Opening, Tuning};
 use crate::p25_parse::P25TrunkParser;
-use crate::recorder::Cmd;
-use crate::types::{Decoded, RadioEvent};
+use crate::p25_voice::{NARROW_RATE, p25_conditioning};
+use crate::recording::Tape;
+use crate::registry::{Entry, Registry};
+use crate::types::{ChannelNum, Decoded, RadioEvent};
+
+/// A P25 control channel: decoded, parsed into trunking messages.
+#[derive(Debug)]
+pub enum P25Control {}
+
+impl Kind for P25Control {
+    type Params = ();
+    type Decoder = ControlSlot;
+    const NAME: &'static str = "p25-control";
+    const PROFILE: trunk_channelizer::ProfileId = NARROW;
+    const AUDIO_RATE: Option<f64> = None;
+
+    fn tuning(at: &Opening<'_, Self>) -> Tuning {
+        Tuning {
+            conditioning: p25_conditioning(at.channelizer, false, false),
+            filter: None,
+            squelch_db: None,
+        }
+    }
+
+    fn decoder(at: &Opening<'_, Self>, _: Tape) -> Result<ControlSlot, OpenError> {
+        let freq_hz = at.call.channel.freq_hz;
+        let modulation = if at.system.qpsk {
+            Modulation::Cqpsk
+        } else {
+            Modulation::C4fm
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let tap_base = at.tap_dir.map_or_else(String::new, |d| {
+            format!("{d}/cc_{}_{}", at.system.short_name, freq_hz as i64)
+        });
+        Ok(ControlSlot::new(
+            ControlChannel {
+                system: at.system.short_name.clone(),
+                freq_hz,
+                source: at.source,
+                port: u32::try_from(at.port).unwrap_or(u32::MAX),
+            },
+            modulation,
+            NARROW_RATE,
+            at.system.sys_num,
+            &tap_base,
+        ))
+    }
+}
 
 /// Which control channel a decoder serves.
 #[derive(Clone, Debug, PartialEq)]
@@ -69,22 +118,16 @@ impl Shared {
     }
 }
 
-/// Every live decoder, for [`control_channels`].
-static REGISTRY: Mutex<Vec<Weak<Shared>>> = Mutex::new(Vec::new());
+static REGISTRY: Registry<Shared> = Registry::new();
 
-/// Counters of every running control-channel decoder.
-pub fn control_channels() -> Vec<ControlChannelReport> {
-    let mut reg = REGISTRY.lock().unwrap_or_else(PoisonError::into_inner);
-    reg.retain(|w| w.strong_count() > 0);
-    reg.iter()
-        .filter_map(Weak::upgrade)
-        .map(|s| s.report())
-        .collect()
+/// Counters of every control-channel decoder (see [`crate::registry`]).
+pub fn control_channels() -> Vec<Entry<ControlChannelReport>> {
+    REGISTRY.read(Shared::report)
 }
 
 /// A control channel on a slot: the decoder, its parser, and the raw
 /// message tap when baselines are being taken.
-pub(crate) struct ControlSlot {
+pub struct ControlSlot {
     decoder: ControlChannelDecoder,
     parser: P25TrunkParser,
     raw: Option<RawLog>,
@@ -117,15 +160,11 @@ impl ControlSlot {
         let raw = (!tap_base.is_empty())
             .then(|| RawLog::open(&format!("{tap_base}.msgs.jsonl")))
             .flatten();
-        let shared = Arc::new(Shared {
+        let shared = REGISTRY.register(Shared {
             channel,
             modulation,
             snapshot: Mutex::new((decoder.stats(), None)),
         });
-        REGISTRY
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(Arc::downgrade(&shared));
         Self {
             decoder,
             parser,
@@ -211,12 +250,13 @@ impl RawLog {
     }
 }
 
-// ── Voice: a decoder per recorder, phase 1 or phase 2 per call ──
+// ── Voice: a decoder per channel, phase 1 or phase 2 ──
 
-/// A recorder's voice decoder counters at one instant.
+/// A voice channel's decoder counters at one instant.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VoiceChannelReport {
-    pub recorder: i32,
+    /// `None` for a decoder outside the radio (tests, tools).
+    pub channel: Option<ChannelNum>,
     /// The system of the call in progress (or last call).
     pub system: String,
     /// Phase 1 calls.
@@ -233,22 +273,17 @@ struct Snapshot {
 }
 
 pub(crate) struct VoiceShared {
-    recorder: i32,
+    channel: Option<ChannelNum>,
     snapshot: Mutex<Snapshot>,
 }
 
 impl VoiceShared {
-    /// A recorder's voice decoder, registered for [`voice_channels`].
-    pub(crate) fn register(recorder: i32) -> Arc<Self> {
-        let shared = Arc::new(Self {
-            recorder,
+    /// A voice decoder, registered for [`voice_channels`].
+    pub(crate) fn register(channel: Option<ChannelNum>) -> Arc<Self> {
+        VOICE_REGISTRY.register(Self {
+            channel,
             snapshot: Mutex::new(Snapshot::default()),
-        });
-        VOICE_REGISTRY
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(Arc::downgrade(&shared));
-        shared
+        })
     }
 
     fn snapshot(&self) -> std::sync::MutexGuard<'_, Snapshot> {
@@ -293,30 +328,19 @@ pub(crate) const fn packed_encryption(e: Option<Encryption>) -> u32 {
     }
 }
 
-static VOICE_REGISTRY: Mutex<Vec<Weak<VoiceShared>>> = Mutex::new(Vec::new());
+static VOICE_REGISTRY: Registry<VoiceShared> = Registry::new();
 
-/// Counters of every recorder's voice regenerator.
-pub fn voice_channels() -> Vec<VoiceChannelReport> {
-    let mut reg = VOICE_REGISTRY
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner);
-    reg.retain(|w| w.strong_count() > 0);
-    reg.iter()
-        .filter_map(Weak::upgrade)
-        .map(|s| {
-            let snap = s
-                .snapshot
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .clone();
-            VoiceChannelReport {
-                recorder: s.recorder,
-                system: snap.system,
-                stats: snap.phase1,
-                tdma: snap.phase2,
-            }
-        })
-        .collect()
+/// Counters of every voice decoder (see [`crate::registry`]).
+pub fn voice_channels() -> Vec<Entry<VoiceChannelReport>> {
+    VOICE_REGISTRY.read(|s| {
+        let snap = s.snapshot().clone();
+        VoiceChannelReport {
+            channel: s.channel,
+            system: snap.system,
+            stats: snap.phase1,
+            tdma: snap.phase2,
+        }
+    })
 }
 
 #[cfg(test)]
@@ -365,17 +389,24 @@ mod tests {
         assert!(sent.len() >= 57, "{}", sent.len());
         assert!(sent.iter().all(|m| m.sys_num == 77 && m.nac == 0x38d));
         assert_eq!(out.audio, Vec::new());
-        let report = control_channels()
-            .into_iter()
-            .find(|r| r.channel == channel())
-            .unwrap();
-        assert_eq!(report.nac, Some(Nac::new(0x38d).unwrap()));
-        assert!(report.stats.tsbk_ok() >= 57);
-        assert_eq!(report.dropped, 0);
+        let mine = || {
+            control_channels()
+                .into_iter()
+                .filter(|e| e.value.channel == channel())
+                .collect::<Vec<_>>()
+        };
+        let report = mine().pop().unwrap();
+        assert!(report.live);
+        assert_eq!(report.value.nac, Some(Nac::new(0x38d).unwrap()));
+        assert!(report.value.stats.tsbk_ok() >= 57);
+        assert_eq!(report.value.dropped, 0);
 
         slot.retune();
         drop(slot);
-        assert!(control_channels().iter().all(|r| r.channel != channel()));
+        let last = mine();
+        assert_eq!(last.len(), 1);
+        assert!(!last[0].live, "reported once more, gone");
+        assert!(mine().is_empty());
     }
 
     #[test]

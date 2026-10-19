@@ -16,7 +16,7 @@ use anyhow::{Context, Result, bail, ensure};
 use num_complex::Complex32;
 use trunk_rtlsdr_sys::{Device, Tuner};
 
-use crate::convert::Lut;
+use crate::convert::{self, Lut};
 use crate::stream::{Producer, Running, Stream};
 
 /// USB transfers in flight and their size, as gr-osmosdr sizes them.
@@ -267,6 +267,7 @@ fn reader(dev: &Device, producer: &Producer, block: usize, stop: &AtomicBool, se
         if transfers <= BUF_SKIP {
             return;
         }
+        producer.count_clipped(convert::clipped(buf));
         let mut off = 0;
         while off < buf.len() {
             let need = (block - cur.len()) * 2;

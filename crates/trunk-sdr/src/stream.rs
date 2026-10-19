@@ -24,6 +24,8 @@ pub struct StreamStats {
     pub drops: u64,
     /// USB transfers received.
     pub transfers: u64,
+    /// Samples the ADC clipped (a component on its rail).
+    pub clipped: u64,
     /// The reader is still delivering.
     pub running: bool,
 }
@@ -51,6 +53,7 @@ pub(crate) struct Inner {
     dropped: AtomicU64,
     drops: AtomicU64,
     transfers: AtomicU64,
+    clipped: AtomicU64,
 }
 
 static REGISTRY: Mutex<Vec<Weak<Inner>>> = Mutex::new(Vec::new());
@@ -72,6 +75,7 @@ impl Inner {
             dropped: self.dropped.load(Ordering::Relaxed),
             drops: self.drops.load(Ordering::Relaxed),
             transfers: self.transfers.load(Ordering::Relaxed),
+            clipped: self.clipped.load(Ordering::Relaxed),
             running: !self.ended.load(Ordering::Relaxed),
         }
     }
@@ -151,6 +155,10 @@ impl Producer {
         self.inner.transfers.fetch_add(1, Ordering::Relaxed);
     }
 
+    pub fn count_clipped(&self, n: u64) {
+        self.inner.clipped.fetch_add(n, Ordering::Relaxed);
+    }
+
     /// No more blocks will come; readers drain what is queued and then see 0.
     pub fn end(&self) {
         self.inner.ended.store(true, Ordering::SeqCst);
@@ -198,6 +206,7 @@ impl Stream {
             dropped: AtomicU64::new(0),
             drops: AtomicU64::new(0),
             transfers: AtomicU64::new(0),
+            clipped: AtomicU64::new(0),
         });
         REGISTRY
             .lock()

@@ -189,6 +189,7 @@ pub struct CallManager {
     src_samples: Counter<u64>,
     src_dropped: Counter<u64>,
     src_drops: Counter<u64>,
+    src_clipped: Counter<u64>,
     src_streaming: Gauge<u64>,
     /// Stream counters at the previous poll, by device serial.
     src_prev: HashMap<String, trunk_sdr::StreamStats>,
@@ -390,6 +391,12 @@ impl CallManager {
             src_drops: meter
                 .u64_counter("trunk.oxide.source.drops")
                 .with_description("Times an SDR stream dropped a block")
+                .build(),
+            src_clipped: meter
+                .u64_counter("trunk.oxide.source.clipped_samples")
+                .with_description(
+                    "Samples the SDR's ADC clipped (I or Q on its rail): front-end overload",
+                )
                 .build(),
             src_streaming: meter
                 .u64_gauge("trunk.oxide.source.streaming")
@@ -1024,6 +1031,8 @@ impl CallManager {
                 .add(now.dropped.saturating_sub(was.dropped), &attrs);
             self.src_drops
                 .add(now.drops.saturating_sub(was.drops), &attrs);
+            self.src_clipped
+                .add(now.clipped.saturating_sub(was.clipped), &attrs);
             self.src_streaming.record(u64::from(now.running), &attrs);
         }
     }

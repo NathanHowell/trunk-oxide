@@ -26,8 +26,8 @@ use crate::fm;
 use crate::p25_calls;
 use crate::p25_voice::P25VoiceHandle;
 use crate::types::{
-    CallCounts, Decoded, RadioEvent, RecorderState, Squelch, TrCallReport, TrRecorderConfig,
-    TrStopRecordingResult, TrTransmission, VoiceTagKind,
+    CallCounts, CallId, Decoded, RadioEvent, RecorderState, Squelch, TrCallReport,
+    TrRecorderConfig, TrStopRecordingResult, TrTransmission, VoiceTagKind,
 };
 
 /// The channelizer as the recorders use it.
@@ -75,7 +75,7 @@ pub struct SystemParams {
 /// A call's start, as the decoder receives it.
 #[derive(Clone, Debug)]
 pub struct Start {
-    rust_call_id: u64,
+    call_id: CallId,
     sys_num: i32,
     system: String,
     talkgroup: i64,
@@ -204,7 +204,7 @@ impl Accounting {
 /// accounting and finishes it. `None` between calls.
 #[derive(Clone, Debug, PartialEq)]
 struct Recording {
-    call_id: u64,
+    call_id: CallId,
     acct: Accounting,
     hold: Hold,
 }
@@ -212,7 +212,7 @@ struct Recording {
 impl Recording {
     fn new(s: &Start, rate: f64) -> Self {
         Self {
-            call_id: s.rust_call_id,
+            call_id: s.call_id,
             acct: Accounting::new(&s.system, s.talkgroup, s.freq, s.phase2),
             hold: Hold::new(rate),
         }
@@ -221,7 +221,7 @@ impl Recording {
     /// Account for `audio` of call `call_id` and return what of it goes
     /// out (see [`Hold::push`]). Audio of any other call (over, or not yet
     /// started) is dropped.
-    fn deliver(&mut self, call_id: u64, audio: &[i16]) -> Vec<i16> {
+    fn deliver(&mut self, call_id: CallId, audio: &[i16]) -> Vec<i16> {
         if call_id != self.call_id || self.acct.state == RecorderState::Available {
             return Vec::new();
         }
@@ -329,7 +329,7 @@ impl ChannelDecoder for P25Slot {
         let crypto = self.voice.take_crypto();
         if crypto != 0 {
             out.events.push(RadioEvent::Crypto {
-                rust_call_id: call.rust_call_id,
+                call_id: call.call_id,
                 alg_id: (crypto >> 16) & 0xff,
                 key_id: crypto & 0xffff,
             });
@@ -352,7 +352,7 @@ impl ChannelDecoder for P25Slot {
                         if t.value != self.source_id {
                             self.source_id = t.value;
                             out.events.push(RadioEvent::SourceChange {
-                                rust_call_id: call.rust_call_id,
+                                call_id: call.call_id,
                                 src_id: t.value,
                             });
                         }
@@ -388,9 +388,9 @@ impl ChannelDecoder for P25Slot {
                     *s = level_i16(*s, self.levels);
                 }
             }
-            let pcm = rec.deliver(call.rust_call_id, &self.audio);
+            let pcm = rec.deliver(call.call_id, &self.audio);
             drop(guard);
-            out.audio(call.rust_call_id, &pcm);
+            out.audio(call.call_id, &pcm);
         }
     }
 
@@ -490,8 +490,8 @@ impl ChannelDecoder for AnalogSlot {
                 .extend(self.gated.iter().map(|&v| level_f32(v, self.levels)));
             let pcm = lock(&self.rec)
                 .as_mut()
-                .map_or_else(Vec::new, |r| r.deliver(call.rust_call_id, &self.pcm));
-            out.audio(call.rust_call_id, &pcm);
+                .map_or_else(Vec::new, |r| r.deliver(call.call_id, &self.pcm));
+            out.audio(call.call_id, &pcm);
         }
     }
 
@@ -521,7 +521,7 @@ pub struct Recorder {
     /// Tuning of the current (or last) call, relative to the source centre.
     offset_hz: f64,
     /// The call it records, while it does.
-    call: Option<u64>,
+    call: Option<CallId>,
 }
 
 impl std::fmt::Debug for Recorder {
@@ -548,8 +548,7 @@ pub struct Slot<'a> {
 /// the call ends.
 pub struct Stopped {
     pub result: TrStopRecordingResult,
-    pub call: u64,
-    pub tail: Vec<i16>,
+    pub tail: Option<(CallId, Vec<i16>)>,
 }
 
 impl Recorder {
@@ -649,7 +648,7 @@ impl Recorder {
         self.call.is_none()
     }
 
-    pub const fn call(&self) -> Option<u64> {
+    pub const fn call(&self) -> Option<CallId> {
         self.call
     }
 
@@ -700,7 +699,7 @@ impl Recorder {
             .then(|| Tone::from_hz(self.tone_hz as f32))
             .flatten();
         let start = Start {
-            rust_call_id: cfg.rust_call_id,
+            call_id: cfg.call_id,
             sys_num: sys.sys_num,
             system: cfg.short_name.clone(),
             talkgroup: cfg.talkgroup,
@@ -719,7 +718,7 @@ impl Recorder {
         // its next block.
         *lock(&self.rec) = Some(Recording::new(&start, self.audio_rate()));
         self.chz.send(self.port, Cmd::Start(start));
-        self.call = Some(cfg.rust_call_id);
+        self.call = Some(cfg.call_id);
         if self.conventional {
             self.chz.set_slot_squelch_db(self.port, cfg.squelch_db);
         } else {
@@ -738,11 +737,7 @@ impl Recorder {
         };
         let Some(call) = self.call.take() else {
             tracing::error!(rec_num = self.num, "stopping an inactive recorder");
-            return Stopped {
-                result,
-                call: 0,
-                tail: Vec::new(),
-            };
+            return Stopped { result, tail: None };
         };
         self.chz.clear_slot(self.port);
         self.chz.send(self.port, Cmd::Stop);
@@ -754,7 +749,10 @@ impl Recorder {
             p25_calls::observe_call(&rec.acct.report(self.num));
         }
         drop(guard);
-        Stopped { result, call, tail }
+        Stopped {
+            result,
+            tail: Some((call, tail)),
+        }
     }
 
     /// Enable (tune) or disable the slot; conventional recorders are driven
@@ -820,7 +818,7 @@ mod tests {
 
     fn start() -> Start {
         Start {
-            rust_call_id: 1,
+            call_id: CallId(1),
             sys_num: 0,
             system: "s".into(),
             talkgroup: 5,
@@ -839,14 +837,18 @@ mod tests {
         let quiet = vec![40i16; 4000];
         let loud = vec![3000i16; 4000];
         let mut r = Recording::new(&start(), 8_000.0);
-        assert_eq!(r.deliver(2, &loud), Vec::<i16>::new(), "another call");
+        assert_eq!(
+            r.deliver(CallId(2), &loud),
+            Vec::<i16>::new(),
+            "another call"
+        );
         assert_eq!(r.acct.sample_count, 0);
-        assert_eq!(r.deliver(1, &quiet), Vec::<i16>::new(), "held");
+        assert_eq!(r.deliver(CallId(1), &quiet), Vec::<i16>::new(), "held");
         assert_eq!(r.acct.sample_count, 4000, "accounting sees every sample");
-        assert_eq!(r.deliver(1, &loud).len(), 8000, "released");
+        assert_eq!(r.deliver(CallId(1), &loud).len(), 8000, "released");
         assert_eq!(r.finish(), Vec::<i16>::new());
         assert_eq!(r.acct.state, RecorderState::Available);
-        assert_eq!(r.deliver(1, &loud), Vec::<i16>::new(), "over");
+        assert_eq!(r.deliver(CallId(1), &loud), Vec::<i16>::new(), "over");
         assert_eq!(r.acct.sample_count, 8000);
     }
 
@@ -898,7 +900,7 @@ mod tests {
                 xor_mask: vec![],
                 squelch_db: -50.0,
                 digital_levels: 1.0,
-                rust_call_id: 42,
+                call_id: CallId(42),
             },
             &sys
         ));
@@ -950,7 +952,7 @@ mod tests {
                 }
             }
             for (id, pcm) in out.audio.drain(..) {
-                assert_eq!(id, 42);
+                assert_eq!(id, CallId(42));
                 audio += pcm.len();
             }
         }
@@ -969,8 +971,7 @@ mod tests {
         assert_eq!(rec.state(), RecorderState::Recording);
         let s = rec.stop();
         assert!(s.result.has_recorder);
-        assert_eq!(s.call, 42);
-        assert!(s.tail.is_empty());
+        assert_eq!(s.tail, Some((CallId(42), Vec::new())));
         assert_eq!(rec.state(), RecorderState::Available);
         assert!(rec.available());
     }

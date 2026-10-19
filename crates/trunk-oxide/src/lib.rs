@@ -904,18 +904,15 @@ impl TrunkRecorder {
                         } => {
                             call_mgr.handle_squelch_event(recorder_num, squelch, pwr_db);
                         }
-                        RadioEvent::SourceChange {
-                            rust_call_id,
-                            src_id,
-                        } => {
-                            call_mgr.handle_source_change(rust_call_id, src_id);
+                        RadioEvent::SourceChange { call_id, src_id } => {
+                            call_mgr.handle_source_change(call_id, src_id);
                         }
                         RadioEvent::Crypto {
-                            rust_call_id,
+                            call_id,
                             alg_id,
                             key_id,
                         } => {
-                            call_mgr.handle_crypto(rust_call_id, alg_id, key_id);
+                            call_mgr.handle_crypto(call_id, alg_id, key_id);
                         }
                         RadioEvent::SignalsDetected {
                             source_center_freq,

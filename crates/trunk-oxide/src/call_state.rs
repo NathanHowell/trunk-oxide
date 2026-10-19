@@ -133,26 +133,13 @@ const MIN_TRANSMISSION: Duration = Duration::from_millis(700);
 
 // ── Newtypes ──
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct CallId(u64);
+pub(crate) use trunk_radio::CallId;
 
 static NEXT_CALL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
-impl CallId {
-    pub(crate) fn next() -> Self {
-        Self(NEXT_CALL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
-    }
-
-    pub(crate) const fn as_u64(self) -> u64 {
-        self.0
-    }
-
-    /// Reconstruct a `CallId` from the `rust_call_id` round-tripped through C++
-    /// (set via [`Self::as_u64`] at recorder creation, returned on audio/source
-    /// callbacks).
-    pub(crate) const fn from_u64(id: u64) -> Self {
-        Self(id)
-    }
+/// A call id no call has had.
+fn next_call_id() -> CallId {
+    CallId(NEXT_CALL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }
 
 /// Monotonic call number counter, replacing C++'s `Call::call_counter`.
@@ -505,7 +492,7 @@ pub(crate) struct CallEntry {
 impl Default for CallEntry {
     fn default() -> Self {
         Self {
-            id: CallId::next(),
+            id: next_call_id(),
             call_num: next_call_num(),
             talkgroup: 0,
             sys_num: 0,
@@ -713,7 +700,7 @@ pub(crate) enum RecorderPolicy {
     /// Recorder spans the entire call (trunked per-speaker boundary). The cut is
     /// a *logical* boundary: the recorder keeps running, audio is continuous,
     /// the source is re-routed, and the next transmission opens eagerly on the
-    /// same recorder (`rust_call_id` unchanged → audio routing + Discord
+    /// same recorder (`CallId` unchanged → audio routing + Discord
     /// coalescing carry across).
     Span { source_id: i64 },
     /// As [`Self::Span`], cut at a new key-up the control channel granted.
@@ -1452,7 +1439,7 @@ impl TrunkStateMachine {
     }
 
     /// Record the P25 encryption parameters (ESS `ALGID` / `KeyID`) decoded by
-    /// op25 on the voice channel (carried as `rust_call_id` → [`CallId`]). The
+    /// op25 on the voice channel (keyed by its [`CallId`]). The
     /// ESS is authoritative, so this also marks the call encrypted. Unknown
     /// calls are ignored.
     pub(crate) fn on_crypto(&mut self, call_id: CallId, alg_id: u8, key_id: u16) {
@@ -1482,12 +1469,12 @@ impl TrunkStateMachine {
     }
 
     /// Handle an in-band source (unit) change decoded by op25 on the voice
-    /// channel (carried as `rust_call_id` → [`CallId`]). Unlike the
+    /// channel (keyed by its [`CallId`]). Unlike the
     /// control-channel source updates in [`Self::update_call_source_entry`],
     /// this cuts a real per-speaker **transmission boundary** so each unit's
     /// audio becomes its own CallStart/CallEnd pair — the same model as a
     /// conventional keyed transmission, but on a continuously-running recorder
-    /// (no stop/retune; `rust_call_id` is unchanged so audio routing and Discord
+    /// (no stop/retune; the [`CallId`] is unchanged so audio routing and Discord
     /// coalescing carry across the boundary).
     /// The voice channel ended a transmission on `call_id` (a terminator):
     /// the next grant for it is a new key-up.
@@ -2612,7 +2599,7 @@ mod tests {
         assert_eq!(sm.calls[0].key_id, Some(0x1234));
 
         // Unknown call ids are ignored.
-        sm.on_crypto(CallId::from_u64(u64::MAX), 0xAA, 1);
+        sm.on_crypto(CallId(u64::MAX), 0xAA, 1);
         assert_eq!(sm.calls[0].alg_id, Some(0x84));
         assert_eq!(sm.alg_id_for(call_id), Some(0x84));
 

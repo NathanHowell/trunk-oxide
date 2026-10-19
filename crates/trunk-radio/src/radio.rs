@@ -13,7 +13,7 @@ use trunk_sdr::{Running, Stream};
 use crate::recorder::{DB_UNSET, Kind, Recorder, Slot, SystemParams};
 use crate::source::Source;
 use crate::types::{
-    AudioSink, EventSender, TrChannelConfig, TrRecorderConfig, TrRecorderStatus,
+    AudioSink, CallId, EventSender, TrChannelConfig, TrRecorderConfig, TrRecorderStatus,
     TrStopRecordingResult, TrTransmission,
 };
 
@@ -89,7 +89,7 @@ struct Inner {
     sources: Vec<Source>,
     systems: Vec<System>,
     recorders: Vec<Recorder>,
-    calls: HashMap<u64, Call>,
+    calls: HashMap<CallId, Call>,
 }
 
 pub struct Radio {
@@ -339,7 +339,7 @@ impl Radio {
     // ── Calls ──
 
     /// A trunked call, with no recorder yet.
-    pub fn create_call(&self, call_id: u64, sys_num: i32) {
+    pub fn create_call(&self, call_id: CallId, sys_num: i32) {
         self.lock().calls.insert(
             call_id,
             Call {
@@ -386,13 +386,13 @@ impl Radio {
     }
 
     /// Bind a conventional call to the recorder made for its channel.
-    pub fn bind_conventional_call(&self, call_id: u64, sys_num: i32, rec_num: i32) {
+    pub fn bind_conventional_call(&self, call_id: CallId, sys_num: i32, rec_num: i32) {
         let mut i = self.lock();
         let recorder = i.recorders.iter().position(|r| r.num == rec_num);
         i.calls.insert(call_id, Call { sys_num, recorder });
     }
 
-    pub fn remove_call(&self, call_id: u64) {
+    pub fn remove_call(&self, call_id: CallId) {
         self.lock().calls.remove(&call_id);
     }
 
@@ -418,7 +418,7 @@ impl Radio {
     pub fn start_recording(
         &self,
         source_idx: i32,
-        call_id: u64,
+        call_id: CallId,
         analog: bool,
         cfg: &TrRecorderConfig,
     ) -> Option<i32> {
@@ -449,34 +449,36 @@ impl Radio {
     /// the call before the state machine ends it.
     fn stop_recorder(&self, rec: &mut Recorder) -> TrStopRecordingResult {
         let s = rec.stop();
-        if !s.tail.is_empty() {
-            self.sink.audio(s.call, &s.tail);
+        if let Some((call, tail)) = &s.tail
+            && !tail.is_empty()
+        {
+            self.sink.audio(*call, tail);
         }
         s.result
     }
 
     /// The recorder recording `call_id`, if one is bound to it.
-    fn bound(i: &Inner, call_id: u64) -> Option<usize> {
+    fn bound(i: &Inner, call_id: CallId) -> Option<usize> {
         i.calls.get(&call_id)?.recorder
     }
 
     /// The call is known to the radio (created, not yet removed).
-    pub fn has_call(&self, call_id: u64) -> bool {
+    pub fn has_call(&self, call_id: CallId) -> bool {
         self.lock().calls.contains_key(&call_id)
     }
 
-    pub fn has_recorder(&self, call_id: u64) -> bool {
+    pub fn has_recorder(&self, call_id: CallId) -> bool {
         Self::bound(&self.lock(), call_id).is_some()
     }
 
-    pub fn recorder_num(&self, call_id: u64) -> i32 {
+    pub fn recorder_num(&self, call_id: CallId) -> i32 {
         let i = self.lock();
         Self::bound(&i, call_id).map_or(0, |r| i.recorders[r].num)
     }
 
     /// Stop the call's recorder (the binding stays until the call is removed
     /// so its transmission list can still be read).
-    pub fn stop_recording(&self, call_id: u64) -> TrStopRecordingResult {
+    pub fn stop_recording(&self, call_id: CallId) -> TrStopRecordingResult {
         let mut i = self.lock();
         let Some(r) = Self::bound(&i, call_id) else {
             return TrStopRecordingResult::default();
@@ -494,7 +496,7 @@ impl Radio {
         }
     }
 
-    pub fn transmission_list(&self, call_id: u64) -> Vec<TrTransmission> {
+    pub fn transmission_list(&self, call_id: CallId) -> Vec<TrTransmission> {
         let i = self.lock();
         Self::bound(&i, call_id).map_or_else(Vec::new, |r| {
             let rec = &i.recorders[r];
@@ -508,7 +510,7 @@ impl Radio {
 
     /// Start a conventional call's recorder (the first time, and again
     /// after each idle timeout).
-    pub fn restart(&self, call_id: u64, cfg: &TrRecorderConfig) {
+    pub fn restart(&self, call_id: CallId, cfg: &TrRecorderConfig) {
         let mut i = self.lock();
         let Some(r) = Self::bound(&i, call_id) else {
             return;
@@ -529,14 +531,14 @@ impl Radio {
         rec.start(cfg, &params);
     }
 
-    pub fn set_recorder_enabled(&self, call_id: u64, enabled: bool) {
+    pub fn set_recorder_enabled(&self, call_id: CallId, enabled: bool) {
         let i = self.lock();
         if let Some(r) = Self::bound(&i, call_id) {
             i.recorders[r].set_enabled(enabled);
         }
     }
 
-    pub fn set_source(&self, call_id: u64, src: i64) {
+    pub fn set_source(&self, call_id: CallId, src: i64) {
         let i = self.lock();
         if let Some(r) = Self::bound(&i, call_id) {
             i.recorders[r].set_source(src);
@@ -544,17 +546,17 @@ impl Radio {
     }
 
     /// The recorder's channel power (dB; [`DB_UNSET`] without one).
-    pub fn pwr_db(&self, call_id: u64) -> f64 {
+    pub fn pwr_db(&self, call_id: CallId) -> f64 {
         let i = self.lock();
         Self::bound(&i, call_id).map_or(DB_UNSET, |r| i.recorders[r].pwr_db())
     }
 
-    pub fn since_last_write_secs(&self, call_id: u64) -> f64 {
+    pub fn since_last_write_secs(&self, call_id: CallId) -> f64 {
         let i = self.lock();
         Self::bound(&i, call_id).map_or(1e9, |r| i.recorders[r].since_last_write_secs())
     }
 
-    pub fn since_last_voice_secs(&self, call_id: u64) -> f64 {
+    pub fn since_last_voice_secs(&self, call_id: CallId) -> f64 {
         let i = self.lock();
         Self::bound(&i, call_id).map_or(1e9, |r| i.recorders[r].since_last_voice_secs())
     }
@@ -616,7 +618,7 @@ mod tests {
 
     struct NoAudio;
     impl AudioSink for NoAudio {
-        fn audio(&self, _: u64, _: &[i16]) {}
+        fn audio(&self, _: CallId, _: &[i16]) {}
     }
 
     fn radio() -> (Radio, tokio::sync::mpsc::Receiver<RadioEvent>) {
@@ -680,7 +682,7 @@ mod tests {
             .unwrap();
         assert_eq!(radio.available_recorders(0, false), 2);
         assert_eq!(radio.available_recorders(0, true), 1);
-        radio.create_call(11, 0);
+        radio.create_call(CallId(11), 0);
         let cfg = TrRecorderConfig {
             talkgroup: 929,
             call_num: 1,
@@ -692,38 +694,38 @@ mod tests {
             xor_mask: vec![],
             squelch_db: 0.0,
             digital_levels: 1.0,
-            rust_call_id: 11,
+            call_id: CallId(11),
         };
-        let num = radio.start_recording(0, 11, false, &cfg).unwrap();
-        assert_eq!(radio.recorder_num(11), num);
-        assert!(radio.has_recorder(11));
+        let num = radio.start_recording(0, CallId(11), false, &cfg).unwrap();
+        assert_eq!(radio.recorder_num(CallId(11)), num);
+        assert!(radio.has_recorder(CallId(11)));
         assert_eq!(radio.available_recorders(0, false), 1);
         // TDMA without a mask is refused
-        radio.create_call(12, 0);
+        radio.create_call(CallId(12), 0);
         assert!(
             radio
                 .start_recording(
                     0,
-                    12,
+                    CallId(12),
                     false,
                     &TrRecorderConfig {
                         phase2_tdma: true,
-                        rust_call_id: 12,
+                        call_id: CallId(12),
                         ..cfg
                     }
                 )
                 .is_none()
         );
         assert_eq!(radio.available_recorders(0, false), 1);
-        let r = radio.stop_recording(11);
+        let r = radio.stop_recording(CallId(11));
         assert!(r.has_recorder);
         assert_eq!(radio.available_recorders(0, false), 2);
         assert!(
-            radio.transmission_list(11).is_empty(),
+            radio.transmission_list(CallId(11)).is_empty(),
             "no audio was decoded"
         );
-        radio.remove_call(11);
-        assert!(!radio.has_recorder(11));
+        radio.remove_call(CallId(11));
+        assert!(!radio.has_recorder(CallId(11)));
         assert_eq!(radio.current_control_channel(0), 772_031_250.0);
         let status = radio.recorder_status();
         assert_eq!(status.len(), 3);
@@ -756,8 +758,8 @@ mod tests {
             signal_detection: false,
         };
         let num = radio.add_conventional_recorder(0, 0, &ch).unwrap();
-        radio.bind_conventional_call(5, 0, num);
-        assert_eq!(radio.recorder_num(5), num);
+        radio.bind_conventional_call(CallId(5), 0, num);
+        assert_eq!(radio.recorder_num(CallId(5)), num);
         // the pool is untouched
         assert_eq!(radio.available_recorders(0, true), 1);
         let cfg = TrRecorderConfig {
@@ -771,14 +773,14 @@ mod tests {
             xor_mask: vec![],
             squelch_db: -50.0,
             digital_levels: 1.0,
-            rust_call_id: 5,
+            call_id: CallId(5),
         };
-        radio.restart(5, &cfg);
-        radio.set_recorder_enabled(5, true);
-        radio.restart(5, &cfg); // the idle timeout's restart stops and starts
-        assert!(radio.has_recorder(5));
-        assert!(radio.pwr_db(5) >= DB_UNSET || radio.pwr_db(5) < 0.0);
-        assert!(radio.since_last_write_secs(5) < 10.0);
+        radio.restart(CallId(5), &cfg);
+        radio.set_recorder_enabled(CallId(5), true);
+        radio.restart(CallId(5), &cfg); // the idle timeout's restart stops and starts
+        assert!(radio.has_recorder(CallId(5)));
+        assert!(radio.pwr_db(CallId(5)) >= DB_UNSET || radio.pwr_db(CallId(5)) < 0.0);
+        assert!(radio.since_last_write_secs(CallId(5)) < 10.0);
         assert!(radio.add_conventional_recorder(9, 0, &ch).is_err());
     }
 }

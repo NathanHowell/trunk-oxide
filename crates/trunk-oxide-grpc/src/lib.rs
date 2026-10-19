@@ -4,7 +4,9 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use trunk_radio::{AudioSink, SystemInfo, TrCallData, TrCallInfo, TrUnitEventType, TrunkMessage};
+use trunk_radio::{
+    AudioSink, CallId, SystemInfo, TrCallData, TrCallInfo, TrUnitEventType, TrunkMessage,
+};
 
 pub use trunk_oxide_proto as proto;
 
@@ -308,8 +310,8 @@ pub struct EventBridge {
     talkgroups: HashMap<(String, i64), TalkgroupMeta>,
     /// (`short_name`, `radio_id`) → OTA-discovered alias
     unit_aliases: RwLock<HashMap<(String, i64), String>>,
-    /// `rust_call_id` → audio metadata (set by Rust, read by GR audio callback)
-    audio_meta: RwLock<HashMap<u64, AudioMeta>>,
+    /// Each call's audio metadata, while it is recorded.
+    audio_meta: RwLock<HashMap<CallId, AudioMeta>>,
 }
 
 impl EventBridge {
@@ -409,29 +411,26 @@ impl EventBridge {
     }
 
     /// Register audio metadata for a call. Called when a call starts recording.
-    pub fn register_audio_meta(&self, rust_call_id: u64, meta: AudioMeta) {
-        self.audio_meta.write().unwrap().insert(rust_call_id, meta);
+    pub fn register_audio_meta(&self, call_id: CallId, meta: AudioMeta) {
+        self.audio_meta.write().unwrap().insert(call_id, meta);
     }
 
     /// Remove audio metadata for a call. Called when a call ends.
-    pub fn unregister_audio_meta(&self, rust_call_id: u64) {
-        self.audio_meta.write().unwrap().remove(&rust_call_id);
+    pub fn unregister_audio_meta(&self, call_id: CallId) {
+        self.audio_meta.write().unwrap().remove(&call_id);
     }
 
     /// Update the frequency for a call (e.g. on retune).
-    pub fn update_audio_meta_freq(&self, rust_call_id: u64, freq: f64) {
-        if let Some(meta) = self.audio_meta.write().unwrap().get_mut(&rust_call_id) {
+    pub fn update_audio_meta_freq(&self, call_id: CallId, freq: f64) {
+        if let Some(meta) = self.audio_meta.write().unwrap().get_mut(&call_id) {
             meta.freq = freq;
         }
     }
 
-    pub fn audio_stream(&self, rust_call_id: u64, samples: &[i16]) {
-        if rust_call_id == 0 {
-            return;
-        }
+    pub fn audio_stream(&self, call_id: CallId, samples: &[i16]) {
         let meta = {
             let guard = self.audio_meta.read().unwrap();
-            match guard.get(&rust_call_id) {
+            match guard.get(&call_id) {
                 Some(m) => m.clone(),
                 None => return,
             }
@@ -565,8 +564,8 @@ impl EventBridge {
 }
 
 impl AudioSink for EventBridge {
-    fn audio(&self, rust_call_id: u64, samples: &[i16]) {
-        self.audio_stream(rust_call_id, samples);
+    fn audio(&self, call_id: CallId, samples: &[i16]) {
+        self.audio_stream(call_id, samples);
     }
 }
 

@@ -508,7 +508,7 @@ impl CallManager {
     fn register_audio_meta(&self, call_id: CallId) {
         if let Some(view) = self.state.get_call_view(call_id) {
             self.bridge.register_audio_meta(
-                call_id.as_u64(),
+                call_id,
                 AudioMeta {
                     talkgroup: view.talkgroup(),
                     short_name: Arc::from(view.short_name()),
@@ -539,11 +539,10 @@ impl CallManager {
                     self.exec_stop_recorder(call_id);
                 }
                 Effect::SetFreq { call_id, freq } => {
-                    self.bridge
-                        .update_audio_meta_freq(call_id.as_u64(), freq.as_hz());
+                    self.bridge.update_audio_meta_freq(call_id, freq.as_hz());
                 }
                 Effect::SetSource { call_id, source_id } => {
-                    self.radio.set_source(call_id.as_u64(), source_id);
+                    self.radio.set_source(call_id, source_id);
                 }
                 Effect::EmitCallStart { call_id } => {
                     // Open the recorder-side call span here (held in `call_spans`,
@@ -689,18 +688,18 @@ impl CallManager {
                             m.idle_timeout_count += 1;
                         });
                         let cfg = self.build_recorder_config_from_view(&view);
-                        self.radio.restart(call_id.as_u64(), &cfg);
+                        self.radio.restart(call_id, &cfg);
                         let rec_num = self
                             .radio
-                            .has_recorder(call_id.as_u64())
-                            .then(|| RecorderNum(self.radio.recorder_num(call_id.as_u64())));
+                            .has_recorder(call_id)
+                            .then(|| RecorderNum(self.radio.recorder_num(call_id)));
                         self.state.on_conventional_restarted(call_id, rec_num);
                     }
                 }
                 Effect::InitRecorder { call_id } => {
                     if let Some(view) = self.state.get_call_view(call_id) {
                         let cfg = self.build_recorder_config_from_view(&view);
-                        self.radio.restart(call_id.as_u64(), &cfg);
+                        self.radio.restart(call_id, &cfg);
                     }
                 }
                 Effect::EnableRecorder { call_id } => {
@@ -714,7 +713,7 @@ impl CallManager {
                             m.enable_count += 1;
                         });
                     }
-                    self.radio.set_recorder_enabled(call_id.as_u64(), true);
+                    self.radio.set_recorder_enabled(call_id, true);
                 }
                 Effect::DisableRecorder { call_id } => {
                     if let Some(view) = self.state.get_call_view(call_id) {
@@ -727,16 +726,16 @@ impl CallManager {
                             m.disable_count += 1;
                         });
                     }
-                    self.radio.set_recorder_enabled(call_id.as_u64(), false);
+                    self.radio.set_recorder_enabled(call_id, false);
                 }
                 Effect::RemoveCall { call_id } => {
-                    self.radio.remove_call(call_id.as_u64());
+                    self.radio.remove_call(call_id);
                     self.voice_snapshots.remove(&call_id);
                     self.state.remove_call(call_id);
                     // Unregister audio meta last: the write lock waits for any
                     // in-flight audio_stream() read lock, ensuring the final
                     // audio send completes before we remove the metadata.
-                    self.bridge.unregister_audio_meta(call_id.as_u64());
+                    self.bridge.unregister_audio_meta(call_id);
                 }
             }
         }
@@ -748,7 +747,7 @@ impl CallManager {
         let Some(sys_num) = self.state.get_call_view(call_id).map(|v| v.sys_num()) else {
             return;
         };
-        self.radio.create_call(call_id.as_u64(), sys_num);
+        self.radio.create_call(call_id, sys_num);
         self.register_audio_meta(call_id);
     }
 
@@ -776,7 +775,7 @@ impl CallManager {
         let freq_hz = freq.as_hz();
         let source_idx = self.find_source(freq_hz);
 
-        if !self.radio.has_call(call_id.as_u64()) {
+        if !self.radio.has_call(call_id) {
             return;
         }
 
@@ -791,9 +790,9 @@ impl CallManager {
                     "not recording: priority exceeds available recorders"
                 );
                 RecordingResult::NoRecorder
-            } else if let Some(rec_num) =
-                self.radio
-                    .start_recording(source_idx, call_id.as_u64(), is_analog, &cfg)
+            } else if let Some(rec_num) = self
+                .radio
+                .start_recording(source_idx, call_id, is_analog, &cfg)
             {
                 RecordingResult::Started {
                     rec_num: RecorderNum(rec_num),
@@ -855,7 +854,7 @@ impl CallManager {
         // `view.recorder().is_some()` guard here would always be false and the
         // old digital recorder would never be stopped, leaking the slot until
         // the source's recorder pool is exhausted.
-        let id = call_id.as_u64();
+        let id = call_id;
         if !self.radio.has_recorder(id) {
             return;
         }
@@ -905,7 +904,7 @@ impl CallManager {
         // exit path of this function; record the stop reason up front.
         let span = self.call_spans.remove(&call_id);
         // How stale the audio was at the moment we concluded the call.
-        let id = call_id.as_u64();
+        let id = call_id;
         let has_call = self.radio.has_call(id);
         let audio_age = has_call.then(|| self.radio.since_last_write_secs(id));
         let voice_age = has_call.then(|| self.radio.since_last_voice_secs(id));
@@ -1349,9 +1348,7 @@ impl CallManager {
                     && v.state() == CallState::Recording
             })
             .filter_map(|v| {
-                let now = VoiceCounters::from_transmissions(
-                    &self.radio.transmission_list(v.id().as_u64()),
-                );
+                let now = VoiceCounters::from_transmissions(&self.radio.transmission_list(v.id()));
                 let then = self
                     .voice_snapshots
                     .get(&v.id())
@@ -1462,8 +1459,8 @@ impl CallManager {
             if view.is_conventional() || view.state() != CallState::Recording {
                 continue;
             }
-            if self.radio.has_recorder(view.id().as_u64()) {
-                let since_write = self.radio.since_last_write_secs(view.id().as_u64());
+            if self.radio.has_recorder(view.id()) {
+                let since_write = self.radio.since_last_write_secs(view.id());
                 if since_write > timeout {
                     timed_out_ids.push(view.id());
                 }
@@ -1479,8 +1476,7 @@ impl CallManager {
                     None
                 };
                 if let Some(hist) = hist
-                    && let Some(pwr_db) =
-                        trunk_radio::signal_from_ffi(self.radio.pwr_db(view.id().as_u64()))
+                    && let Some(pwr_db) = trunk_radio::signal_from_ffi(self.radio.pwr_db(view.id()))
                 {
                     hist.record(
                         pwr_db,
@@ -1552,8 +1548,7 @@ impl CallManager {
         let (call_id, effects) =
             self.state
                 .add_conventional_call(channel, sys_num, &policy, Some(RecorderNum(rec_num)));
-        self.radio
-            .bind_conventional_call(call_id.as_u64(), sys_num, rec_num);
+        self.radio.bind_conventional_call(call_id, sys_num, rec_num);
         self.register_audio_meta(call_id);
 
         self.process_effects(effects);
@@ -1591,21 +1586,19 @@ impl CallManager {
     }
 
     /// An in-band P25 source (unit) change decoded by op25 on the voice channel,
-    /// keyed by the recorder's `rust_call_id`. Cuts a per-speaker transmission
+    /// keyed by the recorder's `call_id`. Cuts a per-speaker transmission
     /// boundary (see [`TrunkStateMachine::on_source_change`]).
-    pub fn handle_source_change(&mut self, rust_call_id: u64, src_id: i64) {
-        let effects = self
-            .state
-            .on_source_change(CallId::from_u64(rust_call_id), src_id);
+    pub fn handle_source_change(&mut self, call_id: CallId, src_id: i64) {
+        let effects = self.state.on_source_change(call_id, src_id);
         self.process_effects(effects);
     }
 
     /// P25 encryption parameters (ESS `ALGID` / `KeyID`) decoded by op25 for an
-    /// encrypted call, keyed by the recorder's `rust_call_id`. Stored on the
+    /// encrypted call, keyed by the recorder's `call_id`. Stored on the
     /// call so the `calls_ended` metric can facet by algorithm.
-    pub fn handle_crypto(&mut self, rust_call_id: u64, alg_id: u32, key_id: u32) {
+    pub fn handle_crypto(&mut self, call_id: CallId, alg_id: u32, key_id: u32) {
         // ALGID is 8 bits and KeyID 16 on the wire; the decoder already masks.
-        let call_id = CallId::from_u64(rust_call_id);
+        let call_id = call_id;
         let (alg_id, key_id) = (
             u8::try_from(alg_id & 0xFF).unwrap_or(0),
             u16::try_from(key_id & 0xFFFF).unwrap_or(0),
@@ -1741,7 +1734,7 @@ impl CallManager {
             xor_mask,
             squelch_db: view.squelch_db(),
             digital_levels: policy.digital_levels,
-            rust_call_id: view.id().as_u64(),
+            call_id: view.id(),
         }
     }
 

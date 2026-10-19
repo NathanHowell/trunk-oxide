@@ -256,6 +256,17 @@ pub struct TrCallInfo {
     pub call_state: i32,
 }
 
+/// A call as the state machine numbers it: what audio and in-band events
+/// are routed by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct CallId(pub u64);
+
+impl std::fmt::Display for CallId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
 /// What a recorder needs to know to start a call.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrRecorderConfig {
@@ -270,7 +281,7 @@ pub struct TrRecorderConfig {
     pub xor_mask: Vec<u8>,
     pub squelch_db: f64,
     pub digital_levels: f64,
-    pub rust_call_id: u64,
+    pub call_id: CallId,
 }
 
 /// What stopping a recorder reports.
@@ -470,10 +481,10 @@ pub enum RadioEvent {
         pwr_db: f64,
     },
     /// An in-band P25 source change on a voice channel.
-    SourceChange { rust_call_id: u64, src_id: i64 },
+    SourceChange { call_id: CallId, src_id: i64 },
     /// In-band encryption parameters of a call we hold no key for.
     Crypto {
-        rust_call_id: u64,
+        call_id: CallId,
         alg_id: u32,
         key_id: u32,
     },
@@ -511,27 +522,27 @@ impl EventSender {
 
 /// Where decoded audio goes: the gRPC bridge, keyed by the call.
 pub trait AudioSink: Send + Sync {
-    fn audio(&self, rust_call_id: u64, samples: &[i16]);
+    fn audio(&self, call_id: CallId, samples: &[i16]);
 }
 
 /// What one channelizer block's decoders produced, for the source thread to
 /// route: audio to the [`AudioSink`], events to the [`EventSender`].
 #[derive(Default)]
 pub struct Decoded {
-    /// Audio by call id, in decode order.
-    pub audio: Vec<(u64, Vec<i16>)>,
+    /// Audio by call, in decode order.
+    pub audio: Vec<(CallId, Vec<i16>)>,
     pub events: Vec<RadioEvent>,
 }
 
 impl Decoded {
     /// Append `samples` to the call's audio.
-    pub fn audio(&mut self, rust_call_id: u64, samples: &[i16]) {
+    pub fn audio(&mut self, call_id: CallId, samples: &[i16]) {
         if samples.is_empty() {
             return;
         }
         match self.audio.last_mut() {
-            Some((id, buf)) if *id == rust_call_id => buf.extend_from_slice(samples),
-            _ => self.audio.push((rust_call_id, samples.to_vec())),
+            Some((id, buf)) if *id == call_id => buf.extend_from_slice(samples),
+            _ => self.audio.push((call_id, samples.to_vec())),
         }
     }
 

@@ -15,7 +15,7 @@ pub struct SourceGain {
     /// The noise floor the calibration measured at that gain, if it ran
     /// (the sweep's relative dB scale).
     pub noise_floor_db: Option<f64>,
-    /// `knee`, `saturation_limited`, `adc_limited`, `fallback`, `cached`
+    /// `budget`, `saturation_limited`, `adc_limited`, `fallback`, `cached`
     /// (the last sweep's pick re-checked and kept) or `configured` (no
     /// `auto_gain`).
     pub reason: &'static str,

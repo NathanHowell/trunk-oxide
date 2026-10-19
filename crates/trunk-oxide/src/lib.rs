@@ -174,11 +174,12 @@ fn run_calibration(
     // The last sweep's pick stands while the floor it was made at holds.
     if let Some(c) = cached {
         match calibrate::recheck(&mut probe, policy, c) {
-            Ok((true, moved)) => {
+            Ok(r) if r.keep => {
                 tracing::info!(
                     device = %device,
                     gain_db = c.gain_db,
-                    noise_floor_moved_db = moved,
+                    noise_floor_moved_db = r.moved_db,
+                    penalty_db = r.penalty_db,
                     "gain calibration: keeping the last sweep's gain"
                 );
                 return Calibrated {
@@ -188,11 +189,12 @@ fn run_calibration(
                     swept: None,
                 };
             }
-            Ok((false, moved)) => tracing::info!(
+            Ok(r) => tracing::info!(
                 device = %device,
                 cached_gain_db = c.gain_db,
-                noise_floor_moved_db = moved,
-                "gain calibration: the noise floor moved since the last sweep; sweeping again"
+                noise_floor_moved_db = r.moved_db,
+                penalty_db = r.penalty_db,
+                "gain calibration: the last sweep's gain now costs too much SNR; sweeping again"
             ),
             Err(e) => tracing::warn!(
                 device = %device, error = %e,
@@ -210,6 +212,7 @@ fn run_calibration(
                 gain_db = sel.gain_db,
                 noise_floor_db = sel.noise_floor_db,
                 reason = sel.reason.label(),
+                penalty_db = sel.penalty_db,
                 configured_gain = fallback_gain,
                 curve = %sweep.curve(policy.sat_limit),
                 "gain auto-calibration complete"

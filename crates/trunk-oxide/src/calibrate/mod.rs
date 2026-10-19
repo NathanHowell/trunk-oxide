@@ -42,18 +42,17 @@ pub struct CalibrationPolicy {
     pub sat_threshold: f32,
     /// Clipping fraction above which a gain is vetoed as overloaded.
     pub sat_limit: f64,
-    /// Floor-vs-gain slope marking the front-end-limited regime (dB/dB).
-    pub knee_slope: f64,
-    /// The least gain (dB) that slope is measured across.
-    pub knee_span_db: f64,
-    /// How far (dB) above the knee the pick sits.
-    pub margin_db: f64,
+    /// The SNR (dB) the ADC's noise may take at the chosen gain
+    /// ([`select::NoiseModel::penalty_db`]).
+    pub penalty_budget_db: f64,
+    /// The worst rms residual (dB) of the noise model still trusted.
+    pub max_fit_rms_db: f64,
     /// Complex samples to capture per gain step. Must comfortably exceed
     /// `fft_size` so Welch averaging has several segments.
     pub capture_samples: usize,
-    /// How far (dB) the noise floor at a cached gain may have moved before
-    /// the device is swept again rather than keeping the cached pick.
-    pub recheck_tolerance_db: f64,
+    /// How far (dB) past the budget a cached pick's penalty may drift (the
+    /// front end warming, say) before the device is swept again.
+    pub recheck_hysteresis_db: f64,
     /// Samples to discard after each gain change, letting the tuner settle.
     pub settle_samples: usize,
 }
@@ -69,20 +68,19 @@ impl Default for CalibrationPolicy {
             sat_threshold: 0.95,
             // 0.1% of samples clipping is already audible overload.
             sat_limit: 1e-3,
-            // Allow margin below the ideal 1.0 dB/dB asymptote.
-            knee_slope: 0.6,
-            // RTL steps run 0.5–4 dB apart and a 0.1 s floor estimate
-            // scatters a few tenths of a dB, so a slope over one small step
-            // is noise; 2.5 dB spans at least two of the fine steps.
-            knee_span_db: 2.5,
-            // At the knee the front end's noise only equals the ADC's (a
-            // ~3 dB noise-figure penalty); 6 dB above it the penalty is ~1.
-            margin_db: 6.0,
+            // The front end's noise 9 dB over the ADC's: sensitivity within
+            // half a dB of the front end's, the rest of the range kept as
+            // overload headroom.
+            penalty_budget_db: 0.5,
+            // 2026-10-19's four dongles fitted to 0.3-0.5 dB rms.
+            max_fit_rms_db: 1.5,
             // ~0.1 s at 2.4 Msps; ~64 Welch segments at fft_size 4096.
             capture_samples: 1 << 18,
-            // A gain step is ~1–3 dB on an RTL tuner; floor drift within
-            // that is noise, beyond it the band changed.
-            recheck_tolerance_db: 2.0,
+            // Up to a 1 dB penalty before re-sweeping: a warm afternoon
+            // moves the floor ~2 dB, which must not walk the gain about
+            // (73121177 went 40.2 -> 36.4 -> 29.7 dB across two deploys on
+            // 2026-10-19 under a 2 dB floor-moved rule).
+            recheck_hysteresis_db: 0.5,
             // ~5 ms of settle at typical rates; the probe also re-runs the
             // flowgraph per step which adds its own warm-up.
             settle_samples: 1 << 14,
@@ -102,9 +100,8 @@ impl CalibrationPolicy {
     fn select_params(&self) -> SelectParams {
         SelectParams {
             sat_limit: self.sat_limit,
-            knee_slope: self.knee_slope,
-            knee_span_db: self.knee_span_db,
-            margin_db: self.margin_db,
+            penalty_budget_db: self.penalty_budget_db,
+            max_fit_rms_db: self.max_fit_rms_db,
         }
     }
 }
@@ -133,26 +130,59 @@ impl Sweep {
     }
 }
 
+/// A re-check of a device's last pick.
+#[derive(Debug, Clone, Copy)]
+pub struct Recheck {
+    /// The pick stands.
+    pub keep: bool,
+    /// How far the floor at that gain moved since the sweep, dB.
+    pub moved_db: f64,
+    /// The SNR the ADC costs at that gain now, dB (`NaN` if unknown).
+    pub penalty_db: f64,
+}
+
 /// Whether a device's last pick still stands.
 ///
-/// One capture at that gain: its noise floor must be within
-/// [`CalibrationPolicy::recheck_tolerance_db`] of the floor measured then,
-/// and not saturating. How far the floor moved is returned with the verdict
-/// for the log.
+/// One capture at that gain re-estimates the front end against the noise
+/// model fitted to the cached sweep (the ADC's floor is the converter's own
+/// and holds): the pick stands while its penalty stays within the budget
+/// plus [`CalibrationPolicy::recheck_hysteresis_db`] and it does not
+/// saturate. A front end that drifted a little keeps its gain; one that
+/// drifted far, or a sweep the model cannot describe, is swept again.
 pub fn recheck(
     probe: &mut dyn IqProbe,
     policy: &CalibrationPolicy,
     cached: &cache::Cached,
-) -> Result<(bool, f64)> {
+) -> Result<Recheck> {
+    let unknown = Recheck {
+        keep: false,
+        moved_db: f64::NAN,
+        penalty_db: f64::NAN,
+    };
     if !probe.supported_gains()?.contains(&cached.gain_db) {
-        return Ok((false, f64::NAN));
+        return Ok(unknown);
     }
+    let curve: Vec<(f64, f64)> = cached
+        .sweep
+        .iter()
+        .filter(|p| p.sat_frac <= policy.sat_limit)
+        .map(|p| (p.gain_db, p.noise_floor_db))
+        .collect();
+    let Some(model) = select::NoiseModel::fit(&curve).filter(|m| m.rms_db <= policy.max_fit_rms_db)
+    else {
+        return Ok(unknown);
+    };
     let m = measure(&probe.capture(cached.gain_db)?, &policy.measure_params());
-    let moved = m.noise_floor_db - cached.noise_floor_db;
-    Ok((
-        moved.abs() <= policy.recheck_tolerance_db && m.sat_frac <= policy.sat_limit,
-        moved,
-    ))
+    let moved_db = m.noise_floor_db - cached.noise_floor_db;
+    let penalty_db = model
+        .with_floor_at(cached.gain_db, m.noise_floor_db)
+        .map_or(f64::INFINITY, |now| now.penalty_db(cached.gain_db));
+    Ok(Recheck {
+        keep: penalty_db <= policy.penalty_budget_db + policy.recheck_hysteresis_db
+            && m.sat_frac <= policy.sat_limit,
+        moved_db,
+        penalty_db,
+    })
 }
 
 /// Sweep every supported gain on `probe`, measure each, and select the best.
@@ -172,6 +202,7 @@ pub fn calibrate(
             selection: GainSelection {
                 gain_db: fallback_gain,
                 noise_floor_db: f64::NAN,
+                penalty_db: f64::NAN,
                 reason: SelectReason::Fallback,
             },
             points: Vec::new(),
@@ -239,27 +270,23 @@ mod tests {
     }
 
     #[test]
-    fn end_to_end_picks_frontend_knee() {
-        // Amplitude flat until 20 dB (ADC-limited), then doubling per 6 dB
-        // (front-end-limited). Knee should land at the first step past 20.
+    fn end_to_end_picks_the_lowest_gain_within_budget() {
+        // ADC noise plus a front end that equals it at 20 dB and tracks gain
+        // 1:1; the budget (0.5 dB) needs the front end 9.1 dB over the ADC.
         let mut probe = MockProbe {
-            gains: vec![0.0, 10.0, 20.0, 26.0, 32.0],
+            gains: vec![0.0, 10.0, 20.0, 26.0, 32.0, 38.0],
             make_iq: Box::new(|g| {
-                let amp = if g <= 20.0 {
-                    0.03
-                } else {
-                    0.03 * 2.0f32.powf((g as f32 - 20.0) / 6.0)
-                };
+                let power = 1.0 + 10f64.powf((g - 20.0) / 10.0);
+                let amp = (0.02 * power.sqrt()) as f32;
                 // seed varies with gain so captures aren't identical
                 noise(1 << 16, amp, (g as u64) + 1)
             }),
         };
         let sweep = calibrate(&mut probe, &CalibrationPolicy::default(), 99.0).unwrap();
         let sel = sweep.selection;
-        assert_eq!(sel.reason, SelectReason::Knee);
-        // Knee confirmed at 26 (by 32); the margin asks for ≥ 32.
-        assert_eq!(sel.gain_db, 32.0);
-        assert_eq!(sweep.points.len(), 5);
+        assert_eq!(sel.reason, SelectReason::Budget, "{sel:?}");
+        assert_eq!(sel.gain_db, 32.0, "{sel:?}");
+        assert_eq!(sweep.points.len(), 6);
         let curve = sweep.curve(1e-3);
         assert!(
             curve.starts_with("0.0:") && curve.contains(" 32.0:"),

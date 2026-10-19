@@ -1,10 +1,10 @@
 //! The last calibration of each device, kept across restarts.
 //!
-//! A knee sweep runs on whatever is on air for a few seconds, so two sweeps
-//! of one dongle can pick gains a step or two apart (smco moved 8 dB between
-//! two deploys on 2026-10-18, and its RF chart stepped with it). Keeping the
-//! last pick and re-checking it against the noise floor it was made at
-//! holds the gain still unless the floor really moved.
+//! A sweep runs on whatever is on air for a few seconds, and the front end
+//! drifts with the room's temperature, so two sweeps of one dongle can pick
+//! gains steps apart (smco moved 8 dB between two deploys on 2026-10-18).
+//! Keeping the last pick and re-checking it against the noise model of its
+//! sweep holds the gain still unless what it costs really changed.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -22,7 +22,8 @@ const FILE: &str = "gain-calibration.json";
 ///
 /// 1: the knee itself, off one tuner step's slope.
 /// 2: the knee confirmed over a span and a second window, plus a margin.
-pub const ALGORITHM: u32 = 2;
+/// 3: the lowest gain within an SNR-loss budget of a fitted noise model.
+pub const ALGORITHM: u32 = 3;
 
 /// One device's last full sweep.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -344,6 +344,11 @@ bool analog_recorder::start(const RecorderConfig &config) {
   int offset_amount = (center_freq - chan_freq);
   prefilter->tune_offset(offset_amount);
 
+  // trunk-fm shadows this chain on the slot's conditioned output: its own
+  // demodulator, noise squelch, tone bank and gate, reporting through the
+  // metrics beside the squelch callbacks above.
+  prefilter->set_decoder(ControlDecoder::Analog, short_name_tap, chan_freq, 0, "", tone_freq, talkgroup);
+
   wav_sink->start_recording(config);
 
   state = REC_ACTIVE;

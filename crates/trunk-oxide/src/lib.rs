@@ -13,6 +13,7 @@ mod call_state;
 pub mod clock;
 mod dedup;
 mod p25_lfsr;
+mod fm_metrics;
 mod p25_metrics;
 pub mod proc_stats;
 

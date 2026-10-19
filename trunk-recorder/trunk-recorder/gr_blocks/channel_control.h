@@ -67,7 +67,8 @@ public:
   // Decode the conditioned channel in the channelizer (P25 control channels);
   // the channelizer parses the messages and sends them to trunking itself.
   // Kept until the hooks arrive if they are not set yet.
-  void set_decoder(ControlDecoder kind, const std::string &system, double freq_hz, int sys_num, const std::string &tap_base);
+  void set_decoder(ControlDecoder kind, const std::string &system, double freq_hz, int sys_num, const std::string &tap_base,
+                   double tone_hz = 0, long talkgroup = 0);
 
   // Offline-baseline taps. enable_tap() returns a file sink for the caller to
   // connect to the conditioned channel; it discards samples until

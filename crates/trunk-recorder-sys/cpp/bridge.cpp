@@ -440,6 +440,7 @@ public:
         switch (s.kind) {
         case ControlDecoder::P25Cqpsk: spec.decoder = TrControlDecoder::P25Cqpsk; break;
         case ControlDecoder::P25C4fm: spec.decoder = TrControlDecoder::P25C4fm; break;
+        case ControlDecoder::Analog: spec.decoder = TrControlDecoder::Analog; break;
         case ControlDecoder::None: break;
         }
         spec.rate = s.rate;
@@ -447,6 +448,8 @@ public:
         spec.freq_hz = s.freq_hz;
         spec.sys_num = s.sys_num;
         spec.tap_base = rust::String(s.tap_base);
+        spec.tone_hz = s.tone_hz;
+        spec.talkgroup = s.talkgroup;
         h_->set_control_decoder(port, spec);
     }
     void set_event_notifier(rust::Box<EventNotifier> n) { h_->set_event_notifier(std::move(n)); }

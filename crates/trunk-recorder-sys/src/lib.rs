@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 pub mod p25;
 pub mod p25_parse;
 pub mod p25_voice;
+pub mod fm;
 pub mod p25_calls;
 
 // cxx derives `Clone` field by field for shared structs.
@@ -21,6 +22,8 @@ pub mod ffi {
         None = 0,
         P25Cqpsk = 1,
         P25C4fm = 2,
+        /// FM voice: trunk-fm on a conventional analog channel.
+        Analog = 3,
     }
 
     /// A control-channel decoder for a shared-channelizer port.
@@ -35,6 +38,9 @@ pub mod ffi {
         sys_num: i32,
         /// Non-empty: write every message to `<tap_base>.msgs.jsonl`.
         tap_base: String,
+        /// `Analog`: the channel's CTCSS tone (0 = none) and its id.
+        tone_hz: f64,
+        talkgroup: i64,
     }
 
     /// What a voice tag says (`TrVoiceTag::kind`).
@@ -1139,6 +1145,20 @@ impl SharedChannelizerHandle {
 
     fn set_control_decoder(&self, port: u32, spec: &ffi::TrControlDecoderSpec) {
         let mut decoders = self.decoders.lock().unwrap_or_else(PoisonError::into_inner);
+        if spec.decoder == ffi::TrControlDecoder::Analog {
+            decoders.remove(&port);
+            drop(decoders);
+            let channel = fm::AnalogChannel {
+                system: spec.system.clone(),
+                talkgroup: spec.talkgroup,
+                freq_hz: spec.freq_hz,
+                source: self.source,
+                port,
+            };
+            let decoder = fm::attach(channel, spec.rate, spec.tone_hz);
+            self.engine.set_slot_decoder(port as usize, Some(decoder));
+            return;
+        }
         let installed = trunk_p25::Modulation::try_from(spec.decoder)
             .ok()
             .map(|modulation| {

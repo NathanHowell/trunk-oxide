@@ -87,8 +87,9 @@ void channel_control::set_conditioning_hooks(ConditioningHooks hooks) {
   if (d_decoder.kind != ControlDecoder::None && d_cond.set_decoder) d_cond.set_decoder(d_decoder);
 }
 
-void channel_control::set_decoder(ControlDecoder kind, const std::string &system, double freq_hz, int sys_num, const std::string &tap_base) {
-  d_decoder = {kind, d_channel_rate_out, system, freq_hz, sys_num, tap_base};
+void channel_control::set_decoder(ControlDecoder kind, const std::string &system, double freq_hz, int sys_num, const std::string &tap_base,
+                                  double tone_hz, long talkgroup) {
+  d_decoder = {kind, d_channel_rate_out, system, freq_hz, sys_num, tap_base, tone_hz, talkgroup};
   if (d_cond.set_decoder) d_cond.set_decoder(d_decoder);
 }
 

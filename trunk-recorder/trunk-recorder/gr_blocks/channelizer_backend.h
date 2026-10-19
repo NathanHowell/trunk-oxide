@@ -35,15 +35,18 @@ enum class ControlDecoder : unsigned {
   None = 0,
   P25Cqpsk = 1,
   P25C4fm = 2,
+  Analog = 3, // FM voice: trunk-fm's demodulator, detectors and gate
 };
 
 struct ControlDecoderSpec {
   ControlDecoder kind;
   double rate;        // the port's conditioned output rate (S/s)
   std::string system; // short name, for metrics
-  double freq_hz;     // control channel frequency, for metrics
+  double freq_hz;     // control channel (or conventional channel) frequency, for metrics
   int sys_num;        // the system its trunking messages are for
   std::string tap_base; // non-empty: write every message to <tap_base>.msgs.jsonl
+  double tone_hz = 0; // Analog: the channel's CTCSS tone, 0 for none
+  long talkgroup = 0; // Analog: the conventional channel's id, for metrics
 };
 
 // DSP engine behind shared_channelizer. The trunk-recorder tree only sees this

@@ -3714,6 +3714,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "trunk-fm"
+version = "0.1.0"
+dependencies = [
+ "num-complex",
+ "trunk-channelizer",
+]
+
+[[package]]
 name = "trunk-oxide"
 version = "0.1.0"
 dependencies = [
@@ -3816,6 +3824,7 @@ dependencies = [
  "tokio",
  "tracing",
  "trunk-channelizer",
+ "trunk-fm",
  "trunk-p25",
 ]
 

@@ -199,6 +199,7 @@ pub struct CallManager {
     /// Counters seen at the previous poll, by source, for delta computation.
     chz_prev: HashMap<i32, trunk_recorder_sys::ChannelizerCounters>,
     p25_metrics: crate::p25_metrics::P25Metrics,
+    fm_metrics: crate::fm_metrics::FmMetrics,
     /// Cumulative overruns per source as of the last poll.
     chz_overruns_total: HashMap<i32, u64>,
     /// Per-call channelizer context, for the call span (see `exec_conclude_call`).
@@ -381,6 +382,7 @@ impl CallManager {
                 .build(),
             chz_prev: HashMap::new(),
             p25_metrics: crate::p25_metrics::P25Metrics::new(&meter),
+            fm_metrics: crate::fm_metrics::FmMetrics::new(&meter),
             chz_overruns_total: HashMap::new(),
             call_chz: HashMap::new(),
             recorder_denied: meter
@@ -1531,6 +1533,7 @@ impl CallManager {
     pub fn tick(&mut self, mut ctx: Pin<&mut TrContext>) {
         self.poll_channelizers();
         self.p25_metrics.poll();
+        self.fm_metrics.poll();
         // First, check recorder write times for recording calls (needs FFI).
         // The state machine can't check this, so we do it here.
         let timeout = self.state.config.call_timeout;

@@ -66,6 +66,9 @@ pub struct SystemConfig {
     pub squelch: f64,
     #[serde(default = "default_max_dev")]
     pub max_dev: i32,
+    /// Noise suppression on analog voice, dB (6, 12, 18 or 21); unset, none.
+    #[serde(default)]
+    pub noise_suppression_db: Option<u8>,
     #[serde(default = "default_true")]
     pub conversation_mode: bool,
     #[serde(default = "default_true")]

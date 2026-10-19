@@ -8,6 +8,7 @@ use std::sync::Arc;
 
 use num_complex::Complex32;
 use trunk_channelizer::{ChannelDecoder, ConditioningSpec, Reading, WIDE};
+use trunk_fm::denoise::Denoiser;
 use trunk_fm::gate::{Config as GateConfig, Event as GateEvent, Gate};
 use trunk_fm::{Audio, Decimation, Detector, FmDemod, Measurement, TAU_US, Tone};
 
@@ -96,6 +97,8 @@ impl Kind for AnalogFm {
                 tone,
             ),
             levels: at.system.analog_levels as f32,
+            denoise: at.system.noise_suppression.map(Denoiser::new),
+            cleaned: Vec::new(),
         })
     }
 }
@@ -120,6 +123,9 @@ pub struct AnalogFmChannel {
     tape: Tape,
     stats: Arc<fm::Shared>,
     levels: f32,
+    /// Noise suppression on the gated voice, when the system asks for it.
+    denoise: Option<Denoiser>,
+    cleaned: Vec<f32>,
 }
 
 impl std::fmt::Debug for AnalogFmChannel {
@@ -174,10 +180,22 @@ impl ChannelDecoder for AnalogFmChannel {
                 power_db,
             });
         }
-        if !self.gated.is_empty() {
+        let voice = if let Some(d) = &mut self.denoise {
+            self.cleaned.clear();
+            d.process(&self.gated, &mut self.cleaned);
+            // A closed gate ends the transmission: its tail comes out now,
+            // not at the start of the next one.
+            if !self.gate.is_open() {
+                d.flush(&mut self.cleaned);
+            }
+            &self.cleaned
+        } else {
+            &self.gated
+        };
+        if !voice.is_empty() {
             self.pcm.clear();
             self.pcm
-                .extend(self.gated.iter().map(|&v| level(v, self.levels)));
+                .extend(voice.iter().map(|&v| level(v, self.levels)));
             let pcm = self.tape.deliver(&self.pcm);
             out.audio(self.call, &pcm);
         }
@@ -200,9 +218,13 @@ mod tests {
     use crate::types::{Channel, ChannelNum, CloseReason};
     use trunk_channelizer::SharedChannelizer;
 
-    #[test]
+    /// Records 2 s of PL'd carrier between noise on slot `port`, checks the
+    /// gate opened and closed once, and returns the samples recorded.
     #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-    fn an_analog_channel_gates_a_pl_transmission_and_records_it() {
+    fn record_one_transmission(
+        noise_suppression: Option<crate::NoiseSuppression>,
+        port: usize,
+    ) -> usize {
         let cfg = trunk_channelizer::Config::standard(912_000.0).unwrap();
         let chz: Chz = SharedChannelizer::new(cfg.clone()).unwrap();
         let center = 488_661_750.0;
@@ -220,6 +242,7 @@ mod tests {
             short_name: "conv".into(),
             qpsk: false,
             max_dev: 5000,
+            noise_suppression,
             analog_levels: 1.0,
             digital_levels: 1.0,
             nac: 0,
@@ -236,7 +259,7 @@ mod tests {
             channelizer: &cfg,
             num: ChannelNum(7),
             source: 0,
-            port: 1,
+            port,
             tap_dir: None,
         };
         let tape = Tape::new(Some(Recording::new(Accounting::new(
@@ -248,14 +271,14 @@ mod tests {
         ))));
         let tuning = AnalogFm::tuning(&at);
         assert_eq!(tuning.filter, Some((5000.0, 6000.0)));
-        chz.set_slot_conditioning(1, tuning.conditioning);
+        chz.set_slot_conditioning(port, tuning.conditioning);
         let (cutoff, transition) = tuning.filter.unwrap();
-        chz.set_slot_filter(1, cutoff, transition);
+        chz.set_slot_filter(port, cutoff, transition);
         chz.set_slot_decoder(
-            1,
+            port,
             Some(Box::new(AnalogFm::decoder(&at, tape.clone()).unwrap())),
         );
-        chz.set_slot(1, WIDE, 100_000.0);
+        chz.set_slot(port, WIDE, 100_000.0);
 
         // 1 s of noise, 2 s of carrier with PL at +100 kHz, 1 s of noise.
         let rate = 912_000.0f64;
@@ -305,16 +328,29 @@ mod tests {
         }
         let st = fm::analog_channels()
             .into_iter()
-            .find(|e| e.value.channel.talkgroup == 2 && e.value.channel.port == 1)
+            .find(|e| e.value.channel.talkgroup == 2 && e.value.channel.port == port as u32)
             .unwrap();
         assert_eq!(st.value.stats.opens, 1, "{:?}", st.value.stats);
         assert_eq!(st.value.stats.closes_quieting, 1, "{:?}", st.value.stats);
         assert_eq!(st.value.channel.system, "conv");
         assert_eq!((opened, closed), (1, 1));
         let (acct, tail) = tape.close().unwrap();
-        // about 2 s of 16 kHz audio came out under the call id
-        assert!((28_000..=36_000).contains(&acct.sample_count), "{acct:?}");
         assert_eq!(audio, acct.sample_count as usize);
         assert!(tail.is_empty());
+        audio
+    }
+
+    #[test]
+    fn an_analog_channel_gates_a_pl_transmission_and_records_it() {
+        let plain = record_one_transmission(None, 1);
+        // about 2 s of 16 kHz audio came out under the call id
+        assert!((28_000..=36_000).contains(&plain), "{plain}");
+    }
+
+    #[test]
+    fn noise_suppression_keeps_every_sample_and_flushes_at_the_close() {
+        let plain = record_one_transmission(None, 2);
+        let suppressed = record_one_transmission(Some(crate::NoiseSuppression::Db12), 3);
+        assert_eq!(suppressed, plain + trunk_fm::denoise::DELAY);
     }
 }

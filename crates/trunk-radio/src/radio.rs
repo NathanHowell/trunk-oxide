@@ -40,6 +40,8 @@ pub struct SystemSetup {
     /// CQPSK (else C4FM) on the control and voice channels.
     pub qpsk: bool,
     pub max_dev: i32,
+    /// Noise suppression on analog voice, if any.
+    pub noise_suppression: Option<crate::NoiseSuppression>,
     pub analog_levels: f64,
     pub digital_levels: f64,
     /// The P25 identity as configured (zeros if not): it gives the phase 2
@@ -633,6 +635,7 @@ mod tests {
             short_name: format!("s{sys_num}"),
             qpsk: true,
             max_dev: 5000,
+            noise_suppression: None,
             analog_levels: 1.0,
             digital_levels: 1.0,
             nac: 0x38d * u64::from(wacn != 0),

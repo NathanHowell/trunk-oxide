@@ -617,6 +617,16 @@ impl ScannerBuilder {
                 short_name: short_name.clone(),
                 qpsk: sys.modulation == Modulation::Qpsk,
                 max_dev: sys.max_dev,
+                noise_suppression: sys
+                    .noise_suppression_db
+                    .map(|db| {
+                        trunk_radio::NoiseSuppression::from_db(db).ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "system '{short_name}': noise_suppression_db = {db}; it is 6, 12, 18 or 21"
+                            )
+                        })
+                    })
+                    .transpose()?,
                 analog_levels: sys.analog_levels,
                 digital_levels: sys.digital_levels,
                 nac: sys.nac,

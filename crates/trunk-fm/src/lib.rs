@@ -19,6 +19,7 @@
 
 mod atan;
 pub mod demod;
+pub mod denoise;
 pub mod design;
 pub mod detect;
 pub mod fir;

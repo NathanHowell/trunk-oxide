@@ -9,22 +9,20 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use num_complex::Complex32;
-use trunk_channelizer::{
-    ConditioningSettings, ConditioningSpec, DetectorConfig, NARROW, SharedChannelizer,
-};
+use trunk_channelizer::{ConditioningSettings, ConditioningSpec, DetectorConfig, NARROW};
 use trunk_p25::Modulation;
 use trunk_sdr::{Running, Stream};
 
 use crate::ChannelizerStats;
-use crate::p25::{self, ControlChannel, ControlPort};
-use crate::recorder::{EXCESS_BW_PUB, NARROW_RATE};
-use crate::types::{DetectedSignal, EventSender, RadioEvent};
+use crate::p25::{ControlChannel, ControlSlot};
+use crate::recorder::{Chz, EXCESS_BW_PUB, NARROW_RATE};
+use crate::types::{AudioSink, Decoded, DetectedSignal, EventSender, RadioEvent};
 
 /// How long a block read waits before the thread checks for a stop.
 const READ_WAIT: Duration = Duration::from_millis(100);
 
 /// Live channelizers by source index (see [`channelizer_stats`]).
-static CHANNELIZERS: Mutex<Vec<(i32, Weak<SharedChannelizer>)>> = Mutex::new(Vec::new());
+static CHANNELIZERS: Mutex<Vec<(i32, Weak<Chz>)>> = Mutex::new(Vec::new());
 
 /// Counters for every live shared channelizer. `max_ns` is the longest block
 /// since the previous call (it is reset by reading).
@@ -43,10 +41,10 @@ pub fn channelizer_stats() -> Vec<ChannelizerStats> {
 }
 
 struct Thread {
-    chz: Arc<SharedChannelizer>,
+    chz: Arc<Chz>,
     stream: Stream,
-    ports: Arc<Mutex<Vec<ControlPort>>>,
     events: EventSender,
+    sink: Arc<dyn AudioSink>,
     stopping: Arc<AtomicBool>,
     got_samples: Arc<AtomicBool>,
     idx: i32,
@@ -59,6 +57,7 @@ impl Thread {
         let hop = self.chz.config().hop();
         let mut buf = vec![Complex32::ZERO; hop];
         let mut filled = 0;
+        let mut out = Decoded::default();
         while !self.stopping.load(Ordering::Relaxed) {
             let n = self.stream.read(&mut buf[filled..], READ_WAIT);
             filled += n;
@@ -69,20 +68,22 @@ impl Thread {
                 continue;
             }
             filled = 0;
-            self.chz.run(&buf);
+            self.chz.run(&buf, &mut out);
             self.got_samples.store(true, Ordering::Relaxed);
-            self.drain();
+            self.route(&mut out);
         }
         tracing::info!(source = self.idx, device = %self.device, "source thread finished");
     }
 
-    /// What the block decoded: control-channel messages and detections.
-    fn drain(&self) {
-        let mut ports = self.ports.lock().unwrap_or_else(PoisonError::into_inner);
-        for port in ports.iter_mut() {
-            port.drain(&mut |m| self.events.send(RadioEvent::TrunkMessages(m)));
+    /// Send on what the block decoded: audio to the sink, events to the
+    /// monitor loop, and what the signal detector found.
+    fn route(&self, out: &mut Decoded) {
+        for (call, pcm) in out.audio.drain(..) {
+            self.sink.audio(call, &pcm);
         }
-        drop(ports);
+        for e in out.events.drain(..) {
+            self.events.send(e);
+        }
         let found = self.chz.take_detections();
         if !found.is_empty() {
             #[allow(clippy::cast_possible_truncation)]
@@ -117,8 +118,7 @@ pub struct Source {
     pub center_hz: f64,
     pub rate_hz: f64,
     pub device: String,
-    pub channelizer: Arc<SharedChannelizer>,
-    ports: Arc<Mutex<Vec<ControlPort>>>,
+    pub channelizer: Arc<Chz>,
     next_port: usize,
     stopping: Arc<AtomicBool>,
     got_samples: Arc<AtomicBool>,
@@ -149,6 +149,7 @@ impl Source {
         running: Box<dyn Running>,
         conditioning: ConditioningSettings,
         events: EventSender,
+        sink: Arc<dyn AudioSink>,
     ) -> Result<Self> {
         let SourceSpec {
             device,
@@ -157,7 +158,7 @@ impl Source {
         } = spec;
         let cfg = trunk_channelizer::Config::standard(rate_hz)
             .with_context(|| format!("channelizer for {rate_hz} S/s"))?;
-        let channelizer = Arc::new(SharedChannelizer::with_conditioning(cfg, conditioning)?);
+        let channelizer = Arc::new(Chz::with_conditioning(cfg, conditioning)?);
         {
             let mut reg = CHANNELIZERS.lock().unwrap_or_else(PoisonError::into_inner);
             reg.retain(|(s, w)| *s != idx && w.strong_count() > 0);
@@ -171,14 +172,13 @@ impl Source {
             hop = channelizer.config().hop(),
             "source channelizer attached"
         );
-        let ports = Arc::new(Mutex::new(Vec::new()));
         let stopping = Arc::new(AtomicBool::new(false));
         let got_samples = Arc::new(AtomicBool::new(false));
         let t = Thread {
             chz: Arc::clone(&channelizer),
             stream,
-            ports: Arc::clone(&ports),
             events,
+            sink,
             stopping: Arc::clone(&stopping),
             got_samples: Arc::clone(&got_samples),
             idx,
@@ -195,7 +195,6 @@ impl Source {
             rate_hz,
             device,
             channelizer,
-            ports,
             next_port: 0,
             stopping,
             got_samples,
@@ -207,7 +206,7 @@ impl Source {
     }
 
     /// The next free channelizer slot.
-    pub fn alloc_port(&mut self) -> usize {
+    pub const fn alloc_port(&mut self) -> usize {
         let p = self.next_port;
         self.next_port += 1;
         p
@@ -268,12 +267,9 @@ impl Source {
             source: self.idx,
             port: u32::try_from(port).unwrap_or(u32::MAX),
         };
-        let (dsp, shared) = p25::attach(channel, modulation, NARROW_RATE);
-        self.channelizer.set_slot_decoder(port, Some(dsp));
-        self.ports
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .push(ControlPort::new(shared, sys_num, tap_base));
+        let slot = ControlSlot::new(channel, modulation, NARROW_RATE, sys_num, tap_base);
+        self.channelizer
+            .set_slot_decoder(port, Some(Box::new(slot)));
         self.channelizer
             .set_slot(port, NARROW, freq_hz - self.center_hz);
         port

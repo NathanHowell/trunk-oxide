@@ -147,6 +147,7 @@ impl Radio {
             setup.running,
             self.cfg.conditioning,
             self.events.clone(),
+            Arc::clone(&self.sink),
         )?;
         source.set_detector_threshold(setup.signal_detector_threshold);
         if setup.analog_recorders > 0 && !source.has_wide() {
@@ -163,14 +164,13 @@ impl Radio {
             (setup.analog_recorders, Kind::Analog),
         ] {
             for _ in 0..count.max(0) {
-                self.add_recorder(&mut i, source_idx, kind, false, 0.0);
+                Self::add_recorder(&mut i, source_idx, kind, false, 0.0);
             }
         }
         Ok(idx)
     }
 
     fn add_recorder(
-        &self,
         i: &mut Inner,
         source_idx: usize,
         kind: Kind,
@@ -187,8 +187,6 @@ impl Radio {
                 port,
                 channelizer: &source.channelizer,
                 center_hz: source.center_hz,
-                events: &self.events,
-                sink: &self.sink,
             },
             kind,
             conventional,
@@ -383,7 +381,7 @@ impl Radio {
             );
         }
         i.sources[src].attach_detector();
-        let rec = self.add_recorder(&mut i, src, kind, true, channel.tone);
+        let rec = Self::add_recorder(&mut i, src, kind, true, channel.tone);
         Ok(i.recorders[rec].num)
     }
 
@@ -447,6 +445,16 @@ impl Radio {
         Some(num)
     }
 
+    /// Stop `rec`, sending the audio its audibility hold still kept under
+    /// the call before the state machine ends it.
+    fn stop_recorder(&self, rec: &mut Recorder) -> TrStopRecordingResult {
+        let s = rec.stop();
+        if !s.tail.is_empty() {
+            self.sink.audio(s.call, &s.tail);
+        }
+        s.result
+    }
+
     /// The recorder recording `call_id`, if one is bound to it.
     fn bound(i: &Inner, call_id: u64) -> Option<usize> {
         i.calls.get(&call_id)?.recorder
@@ -475,7 +483,7 @@ impl Radio {
         };
         let rec = &mut i.recorders[r];
         if rec.call() == Some(call_id) {
-            rec.stop()
+            self.stop_recorder(rec)
         } else {
             // Stopped already (and possibly recording another call now).
             TrStopRecordingResult {
@@ -516,7 +524,7 @@ impl Radio {
         };
         let rec = &mut i.recorders[r];
         if rec.call().is_some() {
-            rec.stop();
+            self.stop_recorder(rec);
         }
         rec.start(cfg, &params);
     }

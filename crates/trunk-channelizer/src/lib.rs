@@ -29,5 +29,5 @@ pub use design::{lowpass_taps, tap_count};
 pub use detector::{Detection, DetectorConfig, SignalDetector};
 pub use service::{
     ChannelDecoder, ConditioningSettings, ConditioningSpec, Counters, DECODER_RETUNE_HZ,
-    ResetPolicy, SharedChannelizer, SlotStats,
+    Reading, ResetPolicy, SharedChannelizer, SlotStats,
 };

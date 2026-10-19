@@ -409,3 +409,34 @@ impl EventSender {
 pub trait AudioSink: Send + Sync {
     fn audio(&self, rust_call_id: u64, samples: &[i16]);
 }
+
+/// What one channelizer block's decoders produced, for the source thread to
+/// route: audio to the [`AudioSink`], events to the [`EventSender`].
+#[derive(Default)]
+pub struct Decoded {
+    /// Audio by call id, in decode order.
+    pub audio: Vec<(u64, Vec<i16>)>,
+    pub events: Vec<RadioEvent>,
+}
+
+impl Decoded {
+    /// Append `samples` to the call's audio.
+    pub fn audio(&mut self, rust_call_id: u64, samples: &[i16]) {
+        if samples.is_empty() {
+            return;
+        }
+        match self.audio.last_mut() {
+            Some((id, buf)) if *id == rust_call_id => buf.extend_from_slice(samples),
+            _ => self.audio.push((rust_call_id, samples.to_vec())),
+        }
+    }
+
+    pub const fn is_empty(&self) -> bool {
+        self.audio.is_empty() && self.events.is_empty()
+    }
+
+    pub fn clear(&mut self) {
+        self.audio.clear();
+        self.events.clear();
+    }
+}

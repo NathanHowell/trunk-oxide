@@ -2,17 +2,19 @@
 //! the state machine drives.
 //!
 //! P25 recorders decode voice to audio with trunk-p25; analog recorders
-//! demodulate FM and gate it with trunk-fm. Both hand their audio to the
-//! [`AudioSink`] and report in-band events through the [`EventSender`],
-//! from the source's DSP thread.
+//! demodulate FM and gate it with trunk-fm. Both run on the source's DSP
+//! thread and append what they decode (audio under the call's id, in-band
+//! events) to the block's [`Decoded`] output; the source thread routes it.
+//! The control side reaches them with [`Cmd`]s through the channelizer's
+//! mailbox, and reads the [`Recording`] accounting they keep.
 
-use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError, Weak};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use num_complex::Complex32;
 use trunk_channelizer::{
-    ChannelDecoder, ConditioningSpec, NARROW, ProfileId, SharedChannelizer, SquelchMode, WIDE,
+    ChannelDecoder, ConditioningSpec, NARROW, ProfileId, Reading, SharedChannelizer, SquelchMode,
+    WIDE,
 };
 use trunk_fm::gate::{Config as GateConfig, Event as GateEvent, Gate};
 use trunk_fm::{Audio, Decimation, Detector, FmDemod, Measurement, TAU_US, Tone};
@@ -22,9 +24,12 @@ use crate::fm;
 use crate::p25_calls;
 use crate::p25_voice::P25VoiceHandle;
 use crate::types::{
-    AudioSink, CallCounts, EventSender, RadioEvent, RecorderState, TrCallReport, TrRecorderConfig,
+    CallCounts, Decoded, RadioEvent, RecorderState, TrCallReport, TrRecorderConfig,
     TrStopRecordingResult, TrTransmission, VoiceTagKind,
 };
+
+/// The channelizer as the recorders use it.
+pub type Chz = SharedChannelizer<Decoded, Cmd>;
 
 /// Conditioned rate of a P25 slot: 5 × 4800 (phase 1) = 4 × 6000 (phase 2).
 pub const NARROW_RATE: f64 = 24_000.0;
@@ -52,6 +57,11 @@ const AUDIBLE_WINDOW_S: f64 = 0.5;
 /// What `get_pwr()` returned with no reading: trunk-recorder's `DB_UNSET`.
 pub const DB_UNSET: f64 = 999.0;
 
+/// A power reading as the state machine takes it: [`DB_UNSET`] for none.
+const fn pwr_or_unset(db: f64) -> f64 {
+    if db.is_nan() { DB_UNSET } else { db }
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Kind {
     P25,
@@ -71,7 +81,7 @@ pub struct SystemParams {
 
 /// A call's start, as the decoder receives it.
 #[derive(Clone, Debug)]
-struct Start {
+pub struct Start {
     rust_call_id: u64,
     sys_num: i32,
     system: String,
@@ -85,15 +95,23 @@ struct Start {
     tone: Option<Tone>,
 }
 
-enum Cmd {
+/// What the control side tells a recorder's decoder.
+#[derive(Clone, Debug)]
+pub enum Cmd {
     Start(Start),
     Stop,
+    /// The unit the state machine says is talking (P25: for Harris aliases).
+    Source(i64),
 }
 
-/// One recording's accounting (what `headless_sink` kept).
+/// One recording's accounting (what `headless_sink` kept), written by the
+/// decoder as it goes and read by the control side.
 #[derive(Clone, Debug)]
 struct Recording {
+    /// The call being recorded (0: none); audio for any other is ignored.
+    call_id: u64,
     state: RecorderState,
+    system: String,
     start: SystemTime,
     last_write: Instant,
     last_voice: Instant,
@@ -120,7 +138,9 @@ impl Default for Recording {
     fn default() -> Self {
         let now = Instant::now();
         Self {
+            call_id: 0,
             state: RecorderState::Available,
+            system: String::new(),
             start: SystemTime::now(),
             last_write: now,
             last_voice: now,
@@ -144,7 +164,9 @@ impl Recording {
     fn start(&mut self, s: &Start) {
         let now = Instant::now();
         *self = Self {
+            call_id: s.rust_call_id,
             state: RecorderState::Idle,
+            system: s.system.clone(),
             start: SystemTime::now(),
             last_write: now,
             last_voice: now,
@@ -168,17 +190,21 @@ impl Recording {
         }
     }
 
-    /// Account for `audio` (at `rate` samples per second) and decide what of
-    /// it goes out: nothing until a half-second window clears
-    /// [`AUDIBLE_RMS`], then everything held plus this. Returns the samples
-    /// to send.
+    /// Account for `audio` (at `rate` samples per second) of call `call_id`
+    /// and decide what of it goes out: nothing until a half-second window
+    /// clears [`AUDIBLE_RMS`], then everything held plus this. Returns the
+    /// samples to send. Audio of a call that is not this one (over, or not
+    /// yet started) is dropped.
     #[allow(
         clippy::cast_precision_loss,
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         clippy::suboptimal_flops
     )]
-    fn deliver(&mut self, audio: &[i16], rate: f64) -> Vec<i16> {
+    fn deliver(&mut self, call_id: u64, audio: &[i16], rate: f64) -> Vec<i16> {
+        if call_id != self.call_id || self.state == RecorderState::Available {
+            return Vec::new();
+        }
         let voice = audio.iter().any(|&s| s.abs() >= VOICE_THRESHOLD);
         self.wrote(audio.len(), voice);
         if self.audible {
@@ -204,9 +230,11 @@ impl Recording {
     }
 
     /// The transmission is over: whatever a final partial window makes
-    /// audible is returned to send, else the held audio is dropped.
+    /// audible is returned to send, else the held audio is dropped. The
+    /// recording takes no more audio.
     #[allow(clippy::cast_precision_loss)]
     fn finish(&mut self) -> Vec<i16> {
+        self.state = RecorderState::Available;
         if !self.audible && self.win_n > 0 {
             let rms = (self.win_sq / self.win_n as f64).sqrt();
             if rms >= AUDIBLE_RMS {
@@ -252,30 +280,36 @@ impl Recording {
             freq: self.freq,
         })
     }
+
+    /// A P25 call's outcome, for the metrics.
+    fn report(&self, recorder: i32) -> TrCallReport {
+        let t = self.transmission();
+        TrCallReport {
+            system: self.system.clone(),
+            recorder,
+            talkgroup: self.talkgroup,
+            freq: self.freq,
+            phase2: self.phase2,
+            #[allow(clippy::cast_precision_loss)]
+            audio_seconds: t
+                .as_ref()
+                .map_or(0.0, |t| t.sample_count as f64 / P25_AUDIO_RATE),
+            transmissions: i64::from(t.is_some()),
+            errors: t.as_ref().map_or(0, |t| t.error_count),
+            spikes: t.as_ref().map_or(0, |t| t.spike_count),
+            sources: self.sources.clone(),
+            algid: self.counts.algid,
+            repeated: i64::try_from(self.counts.repeated).unwrap_or(0),
+            muted: i64::try_from(self.counts.muted).unwrap_or(0),
+        }
+    }
 }
 
-/// What the DSP thread and the control side share.
-struct Shared {
-    cmd: Mutex<Option<Cmd>>,
-    rec: Mutex<Recording>,
-    /// The decoder is running a call.
-    active: AtomicBool,
-    rust_call_id: AtomicU64,
-    /// The unit talking, as last told (P25: for Harris aliases).
-    source_id: AtomicI64,
-}
+/// The accounting, shared by the decoder and the control side.
+type Shared = Arc<Mutex<Recording>>;
 
-impl Shared {
-    fn rec(&self) -> std::sync::MutexGuard<'_, Recording> {
-        self.rec.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-
-    fn take_cmd(&self) -> Option<Cmd> {
-        self.cmd
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-    }
+fn lock(rec: &Shared) -> std::sync::MutexGuard<'_, Recording> {
+    rec.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Level, then PCM: `k` is `digital_levels`/`analog_levels`.
@@ -294,14 +328,16 @@ fn level_f32(s: f32, k: f32) -> i16 {
 struct P25Slot {
     num: i32,
     voice: P25VoiceHandle,
-    shared: Arc<Shared>,
-    sink: Arc<dyn AudioSink>,
-    events: EventSender,
+    rec: Shared,
     audio: Vec<i16>,
     tags: Vec<crate::types::VoiceTag>,
     call: Option<Start>,
     levels: f64,
-    last_src: i64,
+    /// The unit talking, as last heard in band or told by the state machine.
+    source_id: i64,
+    /// The conditioner's power squelch, as of the last block (digital
+    /// conventional channels; always open on the others).
+    squelch_open: bool,
 }
 
 impl std::fmt::Debug for P25Slot {
@@ -312,35 +348,33 @@ impl std::fmt::Debug for P25Slot {
     }
 }
 
-impl P25Slot {
-    fn apply(&mut self, cmd: Cmd) {
+impl ChannelDecoder for P25Slot {
+    type Output = Decoded;
+    type Command = Cmd;
+
+    fn command(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::Start(s) => {
                 self.voice
                     .start_call(s.qpsk, s.phase2, &s.xor_mask, &s.system, s.slot);
                 let _ = self.voice.take_call_counts(); // anything before is not this call's
                 self.levels = s.levels;
-                self.last_src = -1;
-                self.shared.rec().start(&s);
-                self.shared
-                    .rust_call_id
-                    .store(s.rust_call_id, Ordering::Relaxed);
-                self.shared.source_id.store(-1, Ordering::Relaxed);
-                self.shared.active.store(true, Ordering::Relaxed);
+                self.source_id = -1;
                 self.call = Some(s);
             }
-            Cmd::Stop => {
-                self.shared.active.store(false, Ordering::Relaxed);
-                self.call = None;
-            }
+            Cmd::Stop => self.call = None,
+            Cmd::Source(src) => self.source_id = src,
         }
     }
-}
 
-impl ChannelDecoder for P25Slot {
-    fn process(&mut self, iq: &[Complex32]) {
-        if let Some(cmd) = self.shared.take_cmd() {
-            self.apply(cmd);
+    fn process(&mut self, iq: &[Complex32], reading: &Reading, out: &mut Decoded) {
+        if reading.squelch_open != self.squelch_open {
+            self.squelch_open = reading.squelch_open;
+            out.events.push(RadioEvent::Squelch {
+                recorder_num: self.num,
+                muted: !reading.squelch_open,
+                pwr_db: pwr_or_unset(reading.power_db),
+            });
         }
         let Some(call) = &self.call else { return };
         self.audio.clear();
@@ -348,14 +382,14 @@ impl ChannelDecoder for P25Slot {
         self.voice.process(iq, &mut self.audio, &mut self.tags);
         let crypto = self.voice.take_crypto();
         if crypto != 0 {
-            self.events.send(RadioEvent::Crypto {
+            out.events.push(RadioEvent::Crypto {
                 rust_call_id: call.rust_call_id,
                 alg_id: (crypto >> 16) & 0xff,
                 key_id: crypto & 0xffff,
             });
         }
         let counts = self.voice.take_call_counts();
-        let mut rec = self.shared.rec();
+        let mut rec = lock(&self.rec);
         rec.counts.errors += counts.errors;
         rec.counts.spikes += counts.spikes;
         rec.counts.repeated += counts.repeated;
@@ -368,10 +402,9 @@ impl ChannelDecoder for P25Slot {
                         if !rec.sources.contains(&t.value) {
                             rec.sources.push(t.value);
                         }
-                        if t.value != self.last_src {
-                            self.last_src = t.value;
-                            self.shared.source_id.store(t.value, Ordering::Relaxed);
-                            self.events.send(RadioEvent::SourceChange {
+                        if t.value != self.source_id {
+                            self.source_id = t.value;
+                            out.events.push(RadioEvent::SourceChange {
                                 rust_call_id: call.rust_call_id,
                                 src_id: t.value,
                             });
@@ -385,8 +418,7 @@ impl ChannelDecoder for P25Slot {
                 }
                 VoiceTagKind::Alias => {
                     if let Some(a) = &t.alias
-                        && let Some(alias) =
-                            alias::decode(a, self.shared.source_id.load(Ordering::Relaxed))
+                        && let Some(alias) = alias::decode(a, self.source_id)
                     {
                         tracing::info!(
                             radio_id = alias.radio_id,
@@ -394,7 +426,7 @@ impl ChannelDecoder for P25Slot {
                             source = %alias.source,
                             "new unit alias"
                         );
-                        self.events.send(RadioEvent::UnitAlias {
+                        out.events.push(RadioEvent::UnitAlias {
                             sys_num: call.sys_num,
                             alias,
                         });
@@ -409,11 +441,9 @@ impl ChannelDecoder for P25Slot {
                     *s = level_i16(*s, self.levels);
                 }
             }
-            let out = rec.deliver(&self.audio, P25_AUDIO_RATE);
+            let pcm = rec.deliver(call.rust_call_id, &self.audio, P25_AUDIO_RATE);
             drop(rec);
-            if !out.is_empty() {
-                self.sink.audio(call.rust_call_id, &out);
-            }
+            out.audio(call.rust_call_id, &pcm);
         }
     }
 
@@ -424,7 +454,6 @@ impl ChannelDecoder for P25Slot {
 
 struct AnalogSlot {
     num: i32,
-    port: usize,
     demod: FmDemod,
     detector: Detector,
     gate: Gate,
@@ -434,11 +463,8 @@ struct AnalogSlot {
     gate_events: Vec<GateEvent>,
     voice_pending: Vec<f32>,
     pcm: Vec<i16>,
-    shared: Arc<Shared>,
+    rec: Shared,
     stats: Arc<fm::Shared>,
-    chz: Weak<SharedChannelizer>,
-    sink: Arc<dyn AudioSink>,
-    events: EventSender,
     call: Option<Start>,
     levels: f32,
 }
@@ -451,17 +477,12 @@ impl std::fmt::Debug for AnalogSlot {
     }
 }
 
-impl AnalogSlot {
-    fn power_db(&self) -> f64 {
-        let db = self
-            .chz
-            .upgrade()
-            .map_or(f64::NAN, |c| c.slot_power_db(self.port));
-        if db.is_nan() { DB_UNSET } else { db }
-    }
+impl ChannelDecoder for AnalogSlot {
+    type Output = Decoded;
+    type Command = Cmd;
 
     #[allow(clippy::cast_possible_truncation)]
-    fn apply(&mut self, cmd: Cmd) {
+    fn command(&mut self, cmd: Cmd) {
         match cmd {
             Cmd::Start(s) => {
                 self.gate = Gate::new(GateConfig::for_tone(s.tone));
@@ -469,26 +490,14 @@ impl AnalogSlot {
                 self.voice_pending.clear();
                 self.levels = s.levels as f32;
                 self.stats.call(&s.system, s.talkgroup, s.freq, s.tone);
-                self.shared.rec().start(&s);
-                self.shared
-                    .rust_call_id
-                    .store(s.rust_call_id, Ordering::Relaxed);
-                self.shared.active.store(true, Ordering::Relaxed);
                 self.call = Some(s);
             }
-            Cmd::Stop => {
-                self.shared.active.store(false, Ordering::Relaxed);
-                self.call = None;
-            }
+            Cmd::Stop => self.call = None,
+            Cmd::Source(_) => {}
         }
     }
-}
 
-impl ChannelDecoder for AnalogSlot {
-    fn process(&mut self, iq: &[Complex32]) {
-        if let Some(cmd) = self.shared.take_cmd() {
-            self.apply(cmd);
-        }
+    fn process(&mut self, iq: &[Complex32], reading: &Reading, out: &mut Decoded) {
         let Some(call) = &self.call else { return };
         self.audio.clear();
         self.demod.process(iq, &mut self.audio);
@@ -517,24 +526,19 @@ impl ChannelDecoder for AnalogSlot {
             &self.gate_events,
             self.gate.config(),
         );
-        if !self.gate_events.is_empty() {
-            let pwr_db = self.power_db();
-            for e in &self.gate_events {
-                self.events.send(RadioEvent::Squelch {
-                    recorder_num: self.num,
-                    muted: matches!(e, GateEvent::Close { .. }),
-                    pwr_db,
-                });
-            }
+        for e in &self.gate_events {
+            out.events.push(RadioEvent::Squelch {
+                recorder_num: self.num,
+                muted: matches!(e, GateEvent::Close { .. }),
+                pwr_db: pwr_or_unset(reading.power_db),
+            });
         }
         if !self.gated.is_empty() {
             self.pcm.clear();
             self.pcm
                 .extend(self.gated.iter().map(|&v| level_f32(v, self.levels)));
-            let out = self.shared.rec().deliver(&self.pcm, trunk_fm::AUDIO_RATE);
-            if !out.is_empty() {
-                self.sink.audio(call.rust_call_id, &out);
-            }
+            let pcm = lock(&self.rec).deliver(call.rust_call_id, &self.pcm, trunk_fm::AUDIO_RATE);
+            out.audio(call.rust_call_id, &pcm);
         }
     }
 
@@ -557,19 +561,14 @@ pub struct Recorder {
     pub conventional: bool,
     /// The CTCSS tone of a conventional analog channel, 0 for none.
     tone_hz: f64,
-    shared: Arc<Shared>,
-    chz: Arc<SharedChannelizer>,
-    sink: Arc<dyn AudioSink>,
+    rec: Shared,
+    chz: Arc<Chz>,
     center_hz: f64,
     profile: ProfileId,
     /// Tuning of the current (or last) call, relative to the source centre.
     offset_hz: f64,
-    /// Started and not stopped.
-    active: bool,
     /// The call it records, while it does.
     call: Option<u64>,
-    /// What the current call is, for the report at its end.
-    last_start: Option<(String, i64, f64, bool)>,
 }
 
 impl std::fmt::Debug for Recorder {
@@ -578,7 +577,7 @@ impl std::fmt::Debug for Recorder {
             .field("num", &self.num)
             .field("kind", &self.kind)
             .field("conventional", &self.conventional)
-            .field("active", &self.active)
+            .field("call", &self.call)
             .finish_non_exhaustive()
     }
 }
@@ -587,86 +586,85 @@ impl std::fmt::Debug for Recorder {
 pub struct Slot<'a> {
     pub source: usize,
     pub port: usize,
-    pub channelizer: &'a Arc<SharedChannelizer>,
+    pub channelizer: &'a Arc<Chz>,
     pub center_hz: f64,
-    pub events: &'a EventSender,
-    pub sink: &'a Arc<dyn AudioSink>,
+}
+
+/// What stopping a recorder leaves: the result for the state machine, and
+/// the audio the audibility hold still kept, to send under the call before
+/// the call ends.
+pub struct Stopped {
+    pub result: TrStopRecordingResult,
+    pub call: u64,
+    pub tail: Vec<i16>,
 }
 
 impl Recorder {
     /// Install a `kind` recorder on `slot`. Conventional ones stay disabled
     /// until [`Self::set_enabled`]; the others enable themselves on start.
     pub fn new(num: i32, slot: &Slot<'_>, kind: Kind, conventional: bool, tone_hz: f64) -> Self {
-        let shared = Arc::new(Shared {
-            cmd: Mutex::new(None),
-            rec: Mutex::new(Recording::default()),
-            active: AtomicBool::new(false),
-            rust_call_id: AtomicU64::new(0),
-            source_id: AtomicI64::new(-1),
-        });
+        let rec: Shared = Arc::new(Mutex::new(Recording::default()));
         let cfg = slot.channelizer.config();
-        let (profile, spec, decoder): (ProfileId, ConditioningSpec, Box<dyn ChannelDecoder>) =
-            match kind {
-                Kind::P25 => (
-                    NARROW,
-                    ConditioningSpec {
-                        sps: 5,
-                        excess_bw: EXCESS_BW,
-                        in_rate: cfg.out_rate(NARROW),
-                        out_rate: NARROW_RATE,
-                        squelch: conventional.then_some(SquelchMode::DIGITAL),
-                    },
-                    Box::new(P25Slot {
-                        num,
-                        voice: P25VoiceHandle::new(NARROW_RATE, num),
-                        shared: Arc::clone(&shared),
-                        sink: Arc::clone(slot.sink),
-                        events: slot.events.clone(),
-                        audio: Vec::new(),
-                        tags: Vec::new(),
-                        call: None,
-                        levels: 1.0,
-                        last_src: -1,
+        let (profile, spec, decoder): (
+            ProfileId,
+            ConditioningSpec,
+            Box<dyn ChannelDecoder<Output = Decoded, Command = Cmd>>,
+        ) = match kind {
+            Kind::P25 => (
+                NARROW,
+                ConditioningSpec {
+                    sps: 5,
+                    excess_bw: EXCESS_BW,
+                    in_rate: cfg.out_rate(NARROW),
+                    out_rate: NARROW_RATE,
+                    squelch: conventional.then_some(SquelchMode::DIGITAL),
+                },
+                Box::new(P25Slot {
+                    num,
+                    voice: P25VoiceHandle::new(NARROW_RATE, num),
+                    rec: Arc::clone(&rec),
+                    audio: Vec::new(),
+                    tags: Vec::new(),
+                    call: None,
+                    levels: 1.0,
+                    source_id: -1,
+                    squelch_open: true,
+                }),
+            ),
+            Kind::Analog => (
+                WIDE,
+                ConditioningSpec {
+                    sps: 2,
+                    excess_bw: EXCESS_BW,
+                    in_rate: cfg.out_rate(WIDE),
+                    out_rate: WIDE_RATE,
+                    // trunk-fm's own gate decides; the power probe still runs.
+                    squelch: None,
+                },
+                Box::new(AnalogSlot {
+                    num,
+                    demod: FmDemod::new(WIDE_RATE, TAU_US, Decimation::AntiAliased),
+                    detector: Detector::new(),
+                    gate: Gate::new(GateConfig::for_tone(None)),
+                    audio: Audio::default(),
+                    measurements: Vec::new(),
+                    gated: Vec::new(),
+                    gate_events: Vec::new(),
+                    voice_pending: Vec::new(),
+                    pcm: Vec::new(),
+                    rec: Arc::clone(&rec),
+                    stats: fm::Shared::register(fm::AnalogChannel {
+                        system: String::new(),
+                        talkgroup: 0,
+                        freq_hz: 0.0,
+                        source: i32::try_from(slot.source).unwrap_or(-1),
+                        port: u32::try_from(slot.port).unwrap_or(u32::MAX),
                     }),
-                ),
-                Kind::Analog => (
-                    WIDE,
-                    ConditioningSpec {
-                        sps: 2,
-                        excess_bw: EXCESS_BW,
-                        in_rate: cfg.out_rate(WIDE),
-                        out_rate: WIDE_RATE,
-                        // trunk-fm's own gate decides; the power probe still runs.
-                        squelch: None,
-                    },
-                    Box::new(AnalogSlot {
-                        num,
-                        port: slot.port,
-                        demod: FmDemod::new(WIDE_RATE, TAU_US, Decimation::AntiAliased),
-                        detector: Detector::new(),
-                        gate: Gate::new(GateConfig::for_tone(None)),
-                        audio: Audio::default(),
-                        measurements: Vec::new(),
-                        gated: Vec::new(),
-                        gate_events: Vec::new(),
-                        voice_pending: Vec::new(),
-                        pcm: Vec::new(),
-                        shared: Arc::clone(&shared),
-                        stats: fm::Shared::register(fm::AnalogChannel {
-                            system: String::new(),
-                            talkgroup: 0,
-                            freq_hz: 0.0,
-                            source: i32::try_from(slot.source).unwrap_or(-1),
-                            port: u32::try_from(slot.port).unwrap_or(u32::MAX),
-                        }),
-                        chz: Arc::downgrade(slot.channelizer),
-                        sink: Arc::clone(slot.sink),
-                        events: slot.events.clone(),
-                        call: None,
-                        levels: 1.0,
-                    }),
-                ),
-            };
+                    call: None,
+                    levels: 1.0,
+                }),
+            ),
+        };
         slot.channelizer.set_slot_conditioning(slot.port, spec);
         slot.channelizer.set_slot_decoder(slot.port, Some(decoder));
         Self {
@@ -676,27 +674,18 @@ impl Recorder {
             kind,
             conventional,
             tone_hz,
-            shared,
+            rec,
             chz: Arc::clone(slot.channelizer),
-            sink: Arc::clone(slot.sink),
             center_hz: slot.center_hz,
             profile,
             offset_hz: 0.0,
-            active: false,
             call: None,
-            last_start: None,
         }
-    }
-
-    /// The call most recently started on this recorder.
-    fn call_id_of_last(&self) -> Option<u64> {
-        let id = self.shared.rust_call_id.load(Ordering::Relaxed);
-        (id != 0).then_some(id)
     }
 
     /// Free for a call: created, or stopped since the last one.
     pub const fn available(&self) -> bool {
-        !self.active
+        self.call.is_none()
     }
 
     pub const fn call(&self) -> Option<u64> {
@@ -715,7 +704,7 @@ impl Recorder {
     /// Record `cfg`'s call. A pool recorder enables its slot; a conventional
     /// one waits for [`Self::set_enabled`].
     pub fn start(&mut self, cfg: &TrRecorderConfig, sys: &SystemParams) -> bool {
-        if self.active {
+        if self.call.is_some() {
             tracing::error!(
                 rec_num = self.num,
                 "starting a recorder that is already active"
@@ -765,39 +754,10 @@ impl Recorder {
             },
             tone,
         };
-        self.last_start = Some((
-            cfg.short_name.clone(),
-            cfg.talkgroup,
-            cfg.freq,
-            cfg.phase2_tdma,
-        ));
-        *self
-            .shared
-            .cmd
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(Cmd::Start(start));
-        // The decoder applies the start on its next block; until then the
-        // accounting shows the call as pending.
-        {
-            let mut rec = self.shared.rec();
-            rec.state = RecorderState::Idle;
-            rec.start = SystemTime::now();
-            rec.last_write = Instant::now();
-            rec.last_voice = rec.last_write;
-            rec.sample_count = 0;
-            rec.term_events = 0;
-            rec.after_term_samples = 0;
-            rec.talkgroup = cfg.talkgroup;
-            rec.freq = cfg.freq;
-            rec.counts = CallCounts::default();
-            rec.sources.clear();
-            rec.phase2 = cfg.phase2_tdma;
-            rec.audible = false;
-            rec.held.clear();
-            rec.win_sq = 0.0;
-            rec.win_n = 0;
-        }
-        self.active = true;
+        // The accounting shows the call from now; the decoder starts it on
+        // its next block.
+        lock(&self.rec).start(&start);
+        self.chz.send(self.port, Cmd::Start(start));
         self.call = Some(cfg.rust_call_id);
         if self.conventional {
             self.chz.set_slot_squelch_db(self.port, cfg.squelch_db);
@@ -808,59 +768,30 @@ impl Recorder {
     }
 
     /// Stop recording: the slot is disabled and the decoder told; returns
-    /// the FLL error and power the call ends with.
-    pub fn stop(&mut self) -> TrStopRecordingResult {
+    /// the FLL error and power the call ends with, and the held audio.
+    pub fn stop(&mut self) -> Stopped {
         let result = TrStopRecordingResult {
             freq_error: self.freq_error(),
             recorder_pwr: self.pwr_db(),
             has_recorder: true,
         };
-        if !self.active {
+        let Some(call) = self.call.take() else {
             tracing::error!(rec_num = self.num, "stopping an inactive recorder");
-            return result;
-        }
-        self.active = false;
-        self.call = None;
-        self.chz.clear_slot(self.port);
-        *self
-            .shared
-            .cmd
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner) = Some(Cmd::Stop);
-        self.shared.active.store(false, Ordering::Relaxed);
-        let (rec, tail) = {
-            let mut rec = self.shared.rec();
-            rec.state = RecorderState::Available;
-            let tail = rec.finish();
-            (rec.clone(), tail)
+            return Stopped {
+                result,
+                call: 0,
+                tail: Vec::new(),
+            };
         };
-        if !tail.is_empty()
-            && let Some(id) = self.call_id_of_last()
-        {
-            self.sink.audio(id, &tail);
+        self.chz.clear_slot(self.port);
+        self.chz.send(self.port, Cmd::Stop);
+        let mut rec = lock(&self.rec);
+        let tail = rec.finish();
+        if self.kind == Kind::P25 {
+            p25_calls::observe_call(&rec.report(self.num));
         }
-        if self.kind == Kind::P25
-            && let Some((system, talkgroup, freq, phase2)) = self.last_start.take()
-        {
-            let t = rec.transmission();
-            p25_calls::observe_call(&TrCallReport {
-                system,
-                recorder: self.num,
-                talkgroup,
-                freq,
-                phase2,
-                #[allow(clippy::cast_precision_loss)]
-                audio_seconds: t.as_ref().map_or(0.0, |t| t.sample_count as f64 / 8000.0),
-                transmissions: i64::from(t.is_some()),
-                errors: t.as_ref().map_or(0, |t| t.error_count),
-                spikes: t.as_ref().map_or(0, |t| t.spike_count),
-                sources: rec.sources.clone(),
-                algid: rec.counts.algid,
-                repeated: i64::try_from(rec.counts.repeated).unwrap_or(0),
-                muted: i64::try_from(rec.counts.muted).unwrap_or(0),
-            });
-        }
-        result
+        drop(rec);
+        Stopped { result, call, tail }
     }
 
     /// Enable (tune) or disable the slot; conventional recorders are driven
@@ -874,27 +805,27 @@ impl Recorder {
     }
 
     pub fn state(&self) -> RecorderState {
-        if !self.active {
+        if self.call.is_none() {
             return RecorderState::Available;
         }
-        self.shared.rec().state
+        lock(&self.rec).state
     }
 
     pub fn transmission_list(&self) -> Vec<TrTransmission> {
-        self.shared.rec().transmission().into_iter().collect()
+        lock(&self.rec).transmission().into_iter().collect()
     }
 
     pub fn since_last_write_secs(&self) -> f64 {
-        self.shared.rec().last_write.elapsed().as_secs_f64()
+        lock(&self.rec).last_write.elapsed().as_secs_f64()
     }
 
     pub fn since_last_voice_secs(&self) -> f64 {
-        self.shared.rec().last_voice.elapsed().as_secs_f64()
+        lock(&self.rec).last_voice.elapsed().as_secs_f64()
     }
 
     /// The unit the state machine says is talking.
     pub fn set_source(&self, src: i64) {
-        self.shared.source_id.store(src, Ordering::Relaxed);
+        self.chz.send(self.port, Cmd::Source(src));
     }
 
     /// Power squelch threshold of a digital conventional slot (analog slots
@@ -907,8 +838,7 @@ impl Recorder {
 
     /// The slot's smoothed power in dB, [`DB_UNSET`] without a reading.
     pub fn pwr_db(&self) -> f64 {
-        let db = self.chz.slot_power_db(self.port);
-        if db.is_nan() { DB_UNSET } else { db }
+        pwr_or_unset(self.chz.slot_power_db(self.port))
     }
 
     pub fn freq_error(&self) -> i32 {
@@ -919,28 +849,9 @@ impl Recorder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Mutex as StdMutex;
 
-    #[derive(Default)]
-    struct Captured(StdMutex<Vec<(u64, usize)>>);
-
-    impl AudioSink for Captured {
-        fn audio(&self, rust_call_id: u64, samples: &[i16]) {
-            self.0.lock().unwrap().push((rust_call_id, samples.len()));
-        }
-    }
-
-    fn events() -> (EventSender, tokio::sync::mpsc::Receiver<RadioEvent>) {
-        let (tx, rx) = tokio::sync::mpsc::channel(64);
-        (
-            EventSender::new(tx, Arc::new(std::sync::atomic::AtomicUsize::new(0))),
-            rx,
-        )
-    }
-
-    #[test]
-    fn a_transmission_is_held_until_audible_and_dropped_otherwise() {
-        let start = Start {
+    fn start() -> Start {
+        Start {
             rust_call_id: 1,
             sys_num: 0,
             system: "s".into(),
@@ -952,32 +863,41 @@ mod tests {
             xor_mask: vec![],
             levels: 1.0,
             tone: None,
-        };
+        }
+    }
+
+    #[test]
+    fn a_transmission_is_held_until_audible_and_dropped_otherwise() {
         // Quiet audio is held, then dropped at the end.
         let mut r = Recording::default();
-        r.start(&start);
+        r.start(&start());
         let quiet = vec![40i16; 4000];
-        assert_eq!(r.deliver(&quiet, 8_000.0), Vec::<i16>::new());
-        assert_eq!(r.deliver(&quiet, 8_000.0), Vec::<i16>::new());
+        assert_eq!(r.deliver(1, &quiet, 8_000.0), Vec::<i16>::new());
+        assert_eq!(r.deliver(1, &quiet, 8_000.0), Vec::<i16>::new());
         assert_eq!(r.sample_count, 8000, "accounting sees every sample");
         assert_eq!(r.finish(), Vec::<i16>::new());
         assert!(!r.audible);
 
         // Loud audio releases everything held before it, then flows live.
         let mut r = Recording::default();
-        r.start(&start);
-        assert_eq!(r.deliver(&quiet, 8_000.0), Vec::<i16>::new());
+        r.start(&start());
+        assert_eq!(r.deliver(1, &quiet, 8_000.0), Vec::<i16>::new());
         let loud = vec![3000i16; 4000];
-        let out = r.deliver(&loud, 8_000.0);
+        let out = r.deliver(1, &loud, 8_000.0);
         assert_eq!(out.len(), 8000);
         assert_eq!(&out[..4000], &quiet[..]);
-        assert_eq!(r.deliver(&quiet, 8_000.0), quiet);
+        assert_eq!(r.deliver(1, &quiet, 8_000.0), quiet);
         assert_eq!(r.finish(), Vec::<i16>::new());
+        // Nothing after the finish, nor for another call.
+        assert_eq!(r.deliver(1, &loud, 8_000.0), Vec::<i16>::new());
+        r.start(&start());
+        assert_eq!(r.deliver(2, &loud, 8_000.0), Vec::<i16>::new());
+        assert_eq!(r.sample_count, 0);
 
         // A loud partial last window is released at the end.
         let mut r = Recording::default();
-        r.start(&start);
-        assert_eq!(r.deliver(&loud[..1000], 8_000.0), Vec::<i16>::new());
+        r.start(&start());
+        assert_eq!(r.deliver(1, &loud[..1000], 8_000.0), Vec::<i16>::new());
         assert_eq!(r.finish().len(), 1000);
     }
 
@@ -985,19 +905,7 @@ mod tests {
     fn recording_accounts_for_audio_and_voice() {
         let mut r = Recording::default();
         assert!(r.transmission().is_none());
-        r.start(&Start {
-            rust_call_id: 1,
-            sys_num: 0,
-            system: "s".into(),
-            talkgroup: 5,
-            freq: 851e6,
-            qpsk: true,
-            phase2: false,
-            slot: 0,
-            xor_mask: vec![],
-            levels: 1.0,
-            tone: None,
-        });
+        r.start(&start());
         assert_eq!(r.state, RecorderState::Idle);
         r.wrote(160, false);
         assert_eq!(r.state, RecorderState::Recording);
@@ -1005,22 +913,21 @@ mod tests {
         let t = r.transmission().unwrap();
         assert_eq!((t.talkgroup, t.sample_count), (5, 320));
         assert!(r.last_voice >= r.last_write - std::time::Duration::from_millis(1));
+        let report = r.report(3);
+        assert_eq!((report.recorder, report.transmissions), (3, 1));
+        assert!((report.audio_seconds - 0.04).abs() < 1e-9);
     }
 
     #[test]
     #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
     fn an_analog_recorder_gates_a_pl_transmission_and_reports_it() {
         let cfg = trunk_channelizer::Config::standard(912_000.0).unwrap();
-        let chz = Arc::new(SharedChannelizer::new(cfg.clone()).unwrap());
-        let sink: Arc<dyn AudioSink> = Arc::new(Captured::default());
-        let (events, mut rx) = events();
+        let chz: Arc<Chz> = Arc::new(SharedChannelizer::new(cfg.clone()).unwrap());
         let slot = Slot {
             source: 0,
             port: 1,
             channelizer: &chz,
             center_hz: 488_661_750.0,
-            events: &events,
-            sink: &sink,
         };
         let mut rec = Recorder::new(7, &slot, Kind::Analog, true, 162.2);
         let sys = SystemParams {
@@ -1073,8 +980,25 @@ mod tests {
             }
             iq.push(Complex32::from_polar(0.3, phase as f32));
         }
+        let mut out = Decoded::default();
+        let (mut opened, mut closed, mut audio) = (0, 0, 0);
         for block in iq.chunks_exact(hop) {
-            chz.run(block);
+            chz.run(block, &mut out);
+            for e in out.events.drain(..) {
+                if let RadioEvent::Squelch {
+                    recorder_num,
+                    muted,
+                    ..
+                } = e
+                {
+                    assert_eq!(recorder_num, 7);
+                    if muted { closed += 1 } else { opened += 1 }
+                }
+            }
+            for (id, pcm) in out.audio.drain(..) {
+                assert_eq!(id, 42);
+                audio += pcm.len();
+            }
         }
         let st = fm::analog_channels()
             .into_iter()
@@ -1082,27 +1006,17 @@ mod tests {
             .unwrap();
         assert_eq!(st.stats.opens, 1, "{:?}", st.stats);
         assert_eq!(st.stats.closes_quieting, 1, "{:?}", st.stats);
-        let mut opened = 0;
-        let mut closed = 0;
-        while let Ok(e) = rx.try_recv() {
-            if let RadioEvent::Squelch {
-                recorder_num,
-                muted,
-                ..
-            } = e
-            {
-                assert_eq!(recorder_num, 7);
-                if muted { closed += 1 } else { opened += 1 }
-            }
-        }
         assert_eq!((opened, closed), (1, 1));
         let t = rec.transmission_list();
         assert_eq!(t.len(), 1);
-        // about 2 s of 16 kHz audio reached the sink under the call id
+        // about 2 s of 16 kHz audio came out under the call id
         assert!((28_000..=36_000).contains(&t[0].sample_count), "{t:?}");
+        assert_eq!(audio, t[0].sample_count as usize);
         assert_eq!(rec.state(), RecorderState::Recording);
-        let r = rec.stop();
-        assert!(r.has_recorder);
+        let s = rec.stop();
+        assert!(s.result.has_recorder);
+        assert_eq!(s.call, 42);
+        assert!(s.tail.is_empty());
         assert_eq!(rec.state(), RecorderState::Available);
         assert!(rec.available());
     }

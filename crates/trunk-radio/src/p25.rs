@@ -1,22 +1,20 @@
 //! P25 control-channel decoders hosted on shared-channelizer slots.
 //!
 //! The decoder runs on the channelizer's DSP thread, on the slot's
-//! conditioned output (see [`trunk_channelizer::ChannelDecoder`]); its
-//! messages wait in a bounded queue until the source thread, after each
-//! channelizer block, has the [`ControlPort`] parse them and send the
-//! trunking messages on. Counters are readable from any thread for metrics.
+//! conditioned output (see [`trunk_channelizer::ChannelDecoder`]), parses
+//! what it decodes into trunking messages and appends them to the block's
+//! [`Decoded`] output for the source thread to send on. Counters are
+//! readable from any thread for metrics.
 
-use std::collections::VecDeque;
 use std::fmt;
 use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{LineWriter, Write as _};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use num_complex::Complex32;
-use trunk_channelizer::ChannelDecoder;
+use trunk_channelizer::{ChannelDecoder, Reading};
 use trunk_p25::voice::{Encryption, EncryptionTracker};
 use trunk_p25::{
     ControlChannelDecoder, DecoderConfig, DemodConfig, Message, Modulation, Nac, Received,
@@ -27,11 +25,8 @@ pub use trunk_p25::tdma::TdmaStats;
 pub use trunk_p25::voice::VoiceStats;
 
 use crate::p25_parse::P25TrunkParser;
-use crate::types::TrTrunkMessage;
-
-/// Messages held for the drain; beyond this the oldest are dropped (it
-/// drains every channelizer block, so this only fills if it stalls).
-const QUEUE_CAPACITY: usize = 1024;
+use crate::recorder::Cmd;
+use crate::types::{Decoded, RadioEvent};
 
 /// Which control channel a decoder serves.
 #[derive(Clone, Debug, PartialEq)]
@@ -49,27 +44,19 @@ pub struct ControlChannelReport {
     pub modulation: Modulation,
     pub nac: Option<Nac>,
     pub stats: DecoderStats,
-    /// Messages dropped because the queue was full.
+    /// Messages dropped before they were parsed (none since the decoder
+    /// parses in place; kept for the metric).
     pub dropped: u64,
 }
 
-/// State shared by the DSP-side decoder and the drain side.
+/// A decoder's counters, published every block for [`control_channels`].
 pub(crate) struct Shared {
     channel: ControlChannel,
     modulation: Modulation,
-    queue: Mutex<VecDeque<Received>>,
     snapshot: Mutex<(DecoderStats, Option<Nac>)>,
-    dropped: AtomicU64,
 }
 
 impl Shared {
-    pub(crate) fn pop(&self) -> Option<Received> {
-        self.queue
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .pop_front()
-    }
-
     fn report(&self) -> ControlChannelReport {
         let (stats, nac) = *self.snapshot.lock().unwrap_or_else(PoisonError::into_inner);
         ControlChannelReport {
@@ -77,7 +64,7 @@ impl Shared {
             modulation: self.modulation,
             nac,
             stats,
-            dropped: self.dropped.load(Ordering::Relaxed),
+            dropped: 0,
         }
     }
 }
@@ -95,36 +82,73 @@ pub fn control_channels() -> Vec<ControlChannelReport> {
         .collect()
 }
 
-/// The DSP-thread half: owns the decoder.
-struct SlotDecoder {
+/// A control channel on a slot: the decoder, its parser, and the raw
+/// message tap when baselines are being taken.
+pub(crate) struct ControlSlot {
     decoder: ControlChannelDecoder,
+    parser: P25TrunkParser,
+    raw: Option<RawLog>,
     shared: Arc<Shared>,
     scratch: Vec<Received>,
 }
 
-impl fmt::Debug for SlotDecoder {
+impl fmt::Debug for ControlSlot {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("SlotDecoder")
+        f.debug_struct("ControlSlot")
             .field("channel", &self.shared.channel)
             .finish_non_exhaustive()
     }
 }
 
-impl ChannelDecoder for SlotDecoder {
-    fn process(&mut self, iq: &[Complex32]) {
+impl ControlSlot {
+    /// A decoder for `channel` at the slot's conditioned `rate`, parsing
+    /// for system `sys_num`; with a `tap_base`, every message is also
+    /// written to `<tap_base>.msgs.jsonl`.
+    pub(crate) fn new(
+        channel: ControlChannel,
+        modulation: Modulation,
+        rate: f64,
+        sys_num: i32,
+        tap_base: &str,
+    ) -> Self {
+        let decoder =
+            ControlChannelDecoder::new(DecoderConfig::new(DemodConfig::new(rate, modulation)));
+        let parser = P25TrunkParser::new(sys_num, &channel.system);
+        let raw = (!tap_base.is_empty())
+            .then(|| RawLog::open(&format!("{tap_base}.msgs.jsonl")))
+            .flatten();
+        let shared = Arc::new(Shared {
+            channel,
+            modulation,
+            snapshot: Mutex::new((decoder.stats(), None)),
+        });
+        REGISTRY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(Arc::downgrade(&shared));
+        Self {
+            decoder,
+            parser,
+            raw,
+            shared,
+            scratch: Vec::new(),
+        }
+    }
+}
+
+impl ChannelDecoder for ControlSlot {
+    type Output = Decoded;
+    type Command = Cmd;
+
+    fn process(&mut self, iq: &[Complex32], _: &Reading, out: &mut Decoded) {
         self.decoder.process(iq, &mut self.scratch);
-        if !self.scratch.is_empty() {
-            let mut q = self
-                .shared
-                .queue
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner);
-            for m in self.scratch.drain(..) {
-                if q.len() == QUEUE_CAPACITY {
-                    q.pop_front();
-                    self.shared.dropped.fetch_add(1, Ordering::Relaxed);
-                }
-                q.push_back(m);
+        for r in self.scratch.drain(..) {
+            if let Some(raw) = &mut self.raw {
+                raw.write(&r.message);
+            }
+            let parsed = self.parser.parse_message(&r.message);
+            if !parsed.is_empty() {
+                out.events.push(RadioEvent::TrunkMessages(parsed));
             }
         }
         *self
@@ -136,77 +160,6 @@ impl ChannelDecoder for SlotDecoder {
 
     fn retune(&mut self) {
         self.decoder.reset();
-        self.shared
-            .queue
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .clear();
-    }
-}
-
-/// Build a decoder for `channel` at the slot's conditioned `rate`; returns
-/// the DSP half to install on the slot and the drain half to keep.
-pub(crate) fn attach(
-    channel: ControlChannel,
-    modulation: Modulation,
-    rate: f64,
-) -> (Box<dyn ChannelDecoder>, Arc<Shared>) {
-    let decoder =
-        ControlChannelDecoder::new(DecoderConfig::new(DemodConfig::new(rate, modulation)));
-    let shared = Arc::new(Shared {
-        channel,
-        modulation,
-        queue: Mutex::new(VecDeque::new()),
-        snapshot: Mutex::new((decoder.stats(), None)),
-        dropped: AtomicU64::new(0),
-    });
-    REGISTRY
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .push(Arc::downgrade(&shared));
-    (
-        Box::new(SlotDecoder {
-            decoder,
-            shared: Arc::clone(&shared),
-            scratch: Vec::new(),
-        }),
-        shared,
-    )
-}
-
-/// The trunking side of a control channel decoder: its parser, and the raw
-/// message tap when baselines are being taken.
-pub(crate) struct ControlPort {
-    shared: Arc<Shared>,
-    parser: P25TrunkParser,
-    raw: Option<RawLog>,
-}
-
-impl ControlPort {
-    /// `shared`'s messages, for system `sys_num`; with a `tap_base`, every
-    /// message is also written to `<tap_base>.msgs.jsonl`.
-    pub(crate) fn new(shared: Arc<Shared>, sys_num: i32, tap_base: &str) -> Self {
-        let parser = P25TrunkParser::new(sys_num, &shared.channel.system);
-        let raw = (!tap_base.is_empty()).then(|| RawLog::open(&format!("{tap_base}.msgs.jsonl")));
-        Self {
-            shared,
-            parser,
-            raw: raw.flatten(),
-        }
-    }
-
-    /// Parse every message the decoder has queued, handing each one's
-    /// trunking messages to `send`.
-    pub(crate) fn drain(&mut self, send: &mut dyn FnMut(Vec<TrTrunkMessage>)) {
-        while let Some(r) = self.shared.pop() {
-            if let Some(raw) = &mut self.raw {
-                raw.write(&r.message);
-            }
-            let out = self.parser.parse_message(&r.message);
-            if !out.is_empty() {
-                send(out);
-            }
-        }
     }
 }
 
@@ -380,79 +333,75 @@ mod tests {
         }
     }
 
-    #[test]
-    fn decodes_into_the_queue_and_reports() {
+    fn iq(seed: u64) -> Vec<Complex32> {
         let nac = Nac::new(0x38d).unwrap();
-        let mut rng = testgen::Rng::new(1);
+        let mut rng = testgen::Rng::new(seed);
         let mut dibits = Vec::new();
         for _ in 0..20 {
             dibits.extend(testgen::tsdu(nac, &testgen::random_tsbks(&mut rng, 3)));
         }
-        let iq = testgen::modulate_cqpsk(&dibits, 5);
-        let (mut dsp, shared) = attach(channel(), Modulation::Cqpsk, 24_000.0);
-        for chunk in iq.chunks(600) {
-            dsp.process(chunk);
+        testgen::modulate_cqpsk(&dibits, 5)
+    }
+
+    fn messages(out: &Decoded) -> Vec<&crate::types::TrTrunkMessage> {
+        out.events
+            .iter()
+            .filter_map(|e| match e {
+                RadioEvent::TrunkMessages(m) => Some(m),
+                _ => None,
+            })
+            .flatten()
+            .collect()
+    }
+
+    #[test]
+    fn decodes_parses_into_the_output_and_reports() {
+        let mut slot = ControlSlot::new(channel(), Modulation::Cqpsk, 24_000.0, 77, "");
+        let mut out = Decoded::default();
+        for chunk in iq(1).chunks(600) {
+            slot.process(chunk, &Reading::default(), &mut out);
         }
-        let mut tsbks = 0;
-        while let Some(r) = shared.pop() {
-            if let Message::Tsbk { nac: n, .. } = r.message {
-                assert_eq!(n, nac);
-                tsbks += 1;
-            }
-        }
-        assert!(tsbks >= 57, "{tsbks}");
+        let sent = messages(&out);
+        assert!(sent.len() >= 57, "{}", sent.len());
+        assert!(sent.iter().all(|m| m.sys_num == 77 && m.nac == 0x38d));
+        assert_eq!(out.audio, Vec::new());
         let report = control_channels()
             .into_iter()
             .find(|r| r.channel == channel())
             .unwrap();
-        assert_eq!(report.nac, Some(nac));
-        assert_eq!(report.stats.tsbk_ok(), tsbks);
+        assert_eq!(report.nac, Some(Nac::new(0x38d).unwrap()));
+        assert!(report.stats.tsbk_ok() >= 57);
         assert_eq!(report.dropped, 0);
 
-        dsp.retune();
-        assert!(shared.pop().is_none());
-        drop((dsp, shared));
+        slot.retune();
+        drop(slot);
         assert!(control_channels().iter().all(|r| r.channel != channel()));
     }
 
     #[test]
-    fn a_control_port_parses_and_taps_what_was_decoded() {
-        let nac = Nac::new(0x38d).unwrap();
-        let mut rng = testgen::Rng::new(2);
-        let mut dibits = Vec::new();
-        for _ in 0..20 {
-            dibits.extend(testgen::tsdu(nac, &testgen::random_tsbks(&mut rng, 3)));
-        }
-        let iq = testgen::modulate_cqpsk(&dibits, 5);
+    fn the_tap_logs_every_message_decoded() {
         let ch = ControlChannel {
             port: 4,
             ..channel()
         };
-        let (mut dsp, shared) = attach(ch, Modulation::Cqpsk, 24_000.0);
         let dir = std::env::temp_dir().join(format!("p25-control-port-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let base = dir.join("cc_test_851000000");
-        let mut port = ControlPort::new(Arc::clone(&shared), 77, &base.to_string_lossy());
-        for chunk in iq.chunks(600) {
-            dsp.process(chunk);
+        let mut slot =
+            ControlSlot::new(ch, Modulation::Cqpsk, 24_000.0, 77, &base.to_string_lossy());
+        let mut out = Decoded::default();
+        for chunk in iq(2).chunks(600) {
+            slot.process(chunk, &Reading::default(), &mut out);
         }
-        let mut sent = Vec::new();
-        port.drain(&mut |m| sent.push(m));
-        assert!(shared.pop().is_none());
-        // Every packet yields a trunking message.
-        assert!(sent.len() >= 57, "{}", sent.len());
-        assert!(
-            sent.iter()
-                .flatten()
-                .all(|m| m.sys_num == 77 && m.nac == 0x38d)
-        );
-        drop(port);
+        let sent = messages(&out).len();
+        drop(slot);
         let raw = std::fs::read_to_string(format!("{}.msgs.jsonl", base.display())).unwrap();
         let lines: Vec<serde_json::Value> = raw
             .lines()
             .map(|l| serde_json::from_str(l).unwrap())
             .collect();
-        assert_eq!(lines.len(), sent.len());
+        // Every packet yields a trunking message.
+        assert_eq!(lines.len(), sent);
         assert_eq!(lines[0]["seq"], 0);
         assert_eq!(lines[0]["type"], 7);
         assert!(lines[0]["hex"].as_str().unwrap().starts_with("038d"));

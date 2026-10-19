@@ -404,62 +404,6 @@ void tr_config_set_debug_recorder(TrContext &ctx, bool enabled, rust::Str addres
     ctx.impl->trunk_ctx.config.debug_recorder_port = port;
 }
 
-// ── op25's P25 vocoders and voice frame assembler (references) ──
-
-std::unique_ptr<Op25VocoderReference> tr_op25_vocoder_reference_new() {
-    return std::make_unique<Op25VocoderReference>();
-}
-
-void tr_op25_vocoder_reference_phase1(Op25VocoderReference &v, rust::Slice<const uint32_t> u, uint32_t e0, uint32_t et, rust::Slice<int16_t> out) {
-    if (u.size() < 8 || out.size() < static_cast<size_t>(op25_vocoder_reference::samples_per_frame)) return;
-    v.r.phase1(u.data(), e0, et, out.data());
-}
-
-bool tr_op25_vocoder_reference_phase2(Op25VocoderReference &v, rust::Slice<const uint8_t> dibits, bool encrypted, rust::Slice<int16_t> out) {
-    if (dibits.size() < 36 || out.size() < static_cast<size_t>(op25_vocoder_reference::samples_per_frame)) return false;
-    return v.r.phase2(dibits.data(), encrypted, out.data());
-}
-
-std::unique_ptr<Op25VoiceReference> tr_op25_voice_reference_new(bool phase2, int32_t slot, rust::Slice<const uint8_t> xor_mask) {
-    std::string mask(reinterpret_cast<const char *>(xor_mask.data()), xor_mask.size());
-    return std::make_unique<Op25VoiceReference>(phase2, slot, mask);
-}
-
-void tr_op25_voice_reference_push(Op25VoiceReference &r, rust::Slice<const uint8_t> dibits) {
-    r.r.push(dibits.data(), dibits.size());
-}
-
-rust::Vec<int16_t> tr_op25_voice_reference_pcm(const Op25VoiceReference &r) {
-    rust::Vec<int16_t> out;
-    out.reserve(r.r.pcm().size());
-    for (int16_t s : r.r.pcm()) out.push_back(s);
-    return out;
-}
-
-rust::Vec<int64_t> tr_op25_voice_reference_sources(const Op25VoiceReference &r) {
-    rust::Vec<int64_t> out;
-    for (long v : r.r.sources()) out.push_back(v);
-    return out;
-}
-
-rust::Vec<int64_t> tr_op25_voice_reference_terminators(const Op25VoiceReference &r) {
-    rust::Vec<int64_t> out;
-    for (long v : r.r.terminators()) out.push_back(v);
-    return out;
-}
-
-rust::Vec<uint32_t> tr_op25_voice_reference_inputs(const Op25VoiceReference &r) {
-    rust::Vec<uint32_t> out;
-    out.reserve(r.r.voice_inputs().size());
-    for (uint32_t v : r.r.voice_inputs()) out.push_back(v);
-    return out;
-}
-
-rust::Vec<rust::String> tr_op25_voice_reference_json(const Op25VoiceReference &r) {
-    rust::Vec<rust::String> out;
-    for (const auto &j : r.r.json()) out.push_back(rust::String(j));
-    return out;
-}
 
 // ── Shared channelizer backend (DSP in Rust: trunk-channelizer) ──
 

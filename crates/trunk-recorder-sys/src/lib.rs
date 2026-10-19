@@ -464,44 +464,6 @@ pub mod ffi {
         fn tr_config_set_temp_dir(ctx: Pin<&mut TrContext>, dir: &str);
         fn tr_config_set_tap_dir(ctx: Pin<&mut TrContext>, dir: &str);
         fn tr_config_set_soft_vocoder(ctx: Pin<&mut TrContext>, enabled: bool);
-
-        /// op25's P25 vocoders, one 20 ms frame (160 samples) at a time, as
-        /// the reference trunk-p25's are checked against.
-        type Op25VocoderReference;
-        fn tr_op25_vocoder_reference_new() -> UniquePtr<Op25VocoderReference>;
-        /// One IMBE frame: op25's `u[0..8]` and the bits corrected in c0 and
-        /// in all.
-        fn tr_op25_vocoder_reference_phase1(
-            vocoder: Pin<&mut Op25VocoderReference>,
-            u: &[u32],
-            e0: u32,
-            et: u32,
-            out: &mut [i16],
-        );
-        /// One AMBE+2 frame: its 36 descrambled dibits. False if muted.
-        fn tr_op25_vocoder_reference_phase2(
-            vocoder: Pin<&mut Op25VocoderReference>,
-            dibits: &[u8],
-            encrypted: bool,
-            out: &mut [i16],
-        ) -> bool;
-
-        /// op25's voice frame assembler driven with dibits, as the reference
-        /// trunk-p25's call assembler is checked against.
-        type Op25VoiceReference;
-        fn tr_op25_voice_reference_new(
-            phase2: bool,
-            slot: i32,
-            xor_mask: &[u8],
-        ) -> UniquePtr<Op25VoiceReference>;
-        fn tr_op25_voice_reference_push(reference: Pin<&mut Op25VoiceReference>, dibits: &[u8]);
-        fn tr_op25_voice_reference_pcm(reference: &Op25VoiceReference) -> Vec<i16>;
-        fn tr_op25_voice_reference_sources(reference: &Op25VoiceReference) -> Vec<i64>;
-        fn tr_op25_voice_reference_terminators(reference: &Op25VoiceReference) -> Vec<i64>;
-        fn tr_op25_voice_reference_json(reference: &Op25VoiceReference) -> Vec<String>;
-        /// Every frame's vocoder input as records: phase 1 {u0..u7, E0,
-        /// ET, encrypted}, phase 2 {36 dibits, encrypted}.
-        fn tr_op25_voice_reference_inputs(reference: &Op25VoiceReference) -> Vec<u32>;
         fn tr_config_set_debug_recorder(
             ctx: Pin<&mut TrContext>,
             enabled: bool,

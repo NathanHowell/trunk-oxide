@@ -95,10 +95,10 @@ P25 control channel (qii), P25 phase 1 voice (nih), P25 phase 2 TDMA (has).
   ports used `recorder.p25_shadow` and `trunk.oxide.shadow.*`; it was
   deleted with the C++ it compared against (git history: 3c56d61..c4086cf),
   so a new port brings its own for as long as both implementations exist.
-- An oracle: drive the C++ stage directly from a test (`op25_voice_reference`,
-  `op25_vocoder_reference`, the old `tr_p25_reference_parse`) and diff
-  outputs on golden taps and on random streams built to reach every branch,
-  every
+- An oracle: drive the C++ stage directly from a test (the former
+  `op25_voice_reference`, `op25_vocoder_reference`, `tr_p25_reference_parse`)
+  and diff outputs on golden taps and on random streams built to reach every
+  branch, every
   difference a named divergence; freeze the oracle's output as a fixture
   before deleting the C++ (`p25_parse/tests/reference.rs`).
 - Metrics under `trunk.oxide.<stage>.*` in trunk-oxide (counters by outcome,

@@ -49,9 +49,6 @@ public:
 	int handle_packet(uint8_t dibits[], const uint64_t fs) ;
 	void set_slotid(int slotid);
 	void set_msg_callback(std::function<void(gr::message::sptr)> cb);
-	// Each voice frame as the vocoder gets it (36 descrambled dibits,
-	// encrypted), for checking another assembler against this one.
-	std::function<void(const uint8_t *, bool)> voice_tap;
 	void call_end();
 	// A recorder starting a call: no encryption carried over from its last.
 	void call_start() { reset_ess(); }

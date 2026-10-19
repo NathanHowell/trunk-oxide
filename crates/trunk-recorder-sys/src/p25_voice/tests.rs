@@ -1,13 +1,19 @@
+//! The voice pipeline and vocoders against op25, frozen: every fixture here
+//! was taken from op25's own frame assembler and vocoders (driven directly
+//! from C++, since deleted) while they were in the tree, and the Rust had
+//! matched them sample for sample on 16k random frames a phase and 375
+//! tapped calls. The hashes are of the 16-bit samples, little endian
+//! (FNV-1a 64).
+
 use std::collections::BTreeMap;
 
 use trunk_p25::framer::{Duid, ideal};
-use trunk_p25::symbols::slice;
+use trunk_p25::tdma::AmbeParams;
 use trunk_p25::tdma::ambe::AmbeCodeword;
-use trunk_p25::tdma::{AmbeParams, TdmaRegenerator};
 use trunk_p25::testgen::{self, Rng};
 use trunk_p25::types::Nac;
 use trunk_p25::voice::signalling::{ALGID_CLEAR, encode};
-use trunk_p25::voice::{EncryptionSync, ImbeFrame, ImbeParams, Regenerator};
+use trunk_p25::voice::{EncryptionSync, ImbeFrame, ImbeParams};
 
 use super::*;
 
@@ -18,7 +24,15 @@ fn scrambler() -> Scrambler {
     Scrambler::new(0xbee00, 0x5e4, Nac::new(0x5e1).unwrap())
 }
 
-/// One frame's vocoder input, as both sides report it.
+fn fnv(pcm: &[i16]) -> u64 {
+    pcm.iter()
+        .flat_map(|s| s.to_le_bytes())
+        .fold(0xcbf2_9ce4_8422_2325u64, |h, b| {
+            (h ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3)
+        })
+}
+
+/// One frame's vocoder input as op25 would have been given it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Input {
     /// Phase 1: the parameters and error counts, or encrypted (silent).
@@ -61,103 +75,34 @@ impl Input {
     }
 }
 
-/// op25's records ([`ffi::tr_op25_voice_reference_inputs`]) as inputs.
-fn inputs_of(records: &[u32], phase2: bool) -> Vec<Input> {
-    if phase2 {
-        records
-            .chunks(37)
-            .map(|r| {
-                #[allow(clippy::cast_possible_truncation)]
-                Input::Ambe(std::array::from_fn(|i| r[i] as u8), r[36] != 0)
-            })
-            .collect()
-    } else {
-        records
-            .chunks(11)
-            .map(|r| Input::Imbe((r[10] == 0).then(|| (std::array::from_fn(|i| r[i]), r[8], r[9]))))
-            .collect()
-    }
-}
-
-/// Audio, vocoder inputs, sources and terminators of a call.
-struct Reference {
+/// A call's audio, vocoder inputs, in-band sources (each change) and
+/// terminators.
+#[derive(Default)]
+struct Call {
     pcm: Vec<i16>,
     inputs: Vec<Input>,
     sources: Vec<i64>,
     terminators: usize,
 }
 
-fn reference(dibits: &[u8], phase2: bool, slot: i32) -> Reference {
-    let mask: Vec<u8> = scrambler().dibits().to_vec();
-    let mut r = ffi::tr_op25_voice_reference_new(phase2, slot, &mask);
-    for chunk in dibits.chunks(864) {
-        ffi::tr_op25_voice_reference_push(r.pin_mut(), chunk);
-    }
-    Reference {
-        pcm: ffi::tr_op25_voice_reference_pcm(&r),
-        inputs: inputs_of(&ffi::tr_op25_voice_reference_inputs(&r), phase2),
-        sources: ffi::tr_op25_voice_reference_sources(&r),
-        terminators: ffi::tr_op25_voice_reference_terminators(&r).len(),
-    }
-}
-
-/// The pipeline's audio, in-band sources (each change) and terminators.
-fn ours(out: &[CallOutput]) -> Reference {
-    let mut r = Reference {
-        pcm: Vec::new(),
-        inputs: Vec::new(),
-        sources: Vec::new(),
-        terminators: 0,
-    };
+fn call_of(out: &[CallOutput]) -> Call {
+    let mut c = Call::default();
     for o in out {
         match o {
             CallOutput::Audio { pcm, frame } => {
-                r.pcm.extend(pcm);
-                r.inputs.push(Input::of(*frame));
+                c.pcm.extend(pcm);
+                c.inputs.push(Input::of(*frame));
             }
             CallOutput::Event(CallEvent::Source(s)) => {
-                if r.sources.last() != Some(&i64::from(*s)) {
-                    r.sources.push(i64::from(*s));
+                if c.sources.last() != Some(&i64::from(*s)) {
+                    c.sources.push(i64::from(*s));
                 }
             }
-            CallOutput::Event(CallEvent::Terminator) => r.terminators += 1,
+            CallOutput::Event(CallEvent::Terminator) => c.terminators += 1,
             CallOutput::Event(_) => {}
         }
     }
-    r
-}
-
-/// Frame-by-frame comparison, for a readable failure.
-fn frame_diff(a: &[i16], b: &[i16]) -> String {
-    let fa: Vec<&[i16]> = a.chunks(SAMPLES_PER_FRAME).collect();
-    let fb: Vec<&[i16]> = b.chunks(SAMPLES_PER_FRAME).collect();
-    let differ: Vec<usize> = fa
-        .iter()
-        .zip(&fb)
-        .enumerate()
-        .filter(|(_, (x, y))| x != y)
-        .map(|(i, _)| i)
-        .collect();
-    let zero = |f: &[i16]| f.iter().all(|&s| s == 0);
-    format!(
-        "frames {} vs {}; {} differ, first {:?}; silent {} vs {}",
-        fa.len(),
-        fb.len(),
-        differ.len(),
-        &differ[..differ.len().min(8)],
-        fa.iter().filter(|f| zero(f)).count(),
-        fb.iter().filter(|f| zero(f)).count(),
-    )
-}
-
-fn dedup(v: &[i64]) -> Vec<i64> {
-    let mut out: Vec<i64> = Vec::new();
-    for &x in v {
-        if out.last() != Some(&x) {
-            out.push(x);
-        }
-    }
-    out
+    c
 }
 
 fn phase1_call(rng: &mut Rng, algid: u8, superframes: usize) -> Vec<u8> {
@@ -179,33 +124,30 @@ fn phase1_call(rng: &mut Rng, algid: u8, superframes: usize) -> Vec<u8> {
     d
 }
 
+/// Three phase 1 calls (clear, encrypted, clear): op25 vocoded 126 frames
+/// (the encrypted ones silent), heard one source, saw three terminators.
 #[test]
-fn a_clean_phase1_call_sounds_as_op25_makes_it() {
+fn a_clean_phase1_call_sounds_as_op25_did() {
     let mut rng = Rng::new(11);
     let mut d = phase1_call(&mut rng, ALGID_CLEAR, 4);
     d.extend(phase1_call(&mut rng, 0x84, 1));
     d.extend(phase1_call(&mut rng, ALGID_CLEAR, 2));
-    let op25 = reference(&d, false, 0);
     let mut p = VoicePipeline::new(24_000.0);
     p.start_call(Modulation::Cqpsk, false, None, 0);
     let mut out = Vec::new();
     p.process_symbols(&ideal(&d), &mut out);
-    let us = ours(&out);
-    assert_eq!(
-        us.pcm.len(),
-        7 * 18 * SAMPLES_PER_FRAME,
-        "{}",
-        frame_diff(&op25.pcm, &us.pcm)
-    );
-    assert!(us.pcm.iter().any(|&s| s != 0));
-    assert_eq!(us.inputs, op25.inputs);
-    assert!(us.pcm == op25.pcm, "{}", frame_diff(&op25.pcm, &us.pcm));
-    assert_eq!(us.sources, dedup(&op25.sources));
-    assert_eq!((us.terminators, op25.terminators), (3, 3));
+    let us = call_of(&out);
+    assert_eq!(us.pcm.len(), 7 * 18 * SAMPLES_PER_FRAME);
+    assert_eq!(us.inputs.len(), 126);
+    assert_eq!(fnv(&us.pcm), 0xb149_104a_67e0_b4d9);
+    assert_eq!(us.sources, [0x12_3456]);
+    assert_eq!(us.terminators, 3);
 }
 
+/// A phase 2 call: op25 acquired four frames after this pipeline and then
+/// vocoded the same 100 inputs; the same inputs make the same audio.
 #[test]
-fn a_clean_phase2_call_sounds_as_op25_makes_it() {
+fn a_clean_phase2_call_sounds_as_op25_did() {
     let mut rng = Rng::new(12);
     let mut sent = testgen::tdma::Sent::default();
     let es = EncryptionSync {
@@ -214,23 +156,16 @@ fn a_clean_phase2_call_sounds_as_op25_makes_it() {
         keyid: 0,
     };
     let d = testgen::tdma::call(&mut rng, &scrambler(), &es, 0, 6, &mut sent);
-    let op25 = reference(&d, true, 0);
     let mut p = VoicePipeline::new(24_000.0);
     p.start_call(Modulation::Cqpsk, true, Some(scrambler()), 0);
     let mut out = Vec::new();
     p.process_symbols(&ideal(&d), &mut out);
-    let us = ours(&out);
+    let us = call_of(&out);
     assert!(us.pcm.iter().any(|&s| s != 0));
-    // op25 acquires a burst later; from its first frame the inputs agree.
-    let Some(skip) = us.inputs.iter().position(|i| *i == op25.inputs[0]) else {
-        panic!("op25's first frame is not ours");
-    };
-    assert!(skip <= 4, "{skip}");
-    let n = op25.inputs.len();
-    assert!(us.inputs.len() >= skip + n);
-    assert_eq!(us.inputs[skip..skip + n], op25.inputs[..]);
-    // And the same inputs from the same start sound the same.
-    assert_eq!(vocode_fresh(&op25.inputs), op25.pcm);
+    assert_eq!(us.inputs.len(), 104);
+    assert_eq!(fnv(&vocode_fresh(&us.inputs[4..])), 0x4531_1b30_91bd_37a2);
+    assert_eq!(us.sources, Vec::<i64>::new());
+    assert_eq!(us.terminators, 0);
 }
 
 /// `inputs` through a new synthesiser.
@@ -239,91 +174,7 @@ fn vocode_fresh(inputs: &[Input]) -> Vec<i16> {
     inputs.iter().flat_map(|i| p.vocode(i.vocode())).collect()
 }
 
-// ── Against op25 on a capture's voice taps ──
-
-#[derive(Debug, Default)]
-struct Tally {
-    calls: usize,
-    /// Calls whose audio is op25's sample for sample.
-    same_audio: usize,
-    /// Calls whose vocoder inputs, as op25 framed them, our vocoders make
-    /// into op25's audio sample for sample.
-    same_vocoding: usize,
-    /// Frames both vocoded from the same input.
-    same: usize,
-    /// Aligned frames whose inputs differ.
-    differ: usize,
-    /// Of `differ`: only the encryption (or, phase 1, silence) differs.
-    differ_encryption: usize,
-    /// Frames only one side vocoded, before op25's first, after its last,
-    /// and between.
-    ours_only: [usize; 3],
-    op25_only: [usize; 3],
-    sources_differ: usize,
-    /// Ours-only frames by whether their burst was rewritten.
-    ours_only_rewritten: BTreeMap<Option<bool>, usize>,
-    /// Frames one side vocoded (one-sided, or paired with another frame):
-    /// [audible, silent].
-    ours_extra_audio: [usize; 2],
-    op25_extra_audio: [usize; 2],
-    /// Frames both vocoded alike, by who made sound of them: [both, ours
-    /// only, op25 only, neither].
-    same_audio_frames: [usize; 4],
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum Step {
-    Same,
-    Differ,
-    OursOnly,
-    Op25Only,
-}
-
-/// An edit script between two input sequences (longest common subsequence,
-/// substitutions paired up).
-#[allow(clippy::many_single_char_names, clippy::suspicious_operation_groupings)]
-fn align(ours: &[Input], op25: &[Input]) -> Vec<(Step, Option<Input>, Option<Input>)> {
-    let (n, m) = (ours.len(), op25.len());
-    let mut l = vec![vec![0u32; m + 1]; n + 1];
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            l[i][j] = if ours[i] == op25[j] {
-                l[i + 1][j + 1] + 1
-            } else {
-                l[i + 1][j].max(l[i][j + 1])
-            };
-        }
-    }
-    let (mut i, mut j) = (0, 0);
-    let mut out = Vec::new();
-    while i < n || j < m {
-        if i < n && j < m && ours[i] == op25[j] {
-            out.push((Step::Same, Some(ours[i]), Some(op25[j])));
-            i += 1;
-            j += 1;
-        } else if i < n && j < m && l[i + 1][j + 1] == l[i][j] {
-            out.push((Step::Differ, Some(ours[i]), Some(op25[j])));
-            i += 1;
-            j += 1;
-        } else if j == m || (i < n && l[i + 1][j] >= l[i][j + 1]) {
-            out.push((Step::OursOnly, Some(ours[i]), None));
-            i += 1;
-        } else {
-            out.push((Step::Op25Only, None, Some(op25[j])));
-            j += 1;
-        }
-    }
-    out
-}
-
-/// Whether two inputs differ only in whether the frame was encrypted.
-fn encryption_only(ours: Input, op25: Input) -> bool {
-    match (ours, op25) {
-        (Input::Imbe(a), Input::Imbe(b)) => a.is_none() != b.is_none(),
-        (Input::Ambe(a, enc_a), Input::Ambe(b, enc_b)) => a == b && enc_a != enc_b,
-        _ => false,
-    }
-}
+// ── A capture's voice taps ──
 
 fn read_cf32(path: &str) -> Vec<Complex32> {
     let raw = std::fs::read(path).unwrap();
@@ -339,10 +190,10 @@ fn read_cf32(path: &str) -> Vec<Complex32> {
         .collect()
 }
 
-/// With `VOICE_CORPUS=<dir>`, appends each call's clear frames as op25
-/// framed them to `<dir>/imbe.txt` (op25's `u`, one frame a line) or
-/// `<dir>/ambe.txt` (36 dibits a line), calls separated by a blank line:
-/// real speech for `examples/vocoder_noise.rs`.
+/// With `VOICE_CORPUS=<dir>`, appends each call's clear frames to
+/// `<dir>/imbe.txt` (op25's `u`, one frame a line) or `<dir>/ambe.txt` (36
+/// dibits a line), calls separated by a blank line: real speech for
+/// trunk-p25's `vocoder_noise` and `vocoder_ab` examples.
 fn dump_corpus(inputs: &[Input], phase2: bool) {
     use std::io::Write as _;
     let Ok(dir) = std::env::var("VOICE_CORPUS") else {
@@ -365,13 +216,13 @@ fn dump_corpus(inputs: &[Input], phase2: bool) {
     writeln!(f).unwrap();
 }
 
-/// Every voice call of a tapped replay (`v_*.out.cf32`), op25 after the
-/// regenerator against the pipeline: `TRUNK_P25_TAPS=<dir> cargo test -p
-/// trunk-recorder-sys --release --lib voice_capture -- --ignored --nocapture`.
+/// Every voice call of a tapped replay (`v_*.out.cf32`) through the
+/// pipeline: `TRUNK_P25_TAPS=<dir> cargo test -p trunk-recorder-sys
+/// --release --lib voice_capture -- --ignored --nocapture`. Reports what
+/// each made; with `VOICE_CORPUS` writes the speech corpus.
 #[test]
 #[ignore = "needs TRUNK_P25_TAPS"]
-#[allow(clippy::too_many_lines, clippy::many_single_char_names)]
-fn voice_capture_sounds_as_op25_makes_it() {
+fn voice_capture_decodes() {
     let dir = std::env::var("TRUNK_P25_TAPS").expect("TRUNK_P25_TAPS");
     let mut files: Vec<_> = std::fs::read_dir(&dir)
         .unwrap()
@@ -383,7 +234,7 @@ fn voice_capture_sounds_as_op25_makes_it() {
         })
         .collect();
     files.sort();
-    let mut tally: BTreeMap<&str, Tally> = BTreeMap::new();
+    let mut calls = [0usize; 2];
     for path in files {
         let meta: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
@@ -395,186 +246,37 @@ fn voice_capture_sounds_as_op25_makes_it() {
         let rate = meta["out_rate"].as_f64().unwrap();
         let phase2 = meta["tdma"].as_bool().unwrap();
         let slot = u8::try_from(meta["slot"].as_u64().unwrap()).unwrap();
-        // Half a second of nothing lets the regenerators release all.
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         iq.extend(vec![Complex32::new(0.0, 0.0); (rate / 2.0) as usize]);
-
-        // op25 after the regenerator.
-        let mut symbols = Vec::new();
-        if phase2 {
-            let mut r = TdmaRegenerator::new(DemodConfig::phase2(rate), Some(scrambler()));
-            r.process(&iq, &mut symbols, &mut Vec::new());
-            r.flush(&mut symbols);
-        } else {
-            let mut r = Regenerator::new(DemodConfig::new(rate, Modulation::Cqpsk));
-            r.process(&iq, &mut symbols, &mut Vec::new());
-        }
-        let dibits: Vec<u8> = symbols.iter().map(|&s| slice(s)).collect();
-        let op25 = reference(&dibits, phase2, i32::from(slot));
-        dump_corpus(&op25.inputs, phase2);
-
-        // Per voice frame of our channel, in order: was its burst rewritten
-        // (so op25 read the DUID the Rust decoders decided)?
-        let mut rewritten = Vec::new();
-        if phase2 {
-            let mut dec = TdmaDecoder::new(DemodConfig::phase2(rate), Some(scrambler()));
-            dec.process_with(&iq, &mut |_, event, _| {
-                if event.channel == slot {
-                    let r = trunk_p25::tdma::regenerate::rewritten(&event);
-                    rewritten.extend(event.frames().iter().map(|_| r));
-                }
-            });
-        }
         let mut p = VoicePipeline::new(rate);
         p.start_call(Modulation::Cqpsk, phase2, Some(scrambler()), slot);
         let mut out = Vec::new();
         for chunk in iq.chunks(4096) {
             p.process(chunk, &mut out);
         }
-        let us = ours(&out);
-
-        let t = tally
-            .entry(if phase2 { "phase2" } else { "phase1" })
-            .or_default();
-        t.calls += 1;
-        t.same_audio += usize::from(us.pcm == op25.pcm);
-        t.same_vocoding += usize::from(vocode_fresh(&op25.inputs) == op25.pcm);
-        let steps = align(&us.inputs, &op25.inputs);
-        let first = steps.iter().position(|s| s.1.is_some() && s.2.is_some());
-        let last = steps.iter().rposition(|s| s.1.is_some() && s.2.is_some());
-        let mut line = Tally::default();
-        for (k, st) in steps.iter().enumerate() {
-            let place = match (first, last) {
-                (Some(f), _) if k < f => 0,
-                (_, Some(l)) if k > l => 1,
-                _ => 2,
-            };
-            match st.0 {
-                Step::Same => line.same += 1,
-                Step::Differ => {
-                    line.differ += 1;
-                    line.differ_encryption +=
-                        usize::from(encryption_only(st.1.unwrap(), st.2.unwrap()));
-                }
-                Step::OursOnly => line.ours_only[place] += 1,
-                Step::Op25Only => line.op25_only[place] += 1,
-            }
-        }
-        if std::env::var("VOICE_DETAIL").is_ok_and(|v| base.to_string_lossy().contains(&v)) {
-            let (mut i, mut j) = (0usize, 0usize);
-            for st in &steps {
-                if st.0 != Step::Same {
-                    let detail = match (st.1, st.2) {
-                        (Some(Input::Ambe(a, e)), Some(Input::Ambe(b, f))) => format!(
-                            "{} dibits differ, encrypted {e}/{f}",
-                            a.iter().zip(&b).filter(|(x, y)| x != y).count()
-                        ),
-                        _ => String::new(),
-                    };
-                    println!("  ours {i} op25 {j}: {:?} {detail}", st.0);
-                }
-                i += usize::from(st.1.is_some());
-                j += usize::from(st.2.is_some());
-            }
-        }
-        {
-            let audible = |pcm: &[i16], k: usize| {
-                pcm.chunks(SAMPLES_PER_FRAME)
-                    .nth(k)
-                    .is_some_and(|f| f.iter().any(|&x| x.unsigned_abs() >= 16))
-            };
-            let (mut i, mut j) = (0usize, 0usize);
-            for st in &steps {
-                if st.0 == Step::Same {
-                    let (a, b) = (audible(&us.pcm, i), audible(&op25.pcm, j));
-                    t.same_audio_frames[match (a, b) {
-                        (true, true) => 0,
-                        (true, false) => 1,
-                        (false, true) => 2,
-                        (false, false) => 3,
-                    }] += 1;
-                }
-                if st.0 != Step::Same {
-                    if st.1.is_some() {
-                        t.ours_extra_audio[usize::from(!audible(&us.pcm, i))] += 1;
-                    }
-                    if st.2.is_some() {
-                        t.op25_extra_audio[usize::from(!audible(&op25.pcm, j))] += 1;
-                    }
-                }
-                i += usize::from(st.1.is_some());
-                j += usize::from(st.2.is_some());
-            }
-        }
-        if phase2 {
-            let mut i = 0usize;
-            for st in &steps {
-                if st.0 == Step::OursOnly {
-                    *t.ours_only_rewritten
-                        .entry(rewritten.get(i).copied())
-                        .or_default() += 1;
-                }
-                i += usize::from(st.1.is_some());
-            }
-        }
-        let sources_differ = us.sources != dedup(&op25.sources);
+        let us = call_of(&out);
+        dump_corpus(&us.inputs, phase2);
+        calls[usize::from(phase2)] += 1;
+        #[allow(clippy::cast_precision_loss)]
+        let audible = us
+            .pcm
+            .chunks(SAMPLES_PER_FRAME)
+            .filter(|f| f.iter().any(|&s| s.unsigned_abs() >= 16))
+            .count() as f64
+            / 50.0;
         println!(
-            "{}: same {} differ {} (encryption {}) ours-only {:?} op25-only {:?}{}",
+            "{}: {} frames, {audible:.1} s audible, sources {:?}, {} terminators",
             base.file_name().unwrap().to_string_lossy(),
-            line.same,
-            line.differ,
-            line.differ_encryption,
-            line.ours_only,
-            line.op25_only,
-            if sources_differ {
-                format!(" sources {:?} / {:?}", dedup(&op25.sources), us.sources)
-            } else {
-                String::new()
-            },
-        );
-        t.same += line.same;
-        t.differ += line.differ;
-        t.differ_encryption += line.differ_encryption;
-        for i in 0..3 {
-            t.ours_only[i] += line.ours_only[i];
-            t.op25_only[i] += line.op25_only[i];
-        }
-        t.sources_differ += usize::from(sources_differ);
-    }
-    println!("{tally:#?}");
-    assert!(tally.values().map(|t| t.calls).sum::<usize>() > 0);
-    // Whatever the framing, the vocoders are op25's.
-    for t in tally.values() {
-        assert_eq!(t.same_vocoding, t.calls, "{t:?}");
-    }
-    // Phase 1 is op25's frame for frame: every codeword is regenerated, so
-    // both framers see the same frames.
-    if let Some(t) = tally.get("phase1") {
-        assert_eq!(t.differ, 0, "{t:?}");
-        assert_eq!(
-            t.ours_only.iter().sum::<usize>() + t.op25_only.iter().sum::<usize>(),
-            0,
-            "{t:?}"
+            us.inputs.len(),
+            us.sources,
+            us.terminators,
         );
     }
-    // Phase 2 differs only at the edges of lock (LockEdges): op25 frames
-    // from its first S-ISCH to ten bursts past its last, trunk-p25 while
-    // its flywheel holds, and the ISCH is rewritten only then. Never in
-    // what an aligned frame carries, and more of ours make sound.
-    if let Some(t) = tally.get("phase2") {
-        assert_eq!(t.differ_encryption, 0, "{t:?}");
-        // Past the end of ours op25 frames noise for up to ten more bursts
-        // (mostly muted), which is not counted here.
-        let one_sided =
-            t.ours_only.iter().sum::<usize>() + t.op25_only[0] + t.op25_only[2] + 2 * t.differ;
-        assert!(one_sided * 100 <= 5 * t.same, "{t:?}");
-        let ours = t.same_audio_frames[0] + t.same_audio_frames[1] + t.ours_extra_audio[0];
-        let op25 = t.same_audio_frames[0] + t.same_audio_frames[2] + t.op25_extra_audio[0];
-        assert!(ours >= op25, "audible frames: ours {ours} op25 {op25}");
-    }
+    println!("phase 1 calls {} phase 2 calls {}", calls[0], calls[1]);
+    assert!(calls[0] + calls[1] > 0);
 }
 
-// ── The vocoders against op25's ──
+// ── The vocoders against op25's, frozen ──
 
 /// How a run of frames is damaged.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -592,12 +294,7 @@ impl Channel {
 }
 
 const RUN: usize = 40;
-
-/// The first sample where two frames differ.
-fn first_difference(ours: &Pcm, op25: &Pcm) -> String {
-    let i = ours.iter().zip(op25).position(|(a, b)| a != b).unwrap_or(0);
-    format!("sample {i}: ours {} op25 {}", ours[i], op25[i])
-}
+const FRAMES: usize = 2000;
 
 /// Phase 1 frames (op25's `u`, e0, et) in runs of clean, noisy or bad;
 /// only bad runs send b̂0 > 207, which is no pitch.
@@ -625,28 +322,33 @@ fn imbe_frames(rng: &mut Rng, n: usize) -> Vec<([u32; 8], u32, u32)> {
     out
 }
 
+/// op25's audio of `imbe_frames` for seeds 100.., as (hash, audible
+/// frames).
+const IMBE_FIXTURES: [(u64, usize); 8] = [
+    (0x26fb_983b_b93b_2397, 1615),
+    (0x5b0e_8b95_4f66_698a, 1409),
+    (0xce30_5e75_32f6_8b61, 1441),
+    (0x527a_22fa_032a_bb40, 1526),
+    (0x5f7a_f43c_74eb_9a4a, 1345),
+    (0x15ee_0121_2d9f_c851, 1433),
+    (0xdc16_66a4_f7cd_200d, 1217),
+    (0xd9e0_30ce_b13b_08d5, 1306),
+];
+
 #[test]
 fn the_imbe_vocoder_is_op25s() {
-    let (mut audible, mut muted) = (0, 0);
-    for seed in 0..8 {
-        let mut rng = Rng::new(100 + seed);
-        let mut ours = ImbeVocoder::new();
-        let mut op25 = ffi::tr_op25_vocoder_reference_new();
-        for (i, (u, e0, et)) in imbe_frames(&mut rng, 2000).into_iter().enumerate() {
-            let mut want = [0i16; SAMPLES_PER_FRAME];
-            ffi::tr_op25_vocoder_reference_phase1(op25.pin_mut(), &u, e0, et, &mut want);
-            let got = ours.decode(&u, e0, et);
-            audible += usize::from(got.is_some());
-            muted += usize::from(got.is_none());
-            let got = got.unwrap_or([0; SAMPLES_PER_FRAME]);
-            assert!(
-                got == want,
-                "seed {seed} frame {i}: {}",
-                first_difference(&got, &want)
-            );
+    for (seed, &(hash, audible)) in IMBE_FIXTURES.iter().enumerate() {
+        let mut rng = Rng::new(100 + seed as u64);
+        let mut v = ImbeVocoder::new();
+        let mut pcm = Vec::with_capacity(FRAMES * SAMPLES_PER_FRAME);
+        let mut heard = 0;
+        for (u, e0, et) in imbe_frames(&mut rng, FRAMES) {
+            let got = v.decode(&u, e0, et);
+            heard += usize::from(got.is_some_and(|p| p.iter().any(|&s| s != 0)));
+            pcm.extend(got.unwrap_or([0; SAMPLES_PER_FRAME]));
         }
+        assert_eq!((fnv(&pcm), heard), (hash, audible), "seed {seed}");
     }
-    assert!(audible > 0 && muted > 0, "audible {audible} muted {muted}");
 }
 
 /// Tone indices, valid (single, DTMF, KNOX, call progress, silence) and
@@ -716,35 +418,37 @@ fn ambe_frames(rng: &mut Rng, n: usize) -> Vec<([u8; 36], bool)> {
     out
 }
 
+/// op25's audio of `ambe_frames` for seeds 200.., as (hash, frames op25
+/// did not mute, encrypted ones aside).
+const AMBE_FIXTURES: [(u64, usize); 8] = [
+    (0xb7f7_ff2e_4324_bcb5, 1526),
+    (0x7a65_4c36_6059_7eb1, 1573),
+    (0x0428_e840_702b_bfe6, 1517),
+    (0xfa8b_c05a_2e69_a510, 1610),
+    (0x47a0_d6da_675a_3a30, 1541),
+    (0x5138_e97a_d73f_ca00, 1583),
+    (0x18d7_1499_b578_acee, 1712),
+    (0x718a_9a25_a12b_3224, 1552),
+];
+
 #[test]
 fn the_ambe_vocoder_is_op25s() {
-    // Frames heard (audible, muted) by what op25 decodes them as: voice,
-    // silence, erasure (b0 120–123, 126, 127) and tone.
+    // Frames played and muted by what op25 decodes them as: voice, silence,
+    // erasure (b0 120–123, 126, 127) and tone.
     let mut heard: BTreeMap<&str, [usize; 2]> = BTreeMap::new();
-    for seed in 0..8 {
-        let mut rng = Rng::new(200 + seed);
-        let mut ours = AmbeVocoder::new();
-        let mut op25 = ffi::tr_op25_vocoder_reference_new();
-        for (i, (dibits, encrypted)) in ambe_frames(&mut rng, 2000).into_iter().enumerate() {
-            let mut want = [0i16; SAMPLES_PER_FRAME];
-            let op25_audible = ffi::tr_op25_vocoder_reference_phase2(
-                op25.pin_mut(),
-                &dibits,
-                encrypted,
-                &mut want,
-            );
+    for (seed, &(hash, audible)) in AMBE_FIXTURES.iter().enumerate() {
+        let mut rng = Rng::new(200 + seed as u64);
+        let mut v = AmbeVocoder::new();
+        let mut pcm = Vec::with_capacity(FRAMES * SAMPLES_PER_FRAME);
+        let mut played = 0;
+        for (dibits, encrypted) in ambe_frames(&mut rng, FRAMES) {
             let got = if encrypted {
-                ours.encrypted(&dibits);
+                v.encrypted(&dibits);
                 None
             } else {
-                ours.decode(&dibits)
+                v.decode(&dibits)
             };
-            // op25 counts an encrypted frame as not muted.
-            assert_eq!(
-                got.is_some(),
-                op25_audible && !encrypted,
-                "seed {seed} frame {i}"
-            );
+            played += usize::from(got.is_some());
             if !encrypted {
                 let (AmbeParams(u), _) = AmbeCodeword::from_dibits(&dibits).decode_op25();
                 let b0 = ((u[0] >> 5) & 0x78) + ((u[3] >> 9) & 0x7);
@@ -756,13 +460,9 @@ fn the_ambe_vocoder_is_op25s() {
                 };
                 heard.entry(kind).or_default()[usize::from(got.is_none())] += 1;
             }
-            let got = got.unwrap_or([0; SAMPLES_PER_FRAME]);
-            assert!(
-                got == want,
-                "seed {seed} frame {i}: {}",
-                first_difference(&got, &want)
-            );
+            pcm.extend(got.unwrap_or([0; SAMPLES_PER_FRAME]));
         }
+        assert_eq!((fnv(&pcm), played), (hash, audible), "seed {seed}");
     }
     // Each kind both heard and muted (an erasure is heard as a repeat).
     assert_eq!(heard.len(), 4, "{heard:?}");

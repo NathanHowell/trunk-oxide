@@ -892,7 +892,6 @@ namespace gr {
 					// also, 32*9 = 288 byte pkts (for use via UDP)
 					sprintf(s, "%03x %03x %03x %03x %03x %03x %03x %03x\n", u[0], u[1], u[2], u[3], u[4], u[5], u[6], u[7]);
 
-                    if (voice_tap) voice_tap(u, E0, ET, encrypted());
                     if (d_do_audio_output) {
                         if ( !encrypted()) {
                             // This is the Vocoder that OP25 currently uses.

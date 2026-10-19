@@ -113,13 +113,13 @@ Offline, without a replay:
   (the defaults are svrcs's scrambling parameters);
 - `TRUNK_P25_TAPS=RUN/taps cargo test -p trunk-recorder-sys --release --lib
   voice_capture -- --ignored --nocapture` runs every voice tap's IQ through
-  op25's frame assembler (driven directly, `op25_voice_reference`) after
-  trunk-p25's regenerator, and through trunk-p25's own path, and aligns the
-  frames each vocoded: phase 1 must be op25's sample for sample; phase 2 may
-  differ only at the edges of lock (`LockEdges`: op25 frames from its first
-  S-ISCH to ten bursts past its last, trunk-p25 while its flywheel holds).
-  Every call's vocoder inputs as op25 framed them must make op25's audio
-  through trunk-p25's vocoders, sample for sample.
+  trunk-p25's voice path and reports each call; with `VOICE_CORPUS=<dir>`
+  it writes the speech corpus the vocoder examples use. While op25's frame
+  assembler was in the tree this test drove it directly as an oracle: phase
+  1 was op25's sample for sample on 375 calls; phase 2 differed only at the
+  edges of lock (`LockEdges`: op25 framed from its first S-ISCH to ten
+  bursts past its last, trunk-p25 while its flywheel holds), never in what
+  an aligned frame carried, and trunk-p25 made sound of more frames.
 
 The vocoders' policy (`trunk_p25::vocoder::Policy`, what to play, repeat
 or mute) was measured against an alternative built on trunk-p25's soft
@@ -132,13 +132,15 @@ cuts blind A/B clips from the calls where they diverge most, and
 hourly thread. Verdict (2026-10-19, one listener): op25's policy 5, soft 1;
 phase 1 unanimous. Nothing shipped; the apparatus stays for the next idea.
 
-The vocoders are also checked frame by frame against op25's
-(`op25_vocoder_reference`) on random streams that reach every pitch, repeat,
-mute, tone and erasure (`the_imbe_vocoder_is_op25s`,
-`the_ambe_vocoder_is_op25s`). That holds only while op25's
-`software_imbe_decoder.cc` and `ambe.c` are built with `-ffp-contract=off`
-(op25's CMakeLists): GCC fuses multiply-adds under `-march=znver2`, Rust
-never does.
+The vocoders were checked frame by frame against op25's on random streams
+that reach every pitch, repeat, mute, tone and erasure, 16k frames a phase,
+and on every tapped call's frames; op25's audio is frozen as hashes in the
+trunk-recorder-sys `p25_voice` tests (`the_imbe_vocoder_is_op25s`,
+`the_ambe_vocoder_is_op25s`, the clean-call tests) and the C++ oracles are
+gone. The match needed op25's vocoder sources built with
+`-ffp-contract=off` (GCC fuses multiply-adds under `-march=znver2`, Rust
+never does), so op25's own binaries differ from these hashes in the last
+bit.
 
 Voice taps hold the conditioned IQ (`.out.cf32`) only; `.symbols.f32` is in
 taps from before the op25 chains were deleted (op25's demodulator output, or

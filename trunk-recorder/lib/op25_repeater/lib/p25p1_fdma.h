@@ -124,9 +124,6 @@ namespace gr {
                 void set_debug(int debug);
                 void set_nac(int nac);
                 void set_msg_callback(std::function<void(gr::message::sptr)> cb);
-                // Each voice codeword as the vocoder gets it (u, E0, ET,
-                // encrypted), for checking another assembler against this one.
-                std::function<void(const uint32_t *, uint32_t, uint32_t, bool)> voice_tap;
                 void reset_timer();
                 void call_end();
                 void crypt_reset();

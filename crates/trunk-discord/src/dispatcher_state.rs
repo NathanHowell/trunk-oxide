@@ -327,6 +327,19 @@ impl DispatcherState {
         effects
     }
 
+    /// The stream from trunk-oxide ended: no call active on it will see its
+    /// `CallEnd`, so end every one now. Coalescing calls are left to their
+    /// timeout (or to resume, if the talkgroup keys up once reconnected).
+    pub fn on_upstream_lost(&mut self) -> Vec<DispatchEffect> {
+        self.active_calls
+            .drain()
+            .map(|(key, _)| DispatchEffect::EndCall {
+                key,
+                call_data: None,
+            })
+            .collect()
+    }
+
     /// Check for expired coalescing calls and finalize them.
     pub fn on_coalesce_tick(&mut self) -> Vec<DispatchEffect> {
         if self.coalesce_timeout.is_zero() {
@@ -759,6 +772,26 @@ mod tests {
         let effects = s.on_reap_tick();
         assert!(effects.is_empty());
         assert!(s.is_active(&key));
+    }
+
+    #[test]
+    fn a_lost_stream_ends_active_calls_and_leaves_coalescing_ones() {
+        let mut s = DispatcherState::new(10_000);
+        let key = |tg| CallKey {
+            system: Arc::from("smco"),
+            talkgroup: Talkgroup(tg),
+        };
+        s.active_calls.insert(key(1), Instant::now());
+        s.coalescing_calls.insert(key(2), Instant::now());
+
+        let effects = s.on_upstream_lost();
+        assert!(matches!(
+            effects.as_slice(),
+            [DispatchEffect::EndCall { key: k, call_data: None }] if *k == key(1)
+        ));
+        assert!(!s.is_active(&key(1)));
+        assert!(s.is_coalescing(&key(2)));
+        assert!(s.on_upstream_lost().is_empty());
     }
 
     // ── Aggregator forwarding ────────────────────────────────────────────

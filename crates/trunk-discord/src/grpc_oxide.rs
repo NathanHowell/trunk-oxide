@@ -10,13 +10,16 @@ use proto::trunk_oxide_client::TrunkOxideClient;
 
 use crate::dispatcher::{DispatchPump, now_millis};
 
-/// Connect to trunk-oxide with retries (exponential backoff, 1s → 2s → 4s … 30s cap).
+/// The longest wait between attempts: under the watchdog's soft stall, so a
+/// trunk-oxide that is down for a while does not read as a stalled pump.
+const MAX_RETRY: Duration = Duration::from_secs(10);
+
+/// Connect to trunk-oxide with retries (exponential backoff, 1s → 2s → 4s … 10s cap).
 ///
 /// Bumps `heartbeat` on each attempt so the liveness watchdog does not mistake a
 /// legitimately slow/unavailable upstream for a stalled pump.
 async fn connect(socket_path: &str, heartbeat: &AtomicU64) -> Result<tonic::transport::Channel> {
     let mut delay = Duration::from_secs(1);
-    let max_delay = Duration::from_secs(30);
 
     loop {
         heartbeat.store(now_millis(), Ordering::Relaxed);
@@ -41,33 +44,39 @@ async fn connect(socket_path: &str, heartbeat: &AtomicU64) -> Result<tonic::tran
                 );
                 heartbeat.store(now_millis(), Ordering::Relaxed);
                 tokio::time::sleep(delay).await;
-                delay = (delay * 2).min(max_delay);
+                delay = (delay * 2).min(MAX_RETRY);
             }
         }
     }
 }
 
+/// Subscribe to trunk-oxide and pump its stream, for as long as the process
+/// runs: when the stream ends (trunk-oxide restarted, say) the calls it
+/// carried are ended and the subscription is made again. Returns only on an
+/// error that retrying cannot fix.
 pub async fn run(
     socket_path: String,
     mut pump: DispatchPump,
     reporter: tonic_health::server::HealthReporter,
     heartbeat: Arc<AtomicU64>,
 ) -> Result<()> {
-    let channel = connect(&socket_path, &heartbeat).await?;
-    let mut client = TrunkOxideClient::new(channel);
+    loop {
+        let channel = connect(&socket_path, &heartbeat).await?;
+        let mut stream = match TrunkOxideClient::new(channel).subscribe(()).await {
+            Ok(response) => response.into_inner(),
+            Err(status) => {
+                tracing::warn!(%status, retry_in = ?MAX_RETRY, "subscribe to trunk-oxide failed, retrying");
+                tokio::time::sleep(MAX_RETRY).await;
+                continue;
+            }
+        };
+        tracing::info!("subscribed to trunk-oxide");
+        reporter
+            .set_service_status("", tonic_health::ServingStatus::Serving)
+            .await;
 
-    let response = client.subscribe(()).await?;
-    let mut stream = response.into_inner();
-
-    reporter
-        .set_service_status("", tonic_health::ServingStatus::Serving)
-        .await;
-
-    pump.run(&mut stream).await;
-
-    reporter
-        .set_service_status("", tonic_health::ServingStatus::NotServing)
-        .await;
-
-    Ok(())
+        pump.run(&mut stream).await;
+        pump.upstream_lost().await;
+        tracing::warn!("trunk-oxide stream lost, reconnecting");
+    }
 }

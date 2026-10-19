@@ -191,6 +191,19 @@ impl DispatchPump {
         }
     }
 
+    /// The stream ended: finish the calls it was carrying.
+    pub async fn upstream_lost(&mut self) {
+        let effects = self.state.on_upstream_lost();
+        if !effects.is_empty() {
+            tracing::info!(
+                calls = effects.len(),
+                "ending calls the lost stream carried"
+            );
+        }
+        self.process_effects(effects).await;
+        self.record_gauges();
+    }
+
     /// Record that a call handler stopped accepting messages within
     /// [`CALL_SEND_TIMEOUT`]: drop it from the live set so it can no longer
     /// receive (or block the pump on) further sends.

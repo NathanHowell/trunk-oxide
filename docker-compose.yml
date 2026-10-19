@@ -201,14 +201,12 @@ services:
       - whisperer-socket:/run/trunk-whisperer
       - discord-socket:/run/service
       - ./config-discord.toml:/etc/trunk-discord/config.toml:ro
-    # The transcriber backend is selected by profile (whisper | parakeet | whistle), so
-    # discord can't statically depend on a specific one (podman-compose chokes
-    # on a cross-profile depends_on and leaves discord in "Created"). Instead it
-    # depends only on trunk-oxide and relies on restart: unless-stopped to retry
-    # until the active transcriber binds the shared whisperer-socket.
-    depends_on:
-      trunk-oxide:
-        condition: service_healthy
+    # No depends_on: discord keeps retrying trunk-oxide's socket and
+    # resubscribes whenever the stream drops, so either can be restarted on its
+    # own. The transcriber backend is selected by profile (whisper | parakeet |
+    # whistle), which a depends_on could not name anyway (podman-compose chokes
+    # on a cross-profile one); restart: unless-stopped retries until the active
+    # transcriber binds the shared whisperer-socket.
     secrets:
       - discord_token
     command: ["--discord-token", "@/run/secrets/discord_token"]

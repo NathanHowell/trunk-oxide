@@ -302,13 +302,6 @@ void System_impl::setup_decoders(gr::top_block_sptr &tb, std::vector<std::shared
                    src->get_config().tap_dir.empty() ? std::string() : src->get_config().tap_dir + "/cc_" + short_name + "_" + std::to_string(static_cast<long long>(freq))};
     tap.cond = src->channelizer_conditioning(port);
     tap.system = short_name;
-    tap.p25_decoder = src->get_config().p25_decoder;
-    tap.p25_shadow = src->get_config().p25_shadow.control;
-    if (const auto &observer = src->get_config().p25_cc_observer) {
-      tap.observe = [observer, name = short_name, freq](P25DecoderImpl impl, bool primary, long type, const std::string &payload) {
-        observer(name, freq, impl, primary, type, payload);
-      };
-    }
 
     std::shared_ptr<trunking_decoder> decoder;
     if (system_type == SYS_SMARTNET) {

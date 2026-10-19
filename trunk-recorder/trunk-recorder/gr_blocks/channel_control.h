@@ -19,10 +19,6 @@ struct ChannelTap {
   std::string tap_base;                                 // tap file path prefix; empty = no taps
   ConditioningHooks cond;
   std::string system;                                   // system short name
-  P25DecoderImpl p25_decoder = P25DecoderImpl::Rust;
-  bool p25_shadow = false;                              // run the other decoder too
-  // Each decoded message: implementation, primary?, op25 type, payload.
-  std::function<void(P25DecoderImpl, bool, long, const std::string &)> observe;
 };
 
 // Control side of one shared_channelizer port. The channelizer delivers the
@@ -71,7 +67,7 @@ public:
   // Decode the conditioned channel in the channelizer (P25 control channels).
   // Messages arrive on the GR thread through set_message_callback(); both are
   // kept until the hooks arrive if they are not set yet.
-  void set_decoder(ControlDecoder kind, const std::string &system, double freq_hz, bool primary = true);
+  void set_decoder(ControlDecoder kind, const std::string &system, double freq_hz);
   void set_message_callback(std::function<void(const DecodedMessage &)> cb);
 
   // Offline-baseline taps. enable_tap() returns a file sink for the caller to

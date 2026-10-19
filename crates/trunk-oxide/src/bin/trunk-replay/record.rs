@@ -85,8 +85,9 @@ pub struct Summary {
     pub mean_noise_db: Option<f64>,
     pub channelizer: Vec<Value>,
     systems: BTreeMap<String, SystemStats>,
-    /// Every P25 decoder's output by implementation and role, and with
-    /// `recorder.p25_shadow` on, how the implementations agreed.
+    /// Every P25 voice decoder's calls by implementation and role, and with
+    /// `recorder.p25_shadow` on, how the implementations agreed; and the
+    /// control channel parser's counts.
     pub decoders: Value,
 }
 
@@ -97,32 +98,6 @@ pub fn decoder_tallies() -> Value {
         Outcome::Both => "both".to_string(),
         Outcome::Only(i) => format!("only_{}", i.label()),
     };
-    let control: Vec<Value> = shadow::control_channels()
-        .into_iter()
-        .map(|c| {
-            let messages: BTreeMap<String, u64> = c
-                .tally
-                .messages
-                .iter()
-                .map(|(&(i, r, k), &n)| (format!("{}/{}/{}", i.label(), r.label(), k.label()), n))
-                .collect();
-            let agreement: BTreeMap<String, u64> = c
-                .tally
-                .agreement
-                .iter()
-                .map(|(&(k, o), &n)| (format!("{}/{}", k.label(), outcome(o)), n))
-                .collect();
-            let roles: BTreeMap<&str, &str> = c
-                .roles
-                .iter()
-                .map(|(r, i)| (r.label(), i.label()))
-                .collect();
-            json!({
-                "system": c.system, "freq_hz": c.freq_hz, "roles": roles,
-                "messages": messages, "agreement": agreement,
-            })
-        })
-        .collect();
     let v = shadow::voice_tally();
     let calls: BTreeMap<String, Value> = v
         .calls
@@ -168,7 +143,6 @@ pub fn decoder_tallies() -> Value {
         })
         .collect();
     json!({
-        "control": control,
         "voice": { "calls": calls, "agreement": agreement },
         "parser": parser,
     })

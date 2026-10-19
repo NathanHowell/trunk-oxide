@@ -88,8 +88,8 @@ void channel_control::set_conditioning_hooks(ConditioningHooks hooks) {
   if (d_message_cb && d_cond.set_message_callback) d_cond.set_message_callback(d_message_cb);
 }
 
-void channel_control::set_decoder(ControlDecoder kind, const std::string &system, double freq_hz, bool primary) {
-  d_decoder = {kind, d_channel_rate_out, system, freq_hz, primary};
+void channel_control::set_decoder(ControlDecoder kind, const std::string &system, double freq_hz) {
+  d_decoder = {kind, d_channel_rate_out, system, freq_hz};
   if (d_cond.set_decoder) d_cond.set_decoder(d_decoder);
 }
 

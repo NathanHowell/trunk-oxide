@@ -227,7 +227,6 @@ list(APPEND trunk_recorder_sources
   trunk-recorder/source.cc
   trunk-recorder/call_conventional.cc
   trunk-recorder/systems/p25_trunking.cc
-  trunk-recorder/systems/p25_parser.cc
   trunk-recorder/systems/smartnet_parser.cc
   trunk-recorder/systems/smartnet_impl.cc
   trunk-recorder/systems/smartnet_fsk2_demod.cc

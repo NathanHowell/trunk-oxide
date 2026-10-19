@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Gauge, Meter};
 use trunk_recorder_sys::p25::{
-    ControlChannelReport, DecoderStats, Impl, Role, TdmaStats, VoiceChannelReport, VoiceStats,
+    ControlChannelReport, DecoderStats, Impl, TdmaStats, VoiceChannelReport, VoiceStats,
 };
 use trunk_recorder_sys::p25_parse::{self, ParseStats};
 use trunk_recorder_sys::shadow::{self, CallTally, Outcome, VoiceTally};
@@ -319,32 +319,16 @@ impl VoiceMetrics {
     }
 }
 
-/// Every decoder's output by implementation and role (`impl` = rust | op25,
-/// `role` = primary | shadow), and in shadow mode how they agree.
+/// Every voice decoder's calls by implementation and role (`impl` = rust |
+/// op25, `role` = primary | shadow), and in shadow mode how they agree.
 struct ShadowMetrics {
-    cc_messages: Counter<u64>,
-    cc_agreement: Counter<u64>,
     calls: Counter<u64>,
     call_audio: Counter<f64>,
     call_transmissions: Counter<u64>,
     call_bit_errors: Counter<u64>,
     call_spikes: Counter<u64>,
     voice_agreement: Counter<u64>,
-    prev_cc: HashMap<(String, u64), shadow::CcTally>,
     prev_voice: VoiceTally,
-}
-
-/// The role labels of a comparison: which implementation is primary and
-/// which shadow.
-fn roles(attrs: &mut Vec<KeyValue>, roles: &std::collections::BTreeMap<Role, Impl>) {
-    for (role, key) in [
-        (Role::Primary, "primary_impl"),
-        (Role::Shadow, "shadow_impl"),
-    ] {
-        if let Some(i) = roles.get(&role) {
-            attrs.push(KeyValue::new(key, i.label()));
-        }
-    }
 }
 
 fn outcome(attrs: &mut Vec<KeyValue>, o: Outcome) {
@@ -357,19 +341,6 @@ fn outcome(attrs: &mut Vec<KeyValue>, o: Outcome) {
 impl ShadowMetrics {
     fn new(meter: &Meter) -> Self {
         Self {
-            cc_messages: meter
-                .u64_counter("trunk.oxide.p25cc.messages")
-                .with_description(
-                    "Control-channel messages each decoder emitted, by impl, role and kind",
-                )
-                .build(),
-            cc_agreement: meter
-                .u64_counter("trunk.oxide.shadow.cc")
-                .with_description(
-                    "Shadow mode, control channels: messages both implementations decoded, \
-                     or only one (impl) within 2 s",
-                )
-                .build(),
             calls: meter
                 .u64_counter("trunk.oxide.p25call.calls")
                 .with_description("P25 voice calls each decoder handled, by impl, role and phase")
@@ -398,45 +369,11 @@ impl ShadowMetrics {
                      implementations produced, or only one (impl)",
                 )
                 .build(),
-            prev_cc: HashMap::new(),
             prev_voice: VoiceTally::default(),
         }
     }
 
-    #[allow(clippy::cast_possible_truncation)]
     fn poll(&mut self) {
-        for r in shadow::control_channels() {
-            let key = (r.system.clone(), r.freq_hz.to_bits());
-            let was = self
-                .prev_cc
-                .insert(key, r.tally.clone())
-                .unwrap_or_default();
-            let base = [
-                KeyValue::new("system", r.system.clone()),
-                KeyValue::new("freq_hz", r.freq_hz as i64),
-            ];
-            for (&(i, role, kind), &n) in &r.tally.messages {
-                let d = n.saturating_sub(was.messages.get(&(i, role, kind)).copied().unwrap_or(0));
-                if d > 0 {
-                    let mut a = base.to_vec();
-                    a.push(KeyValue::new("impl", i.label()));
-                    a.push(KeyValue::new("role", role.label()));
-                    a.push(KeyValue::new("kind", kind.label()));
-                    self.cc_messages.add(d, &a);
-                }
-            }
-            for (&(kind, o), &n) in &r.tally.agreement {
-                let d = n.saturating_sub(was.agreement.get(&(kind, o)).copied().unwrap_or(0));
-                if d > 0 {
-                    let mut a = base.to_vec();
-                    a.push(KeyValue::new("kind", kind.label()));
-                    outcome(&mut a, o);
-                    roles(&mut a, &r.roles);
-                    self.cc_agreement.add(d, &a);
-                }
-            }
-        }
-
         let now = shadow::voice_tally();
         for ((system, phase, i, role), t) in &now.calls {
             let was: CallTally = self
@@ -599,7 +536,6 @@ impl P25Metrics {
             KeyValue::new("system", r.channel.system.clone()),
             KeyValue::new("freq_hz", r.channel.freq_hz as i64),
             KeyValue::new("impl", Impl::Rust.label()),
-            KeyValue::new("role", r.channel.role.label()),
         ];
         let key = (r.channel.source, r.channel.port);
         let (prev, prev_dropped) = self

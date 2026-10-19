@@ -8,7 +8,6 @@
 #include "trunk-recorder/call.h"
 #include "trunk-recorder/recorders/recorder.h"
 #include "trunk-recorder/systems/parser.h"
-#include "trunk-recorder/systems/p25_parser.h"
 
 #include <memory>
 
@@ -88,19 +87,9 @@ rust::Vec<float> tr_probe_capture(TrProbe &probe, double gain_db, size_t n_sampl
 // ── Config builder functions ──
 void tr_config_set_temp_dir(TrContext &ctx, rust::Str dir);
 void tr_config_set_tap_dir(TrContext &ctx, rust::Str dir);
-void tr_config_set_p25_decoder(TrContext &ctx, TrP25Decoder decoder);
 void tr_config_set_p25_voice_decoder(TrContext &ctx, TrP25Decoder phase1, TrP25Decoder phase2);
-void tr_config_set_p25_shadow(TrContext &ctx, bool control, bool phase1, bool phase2);
-void tr_config_set_p25_parser(TrContext &ctx, bool rust);
+void tr_config_set_p25_shadow(TrContext &ctx, bool phase1, bool phase2);
 void tr_config_set_soft_vocoder(TrContext &ctx, bool enabled);
-
-// trunk-recorder's P25Parser, as the reference the Rust parser is checked against.
-struct P25ReferenceParser {
-  P25Parser parser;
-  P25ParserConfig config;
-};
-std::unique_ptr<P25ReferenceParser> tr_p25_reference_parser_new(int32_t sys_num);
-rust::Vec<TrTrunkMessage> tr_p25_reference_parse(P25ReferenceParser &parser, int64_t msg_type, rust::Slice<const uint8_t> payload);
 void tr_config_set_debug_recorder(TrContext &ctx, bool enabled, rust::Str address, int32_t port);
 
 // ── Bulk source/system builder functions ──

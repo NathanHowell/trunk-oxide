@@ -13,10 +13,4 @@ struct SmartnetParserConfig {
     int bandplan_offset;
 };
 
-struct P25ParserConfig {
-    int sys_num;
-    std::string short_name;
-    std::string custom_freq_table_file;
-};
-
 #endif

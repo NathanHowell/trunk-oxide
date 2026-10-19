@@ -68,7 +68,7 @@ for an analog channel), with a `<base>.json` sidecar describing it:
 |---|---|---|
 | `.in.cf32` | conditioner input (`in_rate`: 24 kS/s digital, ~101 kS/s analog). Only in baselines from before the conditioner moved into the Rust channelizer (k55), e.g. the golden capture's | `examples/condcheck.rs` input |
 | `.out.cf32` | the channelizer's conditioned output: after resample, squelch, RMS AGC and FLL (`out_rate`) | input of a Rust demod / P25 decoder; `condcheck` expected output |
-| `.dibits` | control channels decoded by op25 (`recorder.p25_decoder = "op25"`): slicer output, one byte (0..3) per dibit. trunk-p25 (the default) decodes inside the channelizer and writes none | input of a frame assembler |
+| `.dibits` | control channels, only in taps from before op25's control channel chain was deleted: its slicer output, one byte (0..3) per dibit. trunk-p25 decodes inside the channelizer and writes none | input of a frame assembler |
 | `.symbols.f32` | voice calls: demodulator output (soft symbols) | input of a Rust voice frame decoder |
 | `.msgs.jsonl` | control channels: every raw decoder message (`type`, `arg1`, `arg2`, `hex` payload, `ms` since start) | golden output of the decoder |
 
@@ -88,16 +88,18 @@ wall-clock driven, so compare those with a tolerance. Taps are big (~4 GB per
 
 ## P25 decoder A/B
 
-`recorder.p25_decoder` picks who decodes P25 control channels,
-`recorder.p25_voice_decoder` who decodes phase 1 voice and
+Control channels are always decoded by trunk-p25 (op25's chain was deleted
+once shadow mode showed trunk-p25 decoding everything op25 did, and ~40%
+more). `recorder.p25_voice_decoder` picks who decodes phase 1 voice and
 `recorder.p25_tdma_decoder` who decodes phase 2 (TDMA) voice: `rust`
 (trunk-p25, the default) or `op25` (the GNU Radio chains). Run both with
-`--tap` and compare `taps/cc_*.msgs.jsonl` and `summary.json`.
+`--tap` and compare `summary.json`.
 
 Offline, without a replay:
 - `cargo run --release -p trunk-p25 --example golden -- RUN/taps` decodes the
   control channels' `.out.cf32` (and `.dibits`, if any) and scores the TSBKs
-  against `.msgs.jsonl`;
+  against `.msgs.jsonl` (op25's in the golden capture's taps, trunk-p25's own
+  in newer ones);
 - `cargo run --release -p trunk-p25 --example voice_golden -- RUN/taps`
   decodes every phase 1 call's `.symbols.f32` and `.out.cf32`, and compares
   op25's decoding algorithms with trunk-p25's on the same frames;
@@ -114,53 +116,45 @@ symbols, so take their taps from a run with both voice decoders on `op25`.
 
 ## Shadow mode
 
-`recorder.p25_shadow` runs the implementation *not* chosen above beside the
-primary, on the same IQ, so the two can be compared live or in a replay:
+`recorder.p25_shadow` runs the voice implementation *not* chosen above beside
+the primary, on the same IQ, so the two can be compared live or in a replay:
 
 ```toml
 [recorder.p25_shadow]
-control = true   # control channels
 voice = true     # phase 1 voice
 tdma = true      # phase 2 voice
 ```
 
-The primary drives trunking and audio; the shadow's control messages and
-call audio go nowhere (no plugins, source-change or alias notices). It costs
+The primary drives the call's audio and signalling; the shadow's go nowhere
+(no plugins, source-change, encryption or alias notices). It costs
 about twice the decode CPU of what it covers. In a replay:
 `--set recorder.p25_shadow.tdma=true`.
 
 Every decoder's output is labelled `impl = rust | op25` and
 `role = primary | shadow`, shadow mode or not:
-- `trunk.oxide.p25cc.messages{impl,role,kind}` — control-channel messages;
 - `trunk.oxide.p25call.{calls,audio,transmissions,bit_errors,spikes}{impl,role,phase}`
   — per-call accounts;
-- `trunk.oxide.shadow.cc{kind,outcome,impl,primary_impl,shadow_impl}` — a
-  message both implementations decoded within 2 s (`outcome=both`) or only
-  one (`outcome=only`, `impl` = which);
 - `trunk.oxide.shadow.voice{phase,item,outcome,impl,primary_impl,shadow_impl}`
-  — per call, source units (`item=source`) and whether there was audio
-  (`item=audio`, ≥ 0.5 s) in both or only one.
+  — per call, source units (`item=source`), whether there was audio
+  (`item=audio`, ≥ 0.5 s) and the encryption found (`item=encrypted`, the
+  same ALGID) in both or only one.
 
-The trunk-p25 stage metrics (`p25cc`, `p25voice`, `p25tdma`) carry
-`impl=rust` and the role too. A replay writes the same tallies to
+The trunk-p25 voice stage metrics (`p25voice`, `p25tdma`) carry `impl=rust`
+and the role too; the control channel ones (`p25cc`) only `impl=rust`. A replay writes the same tallies to
 `summary.json` under `decoders`.
 
 ## Control channel parser
 
-`recorder.p25_parser = "rust" | "trunk-recorder"` picks who turns control
-channel messages into trunking messages. The Rust parser (`trunk_p25::trunking`,
-`trunk_recorder_sys::p25_parse`) shares channel plans across a system's
-control channels and fixes trunk-recorder's misreadings (listed in
-`p25_parse.rs`); `summary.json` `decoders.parser` has its per-system counts
-(packet kinds; channels resolved by the control channel's own plans, another
-one's, or not at all). To check it against trunk-recorder's on a capture's
-taps, message by message:
-
-```sh
-TRUNK_P25_MSGS=RUN/taps cargo test -p trunk-recorder-sys --lib capture_matches -- --ignored --nocapture
-```
-
-Every difference must be one of the named divergences; anything else fails.
+trunk-p25's parser (`trunk_p25::trunking`, `trunk_recorder_sys::p25_parse`)
+turns control channel messages into trunking messages. It shares channel
+plans across a system's control channels and fixes trunk-recorder's
+misreadings (the named divergences in `p25_parse.rs`); `summary.json`
+`decoders.parser` has its per-system counts (packet kinds; channels resolved
+by the control channel's own plans, another one's, or not at all).
+trunk-recorder's `P25Parser` is deleted. Before it went it matched the Rust
+parser on a 98k-message capture except for the named divergences, and its
+output for the unit-test corpus is kept in `p25_parse/tests/reference.rs`,
+which `matches_trunk_recorder_except_where_noted` still checks against.
 
 ## Notes
 

@@ -1,13 +1,14 @@
 //! P25 control channel messages to trunking messages, in place of
-//! trunk-recorder's `P25Parser`.
+//! trunk-recorder's (deleted) `P25Parser`.
 //!
-//! Takes op25's message form (a type and the NAC-prefixed payload) from
-//! either control channel decoder. Every control channel of a system shares
+//! Takes op25's message form (a type and the NAC-prefixed payload) from the
+//! control channel decoder. Every control channel of a system shares
 //! one [`SystemPlans`], so a grant resolves as soon as any of them has heard
 //! the plan it names.
 //!
-//! The output matches `P25Parser`'s field for field except where that is
-//! wrong ([`Divergence`]):
+//! The output matches what `P25Parser` made of the same messages, field for
+//! field, except where that was wrong ([`Divergence`]; its output for the
+//! test corpus is kept in `tests/reference.rs`):
 //! - grant updates naming two groups on two slots of one TDMA carrier
 //!   report both (trunk-recorder compares frequencies and drops the second),
 //!   and a second channel of 0xffff means none for Motorola's as for the

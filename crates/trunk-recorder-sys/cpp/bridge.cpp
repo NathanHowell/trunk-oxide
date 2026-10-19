@@ -35,7 +35,6 @@
 #include "trunk-recorder/formatter.h"
 #include "trunk-recorder/recorders/dmr_recorder.h"
 #include "trunk-recorder/source.h"
-#include "trunk-recorder/systems/p25_parser.h"
 #include "trunk-recorder/gr_blocks/symbol_regenerator.h"
 #include "trunk-recorder/systems/smartnet_parser.h"
 #include "trunk-recorder/systems/system.h"
@@ -385,15 +384,10 @@ void tr_config_set_p25_voice_decoder(TrContext &ctx, TrP25Decoder phase1, TrP25D
     update_voice_regenerator(config);
 }
 
-void tr_config_set_p25_shadow(TrContext &ctx, bool control, bool phase1, bool phase2) {
+void tr_config_set_p25_shadow(TrContext &ctx, bool phase1, bool phase2) {
     auto &config = ctx.impl->trunk_ctx.config;
-    config.p25_shadow = {control, phase1, phase2};
+    config.p25_shadow = {phase1, phase2};
     update_voice_regenerator(config);
-    config.p25_cc_observer = [](const std::string &system, double freq, P25DecoderImpl impl, bool primary, long type,
-                                const std::string &payload) {
-        p25_observe_cc_message(rust::Str(system), freq, to_tr(impl), primary, static_cast<int64_t>(type),
-                               rust::Slice<const uint8_t>(reinterpret_cast<const uint8_t *>(payload.data()), payload.size()));
-    };
     config.p25_call_observer = [](const P25CallReport &r) {
         TrCallReport out;
         out.system = rust::String(r.system);
@@ -415,31 +409,6 @@ void tr_config_set_p25_shadow(TrContext &ctx, bool control, bool phase1, bool ph
         }
         p25_observe_call(out);
     };
-}
-
-void tr_config_set_p25_decoder(TrContext &ctx, TrP25Decoder decoder) {
-    ctx.impl->trunk_ctx.config.p25_decoder =
-        decoder == TrP25Decoder::Op25 ? P25DecoderImpl::Op25 : P25DecoderImpl::Rust;
-}
-
-void tr_config_set_p25_parser(TrContext &ctx, bool rust) {
-    ctx.impl->trunk_ctx.config.p25_rust_parser = rust;
-}
-
-std::unique_ptr<P25ReferenceParser> tr_p25_reference_parser_new(int32_t sys_num) {
-    auto p = std::make_unique<P25ReferenceParser>();
-    p->config.sys_num = sys_num;
-    return p;
-}
-
-rust::Vec<TrTrunkMessage> tr_p25_reference_parse(P25ReferenceParser &parser, int64_t msg_type, rust::Slice<const uint8_t> payload) {
-    std::string s(reinterpret_cast<const char *>(payload.data()), payload.size());
-    auto msg = gr::message::make_from_string(s, msg_type, 0, 0);
-    rust::Vec<TrTrunkMessage> out;
-    for (const auto &m : parser.parser.parse_message(msg, parser.config)) {
-        out.push_back(convert_trunk_message(m));
-    }
-    return out;
 }
 
 void tr_config_set_tap_dir(TrContext &ctx, rust::Str dir) {
@@ -490,7 +459,7 @@ public:
         case ControlDecoder::P25C4fm: kind = TrControlDecoder::P25C4fm; break;
         case ControlDecoder::None: break;
         }
-        h_->set_control_decoder(port, kind, s.rate, rust::Str(s.system), s.freq_hz, s.primary);
+        h_->set_control_decoder(port, kind, s.rate, rust::Str(s.system), s.freq_hz);
     }
     bool next_message(unsigned port, DecodedMessage &msg) override {
         TrDecodedMessage m;
@@ -757,9 +726,7 @@ void tr_context_set_event_notifier(TrContext &ctx, rust::Box<EventNotifier> noti
 struct TrunkDrainState {
     rust::Box<EventNotifier> notifier;
     std::unique_ptr<SmartnetParser> smartnet_parser;  // non-null for Smartnet
-    std::unique_ptr<P25Parser> p25_parser;            // P25 with trunk-recorder's parser
-    std::optional<rust::Box<P25TrunkParser>> rust_p25_parser; // P25 with trunk-p25's
-    P25ParserConfig p25_config;
+    std::optional<rust::Box<P25TrunkParser>> p25_parser; // non-empty for P25
 
     // Offline baseline: every raw decoder message, before parsing
     // (Config::tap_dir). One decoder = one GR thread, so no locking.
@@ -811,14 +778,8 @@ void tr_context_wire_event_notifiers(TrContext &ctx) {
                 config.bandplan_spacing = system->get_bandplan_spacing();
                 config.bandplan_offset = system->get_bandplan_offset();
                 state->smartnet_parser = std::make_unique<SmartnetParser>(std::move(config));
-            } else if (sys_type == SYS_P25 && ctx.impl->trunk_ctx.config.p25_rust_parser) {
-                state->rust_p25_parser = p25_trunk_parser_new(system->get_sys_num(), system->get_short_name());
-            } else if (sys_type == SYS_P25) {
-                state->p25_parser = std::make_unique<P25Parser>();
-                P25ParserConfig p25_config;
-                p25_config.sys_num = system->get_sys_num();
-                p25_config.short_name = system->get_short_name();
-                state->p25_config = std::move(p25_config);
+            } else {
+                state->p25_parser = p25_trunk_parser_new(system->get_sys_num(), system->get_short_name());
             }
 
             const std::string &tap_dir = ctx.impl->trunk_ctx.config.tap_dir;
@@ -829,19 +790,14 @@ void tr_context_wire_event_notifiers(TrContext &ctx) {
 
             decoder->set_msg_callback([state](gr::message::sptr msg) {
                 state->log_raw(msg);
-                if (state->rust_p25_parser) {
+                if (state->p25_parser) {
                     const std::string payload = msg->to_string();
-                    auto result = (*state->rust_p25_parser)->parse(
+                    auto result = (*state->p25_parser)->parse(
                         msg->type(), rust::Slice<const uint8_t>(reinterpret_cast<const uint8_t *>(payload.data()), payload.size()));
                     if (!result.empty()) event_notifier_notify_trunk_messages(*state->notifier, std::move(result));
                     return;
                 }
-                std::vector<TrunkMessage> parsed;
-                if (state->smartnet_parser) {
-                    parsed = state->smartnet_parser->parse_message(msg);
-                } else if (state->p25_parser) {
-                    parsed = state->p25_parser->parse_message(msg, state->p25_config);
-                }
+                std::vector<TrunkMessage> parsed = state->smartnet_parser->parse_message(msg);
                 if (parsed.empty()) return;
 
                 rust::Vec<TrTrunkMessage> result;

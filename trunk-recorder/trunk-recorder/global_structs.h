@@ -28,14 +28,13 @@ struct Transmission {
   char filename[255];
 };
 
-// Who decodes P25 control channels: trunk-p25 on the channelizer slot, or
-// op25's GNU Radio chain (kept for A/B replays).
+// Who decodes P25 voice: trunk-p25 (regenerating for op25's frame
+// assembler), or op25's GNU Radio chain.
 enum class P25DecoderImpl { Rust, Op25 };
 
 // Shadow mode: the other implementation runs alongside the primary on the
-// same IQ, and its output is only reported (to the observers), never used.
+// same IQ, and its output is only reported (to the observer), never used.
 struct P25Shadow {
-  bool control = false;
   bool phase1 = false;
   bool phase2 = false;
 };
@@ -71,7 +70,6 @@ struct Config {
   // When non-empty, channel conditioners and decoders write raw taps here for
   // offline baselines (see channel_control::enable_tap).
   std::string tap_dir;
-  P25DecoderImpl p25_decoder = P25DecoderImpl::Rust;
   // Set by the host when trunk-p25 decodes P25 voice: makes the backend of a
   // recorder's regenerator (conditioned rate, recorder number). Empty =
   // op25's demodulators throughout. The flags say which phases use it.
@@ -79,11 +77,6 @@ struct Config {
   bool p25_rust_phase1 = false;
   bool p25_rust_phase2 = false;
   P25Shadow p25_shadow;
-  // Control channel messages parsed by trunk-p25 (else P25Parser).
-  bool p25_rust_parser = true;
-  // Every message any P25 control-channel decoder emits (system, frequency,
-  // implementation, primary?, op25 message type and payload).
-  std::function<void(const std::string &, double, P25DecoderImpl, bool, long, const std::string &)> p25_cc_observer;
   // Every P25 voice call, when it ends.
   std::function<void(const P25CallReport &)> p25_call_observer;
   std::shared_ptr<EventSink> event_sink;

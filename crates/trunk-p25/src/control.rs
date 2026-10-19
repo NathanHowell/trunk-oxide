@@ -1,8 +1,8 @@
 //! A control channel: IQ in, typed messages out.
 //!
 //! [`Message::op25_type`] and [`Message::op25_payload`] give the exact type
-//! and bytes op25's `p25p1_fdma` sends for the same frame, so the existing
-//! `P25Parser` reads them unchanged.
+//! and bytes op25's `p25p1_fdma` sends for the same frame, the form
+//! `trunk_recorder_sys::p25_parse` reads.
 //!
 //! Recovery beyond op25:
 //! - every block is Viterbi decoded on soft symbols;

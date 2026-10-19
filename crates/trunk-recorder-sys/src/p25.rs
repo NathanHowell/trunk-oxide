@@ -36,7 +36,6 @@ pub struct ControlChannel {
     pub freq_hz: f64,
     pub source: i32,
     pub port: u32,
-    pub role: Role,
 }
 
 /// Which implementation produced a result.
@@ -452,7 +451,6 @@ mod tests {
             freq_hz: 851e6,
             source: 0,
             port: 3,
-            role: Role::Primary,
         }
     }
 

@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use super::*;
-use crate::ffi;
+
+mod reference;
 
 const TSDU: i64 = op25::TSDU;
 
@@ -227,14 +228,14 @@ fn explains(notes: &[Divergence], rust: &[TrTrunkMessage], cpp: &[TrTrunkMessage
 
 fn compare(
     rust: &mut P25TrunkParser,
-    cpp: std::pin::Pin<&mut ffi::P25ReferenceParser>,
+    cpp: Vec<TrTrunkMessage>,
     msg_type: i64,
     payload: &[u8],
     tally: &mut Tally,
 ) {
     let mut notes = Vec::new();
     let r = without_meta(rust.parse_noting(msg_type, payload, &mut |d| notes.push(d)));
-    let c = without_meta(ffi::tr_p25_reference_parse(cpp, msg_type, payload));
+    let c = cpp;
     if r == c {
         tally.same += 1;
     } else if explains(&notes, &r, &c) {
@@ -252,60 +253,59 @@ fn compare(
     }
 }
 
-/// One of every message the capture has, plus edge cases, against
-/// trunk-recorder's parser.
+/// One of every message the capture has, plus edge cases: before the plans
+/// are known, then after.
+const CORPUS: &[(i64, &str)] = &[
+    (TSDU, GRANT),
+    (TSDU, NET_STATUS),
+    (TSDU, RFSS_STATUS),
+    (TSDU, "05e1020036fc070a37c105ab"),
+    (TSDU, IDEN_TDMA),
+    (TSDU, IDEN_FDMA),
+    (TSDU, GRANT),
+    (TSDU, NET_STATUS),
+    (TSDU, "05e1020037ec047f37ec047f"),
+    (TSDU, "05e1020037ec047f37ed0480"),
+    (TSDU, "05e1020036fc070a37c105ab"),
+    (TSDU, "05e180901290129012901290"),
+    (TSDU, "05e182904037ed1290ccc671"),
+    (TSDU, "05e1839037ed129037ed1290"),
+    (TSDU, "05e1839037ed1290ffff1290"),
+    (TSDU, "05e105904080c00000000800"),
+    (TSDU, "05e189901180000000000000"),
+    (TSDU, "05e10b900000000000001670"),
+    (TSDU, "05e114000016a0ffffc7e52f"),
+    (TSDU, "05e11500010000ffffcccf96"),
+    (TSDU, "05e1160000c016a0ffff0001"),
+    (TSDU, "05e12000a300fffffdc9535a"),
+    (TSDU, "05e128000009f609f7cb0afe"),
+    (TSDU, "05e128000209f609f7cb0afe"),
+    (TSDU, "05e12a000000c92062fffffd"),
+    (TSDU, "05e12b000012a90101ccd03c"),
+    (TSDU, "05e12c0005e4cb0afecb0afe"),
+    (TSDU, "05e12f0000bee005e4c95523"),
+    (TSDU, "05e1300000042a3551823ca2"),
+    (TSDU, "05e139000101165804168804"),
+    (TSDU, "05e13c000035e40103161070"),
+    (TSDU, "05e1040047ec000123000456"),
+    (TSDU, "05e1060047ec000123000456"),
+    (TSDU, "05e104900016a0ffffc7e52f"),
+    (TSDU, "05e1440000c016a0ffff0001"),
+    (0xffff, ""),
+    (op25::TDULC, "05e1"),
+    (TSDU, "ffff00"),
+];
+
+/// The corpus against what trunk-recorder's parser made of it.
 #[test]
 fn matches_trunk_recorder_except_where_noted() {
     let mut rust = parser();
-    let mut cpp = ffi::tr_p25_reference_parser_new(rust.sys_num);
     let mut tally = Tally::default();
-    let mut run = |ty: i64, payload: Vec<u8>, tally: &mut Tally| {
-        compare(&mut rust, cpp.pin_mut(), ty, &payload, tally);
-    };
-    // Before the plans are known, then after.
-    let corpus = [
-        GRANT,
-        NET_STATUS,
-        RFSS_STATUS,
-        "05e1020036fc070a37c105ab",
-        IDEN_TDMA,
-        IDEN_FDMA,
-        GRANT,
-        NET_STATUS,
-        "05e1020037ec047f37ec047f",
-        "05e1020037ec047f37ed0480",
-        "05e1020036fc070a37c105ab",
-        "05e180901290129012901290",
-        "05e182904037ed1290ccc671",
-        "05e1839037ed129037ed1290",
-        "05e1839037ed1290ffff1290",
-        "05e105904080c00000000800",
-        "05e189901180000000000000",
-        "05e10b900000000000001670",
-        "05e114000016a0ffffc7e52f",
-        "05e11500010000ffffcccf96",
-        "05e1160000c016a0ffff0001",
-        "05e12000a300fffffdc9535a",
-        "05e128000009f609f7cb0afe",
-        "05e128000209f609f7cb0afe",
-        "05e12a000000c92062fffffd",
-        "05e12b000012a90101ccd03c",
-        "05e12c0005e4cb0afecb0afe",
-        "05e12f0000bee005e4c95523",
-        "05e1300000042a3551823ca2",
-        "05e139000101165804168804",
-        "05e13c000035e40103161070",
-        "05e1040047ec000123000456",
-        "05e1060047ec000123000456",
-        "05e104900016a0ffffc7e52f",
-        "05e1440000c016a0ffff0001",
-    ];
-    for s in corpus {
-        run(TSDU, hex(s), &mut tally);
+    let cpp = reference::reference(rust.sys_num);
+    assert_eq!(cpp.len(), CORPUS.len());
+    for (&(ty, s), cpp) in CORPUS.iter().zip(cpp) {
+        compare(&mut rust, cpp, ty, &hex(s), &mut tally);
     }
-    run(0xffff, Vec::new(), &mut tally);
-    run(op25::TDULC, hex("05e1"), &mut tally);
-    run(TSDU, hex("ffff00"), &mut tally);
     assert!(
         tally.unexplained.is_empty(),
         "{}",
@@ -321,51 +321,4 @@ fn matches_trunk_recorder_except_where_noted() {
     ] {
         assert!(tally.diverged.contains_key(d), "{d}: {tally:?}");
     }
-}
-
-/// The whole of a capture's control channel taps (`*.msgs.jsonl`):
-/// `TRUNK_P25_MSGS=<dir> cargo test -p trunk-recorder-sys -- --ignored`.
-#[test]
-#[ignore = "needs TRUNK_P25_MSGS"]
-fn capture_matches_trunk_recorder_except_where_noted() {
-    let dir = std::env::var("TRUNK_P25_MSGS").expect("TRUNK_P25_MSGS");
-    let mut files: Vec<_> = std::fs::read_dir(&dir)
-        .unwrap()
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| p.to_string_lossy().ends_with(".msgs.jsonl"))
-        .collect();
-    files.sort();
-    let mut total = Tally::default();
-    for path in files {
-        let mut rust = parser();
-        let mut cpp = ffi::tr_p25_reference_parser_new(rust.sys_num);
-        let mut tally = Tally::default();
-        for line in std::fs::read_to_string(&path).unwrap().lines() {
-            let v: serde_json::Value = serde_json::from_str(line).unwrap();
-            let ty = v["type"].as_i64().unwrap();
-            let payload = hex(v["hex"].as_str().unwrap());
-            compare(&mut rust, cpp.pin_mut(), ty, &payload, &mut tally);
-        }
-        println!(
-            "{}: same {} diverged {:?} unexplained {}",
-            path.file_name().unwrap().to_string_lossy(),
-            tally.same,
-            tally.diverged,
-            tally.unexplained.len()
-        );
-        total.same += tally.same;
-        for (k, v) in tally.diverged {
-            *total.diverged.entry(k).or_default() += v;
-        }
-        total.unexplained.extend(tally.unexplained);
-    }
-    println!("total: same {} diverged {:?}", total.same, total.diverged);
-    let shown: Vec<_> = total.unexplained.iter().take(20).cloned().collect();
-    assert!(
-        total.unexplained.is_empty(),
-        "{} unexplained:\n{}",
-        total.unexplained.len(),
-        shown.join("\n")
-    );
 }

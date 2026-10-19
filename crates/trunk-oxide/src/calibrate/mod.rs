@@ -174,11 +174,26 @@ pub fn recheck(
     };
     let m = measure(&probe.capture(cached.gain_db)?, &policy.measure_params());
     let moved_db = m.noise_floor_db - cached.noise_floor_db;
-    let penalty_db = model
-        .with_floor_at(cached.gain_db, m.noise_floor_db)
-        .map_or(f64::INFINITY, |now| now.penalty_db(cached.gain_db));
+    let Some(now) = model.with_floor_at(cached.gain_db, m.noise_floor_db) else {
+        return Ok(Recheck {
+            moved_db,
+            ..unknown
+        });
+    };
+    let penalty_db = now.penalty_db(cached.gain_db);
+    // What a sweep would now pick from the same steps: the lowest within
+    // budget, else the highest (ADC-limited). If that is the cached gain, a
+    // sweep cannot do better; otherwise the cached gain stands while it is
+    // within the hysteresis.
+    let gains: Vec<f64> = curve.iter().map(|&(g, _)| g).collect();
+    let would_pick = gains
+        .iter()
+        .copied()
+        .find(|&g| now.penalty_db(g) <= policy.penalty_budget_db)
+        .or_else(|| gains.last().copied());
+    let still_best = would_pick.is_some_and(|g| (g - cached.gain_db).abs() < 1e-9);
     Ok(Recheck {
-        keep: penalty_db <= policy.penalty_budget_db + policy.recheck_hysteresis_db
+        keep: (still_best || penalty_db <= policy.penalty_budget_db + policy.recheck_hysteresis_db)
             && m.sat_frac <= policy.sat_limit,
         moved_db,
         penalty_db,
@@ -327,6 +342,68 @@ mod tests {
         assert_eq!(sweep.selection.reason, SelectReason::Fallback);
         assert_eq!(sweep.selection.gain_db, 40.0);
         assert_eq!(sweep.points.len(), 4);
+    }
+
+    /// A dongle whose front end equals its ADC at `equal_at` dB (slope 1),
+    /// as a probe and as the cached sweep it would have produced.
+    fn dongle(equal_at: f64) -> (MockProbe, cache::Cached) {
+        const GAINS: [f64; 7] = [0.0, 10.0, 20.0, 26.0, 32.0, 38.0, 44.0];
+        let power = move |g: f64| 1.0 + 10f64.powf((g - equal_at) / 10.0);
+        let mut probe = MockProbe {
+            gains: GAINS.to_vec(),
+            make_iq: Box::new(move |g| noise(1 << 16, (0.02 * power(g).sqrt()) as f32, 7)),
+        };
+        let policy = CalibrationPolicy::default();
+        let sweep = calibrate(&mut probe, &policy, 0.0).unwrap();
+        let cached = cache::Cached {
+            gain_db: sweep.selection.gain_db,
+            noise_floor_db: sweep.selection.noise_floor_db,
+            reason: sweep.selection.reason.label().into(),
+            at: 0,
+            algorithm: cache::ALGORITHM,
+            sweep: sweep
+                .points
+                .iter()
+                .map(|p| cache::SweepPoint {
+                    gain_db: p.gain_db,
+                    noise_floor_db: p.measurement.noise_floor_db,
+                    sat_frac: p.measurement.sat_frac,
+                })
+                .collect(),
+        };
+        (probe, cached)
+    }
+
+    #[test]
+    fn a_recheck_keeps_what_a_sweep_would_pick_again() {
+        let policy = CalibrationPolicy::default();
+        // within budget at 32 dB; unchanged, it stands
+        let (mut probe, cached) = dongle(20.0);
+        assert_eq!(cached.gain_db, 32.0);
+        assert!(recheck(&mut probe, &policy, &cached).unwrap().keep);
+        // ADC-limited (the front end equals the ADC only at 44 dB): the top
+        // gain costs more than the budget, but a sweep would pick it again
+        let (mut probe, cached) = dongle(44.0);
+        assert_eq!(
+            (cached.gain_db, cached.reason.as_str()),
+            (44.0, "adc_limited")
+        );
+        let r = recheck(&mut probe, &policy, &cached).unwrap();
+        assert!(r.keep && r.penalty_db > 1.0, "{r:?}");
+    }
+
+    #[test]
+    fn a_recheck_sweeps_again_once_the_front_end_drifted_far() {
+        let policy = CalibrationPolicy::default();
+        let (_, cached) = dongle(20.0);
+        // the same dongle with 8 dB less front-end gain: at 32 dB the front
+        // end is only 4 dB over the ADC, a 1.5 dB penalty
+        let (mut warmer, _) = dongle(28.0);
+        let r = recheck(&mut warmer, &policy, &cached).unwrap();
+        assert!(!r.keep && r.penalty_db > 1.0, "{r:?}");
+        // 1 dB less: within the hysteresis
+        let (mut warm, _) = dongle(21.0);
+        assert!(recheck(&mut warm, &policy, &cached).unwrap().keep);
     }
 
     #[test]

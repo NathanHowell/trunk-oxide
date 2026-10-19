@@ -11,7 +11,7 @@ use trunk_oxide_proto as proto;
 use trunk_database::Database;
 
 use crate::audio_shape::{self, AudioShape};
-use crate::call_state::{CallEffect, CallState, CallStateConfig, SILENCE_RMS_THRESHOLD};
+use crate::call_state::{CallEffect, CallState, CallStateConfig};
 use crate::channel_writer::{ChannelWriterHandle, ChannelWriters, WriteIdentity};
 use crate::discord::{DiscordClient, TRANSCRIBING_EMOJI};
 use crate::grpc_transcriber::{TranscriberConnection, Transcription};
@@ -84,8 +84,6 @@ struct SegmentMeta {
     offset_s: f64,
     /// Segment length in samples (16 kHz).
     samples: usize,
-    /// Loudest 0.5 s window RMS — what the silence gate decided on.
-    peak_rms: f64,
     /// Where speech starts/ends in this segment (None if no voiced frame).
     shape: Option<AudioShape>,
 }
@@ -163,7 +161,6 @@ pub struct CallHandler {
     dbg_kept_samples: u64,
     /// Transcription chunks kept / dropped by the silence gate.
     dbg_kept_chunks: u32,
-    dbg_gated_chunks: u32,
     /// Running 0-based index of transcription segments (kept or gated), for spans.
     segment_index: u32,
     /// Cumulative samples of all prior segments — a segment's call-relative offset.
@@ -267,7 +264,6 @@ impl CallHandler {
             dbg_audio_samples: 0,
             dbg_kept_samples: 0,
             dbg_kept_chunks: 0,
-            dbg_gated_chunks: 0,
             segment_index: 0,
             segment_offset_samples: 0,
         })
@@ -676,27 +672,17 @@ impl CallHandler {
         }
     }
 
-    /// Enqueue a transmission segment for transcription, skipping silent ones so
-    /// dead air never reaches the capacity-constrained transcriber. "Silent"
-    /// means no ~0.5 s window in the segment clears [`SILENCE_RMS_THRESHOLD`]
-    /// (see [`peak_window_rms`]); a whole-segment average would drop a segment
-    /// that is mostly quiet but contains real speech, which is what was eating
-    /// the start of transmissions. The same gate drives the attach/has-content
-    /// decision (via [`CallState::on_transcription_enqueued`]), so a segment too
-    /// quiet to transcribe is also too quiet to attach. Gating is purely about
-    /// what we *transcribe*: the OGG encoder works off the raw ingested samples
-    /// and is unaffected.
+    /// Enqueue a transmission segment for transcription. trunk-oxide only
+    /// sends audio of transmissions that proved audible (its recorders hold
+    /// a transmission back until a half-second window clears their RMS
+    /// threshold and drop it otherwise), so everything that arrives is
+    /// worth transcribing and attaching.
     fn enqueue_audio(&mut self, audio: Vec<f32>) -> Vec<CallEffect> {
         let samples = audio.len();
         if samples == 0 {
             return Vec::new();
         }
-        let peak_rms = peak_window_rms(&audio);
-        let kept = peak_rms >= SILENCE_RMS_THRESHOLD;
-        self.metrics.audio_peak_rms.record(peak_rms, &self.labels());
-
-        // Shape metrics cover every segment, including gated ones: a "silent"
-        // segment is exactly where a clipped lead-in or tail would hide.
+        // Shape metrics: a clipped lead-in or tail shows here.
         let shape = audio_shape::analyze(&audio);
         if let Some(s) = &shape {
             record_audio_shape(&self.metrics, &self.labels(), s);
@@ -706,48 +692,17 @@ impl CallHandler {
             index: self.segment_index,
             offset_s: self.segment_offset_samples as f64 / 16000.0,
             samples,
-            peak_rms,
             shape,
         };
         self.segment_index += 1;
         self.segment_offset_samples += samples as u64;
-
-        tracing::info!(
-            target: "audio_debug",
-            index = meta.index,
-            offset_s = meta.offset_s,
-            peak_rms,
-            samples,
-            secs = samples as f64 / 16000.0,
-            threshold = SILENCE_RMS_THRESHOLD,
-            kept,
-            "transcription segment silence-gate decision"
-        );
-
-        if kept {
-            self.dbg_kept_samples += samples as u64;
-            self.dbg_kept_chunks += 1;
-            self.enqueue_job(TranscribeJob::Audio { audio, meta });
-            // Track it as in-flight so the executor shows the ⏳ reaction until
-            // the matching result comes back via `apply_transcript`. Emits no
-            // effect (reaction is reconciled after each batch).
-            self.state.on_transcription_enqueued()
-        } else {
-            self.dbg_gated_chunks += 1;
-            // A gated segment produces no transcribe span, so the hole would be
-            // invisible in the trace. Drop a zero-work `segment_gated` span,
-            // parented to the call span, so the call's timeline shows exactly
-            // where (offset_s) and how much audio was discarded as silent.
-            let _gated = tracing::info_span!(
-                "segment_gated",
-                chunk_index = meta.index,
-                offset_s = meta.offset_s,
-                samples = meta.samples,
-                peak_rms = meta.peak_rms,
-            )
-            .entered();
-            Vec::new()
-        }
+        self.dbg_kept_samples += samples as u64;
+        self.dbg_kept_chunks += 1;
+        self.enqueue_job(TranscribeJob::Audio { audio, meta });
+        // Track it as in-flight so the executor shows the ⏳ reaction until
+        // the matching result comes back via `apply_transcript`. Emits no
+        // effect (reaction is reconciled after each batch).
+        self.state.on_transcription_enqueued()
     }
 
     /// Flush the resampler tail and force-finish tone detection into
@@ -861,8 +816,7 @@ impl CallHandler {
         }
 
         // Audio-vs-duration diagnosis: compare the total captured audio (what's
-        // in the OGG) against the summed recording_length (what drives Duration)
-        // and the silence-gate's effect on transcription coverage.
+        // in the OGG) against the summed recording_length (what drives Duration).
         let audio_secs = self.dbg_audio_samples as f64 / 16000.0;
         let transcribed_secs = self.dbg_kept_samples as f64 / 16000.0;
         tracing::info!(
@@ -870,10 +824,8 @@ impl CallHandler {
             audio_secs,
             duration_secs = self.state.accumulated_duration().as_secs_f64(),
             transcribed_secs,
-            gated_secs = audio_secs - transcribed_secs,
             ptt_count = self.state.ptt_count(),
-            kept_chunks = self.dbg_kept_chunks,
-            gated_chunks = self.dbg_gated_chunks,
+            chunks = self.dbg_kept_chunks,
             "call audio summary: OGG audio vs Duration vs transcribed"
         );
     }
@@ -898,15 +850,14 @@ async fn transcription_worker(
             TranscribeJob::Audio { audio, meta } => {
                 // One `segment` span per transmission segment, parented to the
                 // call span (the worker is instrumented with it). It carries the
-                // segment's place in the call (offset_s/index), length, and
-                // loudness, and is the parent of the downstream transcribe RPC
+                // segment's place in the call (offset_s/index) and length, and
+                // is the parent of the downstream transcribe RPC
                 // spans — so a trace shows each segment's position and decode.
                 let span = tracing::info_span!(
                     "segment",
                     chunk_index = meta.index,
                     offset_s = meta.offset_s,
                     samples = meta.samples,
-                    peak_rms = meta.peak_rms,
                 );
                 let samples = audio.len();
                 let t = transcribe_one(&whisperer, &metrics, &identity, audio)
@@ -1079,36 +1030,6 @@ fn buffer_threshold(duration_ms: u64) -> usize {
     usize::try_from(duration_ms)
         .unwrap_or(usize::MAX)
         .saturating_mul(16)
-}
-
-/// Root-mean-square of f32 PCM samples in [-1, 1]. Empty input is 0.0 (silent).
-fn rms(samples: &[f32]) -> f64 {
-    let Ok(count) = u32::try_from(samples.len()) else {
-        return 0.0;
-    };
-    if count == 0 {
-        return 0.0;
-    }
-    let sum_sq: f64 = samples.iter().map(|&s| f64::from(s) * f64::from(s)).sum();
-    (sum_sq / f64::from(count)).sqrt()
-}
-
-/// Window length for the silence gate's per-window RMS scan (~0.5 s at 16 kHz).
-const RMS_WINDOW_SAMPLES: usize = 8000;
-
-/// Loudest ~0.5 s window in `samples`. The silence gate uses this instead of a
-/// whole-segment average so a mostly-quiet segment that still contains real
-/// speech (e.g. a transmission's quiet key-up lead-in before the talker comes
-/// up) is kept rather than dropped — averaging over the whole segment was what
-/// silently discarded the *beginning* of transmissions.
-fn peak_window_rms(samples: &[f32]) -> f64 {
-    if samples.len() <= RMS_WINDOW_SAMPLES {
-        return rms(samples);
-    }
-    samples
-        .chunks(RMS_WINDOW_SAMPLES)
-        .map(rms)
-        .fold(0.0_f64, f64::max)
 }
 
 fn decode_audio(bytes: &[u8]) -> Vec<f32> {

@@ -30,6 +30,8 @@ use crate::types::{
 pub const NARROW_RATE: f64 = 24_000.0;
 /// Conditioned rate of an analog slot.
 pub const WIDE_RATE: f64 = 96_000.0;
+/// trunk-p25's vocoded audio rate.
+const P25_AUDIO_RATE: f64 = 8_000.0;
 /// Conditioner roll-off, as `channel_control` set it.
 const EXCESS_BW: f32 = 0.2;
 pub(crate) const EXCESS_BW_PUB: f32 = EXCESS_BW;
@@ -38,6 +40,15 @@ pub(crate) const EXCESS_BW_PUB: f32 = EXCESS_BW;
 const ANALOG_BANDWIDTH_HZ: f64 = 12_000.0;
 /// A sample at or above this is voice, not digital silence (~-66 dBFS).
 const VOICE_THRESHOLD: i16 = 16;
+/// A transmission is audible once some half-second window of its audio
+/// reaches this RMS (about -46 dBFS).
+///
+/// Until then its audio is held back; a transmission that ends without
+/// reaching it is dropped, so a tone-only key-up or an empty channel never
+/// reaches anyone downstream.
+pub const AUDIBLE_RMS: f64 = 0.005;
+/// The window over which [`AUDIBLE_RMS`] is measured.
+const AUDIBLE_WINDOW_S: f64 = 0.5;
 /// What `get_pwr()` returned with no reading: trunk-recorder's `DB_UNSET`.
 pub const DB_UNSET: f64 = 999.0;
 
@@ -96,6 +107,13 @@ struct Recording {
     /// Units heard in band, in order of first appearance (P25).
     sources: Vec<i64>,
     phase2: bool,
+    /// Some window reached [`AUDIBLE_RMS`]: the audio flows.
+    audible: bool,
+    /// Audio held back until the transmission proves audible.
+    held: Vec<i16>,
+    /// The window in progress: sum of squares and samples.
+    win_sq: f64,
+    win_n: usize,
 }
 
 impl Default for Recording {
@@ -114,6 +132,10 @@ impl Default for Recording {
             counts: CallCounts::default(),
             sources: Vec::new(),
             phase2: false,
+            audible: false,
+            held: Vec::new(),
+            win_sq: 0.0,
+            win_n: 0,
         }
     }
 }
@@ -143,6 +165,68 @@ impl Recording {
         self.last_write = now;
         if voice {
             self.last_voice = now;
+        }
+    }
+
+    /// Account for `audio` (at `rate` samples per second) and decide what of
+    /// it goes out: nothing until a half-second window clears
+    /// [`AUDIBLE_RMS`], then everything held plus this. Returns the samples
+    /// to send.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::suboptimal_flops
+    )]
+    fn deliver(&mut self, audio: &[i16], rate: f64) -> Vec<i16> {
+        let voice = audio.iter().any(|&s| s.abs() >= VOICE_THRESHOLD);
+        self.wrote(audio.len(), voice);
+        if self.audible {
+            return audio.to_vec();
+        }
+        let win_len = (rate * AUDIBLE_WINDOW_S) as usize;
+        self.held.extend_from_slice(audio);
+        for &s in audio {
+            let v = f64::from(s) / 32768.0;
+            self.win_sq += v * v;
+            self.win_n += 1;
+            if self.win_n >= win_len {
+                let rms = (self.win_sq / self.win_n as f64).sqrt();
+                self.win_sq = 0.0;
+                self.win_n = 0;
+                if rms >= AUDIBLE_RMS {
+                    self.audible = true;
+                    return std::mem::take(&mut self.held);
+                }
+            }
+        }
+        Vec::new()
+    }
+
+    /// The transmission is over: whatever a final partial window makes
+    /// audible is returned to send, else the held audio is dropped.
+    #[allow(clippy::cast_precision_loss)]
+    fn finish(&mut self) -> Vec<i16> {
+        if !self.audible && self.win_n > 0 {
+            let rms = (self.win_sq / self.win_n as f64).sqrt();
+            if rms >= AUDIBLE_RMS {
+                self.audible = true;
+            }
+        }
+        self.win_sq = 0.0;
+        self.win_n = 0;
+        if self.audible {
+            std::mem::take(&mut self.held)
+        } else {
+            if !self.held.is_empty() {
+                tracing::info!(
+                    talkgroup = self.talkgroup,
+                    samples = self.held.len(),
+                    "dropping a transmission with no audible audio"
+                );
+            }
+            self.held.clear();
+            Vec::new()
         }
     }
 
@@ -325,10 +409,11 @@ impl ChannelDecoder for P25Slot {
                     *s = level_i16(*s, self.levels);
                 }
             }
-            let voice = self.audio.iter().any(|&s| s.abs() >= VOICE_THRESHOLD);
-            rec.wrote(self.audio.len(), voice);
+            let out = rec.deliver(&self.audio, P25_AUDIO_RATE);
             drop(rec);
-            self.sink.audio(call.rust_call_id, &self.audio);
+            if !out.is_empty() {
+                self.sink.audio(call.rust_call_id, &out);
+            }
         }
     }
 
@@ -446,9 +531,10 @@ impl ChannelDecoder for AnalogSlot {
             self.pcm.clear();
             self.pcm
                 .extend(self.gated.iter().map(|&v| level_f32(v, self.levels)));
-            let voice = self.pcm.iter().any(|&s| s.abs() >= VOICE_THRESHOLD);
-            self.shared.rec().wrote(self.pcm.len(), voice);
-            self.sink.audio(call.rust_call_id, &self.pcm);
+            let out = self.shared.rec().deliver(&self.pcm, trunk_fm::AUDIO_RATE);
+            if !out.is_empty() {
+                self.sink.audio(call.rust_call_id, &out);
+            }
         }
     }
 
@@ -473,6 +559,7 @@ pub struct Recorder {
     tone_hz: f64,
     shared: Arc<Shared>,
     chz: Arc<SharedChannelizer>,
+    sink: Arc<dyn AudioSink>,
     center_hz: f64,
     profile: ProfileId,
     /// Tuning of the current (or last) call, relative to the source centre.
@@ -591,6 +678,7 @@ impl Recorder {
             tone_hz,
             shared,
             chz: Arc::clone(slot.channelizer),
+            sink: Arc::clone(slot.sink),
             center_hz: slot.center_hz,
             profile,
             offset_hz: 0.0,
@@ -598,6 +686,12 @@ impl Recorder {
             call: None,
             last_start: None,
         }
+    }
+
+    /// The call most recently started on this recorder.
+    fn call_id_of_last(&self) -> Option<u64> {
+        let id = self.shared.rust_call_id.load(Ordering::Relaxed);
+        (id != 0).then_some(id)
     }
 
     /// Free for a call: created, or stopped since the last one.
@@ -698,6 +792,10 @@ impl Recorder {
             rec.counts = CallCounts::default();
             rec.sources.clear();
             rec.phase2 = cfg.phase2_tdma;
+            rec.audible = false;
+            rec.held.clear();
+            rec.win_sq = 0.0;
+            rec.win_n = 0;
         }
         self.active = true;
         self.call = Some(cfg.rust_call_id);
@@ -730,11 +828,17 @@ impl Recorder {
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(Cmd::Stop);
         self.shared.active.store(false, Ordering::Relaxed);
-        let rec = {
+        let (rec, tail) = {
             let mut rec = self.shared.rec();
             rec.state = RecorderState::Available;
-            rec.clone()
+            let tail = rec.finish();
+            (rec.clone(), tail)
         };
+        if !tail.is_empty()
+            && let Some(id) = self.call_id_of_last()
+        {
+            self.sink.audio(id, &tail);
+        }
         if self.kind == Kind::P25
             && let Some((system, talkgroup, freq, phase2)) = self.last_start.take()
         {
@@ -832,6 +936,49 @@ mod tests {
             EventSender::new(tx, Arc::new(std::sync::atomic::AtomicUsize::new(0))),
             rx,
         )
+    }
+
+    #[test]
+    fn a_transmission_is_held_until_audible_and_dropped_otherwise() {
+        let start = Start {
+            rust_call_id: 1,
+            sys_num: 0,
+            system: "s".into(),
+            talkgroup: 5,
+            freq: 851e6,
+            qpsk: true,
+            phase2: false,
+            slot: 0,
+            xor_mask: vec![],
+            levels: 1.0,
+            tone: None,
+        };
+        // Quiet audio is held, then dropped at the end.
+        let mut r = Recording::default();
+        r.start(&start);
+        let quiet = vec![40i16; 4000];
+        assert_eq!(r.deliver(&quiet, 8_000.0), Vec::<i16>::new());
+        assert_eq!(r.deliver(&quiet, 8_000.0), Vec::<i16>::new());
+        assert_eq!(r.sample_count, 8000, "accounting sees every sample");
+        assert_eq!(r.finish(), Vec::<i16>::new());
+        assert!(!r.audible);
+
+        // Loud audio releases everything held before it, then flows live.
+        let mut r = Recording::default();
+        r.start(&start);
+        assert_eq!(r.deliver(&quiet, 8_000.0), Vec::<i16>::new());
+        let loud = vec![3000i16; 4000];
+        let out = r.deliver(&loud, 8_000.0);
+        assert_eq!(out.len(), 8000);
+        assert_eq!(&out[..4000], &quiet[..]);
+        assert_eq!(r.deliver(&quiet, 8_000.0), quiet);
+        assert_eq!(r.finish(), Vec::<i16>::new());
+
+        // A loud partial last window is released at the end.
+        let mut r = Recording::default();
+        r.start(&start);
+        assert_eq!(r.deliver(&loud[..1000], 8_000.0), Vec::<i16>::new());
+        assert_eq!(r.finish().len(), 1000);
     }
 
     #[test]

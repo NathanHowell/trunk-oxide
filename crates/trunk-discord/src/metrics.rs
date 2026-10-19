@@ -35,7 +35,6 @@ pub struct Metrics {
     pub audio_trailing_silence: Histogram<f64>,
     /// Peak 0.5 s-window RMS of each segment (linear, full scale 1.0); the
     /// value the silence gate compares against `SILENCE_RMS_THRESHOLD`.
-    pub audio_peak_rms: Histogram<f64>,
     /// Level of the last voiced frame relative to the segment peak (dB, <= 0).
     pub audio_end_level_db: Histogram<f64>,
     /// Segments whose speech ends while still loud (a clipped tail).
@@ -136,13 +135,6 @@ impl Metrics {
                 .f64_histogram("trunk.discord.audio_trailing_silence_seconds")
                 .with_description("Seconds after the last voiced frame in a transmission segment")
                 .with_boundaries(SECONDS_BOUNDARIES.to_vec())
-                .build(),
-            audio_peak_rms: meter
-                .f64_histogram("trunk.discord.audio_peak_rms")
-                .with_description("Peak 0.5 s-window RMS per transmission segment (linear)")
-                .with_boundaries(vec![
-                    0.001, 0.002, 0.005, 0.01, 0.02, 0.03, 0.05, 0.075, 0.1, 0.15, 0.2, 0.3, 0.5,
-                ])
                 .build(),
             audio_end_level_db: meter
                 .f64_histogram("trunk.discord.audio_end_level_db")

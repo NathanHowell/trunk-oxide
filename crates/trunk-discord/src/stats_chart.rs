@@ -102,30 +102,6 @@ const PANELS: &[PanelSpec] = &[
         ],
     },
     PanelSpec {
-        title: "Audio level (median segment peak RMS)",
-        y_desc: "RMS (1.0 = full scale)",
-        zero_floor: true,
-        queries: &[QuerySpec {
-            query: "histogram_quantile(0.5, sum by (le,short_name)(rate(trunk.discord.audio_peak_rms_bucket[30m])))",
-            label: Label::Tagged {
-                prefix: "",
-                tag: "short_name",
-            },
-        }],
-    },
-    PanelSpec {
-        title: "Quiet segments (peak RMS < 0.005)",
-        y_desc: "% of segments",
-        zero_floor: true,
-        queries: &[QuerySpec {
-            query: "sum by (short_name)(rate(trunk.discord.audio_peak_rms_bucket{le=\"0.005\"}[30m]))/sum by (short_name)(rate(trunk.discord.audio_peak_rms_count[30m]))*100",
-            label: Label::Tagged {
-                prefix: "",
-                tag: "short_name",
-            },
-        }],
-    },
-    PanelSpec {
         title: "RF power: signal vs noise floor (median)",
         y_desc: "dB",
         zero_floor: false,

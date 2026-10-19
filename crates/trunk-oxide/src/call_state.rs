@@ -6,7 +6,7 @@ use crate::clock::Clock;
 
 use trunk_config::{DefaultMode, SystemType, TalkgroupMode};
 
-use trunk_radio::Squelch;
+use trunk_radio::{Squelch, TrunkMessage, Trunking, Voice};
 
 // ── Read-only view ──
 
@@ -558,17 +558,17 @@ impl CallEntry {
     }
 
     /// The grant names exactly this call's channel and slot.
-    fn on_channel(&self, msg: &TrunkMessage) -> bool {
-        self.freq == msg.freq
-            && self.phase2_tdma == msg.phase2_tdma
-            && self.tdma_slot == msg.tdma_slot
+    fn on_channel(&self, v: &Voice) -> bool {
+        self.freq == v.freq()
+            && self.phase2_tdma == v.phase2_tdma()
+            && self.tdma_slot == v.tdma_slot()
     }
 
     /// The grant needs this call's channel: the same frequency, and the same
     /// slot when both are TDMA (a phase 1 grant takes both slots).
-    fn shares_channel(&self, msg: &TrunkMessage) -> bool {
-        self.freq == msg.freq
-            && (!(self.phase2_tdma && msg.phase2_tdma) || self.tdma_slot == msg.tdma_slot)
+    fn shares_channel(&self, v: &Voice) -> bool {
+        self.freq == v.freq()
+            && (!(self.phase2_tdma && v.phase2_tdma()) || self.tdma_slot == v.tdma_slot())
     }
 
     /// End the current keyed transmission *without* emitting a boundary: push
@@ -820,11 +820,6 @@ pub(crate) enum Effect {
     RemoveCall {
         call_id: CallId,
     },
-
-    // ── Diagnostics ──
-    Warn {
-        message: String,
-    },
 }
 
 /// Newtype wrapper for a list of effects returned by state machine methods.
@@ -898,55 +893,34 @@ pub(crate) enum UnitEventType {
     AnswerRequest,
 }
 
-// ── Message type (pure Rust mirror of TrMessageType) ──
+// ── What the state machine reads off a voice grant or update ──
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MessageType {
-    Grant,
-    Update,
-    UuVGrant,
-    UuVUpdate,
-    Tdulc,
-    PatchAdd,
-    PatchDelete,
-    ControlChannel,
-    Sysid,
-    Status,
-    InvalidCcMessage,
-    Registration,
-    Deregistration,
-    Affiliation,
-    Acknowledge,
-    Location,
-    DataGrant,
-    UuAnsReq,
-    Unknown(u8),
+/// A voice grant or update as the state machine compares it with its calls.
+trait VoiceExt {
+    fn freq(&self) -> Freq;
+    fn tdma_slot(&self) -> i32;
+    fn phase2_tdma(&self) -> bool;
+    fn tg(&self) -> i64;
+    /// The unit talking: -1 when the message does not say.
+    fn source_id(&self) -> i64;
 }
 
-// ── Trunk message (pure Rust input to state machine) ──
-
-pub(crate) struct TrunkMessage {
-    pub(crate) message_type: MessageType,
-    pub(crate) sys_num: i32,
-    pub(crate) talkgroup: i64,
-    pub(crate) freq: Freq,
-    pub(crate) source: i64,
-    pub(crate) tdma_slot: i32,
-    pub(crate) phase2_tdma: bool,
-    pub(crate) mode: bool,
-    pub(crate) duplex: bool,
-    pub(crate) emergency: bool,
-    pub(crate) encrypted: bool,
-    pub(crate) priority: i32,
-    pub(crate) wacn: u64,
-    pub(crate) nac: u64,
-    pub(crate) sys_id: u64,
-    pub(crate) sys_rfss: i32,
-    pub(crate) sys_site_id: i32,
-    pub(crate) patch_sg: u64,
-    pub(crate) patch_ga1: u64,
-    pub(crate) patch_ga2: u64,
-    pub(crate) patch_ga3: u64,
+impl VoiceExt for Voice {
+    fn freq(&self) -> Freq {
+        Freq::from_hz(self.channel.freq_hz)
+    }
+    fn tdma_slot(&self) -> i32 {
+        self.channel.slot.map_or(0, i32::from)
+    }
+    fn phase2_tdma(&self) -> bool {
+        self.channel.slot.is_some()
+    }
+    fn tg(&self) -> i64 {
+        i64::from(self.talkgroup)
+    }
+    fn source_id(&self) -> i64 {
+        self.source.map_or(-1, i64::from)
+    }
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -1015,138 +989,110 @@ impl TrunkStateMachine {
 
     pub(crate) fn on_message(&mut self, msg: &TrunkMessage) -> Effects {
         let now = self.clock.now();
-        match msg.message_type {
-            MessageType::InvalidCcMessage => Effects::new(),
+        let sys_num = msg.sys_num;
+        let unit_event = |type_, source_id: u32, talkgroup: i64| -> Effects {
+            Effect::EmitUnitEvent {
+                sys_num,
+                type_,
+                source_id: i64::from(source_id),
+                talkgroup,
+            }
+            .into()
+        };
+        match msg.kind {
+            Trunking::Invalid | Trunking::Unknown | Trunking::Tdulc { talkgroup: None } => {
+                Effects::new()
+            }
 
-            MessageType::ControlChannel => Effect::AddControlChannel {
-                sys_num: msg.sys_num,
-                freq: msg.freq,
+            Trunking::ControlChannel { freq_hz } => Effect::AddControlChannel {
+                sys_num,
+                freq: Freq::from_hz(freq_hz),
             }
             .into(),
 
-            MessageType::PatchAdd => {
-                if let Some(pt) = self.patch_tables.get_mut(&msg.sys_num) {
+            Trunking::PatchAdd(p) => {
+                if let Some(pt) = self.patch_tables.get_mut(&sys_num) {
                     pt.update(
-                        msg.patch_sg,
-                        msg.patch_ga1,
-                        msg.patch_ga2,
-                        msg.patch_ga3,
+                        u64::from(p.supergroup),
+                        u64::from(p.groups[0]),
+                        u64::from(p.groups[1]),
+                        u64::from(p.groups[2]),
                         now,
                     );
                 }
                 Effects::new()
             }
-            MessageType::PatchDelete => {
-                if let Some(pt) = self.patch_tables.get_mut(&msg.sys_num) {
-                    pt.delete(msg.patch_sg, msg.patch_ga1, msg.patch_ga2, msg.patch_ga3);
+            Trunking::PatchDelete(p) => {
+                if let Some(pt) = self.patch_tables.get_mut(&sys_num) {
+                    pt.delete(
+                        u64::from(p.supergroup),
+                        u64::from(p.groups[0]),
+                        u64::from(p.groups[1]),
+                        u64::from(p.groups[2]),
+                    );
                 }
                 Effects::new()
             }
 
-            MessageType::Tdulc => self.on_tdulc(msg.sys_num, msg.talkgroup),
+            Trunking::Tdulc {
+                talkgroup: Some(tg),
+            } => self.on_tdulc(sys_num, i64::from(tg)),
 
-            MessageType::Sysid => {
-                if let Some(id) = self.system_identities.get_mut(&msg.sys_num) {
-                    id.rfss = msg.sys_rfss;
-                    id.site_id = msg.sys_site_id;
+            Trunking::Site { rfss, site, .. } => {
+                if let Some(id) = self.system_identities.get_mut(&sys_num) {
+                    id.rfss = i32::from(rfss);
+                    id.site_id = i32::from(site);
                 }
-                Effect::EmitSetupSystem {
-                    sys_num: msg.sys_num,
-                }
-                .into()
+                Effect::EmitSetupSystem { sys_num }.into()
             }
-            MessageType::Status => {
-                if let Some(id) = self.system_identities.get_mut(&msg.sys_num) {
-                    id.sys_id = msg.sys_id;
-                    id.wacn = msg.wacn;
-                    id.nac = msg.nac;
-                    id.xor_mask = crate::p25_lfsr::compute_xor_mask(msg.nac, msg.sys_id, msg.wacn);
+            Trunking::Network { wacn, sys_id, .. } => {
+                if let Some(id) = self.system_identities.get_mut(&sys_num) {
+                    id.sys_id = u64::from(sys_id);
+                    id.wacn = u64::from(wacn);
+                    id.nac = u64::from(msg.nac);
+                    id.xor_mask = crate::p25_lfsr::compute_xor_mask(id.nac, id.sys_id, id.wacn);
                 }
-                Effect::EmitSetupSystem {
-                    sys_num: msg.sys_num,
-                }
-                .into()
+                Effect::EmitSetupSystem { sys_num }.into()
             }
 
             // Unit events (stateless)
-            MessageType::Registration => Effect::EmitUnitEvent {
-                sys_num: msg.sys_num,
-                type_: UnitEventType::Registration,
-                source_id: msg.source,
-                talkgroup: 0,
+            Trunking::Registration { unit } => unit_event(UnitEventType::Registration, unit, 0),
+            Trunking::Deregistration { unit } => unit_event(UnitEventType::Deregistration, unit, 0),
+            Trunking::Affiliation { group, unit } => {
+                unit_event(UnitEventType::Affiliation, unit, i64::from(group))
             }
-            .into(),
-            MessageType::Deregistration => Effect::EmitUnitEvent {
-                sys_num: msg.sys_num,
-                type_: UnitEventType::Deregistration,
-                source_id: msg.source,
-                talkgroup: 0,
+            Trunking::Acknowledge { unit, .. } => unit_event(UnitEventType::Acknowledge, unit, 0),
+            Trunking::Location { group, unit } => {
+                unit_event(UnitEventType::Location, unit, i64::from(group))
             }
-            .into(),
-            MessageType::Affiliation => Effect::EmitUnitEvent {
-                sys_num: msg.sys_num,
-                type_: UnitEventType::Affiliation,
-                source_id: msg.source,
-                talkgroup: msg.talkgroup,
+            Trunking::DataGrant { unit, .. } => unit_event(UnitEventType::DataGrant, unit, 0),
+            Trunking::AnswerRequest(v) => {
+                unit_event(UnitEventType::AnswerRequest, v.source.unwrap_or(0), v.tg())
             }
-            .into(),
-            MessageType::Acknowledge => Effect::EmitUnitEvent {
-                sys_num: msg.sys_num,
-                type_: UnitEventType::Acknowledge,
-                source_id: msg.source,
-                talkgroup: 0,
-            }
-            .into(),
-            MessageType::Location => Effect::EmitUnitEvent {
-                sys_num: msg.sys_num,
-                type_: UnitEventType::Location,
-                source_id: msg.source,
-                talkgroup: msg.talkgroup,
-            }
-            .into(),
-            MessageType::DataGrant => Effect::EmitUnitEvent {
-                sys_num: msg.sys_num,
-                type_: UnitEventType::DataGrant,
-                source_id: msg.source,
-                talkgroup: 0,
-            }
-            .into(),
-            MessageType::UuAnsReq => Effect::EmitUnitEvent {
-                sys_num: msg.sys_num,
-                type_: UnitEventType::AnswerRequest,
-                source_id: msg.source,
-                talkgroup: msg.talkgroup,
-            }
-            .into(),
 
             // Call lifecycle
-            MessageType::Grant => self.on_grant(msg, true),
-            MessageType::Update => {
+            Trunking::Grant(v) => self.on_grant(sys_num, msg.nac, &v, true),
+            Trunking::Update(v) => {
                 if self.config.new_call_from_update {
-                    self.on_grant(msg, false)
+                    self.on_grant(sys_num, msg.nac, &v, false)
                 } else {
-                    self.on_update(msg)
+                    self.on_update(sys_num, &v)
                 }
             }
-            MessageType::UuVGrant => {
+            Trunking::UnitGrant(v) => {
                 if self.config.record_uu_v_calls {
-                    self.on_grant(msg, true)
+                    self.on_grant(sys_num, msg.nac, &v, true)
                 } else {
                     Effects::new()
                 }
             }
-            MessageType::UuVUpdate => {
+            Trunking::UnitUpdate(v) => {
                 if self.config.record_uu_v_calls {
-                    self.on_update(msg)
+                    self.on_update(sys_num, &v)
                 } else {
                     Effects::new()
                 }
             }
-
-            MessageType::Unknown(t) => Effect::Warn {
-                message: format!("unhandled message type: {t}"),
-            }
-            .into(),
         }
     }
 
@@ -1157,19 +1103,19 @@ impl TrunkStateMachine {
     /// calls are over; left alone, their recorders would record the new
     /// talkgroup until a timeout. Talkgroups patched together share a channel
     /// legitimately and are left alone.
-    fn end_reassigned_calls(&self, msg: &TrunkMessage) -> Effects {
+    fn end_reassigned_calls(&self, sys_num: i32, v: &Voice) -> Effects {
         let now = self.clock.now();
         let mut effects = Effects::new();
         let patched = self
             .patch_tables
-            .get(&msg.sys_num)
-            .map(|pt| pt.get_patch(Talkgroup(msg.talkgroup)))
+            .get(&sys_num)
+            .map(|pt| pt.get_patch(Talkgroup(v.tg())))
             .unwrap_or_default();
         for entry in &self.calls {
             if !entry.is_trunked()
-                || entry.sys_num != msg.sys_num
-                || entry.talkgroup == msg.talkgroup
-                || !entry.shares_channel(msg)
+                || entry.sys_num != sys_num
+                || entry.talkgroup == v.tg()
+                || !entry.shares_channel(v)
                 || patched.contains(&Talkgroup(entry.talkgroup))
             {
                 continue;
@@ -1177,7 +1123,7 @@ impl TrunkStateMachine {
             tracing::info!(
                 short_name = %entry.short_name,
                 talkgroup = entry.talkgroup,
-                to_talkgroup = msg.talkgroup,
+                to_talkgroup = v.tg(),
                 freq = %entry.freq,
                 slot = entry.tdma_slot,
                 since_update_s = now.saturating_duration_since(entry.last_update).as_secs_f64(),
@@ -1198,13 +1144,16 @@ impl TrunkStateMachine {
         effects
     }
 
-    fn on_grant(&mut self, msg: &TrunkMessage, is_grant_message: bool) -> Effects {
+    /// A grant (or, with `new_call_from_update`, an update) of a voice
+    /// channel on system `sys_num`, heard with `nac`.
+    fn on_grant(&mut self, sys_num: i32, nac: u16, v: &Voice, is_grant_message: bool) -> Effects {
         let now = self.clock.now();
         let mut effects = if is_grant_message {
-            self.end_reassigned_calls(msg)
+            self.end_reassigned_calls(sys_num, v)
         } else {
             Effects::new()
         };
+        let source = v.source_id();
 
         // A talkgroup has one call per system. A grant on another channel or
         // TDMA slot moves it there (the retune below), rather than starting a
@@ -1212,14 +1161,14 @@ impl TrunkStateMachine {
         let existing_idx = self
             .calls
             .iter()
-            .position(|entry| entry.talkgroup == msg.talkgroup && entry.sys_num == msg.sys_num);
+            .position(|entry| entry.talkgroup == v.tg() && entry.sys_num == sys_num);
 
         if let Some(idx) = existing_idx {
-            let same_channel = self.calls[idx].on_channel(msg);
+            let same_channel = self.calls[idx].on_channel(v);
             if same_channel {
                 let entry = &mut self.calls[idx];
                 let resuming_idle = entry.state == CallState::Idle && entry.is_trunked();
-                let source_changed = msg.source > 0 && msg.source != entry.current_source_id;
+                let source_changed = source > 0 && source != entry.current_source_id;
 
                 // A TDULC parked this call Idle while keeping the recorder warm.
                 // If a *different* unit now keys up, the prior speaker's
@@ -1236,19 +1185,15 @@ impl TrunkStateMachine {
                 // one speaker's PTT cycle.
                 if resuming_idle && source_changed {
                     let call_id = entry.id;
-                    entry.current_source_id = msg.source;
+                    entry.current_source_id = source;
                     tracing::info!(
                         short_name = %entry.short_name,
                         talkgroup = entry.talkgroup,
-                        source = msg.source,
+                        source,
                         "regrant with new speaker on parked call: cutting per-speaker boundary"
                     );
-                    return self.cut_transmission(
-                        call_id,
-                        RecorderPolicy::Span {
-                            source_id: msg.source,
-                        },
-                    );
+                    return self
+                        .cut_transmission(call_id, RecorderPolicy::Span { source_id: source });
                 }
 
                 // A grant for a call already recording is a new key-up: from
@@ -1256,7 +1201,7 @@ impl TrunkStateMachine {
                 // after the voice channel ended its transmission. Each is its
                 // own transmission. The grant usually beats the in-band source
                 // change, which then matches and is ignored, so cut here.
-                let other_handset = msg.source > 0 && msg.source != entry.current_source_id;
+                let other_handset = source > 0 && source != entry.current_source_id;
                 if is_grant_message
                     && entry.is_trunked()
                     && entry.state == CallState::Recording
@@ -1264,8 +1209,8 @@ impl TrunkStateMachine {
                     && now.saturating_duration_since(entry.segment_start) >= MIN_TRANSMISSION
                 {
                     let call_id = entry.id;
-                    let source_id = if msg.source > 0 {
-                        msg.source
+                    let source_id = if source > 0 {
+                        source
                     } else {
                         entry.current_source_id
                     };
@@ -1297,7 +1242,7 @@ impl TrunkStateMachine {
                 // EmitCallStart — this is the same logical call already in
                 // progress, and a duplicate call_start orphans/duplicates the
                 // downstream embed (it is keyed by talkgroup, not call id).
-                self.update_call_source(idx, msg.source, &mut effects);
+                self.update_call_source(idx, source, &mut effects);
             } else {
                 // Retune to the new channel or slot: close the current segment
                 // (if Recording), start a new one
@@ -1323,57 +1268,55 @@ impl TrunkStateMachine {
                     entry.recorder = None;
                 }
 
-                entry.freq = msg.freq;
-                entry.tdma_slot = msg.tdma_slot;
-                entry.phase2_tdma = msg.phase2_tdma;
+                entry.freq = v.freq();
+                entry.tdma_slot = v.tdma_slot();
+                entry.phase2_tdma = v.phase2_tdma();
                 // Refresh the tracked source for the new freq so the next grant
                 // on it isn't misread as a source change (which would emit a
                 // spurious SetSource/EmitSignal).
-                entry.current_source_id = msg.source;
+                entry.current_source_id = source;
                 effects.push(Effect::SetFreq {
                     call_id: entry.id,
-                    freq: msg.freq,
+                    freq: v.freq(),
                 });
                 entry.last_update = now;
 
                 // Evaluate recording policy for new freq
-                let policy_effects = self.evaluate_recording_policy(idx, msg);
+                let policy_effects = self.evaluate_recording_policy(idx, sys_num, v);
                 effects.extend(policy_effects);
             }
             return effects;
         }
 
         // New call
-        let multisite = self.check_multisite(msg.talkgroup, msg.sys_num, msg);
-        let policy = self
-            .config
-            .systems
-            .get(&msg.sys_num)
-            .unwrap_or(&DEFAULT_POLICY);
+        let site = self.system_identities.get(&sys_num);
+        let (wacn, rfss, site_id) = site.map_or((0, 0, 0), |s| (s.wacn, s.rfss, s.site_id));
+        let multisite = self.check_multisite(v.tg(), sys_num, nac, wacn, rfss, site_id);
+        let policy = self.config.systems.get(&sys_num).unwrap_or(&DEFAULT_POLICY);
 
         let new_entry = CallEntry {
             start_time: now,
             last_update: now,
             segment_start: now,
-            talkgroup: msg.talkgroup,
-            sys_num: msg.sys_num,
+            talkgroup: v.tg(),
+            sys_num,
             short_name: policy.short_name.clone(),
-            tdma_slot: msg.tdma_slot,
-            phase2_tdma: msg.phase2_tdma,
-            mode: msg.mode,
-            duplex: msg.duplex,
-            emergency: msg.emergency,
-            freq: msg.freq,
-            encrypted: msg.encrypted,
-            current_source_id: msg.source,
-            priority: msg.priority,
+            tdma_slot: v.tdma_slot(),
+            phase2_tdma: v.phase2_tdma(),
+            mode: v.options.packet,
+            duplex: v.options.duplex,
+            emergency: v.options.emergency,
+            freq: v.freq(),
+            encrypted: v.options.encrypted,
+            current_source_id: source,
+            priority: i32::from(v.options.priority),
             max_duration: policy.max_duration,
             squelch_db: policy.squelch_db,
             call_mode: CallMode::Trunked(TrunkedFields {
                 multi_site: policy.multi_site,
-                wacn: msg.wacn,
-                rfss: msg.sys_rfss,
-                site_id: msg.sys_site_id,
+                wacn,
+                rfss,
+                site_id,
                 multi_site_name: policy.multi_site_name.clone(),
                 conversation_mode: policy.conversation_mode,
             }),
@@ -1387,7 +1330,7 @@ impl TrunkStateMachine {
         effects.push(Effect::CreateCall { call_id });
 
         if multisite.is_superseding {
-            let policy_effects = self.evaluate_recording_policy(new_idx, msg);
+            let policy_effects = self.evaluate_recording_policy(new_idx, sys_num, v);
             let recording_started = self.calls[new_idx].state == CallState::Recording
                 || policy_effects
                     .iter()
@@ -1407,13 +1350,9 @@ impl TrunkStateMachine {
         } else if multisite.is_duplicate {
             self.calls[new_idx].state = CallState::Rejected(RejectReason::Duplicate);
         } else {
-            let policy_effects = self.evaluate_recording_policy(new_idx, msg);
+            let policy_effects = self.evaluate_recording_policy(new_idx, sys_num, v);
             if !policy_effects.is_empty() && !is_grant_message {
-                tracing::info!(
-                    talkgroup = msg.talkgroup,
-                    sys_num = msg.sys_num,
-                    "this was an UPDATE"
-                );
+                tracing::info!(talkgroup = v.tg(), sys_num, "this was an UPDATE");
             }
             effects.extend(policy_effects);
         }
@@ -1426,24 +1365,19 @@ impl TrunkStateMachine {
 
     // ── Update handling ──
 
-    fn on_update(&mut self, msg: &TrunkMessage) -> Effects {
+    fn on_update(&mut self, sys_num: i32, v: &Voice) -> Effects {
         let now = self.clock.now();
         let mut effects = Effects::new();
 
         for entry in self.calls.iter_mut() {
-            if entry.talkgroup == msg.talkgroup
-                && entry.sys_num == msg.sys_num
-                && entry.freq == msg.freq
-                && entry.tdma_slot == msg.tdma_slot
-                && entry.phase2_tdma == msg.phase2_tdma
-            {
-                if msg.encrypted {
+            if entry.talkgroup == v.tg() && entry.sys_num == sys_num && entry.on_channel(v) {
+                if v.options.encrypted {
                     entry.encrypted = true;
                 }
 
                 // Source changed: re-route only (SetSource + EmitSignal). No
                 // EmitCallStart for an already-started call — see on_grant.
-                Self::update_call_source_entry(entry, msg.source, &mut effects, now);
+                Self::update_call_source_entry(entry, v.source_id(), &mut effects, now);
             }
         }
 
@@ -1668,9 +1602,8 @@ impl TrunkStateMachine {
 
     // ── Recording policy (pure evaluation) ──
 
-    fn evaluate_recording_policy(&mut self, entry_idx: usize, msg: &TrunkMessage) -> Effects {
-        let sys_num = msg.sys_num;
-        let tg = Talkgroup(msg.talkgroup);
+    fn evaluate_recording_policy(&mut self, entry_idx: usize, sys_num: i32, v: &Voice) -> Effects {
+        let tg = Talkgroup(v.tg());
 
         let sys_policy = match self.config.systems.get(&sys_num) {
             Some(sp) => sp,
@@ -1707,7 +1640,8 @@ impl TrunkStateMachine {
         }
 
         // 2. Encryption check
-        let is_encrypted = msg.encrypted || tg_policy.is_some_and(|tg| tg.mode.is_encrypted());
+        let is_encrypted =
+            v.options.encrypted || tg_policy.is_some_and(|tg| tg.mode.is_encrypted());
         if is_encrypted {
             entry.encrypted = true;
             if !sys_policy.monitor_encrypted {
@@ -1716,8 +1650,8 @@ impl TrunkStateMachine {
                     tracing::info!(
                         talkgroup = tg.0,
                         sys_num,
-                        freq = %msg.freq,
-                        slot = msg.tdma_slot,
+                        freq = %v.freq(),
+                        slot = v.tdma_slot(),
                         "not recording: encrypted"
                     );
                 }
@@ -1817,7 +1751,18 @@ impl TrunkStateMachine {
 
     // ── Multisite duplicate detection (pure) ──
 
-    fn check_multisite(&self, talkgroup: i64, sys_num: i32, msg: &TrunkMessage) -> MultiSiteResult {
+    /// Whether a new call on `sys_num` (a site of `wacn`, `rfss`/`site_id`,
+    /// heard with `nac`) duplicates or supersedes one on another site.
+    #[allow(clippy::cast_sign_loss)]
+    fn check_multisite(
+        &self,
+        talkgroup: i64,
+        sys_num: i32,
+        nac: u16,
+        wacn: u64,
+        rfss: i32,
+        site_id: i32,
+    ) -> MultiSiteResult {
         let mut result = MultiSiteResult {
             is_duplicate: false,
             is_superseding: false,
@@ -1845,12 +1790,12 @@ impl TrunkStateMachine {
             }
 
             if trunked.multi_site_name.is_empty() {
-                if trunked.wacn != msg.wacn {
+                if trunked.wacn != wacn {
                     continue;
                 }
 
                 let call_rfss_site = trunked.rfss as u64 * 10000 + trunked.site_id as u64;
-                let msg_rfss_site = msg.sys_rfss as u64 * 10000 + msg.sys_site_id as u64;
+                let msg_rfss_site = rfss as u64 * 10000 + site_id as u64;
 
                 if msg_rfss_site == call_rfss_site {
                     continue;
@@ -1861,7 +1806,7 @@ impl TrunkStateMachine {
 
                 let call_preferred_nac =
                     self.get_preferred_nac(entry.sys_num, Talkgroup(talkgroup));
-                if call_preferred_nac != call_rfss_site && msg.nac == msg_rfss_site {
+                if call_preferred_nac != call_rfss_site && u64::from(nac) == msg_rfss_site {
                     result.is_superseding = true;
                 }
             } else {
@@ -2322,30 +2267,62 @@ mod tests {
         }
     }
 
-    fn grant_msg(talkgroup: i64, freq_hz: f64) -> TrunkMessage {
+    use trunk_radio::{Channel, Options};
+
+    /// A message of `kind` on system 1.
+    fn message(kind: Trunking) -> TrunkMessage {
         TrunkMessage {
-            message_type: MessageType::Grant,
             sys_num: 1,
-            talkgroup,
-            freq: Freq::from_hz(freq_hz),
-            source: 100,
-            tdma_slot: 0,
-            phase2_tdma: false,
-            mode: false,
-            duplex: false,
-            emergency: false,
-            encrypted: false,
-            priority: 0,
-            wacn: 0,
             nac: 0,
-            sys_id: 0,
-            sys_rfss: 0,
-            sys_site_id: 0,
-            patch_sg: 0,
-            patch_ga1: 0,
-            patch_ga2: 0,
-            patch_ga3: 0,
+            opcode: 0,
+            kind,
         }
+    }
+
+    /// A grant of `freq_hz` (phase 1) to `talkgroup` for unit 100.
+    fn grant_msg(talkgroup: i64, freq_hz: f64) -> TrunkMessage {
+        message(Trunking::Grant(voice(talkgroup, freq_hz, None, Some(100))))
+    }
+
+    fn voice(talkgroup: i64, freq_hz: f64, slot: Option<u8>, source: Option<u32>) -> Voice {
+        Voice {
+            channel: Channel { freq_hz, slot },
+            talkgroup: u32::try_from(talkgroup).unwrap(),
+            source,
+            options: Options::default(),
+        }
+    }
+
+    /// `m` as a grant from `source` instead.
+    fn from_source(m: &TrunkMessage, source: i64) -> TrunkMessage {
+        let Trunking::Grant(v) = m.kind else {
+            panic!("not a grant")
+        };
+        message(Trunking::Grant(Voice {
+            source: Some(u32::try_from(source).unwrap()),
+            ..v
+        }))
+    }
+
+    /// `m` with the call encrypted.
+    fn encrypted(m: &TrunkMessage) -> TrunkMessage {
+        let Trunking::Grant(v) = m.kind else {
+            panic!("not a grant")
+        };
+        message(Trunking::Grant(Voice {
+            options: Options {
+                encrypted: true,
+                ..v.options
+            },
+            ..v
+        }))
+    }
+
+    /// A terminator naming `talkgroup`.
+    fn tdulc(talkgroup: i64) -> TrunkMessage {
+        message(Trunking::Tdulc {
+            talkgroup: Some(u32::try_from(talkgroup).unwrap()),
+        })
     }
 
     /// Verify effects contain the expected variant names in order.
@@ -2373,7 +2350,6 @@ mod tests {
                 Effect::EnableRecorder { .. } => "EnableRecorder",
                 Effect::DisableRecorder { .. } => "DisableRecorder",
                 Effect::RemoveCall { .. } => "RemoveCall",
-                Effect::Warn { .. } => "Warn",
             })
             .collect();
 
@@ -2425,8 +2401,7 @@ mod tests {
         let msg = grant_msg(100, 851_000_000.0);
         let _effects = sm.on_message(&msg);
 
-        let mut msg2 = grant_msg(100, 851_000_000.0);
-        msg2.source = 200;
+        let msg2 = from_source(&grant_msg(100, 851_000_000.0), 200);
         let effects = sm.on_message(&msg2);
 
         assert_effects_contain_ordered(&effects, &["SetSource", "EmitSignal"]);
@@ -2459,11 +2434,12 @@ mod tests {
     // ── A channel granted to another talkgroup ends the call on it ──
 
     fn tdma_grant(talkgroup: i64, freq_hz: f64, slot: i32) -> TrunkMessage {
-        TrunkMessage {
-            phase2_tdma: true,
-            tdma_slot: slot,
-            ..grant_msg(talkgroup, freq_hz)
-        }
+        message(Trunking::Grant(voice(
+            talkgroup,
+            freq_hz,
+            Some(u8::try_from(slot).unwrap()),
+            Some(100),
+        )))
     }
 
     fn start(sm: &mut TrunkStateMachine, msg: &TrunkMessage) -> CallId {
@@ -2555,10 +2531,7 @@ mod tests {
         let mut sm = TrunkStateMachine::new(config);
         let _ = start(&mut sm, &grant_msg(100, 851_000_000.0));
 
-        let update = TrunkMessage {
-            message_type: MessageType::Update,
-            ..grant_msg(200, 851_000_000.0)
-        };
+        let update = message(Trunking::Update(voice(200, 851_000_000.0, None, Some(100))));
         assert_eq!(ended(&sm.on_message(&update)), []);
     }
 
@@ -2697,10 +2670,7 @@ mod tests {
     // ── Control channel grant on a recording call → per-PTT boundary ──
 
     fn key_up(sm: &mut TrunkStateMachine, source: i64) -> Effects {
-        sm.on_message(&TrunkMessage {
-            source,
-            ..grant_msg(100, 851_000_000.0)
-        })
+        sm.on_message(&from_source(&grant_msg(100, 851_000_000.0), source))
     }
 
     fn cut_at_key_up(effects: &Effects, source: i64) -> bool {
@@ -2833,20 +2803,13 @@ mod tests {
         assert_eq!(sm.calls[0].current_source_id, 100);
 
         // PTT release: TDULC parks the call Idle (recorder kept warm), no event.
-        let tdulc = TrunkMessage {
-            message_type: MessageType::Tdulc,
-            ..grant_msg(100, 851_000_000.0)
-        };
-        assert!(sm.on_message(&tdulc).is_empty());
+        assert!(sm.on_message(&tdulc(100)).is_empty());
         assert_eq!(sm.calls[0].state, CallState::Idle);
 
         // A different unit (200) keys up: the regrant must cut a per-speaker
         // boundary for speaker 100, not silently merge 100 and 200 into one
         // transmission.
-        let regrant = TrunkMessage {
-            source: 200,
-            ..grant_msg(100, 851_000_000.0)
-        };
+        let regrant = from_source(&grant_msg(100, 851_000_000.0), 200);
         let effects = sm.on_message(&regrant);
         assert_effects_contain_ordered(
             &effects,
@@ -2886,11 +2849,7 @@ mod tests {
         let mut sm = TrunkStateMachine::new(test_config());
         let call_id = recording_trunked_call(&mut sm);
 
-        let tdulc = TrunkMessage {
-            message_type: MessageType::Tdulc,
-            ..grant_msg(100, 851_000_000.0)
-        };
-        let _ = sm.on_message(&tdulc);
+        let _ = sm.on_message(&tdulc(100));
         assert_eq!(sm.calls[0].state, CallState::Idle);
 
         // Same unit (100) re-keys: this is one speaker's PTT cycle, so resume in
@@ -2966,13 +2925,7 @@ mod tests {
             },
         );
 
-        let tdulc = TrunkMessage {
-            message_type: MessageType::Tdulc,
-            talkgroup: 100,
-            sys_num: 1,
-            ..grant_msg(100, 0.0)
-        };
-        let effects = sm.on_message(&tdulc);
+        let effects = sm.on_message(&tdulc(100));
 
         // TDULC only transitions state — no effects emitted
         assert!(effects.is_empty());
@@ -2996,13 +2949,7 @@ mod tests {
         );
 
         // TDULC → Idle
-        let tdulc = TrunkMessage {
-            message_type: MessageType::Tdulc,
-            talkgroup: 100,
-            sys_num: 1,
-            ..grant_msg(100, 0.0)
-        };
-        let _effects = sm.on_message(&tdulc);
+        let _effects = sm.on_message(&tdulc(100));
         assert_eq!(sm.calls[0].state, CallState::Idle);
 
         // Grant again → Recording
@@ -3434,10 +3381,7 @@ mod tests {
         assert_eq!(sm.calls.len(), 1);
 
         // Send Update with a different source unit
-        let mut update = grant_msg(100, 851_000_000.0);
-        update.message_type = MessageType::Update;
-        update.source = 200; // different from grant's source=100
-
+        let update = message(Trunking::Update(voice(100, 851_000_000.0, None, Some(200))));
         let effects = sm.on_message(&update);
 
         assert!(
@@ -3468,10 +3412,7 @@ mod tests {
         let _effects = sm.on_message(&msg);
 
         // Update with same source
-        let mut update = grant_msg(100, 851_000_000.0);
-        update.message_type = MessageType::Update;
-        // source=100, same as grant
-
+        let update = message(Trunking::Update(voice(100, 851_000_000.0, None, Some(100))));
         let effects = sm.on_message(&update);
 
         assert!(effects.is_empty());
@@ -3485,10 +3426,13 @@ mod tests {
         let _effects = sm.on_message(&msg);
         assert!(!sm.calls[0].encrypted);
 
-        let mut update = grant_msg(100, 851_000_000.0);
-        update.message_type = MessageType::Update;
-        update.encrypted = true;
-
+        let update = message(Trunking::Update(Voice {
+            options: Options {
+                encrypted: true,
+                ..Options::default()
+            },
+            ..voice(100, 851_000_000.0, None, Some(100))
+        }));
         let _effects = sm.on_message(&update);
 
         assert!(sm.calls[0].encrypted);
@@ -3502,10 +3446,12 @@ mod tests {
         let msg = grant_msg(100, 851_000_000.0);
         let _effects = sm.on_message(&msg);
 
-        let mut update = grant_msg(100, 851_000_000.0);
-        update.message_type = MessageType::UuVUpdate;
-        update.source = 200;
-
+        let update = message(Trunking::UnitUpdate(voice(
+            100,
+            851_000_000.0,
+            None,
+            Some(200),
+        )));
         let effects = sm.on_message(&update);
 
         assert!(effects.is_empty());
@@ -3520,10 +3466,12 @@ mod tests {
         let msg = grant_msg(100, 851_000_000.0);
         let _effects = sm.on_message(&msg);
 
-        let mut update = grant_msg(100, 851_000_000.0);
-        update.message_type = MessageType::UuVUpdate;
-        update.source = 200;
-
+        let update = message(Trunking::UnitUpdate(voice(
+            100,
+            851_000_000.0,
+            None,
+            Some(200),
+        )));
         let effects = sm.on_message(&update);
 
         assert!(
@@ -3533,28 +3481,12 @@ mod tests {
         );
     }
 
-    // ── Unknown message type produces Warn ──
-
-    #[test]
-    fn unknown_message_type_produces_warn() {
-        let mut sm = TrunkStateMachine::new(test_config());
-        let msg = TrunkMessage {
-            message_type: MessageType::Unknown(99),
-            ..grant_msg(0, 0.0)
-        };
-        let effects = sm.on_message(&msg);
-
-        assert_eq!(effects.len(), 1);
-        assert!(matches!(&effects[0], Effect::Warn { message } if message.contains("99")));
-    }
-
     // ── Encrypted call is rejected ──
 
     #[test]
     fn encrypted_call_rejected_when_not_monitoring() {
         let mut sm = TrunkStateMachine::new(test_config());
-        let mut msg = grant_msg(100, 851_000_000.0);
-        msg.encrypted = true;
+        let msg = encrypted(&grant_msg(100, 851_000_000.0));
 
         let effects = sm.on_message(&msg);
 
@@ -3945,10 +3877,9 @@ mod tests {
     #[test]
     fn control_channel_message_emits_add_control_channel() {
         let mut sm = TrunkStateMachine::new(test_config());
-        let mut msg = grant_msg(0, 851_000_000.0);
-        msg.message_type = MessageType::ControlChannel;
-
-        let effects = sm.on_message(&msg);
+        let effects = sm.on_message(&message(Trunking::ControlChannel {
+            freq_hz: 851_000_000.0,
+        }));
 
         assert_eq!(effects.len(), 1);
         assert!(matches!(
@@ -3960,12 +3891,11 @@ mod tests {
     #[test]
     fn sysid_message_emits_setup_system() {
         let mut sm = TrunkStateMachine::new(test_config());
-        let mut msg = grant_msg(0, 0.0);
-        msg.message_type = MessageType::Sysid;
-        msg.sys_rfss = 42;
-        msg.sys_site_id = 7;
-
-        let effects = sm.on_message(&msg);
+        let effects = sm.on_message(&message(Trunking::Site {
+            sys_id: 0,
+            rfss: 42,
+            site: 7,
+        }));
 
         assert_eq!(effects.len(), 1);
         assert!(matches!(
@@ -3977,13 +3907,14 @@ mod tests {
     #[test]
     fn status_message_updates_identity_and_emits_setup() {
         let mut sm = TrunkStateMachine::new(test_config());
-        let mut msg = grant_msg(0, 0.0);
-        msg.message_type = MessageType::Status;
-        msg.sys_id = 123;
-        msg.wacn = 456;
-        msg.nac = 789;
-
-        let effects = sm.on_message(&msg);
+        let effects = sm.on_message(&TrunkMessage {
+            nac: 789,
+            ..message(Trunking::Network {
+                freq_hz: 0.0,
+                wacn: 456,
+                sys_id: 123,
+            })
+        });
 
         assert_eq!(effects.len(), 1);
         assert!(matches!(
@@ -4000,11 +3931,7 @@ mod tests {
     #[test]
     fn registration_message_emits_unit_event() {
         let mut sm = TrunkStateMachine::new(test_config());
-        let mut msg = grant_msg(0, 0.0);
-        msg.message_type = MessageType::Registration;
-        msg.source = 42;
-
-        let effects = sm.on_message(&msg);
+        let effects = sm.on_message(&message(Trunking::Registration { unit: 42 }));
 
         assert_eq!(effects.len(), 1);
         assert!(matches!(
@@ -4020,12 +3947,10 @@ mod tests {
     #[test]
     fn affiliation_message_includes_talkgroup() {
         let mut sm = TrunkStateMachine::new(test_config());
-        let mut msg = grant_msg(0, 0.0);
-        msg.message_type = MessageType::Affiliation;
-        msg.source = 10;
-        msg.talkgroup = 200;
-
-        let effects = sm.on_message(&msg);
+        let effects = sm.on_message(&message(Trunking::Affiliation {
+            group: 200,
+            unit: 10,
+        }));
 
         assert_eq!(effects.len(), 1);
         assert!(matches!(
@@ -4042,10 +3967,7 @@ mod tests {
     #[test]
     fn invalid_cc_message_produces_no_effects() {
         let mut sm = TrunkStateMachine::new(test_config());
-        let mut msg = grant_msg(0, 0.0);
-        msg.message_type = MessageType::InvalidCcMessage;
-
-        let effects = sm.on_message(&msg);
+        let effects = sm.on_message(&message(Trunking::Invalid));
 
         assert!(effects.is_empty());
     }

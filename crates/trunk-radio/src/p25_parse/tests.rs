@@ -3,6 +3,7 @@ use std::fmt::Write as _;
 
 use super::*;
 
+mod flat;
 mod reference;
 
 const TSDU: i64 = op25::TSDU;
@@ -21,8 +22,15 @@ const GRANT: &str = "05e100004436d1070acb6654"; // tg 0x70a on 03-1745
 const NET_STATUS: &str = "05e13b0000bee005e4167070";
 const RFSS_STATUS: &str = "05e13a000035e40101167070";
 
+use flat::{TrMessageType, TrTrunkMessage};
+
+/// The flat form of each, as the reference corpus is recorded.
+fn flat(v: Vec<TrunkMessage>) -> Vec<TrTrunkMessage> {
+    v.iter().map(TrTrunkMessage::from).collect()
+}
+
 fn parse(p: &mut P25TrunkParser, s: &str) -> Vec<TrTrunkMessage> {
-    p.parse(TSDU, &hex(s))
+    flat(p.parse(TSDU, &hex(s)))
 }
 
 /// A parser for a system no other test uses (plans are shared per system).
@@ -155,7 +163,7 @@ fn every_packet_yields_a_message() {
 fn malformed_and_bare_messages() {
     let mut p = parser();
     let t = |p: &mut P25TrunkParser, ty, payload: &[u8]| {
-        p.parse(ty, payload)
+        flat(p.parse(ty, payload))
             .into_iter()
             .map(|m| m.message_type)
             .collect::<Vec<_>>()
@@ -234,7 +242,9 @@ fn compare(
     tally: &mut Tally,
 ) {
     let mut notes = Vec::new();
-    let r = without_meta(rust.parse_noting(msg_type, payload, &mut |d| notes.push(d)));
+    let r = without_meta(flat(
+        rust.parse_noting(msg_type, payload, &mut |d| notes.push(d)),
+    ));
     let c = cpp;
     if r == c {
         tally.same += 1;
@@ -363,12 +373,12 @@ fn typed_matches_op25(messages: impl IntoIterator<Item = Message>) -> usize {
     let (mut wire, mut direct) = (parser(), parser());
     let mut n = 0;
     for m in messages {
-        let mut d = without_meta(direct.parse_message(&m));
+        let mut d = without_meta(flat(direct.parse_message(&m)));
         for x in &mut d {
             x.sys_num = wire.sys_num;
         }
         assert_eq!(
-            without_meta(wire.parse(m.op25_type(), &m.op25_payload())),
+            without_meta(flat(wire.parse(m.op25_type(), &m.op25_payload()))),
             d,
             "{m:?}"
         );

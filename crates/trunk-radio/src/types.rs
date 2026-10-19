@@ -7,37 +7,6 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
-/// What a trunking message is.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[repr(u8)]
-pub enum TrMessageType {
-    Grant = 0,
-    Status = 1,
-    Update = 2,
-    ControlChannel = 3,
-    Registration = 4,
-    Deregistration = 5,
-    Affiliation = 6,
-    Sysid = 7,
-    Acknowledge = 8,
-    Location = 9,
-    PatchAdd = 10,
-    PatchDelete = 11,
-    DataGrant = 12,
-    UuAnsReq = 13,
-    UuVGrant = 14,
-    UuVUpdate = 15,
-    InvalidCcMessage = 16,
-    Tdulc = 17,
-    Unknown = 99,
-}
-
-impl TrMessageType {
-    pub const fn repr(self) -> u8 {
-        self as u8
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum TrUnitEventType {
@@ -65,38 +34,130 @@ impl TrCallDataStatus {
     }
 }
 
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TrPatchData {
-    pub sg: u64,
-    pub ga1: u64,
-    pub ga2: u64,
-    pub ga3: u64,
+/// A trunking message, as the parser reads it off a control channel.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TrunkMessage {
+    pub sys_num: i32,
+    /// The NAC the packet came with (0 for a message without one).
+    pub nac: u16,
+    /// The packet's opcode, as trunk-recorder reported it (255: none).
+    pub opcode: u64,
+    pub kind: Trunking,
 }
 
-/// A parsed control-channel message.
-#[derive(Debug, Clone, PartialEq)]
+/// What a trunking message says.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Trunking {
+    /// A voice channel granted to a talkgroup (or a Motorola patch
+    /// supergroup).
+    Grant(Voice),
+    /// A talkgroup's call going on, on its channel.
+    Update(Voice),
+    /// A voice channel granted to a unit-to-unit call (`talkgroup` is the
+    /// called unit).
+    UnitGrant(Voice),
+    UnitUpdate(Voice),
+    /// A unit asked to answer a unit-to-unit call (no channel yet).
+    AnswerRequest(Voice),
+    DataGrant {
+        /// 0 if the channel is unknown.
+        freq_hz: f64,
+        unit: u32,
+        options: Options,
+    },
+    Acknowledge {
+        group: u16,
+        unit: u32,
+    },
+    Affiliation {
+        group: u16,
+        unit: u32,
+    },
+    Location {
+        group: u16,
+        unit: u32,
+    },
+    Registration {
+        unit: u32,
+    },
+    Deregistration {
+        unit: u32,
+    },
+    /// Another control channel of the site.
+    ControlChannel {
+        freq_hz: f64,
+    },
+    /// RFSS status: which site this is.
+    Site {
+        sys_id: u16,
+        rfss: u8,
+        site: u8,
+    },
+    /// Network status: which system this is.
+    Network {
+        /// The control channel named; 0 if unknown.
+        freq_hz: f64,
+        wacn: u32,
+        sys_id: u16,
+    },
+    PatchAdd(Patch),
+    PatchDelete(Patch),
+    /// A terminator with link control, naming the talkgroup when it does
+    /// (a control channel's never does).
+    Tdulc {
+        talkgroup: Option<u32>,
+    },
+    /// A packet that could not be read.
+    Invalid,
+    /// A packet the state machine has no use for.
+    Unknown,
+}
+
+/// A voice grant or update.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Voice {
+    pub channel: Channel,
+    /// The talkgroup, or the called unit of a unit-to-unit call.
+    pub talkgroup: u32,
+    /// The unit talking, when the message names it.
+    pub source: Option<u32>,
+    pub options: Options,
+}
+
+/// A traffic channel as a grant names it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Channel {
+    /// 0 if no plan covers the channel.
+    pub freq_hz: f64,
+    /// The TDMA slot, on a phase 2 channel.
+    pub slot: Option<u8>,
+}
+
+impl Channel {
+    /// No channel, or one no plan covers.
+    pub const NONE: Self = Self {
+        freq_hz: 0.0,
+        slot: None,
+    };
+}
+
+/// A voice call's service options.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[allow(clippy::struct_excessive_bools)]
-pub struct TrTrunkMessage {
-    pub message_type: TrMessageType,
-    pub meta: String,
-    pub freq: f64,
-    pub talkgroup: i64,
-    pub encrypted: bool,
+pub struct Options {
     pub emergency: bool,
+    pub encrypted: bool,
     pub duplex: bool,
-    pub mode: bool,
-    pub priority: i32,
-    pub tdma_slot: i32,
-    pub phase2_tdma: bool,
-    pub source: i64,
-    pub sys_num: i32,
-    pub sys_id: u64,
-    pub sys_rfss: i32,
-    pub sys_site_id: i32,
-    pub nac: u64,
-    pub wacn: u64,
-    pub patch_data: TrPatchData,
-    pub opcode: u64,
+    /// Packet (not circuit) mode.
+    pub packet: bool,
+    pub priority: u8,
+}
+
+/// Talkgroups patched into a supergroup.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Patch {
+    pub supergroup: u16,
+    pub groups: [u16; 3],
 }
 
 /// One recording's audio accounting.
@@ -398,7 +459,7 @@ impl From<trunk_fm::gate::CloseReason> for CloseReason {
 /// Events from the DSP threads to the monitor loop.
 pub enum RadioEvent {
     /// Parsed trunk messages from a control channel.
-    TrunkMessages(Vec<TrTrunkMessage>),
+    TrunkMessages(Vec<TrunkMessage>),
     /// A recorder's transmission detector (the power squelch of a digital
     /// channel, trunk-fm's gate on an analog one) opened or closed.
     Squelch {

@@ -7,8 +7,8 @@ use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Gauge, Histogram};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use trunk_radio::{
-    DetectedSignal, Radio, TrCallData, TrCallDataStatus, TrMessageType, TrRecorderConfig,
-    TrTrunkMessage, TrUnitEventType,
+    DetectedSignal, Radio, TrCallData, TrCallDataStatus, TrRecorderConfig, TrUnitEventType,
+    TrunkMessage, Trunking,
 };
 use trunk_radio::{Squelch, SystemInfo};
 
@@ -19,8 +19,8 @@ use trunk_oxide_grpc::proto::SystemType as ProtoSystemType;
 use crate::ConventionalMetricsSnapshot;
 
 use crate::call_state::{
-    CallEndReason, CallId, CallState, CallView, Effect, Effects, Freq, MessageType, RecorderNum,
-    RecordingResult, RejectReason, Talkgroup, TrunkMessage, TrunkStateMachine, UnitEventType,
+    CallEndReason, CallId, CallState, CallView, Effect, Effects, Freq, RecorderNum,
+    RecordingResult, RejectReason, Talkgroup, TrunkStateMachine, UnitEventType,
 };
 
 pub use crate::call_state::{
@@ -503,56 +503,6 @@ impl CallManager {
         }
     }
 
-    // ── Message conversion from CXX → pure Rust ──
-
-    const fn convert_message(msg: &TrTrunkMessage) -> TrunkMessage {
-        let message_type = match msg.message_type {
-            TrMessageType::Grant => MessageType::Grant,
-            TrMessageType::Update => MessageType::Update,
-            TrMessageType::UuVGrant => MessageType::UuVGrant,
-            TrMessageType::UuVUpdate => MessageType::UuVUpdate,
-            TrMessageType::Tdulc => MessageType::Tdulc,
-            TrMessageType::PatchAdd => MessageType::PatchAdd,
-            TrMessageType::PatchDelete => MessageType::PatchDelete,
-            TrMessageType::ControlChannel => MessageType::ControlChannel,
-            TrMessageType::Sysid => MessageType::Sysid,
-            TrMessageType::Status => MessageType::Status,
-            TrMessageType::InvalidCcMessage => MessageType::InvalidCcMessage,
-            TrMessageType::Registration => MessageType::Registration,
-            TrMessageType::Deregistration => MessageType::Deregistration,
-            TrMessageType::Affiliation => MessageType::Affiliation,
-            TrMessageType::Acknowledge => MessageType::Acknowledge,
-            TrMessageType::Location => MessageType::Location,
-            TrMessageType::DataGrant => MessageType::DataGrant,
-            TrMessageType::UuAnsReq => MessageType::UuAnsReq,
-            _ => MessageType::Unknown(msg.message_type.repr()),
-        };
-
-        TrunkMessage {
-            message_type,
-            sys_num: msg.sys_num,
-            talkgroup: msg.talkgroup,
-            freq: Freq::from_hz(msg.freq),
-            source: msg.source,
-            tdma_slot: msg.tdma_slot,
-            phase2_tdma: msg.phase2_tdma,
-            mode: msg.mode,
-            duplex: msg.duplex,
-            emergency: msg.emergency,
-            encrypted: msg.encrypted,
-            priority: msg.priority,
-            wacn: msg.wacn,
-            nac: msg.nac,
-            sys_id: msg.sys_id,
-            sys_rfss: msg.sys_rfss,
-            sys_site_id: msg.sys_site_id,
-            patch_sg: msg.patch_data.sg,
-            patch_ga1: msg.patch_data.ga1,
-            patch_ga2: msg.patch_data.ga2,
-            patch_ga3: msg.patch_data.ga3,
-        }
-    }
-
     // ── Audio metadata management ──
 
     fn register_audio_meta(&self, call_id: CallId) {
@@ -787,9 +737,6 @@ impl CallManager {
                     // in-flight audio_stream() read lock, ensuring the final
                     // audio send completes before we remove the metadata.
                     self.bridge.unregister_audio_meta(call_id.as_u64());
-                }
-                Effect::Warn { message } => {
-                    tracing::debug!(%message, "state machine warning");
                 }
             }
         }
@@ -1354,40 +1301,37 @@ impl CallManager {
     }
 
     /// `msg` was dropped as a duplicate before reaching the state machine.
-    pub fn note_duplicate(&self, msg: &TrTrunkMessage) {
+    pub fn note_duplicate(&self, msg: &TrunkMessage) {
         self.control_channel_duplicates.add(
             1,
             &[KeyValue::new("short_name", self.short_name_of(msg.sys_num))],
         );
     }
 
-    pub fn handle_message(&mut self, msg: &TrTrunkMessage) {
-        let rust_msg = Self::convert_message(msg);
-
-        if !matches!(rust_msg.message_type, MessageType::InvalidCcMessage) {
+    pub fn handle_message(&mut self, msg: &TrunkMessage) {
+        if msg.kind != Trunking::Invalid {
             self.control_channel_messages.add(
                 1,
                 &[KeyValue::new("short_name", self.short_name_of(msg.sys_num))],
             );
         }
 
-        // Sysid/Status are noted once per system; repeats go no further.
-        let first = match rust_msg.message_type {
-            MessageType::Sysid => self.radio.update_sysid(msg),
-            MessageType::Status => self.radio.update_status(msg),
+        // The site and the system are noted once each; repeats go no further.
+        let first = match msg.kind {
+            Trunking::Site { rfss, site, .. } => self.radio.update_sysid(msg.sys_num, rfss, site),
+            Trunking::Network { wacn, sys_id, .. } => {
+                self.radio.update_status(msg.sys_num, sys_id, wacn, msg.nac)
+            }
             _ => true,
         };
         if !first {
             return;
         }
 
-        if matches!(
-            rust_msg.message_type,
-            MessageType::Grant | MessageType::UuVGrant
-        ) {
-            self.note_ptt_ends(&rust_msg);
+        if let Trunking::Grant(v) | Trunking::UnitGrant(v) = msg.kind {
+            self.note_ptt_ends(msg.sys_num, i64::from(v.talkgroup));
         }
-        let effects = self.state.on_message(&rust_msg);
+        let effects = self.state.on_message(msg);
         self.process_effects(effects);
     }
 
@@ -1395,13 +1339,13 @@ impl CallManager {
     /// granted talkgroup's recording calls had their voice channel end a
     /// transmission (a terminator since the current transmission began), so
     /// the grant can be read as a new key-up even from the same handset.
-    fn note_ptt_ends(&mut self, msg: &TrunkMessage) {
+    fn note_ptt_ends(&mut self, sys_num: i32, talkgroup: i64) {
         let ended: Vec<CallId> = self
             .state
             .iter_calls()
             .filter(|v| {
-                v.sys_num() == msg.sys_num
-                    && v.talkgroup() == msg.talkgroup
+                v.sys_num() == sys_num
+                    && v.talkgroup() == talkgroup
                     && v.state() == CallState::Recording
             })
             .filter_map(|v| {

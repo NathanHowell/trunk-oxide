@@ -14,7 +14,6 @@ mod p25_lfsr;
 mod p25_metrics;
 pub mod proc_stats;
 
-use std::hash::{Hash, Hasher};
 use std::ops::RangeInclusive;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
@@ -24,7 +23,7 @@ use anyhow::Context as _;
 use trunk_radio::radio::SystemKind;
 use trunk_radio::{
     ConditioningSettings, EventSender, Radio, RadioConfig, RadioEvent, SourceSetup, SystemSetup,
-    TrTrunkMessage,
+    TrunkMessage, Trunking,
 };
 
 pub use call_manager::{CallManagerConfig, ConventionalChannel, SystemPolicy, TalkgroupPolicy};
@@ -56,38 +55,49 @@ pub struct ConventionalMetricsSnapshot {
     pub channels: Vec<ConventionalChannelMetrics>,
 }
 
-/// Dedup key derived from a trunk message. Two identical TSBKs parsed by
-/// different decoders on the same system produce the same key.
+/// What makes two trunk messages the same packet: the same kind, opcode,
+/// channel, talkgroup and unit on one system. Two decoders of the same
+/// system hearing one TSBK produce equal keys.
+#[derive(PartialEq, Eq, Hash)]
 struct TrunkMsgKey {
     sys_num: i32,
-    message_type: u8,
+    kind: std::mem::Discriminant<Trunking>,
     opcode: u64,
-    talkgroup: i64,
-    source: i64,
+    talkgroup: u32,
+    source: Option<u32>,
     freq_bits: u64,
 }
 
-impl From<&TrTrunkMessage> for TrunkMsgKey {
-    fn from(msg: &TrTrunkMessage) -> Self {
+impl From<&TrunkMessage> for TrunkMsgKey {
+    fn from(msg: &TrunkMessage) -> Self {
+        use Trunking as K;
+        let (talkgroup, source, freq_hz) = match msg.kind {
+            K::Grant(v)
+            | K::Update(v)
+            | K::UnitGrant(v)
+            | K::UnitUpdate(v)
+            | K::AnswerRequest(v) => (v.talkgroup, v.source, v.channel.freq_hz),
+            K::DataGrant { freq_hz, unit, .. } => (0, Some(unit), freq_hz),
+            K::Acknowledge { group, unit }
+            | K::Affiliation { group, unit }
+            | K::Location { group, unit } => (u32::from(group), Some(unit), 0.0),
+            K::Registration { unit } | K::Deregistration { unit } => (0, Some(unit), 0.0),
+            K::ControlChannel { freq_hz } | K::Network { freq_hz, .. } => (0, None, freq_hz),
+            K::Site { .. }
+            | K::PatchAdd(_)
+            | K::PatchDelete(_)
+            | K::Tdulc { .. }
+            | K::Invalid
+            | K::Unknown => (0, None, 0.0),
+        };
         Self {
             sys_num: msg.sys_num,
-            message_type: msg.message_type.repr(),
+            kind: std::mem::discriminant(&msg.kind),
             opcode: msg.opcode,
-            talkgroup: msg.talkgroup,
-            source: msg.source,
-            freq_bits: msg.freq.to_bits(),
+            talkgroup,
+            source,
+            freq_bits: freq_hz.to_bits(),
         }
-    }
-}
-
-impl Hash for TrunkMsgKey {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.sys_num.hash(state);
-        self.message_type.hash(state);
-        self.opcode.hash(state);
-        self.talkgroup.hash(state);
-        self.source.hash(state);
-        self.freq_bits.hash(state);
     }
 }
 
@@ -877,7 +887,7 @@ impl TrunkRecorder {
                                     by_system.entry(msg.sys_num).or_default().push(i);
                                 }
                                 for (&sys_num, indices) in &by_system {
-                                    let sys_msgs: Vec<TrTrunkMessage> =
+                                    let sys_msgs: Vec<TrunkMessage> =
                                         indices.iter().map(|&i| messages[i].clone()).collect();
                                     let info = call_mgr.get_system_info(sys_num);
                                     self.bridge.trunk_message(&sys_msgs, &info);

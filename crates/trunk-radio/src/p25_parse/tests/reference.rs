@@ -3,7 +3,7 @@
 
 #![allow(clippy::unreadable_literal, clippy::struct_excessive_bools)] // recorded values
 
-use crate::types::{TrMessageType as T, TrPatchData, TrTrunkMessage};
+use super::flat::{TrMessageType as T, TrPatchData, TrTrunkMessage};
 
 struct M {
     freq: f64,

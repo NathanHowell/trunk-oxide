@@ -40,7 +40,7 @@ use trunk_p25::trunking::{
 };
 use trunk_p25::{Message, Tsbk};
 
-use crate::types::{TrMessageType, TrPatchData, TrTrunkMessage};
+use crate::types::{Channel, Options, Patch, TrunkMessage, Trunking, Voice};
 
 /// op25 message types (the frame's DUID).
 mod op25 {
@@ -183,7 +183,7 @@ impl P25TrunkParser {
     }
 
     /// A message from trunk-p25's control channel decoder.
-    pub fn parse_message(&mut self, message: &Message) -> Vec<TrTrunkMessage> {
+    pub fn parse_message(&mut self, message: &Message) -> Vec<TrunkMessage> {
         self.parse_message_noting(message, &mut |_| {})
     }
 
@@ -193,12 +193,12 @@ impl P25TrunkParser {
         &mut self,
         message: &Message,
         note: &mut dyn FnMut(Divergence),
-    ) -> Vec<TrTrunkMessage> {
+    ) -> Vec<TrunkMessage> {
         self.parse_packet(Packet::of_message(message), note)
     }
 
     /// A message in op25's form: its type (the DUID) and NAC-prefixed body.
-    pub fn parse(&mut self, msg_type: i64, payload: &[u8]) -> Vec<TrTrunkMessage> {
+    pub fn parse(&mut self, msg_type: i64, payload: &[u8]) -> Vec<TrunkMessage> {
         self.parse_noting(msg_type, payload, &mut |_| {})
     }
 
@@ -209,7 +209,7 @@ impl P25TrunkParser {
         msg_type: i64,
         payload: &[u8],
         note: &mut dyn FnMut(Divergence),
-    ) -> Vec<TrTrunkMessage> {
+    ) -> Vec<TrunkMessage> {
         self.parse_packet(Packet::of_op25(msg_type, payload), note)
     }
 
@@ -217,26 +217,18 @@ impl P25TrunkParser {
         &mut self,
         packet: Packet,
         note: &mut dyn FnMut(Divergence),
-    ) -> Vec<TrTrunkMessage> {
+    ) -> Vec<TrunkMessage> {
         let system = Arc::clone(&self.system);
         let mut system = system.lock().unwrap_or_else(PoisonError::into_inner);
         let out = match packet {
-            Packet::Bare(t) => vec![message(self.sys_num, t, 0, op25::NO_OPCODE)],
+            Packet::Bare(kind) => vec![message(self.sys_num, kind, 0, op25::NO_OPCODE)],
             Packet::Malformed => {
                 note(Divergence::Malformed);
-                vec![message(
-                    self.sys_num,
-                    TrMessageType::InvalidCcMessage,
-                    0,
-                    op25::NO_OPCODE,
-                )]
+                vec![message(self.sys_num, Trunking::Invalid, 0, op25::NO_OPCODE)]
             }
             Packet::Osp { nac, osp, opcode } => self.parse_osp(&mut system, nac, osp, opcode, note),
         };
-        if out
-            .iter()
-            .any(|m| m.message_type == TrMessageType::InvalidCcMessage)
-        {
+        if out.iter().any(|m| m.kind == Trunking::Invalid) {
             system.stats.invalid += 1;
         }
         out
@@ -249,7 +241,7 @@ impl P25TrunkParser {
         osp: Osp,
         opcode: u64,
         note: &mut dyn FnMut(Divergence),
-    ) -> Vec<TrTrunkMessage> {
+    ) -> Vec<TrunkMessage> {
         *system.stats.kinds.entry(osp.kind()).or_default() += 1;
         self.plans.learn(&osp, &mut system.plans);
         self.parsed += 1;
@@ -264,7 +256,7 @@ impl P25TrunkParser {
                 opcode,
                 at: self.parsed,
             });
-            vec![message(self.sys_num, TrMessageType::Unknown, nac, opcode)]
+            vec![message(self.sys_num, Trunking::Unknown, nac, opcode)]
         } else {
             self.messages(system, &osp, nac, opcode, note)
         };
@@ -301,7 +293,7 @@ impl P25TrunkParser {
         nac: u16,
         opcode: u64,
         note: &mut dyn FnMut(Divergence),
-    ) -> Vec<TrTrunkMessage> {
+    ) -> Vec<TrunkMessage> {
         Context {
             parser: self,
             system,
@@ -317,7 +309,7 @@ impl P25TrunkParser {
 #[derive(Clone, Copy)]
 enum Packet {
     /// A message that carries no packet: only its kind is sent on.
-    Bare(TrMessageType),
+    Bare(Trunking),
     /// A packet too short for its kind.
     Malformed,
     Osp {
@@ -349,13 +341,11 @@ impl Packet {
             Message::Mbt { .. } => Self::Malformed,
             Message::Terminator {
                 link_control: true, ..
-            } => Self::Bare(TrMessageType::Tdulc),
-            Message::Terminator { .. } | Message::Voice { .. } => {
-                Self::Bare(TrMessageType::Unknown)
-            }
+            } => Self::Bare(TDULC),
+            Message::Terminator { .. } | Message::Voice { .. } => Self::Bare(Trunking::Unknown),
             // op25 sends a timeout without a body, which trunk-recorder
             // counts as invalid.
-            Message::Timeout => Self::Bare(TrMessageType::InvalidCcMessage),
+            Message::Timeout => Self::Bare(Trunking::Invalid),
         }
     }
 
@@ -363,17 +353,17 @@ impl Packet {
         // trunk-recorder: -2 is a GUI command, -1 a timeout, other negative
         // types are invalid, and a payload must at least hold the NAC.
         match msg_type {
-            -2 | -1 => return Self::Bare(TrMessageType::Unknown),
-            t if t < 0 => return Self::Bare(TrMessageType::InvalidCcMessage),
+            -2 | -1 => return Self::Bare(Trunking::Unknown),
+            t if t < 0 => return Self::Bare(Trunking::Invalid),
             _ => {}
         }
         let Some((nac, body)) = payload.split_first_chunk::<2>() else {
-            return Self::Bare(TrMessageType::InvalidCcMessage);
+            return Self::Bare(Trunking::Invalid);
         };
         let nac = u16::from_be_bytes(*nac);
         if nac == 0xffff {
             // Phase 2 (op25's TDMA marker).
-            return Self::Bare(TrMessageType::Unknown);
+            return Self::Bare(Trunking::Unknown);
         }
         let (osp, raw_opcode) = match msg_type {
             op25::TSDU => {
@@ -386,8 +376,8 @@ impl Packet {
                 Some((header, data)) if data.len() >= 8 => (Osp::from_mbt(header, data), header[7]),
                 _ => return Self::Malformed,
             },
-            op25::TDULC => return Self::Bare(TrMessageType::Tdulc),
-            _ => return Self::Bare(TrMessageType::Unknown),
+            op25::TDULC => return Self::Bare(TDULC),
+            _ => return Self::Bare(Trunking::Unknown),
         };
         Self::Osp {
             nac,
@@ -406,34 +396,16 @@ fn opcode_of(osp: &Osp, raw: u8) -> u64 {
     }
 }
 
-/// A message with trunk-recorder's defaults.
-fn message(sys_num: i32, message_type: TrMessageType, nac: u16, opcode: u64) -> TrTrunkMessage {
-    TrTrunkMessage {
-        message_type,
-        meta: String::new(),
-        freq: 0.0,
-        talkgroup: 0,
-        encrypted: false,
-        emergency: false,
-        duplex: false,
-        mode: false,
-        priority: 0,
-        tdma_slot: 0,
-        phase2_tdma: false,
-        source: -1,
+/// A control channel's terminator: it never names the talkgroup.
+const TDULC: Trunking = Trunking::Tdulc { talkgroup: None };
+
+/// A message of `kind` from system `sys_num`.
+const fn message(sys_num: i32, kind: Trunking, nac: u16, opcode: u64) -> TrunkMessage {
+    TrunkMessage {
         sys_num,
-        sys_id: 0,
-        sys_rfss: 0,
-        sys_site_id: 0,
-        nac: u64::from(nac),
-        wacn: 0,
-        patch_data: TrPatchData {
-            sg: 0,
-            ga1: 0,
-            ga2: 0,
-            ga3: 0,
-        },
+        nac,
         opcode,
+        kind,
     }
 }
 
@@ -446,8 +418,8 @@ struct Context<'a> {
 }
 
 impl Context<'_> {
-    fn base(&self, t: TrMessageType) -> TrTrunkMessage {
-        message(self.parser.sys_num, t, self.nac, self.opcode)
+    const fn msg(&self, kind: Trunking) -> TrunkMessage {
+        message(self.parser.sys_num, kind, self.nac, self.opcode)
     }
 
     fn resolve(&mut self, id: ChannelId) -> Option<trunk_p25::trunking::Channel> {
@@ -468,58 +440,77 @@ impl Context<'_> {
         }
     }
 
-    /// A message on `id`: its frequency (0 if unknown) and TDMA slot.
+    /// A voice message of `kind` on the channel `id` names.
+    fn voice(
+        &mut self,
+        kind: fn(Voice) -> Trunking,
+        id: Option<ChannelId>,
+        talkgroup: u32,
+        source: Option<u32>,
+        options: Options,
+    ) -> TrunkMessage {
+        let channel = id.map_or(Channel::NONE, |id| self.channel(id));
+        self.msg(kind(Voice {
+            channel,
+            talkgroup,
+            source,
+            options,
+        }))
+    }
+
+    /// The channel `id` names: its frequency (0 if unknown) and TDMA slot.
     #[allow(clippy::cast_precision_loss)]
-    fn on(&mut self, t: TrMessageType, id: ChannelId) -> TrTrunkMessage {
-        let mut m = self.base(t);
-        if let Some(c) = self.resolve(id) {
-            m.freq = c.freq_hz as f64;
-            if let Some(slot) = c.slot {
-                m.phase2_tdma = true;
-                m.tdma_slot = i32::from(slot);
-            }
-        }
-        m
+    fn channel(&mut self, id: ChannelId) -> Channel {
+        self.resolve(id).map_or(Channel::NONE, |c| Channel {
+            freq_hz: c.freq_hz as f64,
+            slot: c.slot,
+        })
     }
 
     #[allow(clippy::too_many_lines)] // one arm per packet kind
-    fn messages(&mut self, osp: &Osp) -> Vec<TrTrunkMessage> {
-        use TrMessageType as T;
-        let unknown = vec![self.base(T::Unknown)];
+    fn messages(&mut self, osp: &Osp) -> Vec<TrunkMessage> {
+        use Trunking as K;
+        let unknown = vec![self.msg(K::Unknown)];
         match *osp {
             Osp::GroupVoiceGrant {
                 options,
                 channel,
                 group,
                 source,
-            } => vec![with_options(
-                self.on(T::Grant, channel),
-                options,
-                i64::from(group),
-                i64::from(source),
+            } => vec![self.voice(
+                K::Grant,
+                Some(channel),
+                u32::from(group),
+                Some(source),
+                options_of(options),
             )],
             Osp::MotPatchGrant {
                 options,
                 channel,
                 supergroup,
                 source,
-            } => vec![with_options(
-                self.on(T::Grant, channel),
-                options,
-                i64::from(supergroup),
-                source.map_or(-1, i64::from),
+            } => vec![self.voice(
+                K::Grant,
+                Some(channel),
+                u32::from(supergroup),
+                source,
+                options_of(options),
             )],
             Osp::GroupVoiceGrantUpdate { first, second }
             | Osp::MotPatchGrantUpdate { first, second } => self.updates(first, second),
             Osp::GroupVoiceGrantUpdateExplicit {
                 options, tx, group, ..
-            } => {
-                let mut m = self.on(T::Update, tx);
-                m.talkgroup = i64::from(group);
-                m.emergency = options.emergency();
-                m.encrypted = options.encrypted();
-                vec![m]
-            }
+            } => vec![self.voice(
+                K::Update,
+                Some(tx),
+                u32::from(group),
+                None,
+                Options {
+                    emergency: options.emergency(),
+                    encrypted: options.encrypted(),
+                    ..Options::default()
+                },
+            )],
             Osp::UnitVoiceGrant {
                 options,
                 channel,
@@ -529,93 +520,89 @@ impl Context<'_> {
                 if options == ServiceOptions::NONE {
                     (self.note)(Divergence::UnitGrantOptions);
                 }
-                vec![with_options(
-                    self.on(T::UuVGrant, channel),
-                    options,
-                    i64::from(target),
-                    i64::from(source),
+                vec![self.voice(
+                    K::UnitGrant,
+                    Some(channel),
+                    target,
+                    Some(source),
+                    options_of(options),
                 )]
             }
             Osp::UnitAnswerRequest {
                 options,
                 target,
                 source,
-            } => vec![with_options(
-                self.base(T::UuAnsReq),
-                options,
-                i64::from(target),
-                i64::from(source),
+            } => vec![self.voice(
+                K::AnswerRequest,
+                None,
+                target,
+                Some(source),
+                options_of(options),
             )],
             Osp::UnitVoiceGrantUpdate {
                 channel,
                 target,
                 source,
-            } => {
-                let mut m = self.on(T::UuVUpdate, channel);
-                m.talkgroup = i64::from(target);
-                m.source = i64::from(source);
-                vec![m]
-            }
+            } => vec![self.voice(
+                K::UnitUpdate,
+                Some(channel),
+                target,
+                Some(source),
+                Options::default(),
+            )],
             Osp::DataGrant {
                 options,
                 tx,
                 target,
                 ..
             } => {
-                let mut m = self.base(T::DataGrant);
-                if let Some(c) = self.resolve(tx) {
-                    #[allow(clippy::cast_precision_loss)]
-                    {
-                        m.freq = c.freq_hz as f64;
-                    }
-                }
-                m.emergency = options.emergency();
-                m.encrypted = options.encrypted();
-                m.duplex = options.duplex();
-                m.mode = options.packet();
-                m.source = i64::from(target);
-                vec![m]
+                // trunk-recorder reads the frequency but not the slot.
+                let freq_hz = self.channel(tx).freq_hz;
+                vec![self.msg(K::DataGrant {
+                    freq_hz,
+                    unit: target,
+                    options: Options {
+                        priority: 0,
+                        ..options_of(options)
+                    },
+                })]
             }
-            Osp::Acknowledge { group, target } => {
-                let mut m = self.base(T::Acknowledge);
-                m.talkgroup = i64::from(group);
-                m.source = i64::from(target);
-                vec![m]
-            }
+            Osp::Acknowledge { group, target } => vec![self.msg(K::Acknowledge {
+                group,
+                unit: target,
+            })],
             Osp::GroupAffiliation {
                 response,
                 group,
                 target,
                 ..
-            } => self.accepted(response, unknown, |cx| {
-                let mut m = cx.base(T::Affiliation);
-                m.source = i64::from(target);
-                m.talkgroup = i64::from(group);
-                m
-            }),
+            } => self.accepted(
+                response,
+                unknown,
+                K::Affiliation {
+                    group,
+                    unit: target,
+                },
+            ),
             Osp::LocationRegistration {
                 response,
                 group,
                 target,
-            } => self.accepted(response, unknown, |cx| {
-                let mut m = cx.base(T::Location);
-                m.talkgroup = i64::from(group);
-                m.source = i64::from(target);
-                m
-            }),
+            } => self.accepted(
+                response,
+                unknown,
+                K::Location {
+                    group,
+                    unit: target,
+                },
+            ),
             Osp::UnitRegistration {
                 response,
                 source_id,
                 ..
-            } => self.accepted(response, unknown, |cx| {
-                let mut m = cx.base(T::Registration);
-                m.source = i64::from(source_id);
-                m
-            }),
+            } => self.accepted(response, unknown, K::Registration { unit: source_id }),
             Osp::UnitDeregistration { source } => {
-                let mut m = self.base(T::Deregistration);
-                m.source = i64::from(source);
-                vec![m]
+                vec![self.msg(K::Deregistration { unit: source })]
             }
             Osp::SecondaryControlExplicit { tx, .. } => {
                 (self.note)(Divergence::SecondaryControl);
@@ -628,46 +615,44 @@ impl Context<'_> {
                 }
                 self.control_channels(&channels).unwrap_or(unknown)
             }
-            Osp::RfssStatus { site, .. } => {
-                let mut m = self.base(T::Sysid);
-                m.sys_id = u64::from(site.system);
-                m.sys_rfss = i32::from(site.rfss);
-                m.sys_site_id = i32::from(site.site);
-                vec![m]
-            }
+            Osp::RfssStatus { site, .. } => vec![self.msg(K::Site {
+                sys_id: site.system,
+                rfss: site.rfss,
+                site: site.site,
+            })],
             Osp::NetworkStatus {
                 wacn,
                 system,
                 channel,
             } => {
-                let mut m = self.on(T::Status, channel);
-                if m.freq == 0.0 {
+                // trunk-recorder leaves the slot out of status messages.
+                let freq_hz = self.channel(channel).freq_hz;
+                if freq_hz == 0.0 {
                     (self.note)(Divergence::EarlyStatus);
                 }
-                // trunk-recorder leaves the slot out of status messages.
-                m.phase2_tdma = false;
-                m.tdma_slot = 0;
-                m.wacn = u64::from(wacn);
-                m.sys_id = u64::from(system);
-                vec![m]
+                vec![self.msg(K::Network {
+                    freq_hz,
+                    wacn,
+                    sys_id: system,
+                })]
             }
             Osp::MotPatchAdd { supergroup, groups } => {
-                let mut m = self.base(T::PatchAdd);
-                m.patch_data = patch(supergroup, groups);
-                vec![m]
+                vec![self.msg(K::PatchAdd(Patch { supergroup, groups }))]
             }
             Osp::HarrisPatch {
                 activate,
                 supergroup,
                 group,
             } => {
-                let mut m = self.base(if activate {
-                    T::PatchAdd
+                let patch = Patch {
+                    supergroup,
+                    groups: [group; 3],
+                };
+                vec![self.msg(if activate {
+                    K::PatchAdd(patch)
                 } else {
-                    T::PatchDelete
-                });
-                m.patch_data = patch(supergroup, [group; 3]);
-                vec![m]
+                    K::PatchDelete(patch)
+                })]
             }
             Osp::Protected { .. } | Osp::Other { .. } => {
                 (self.note)(Divergence::NotStandard);
@@ -677,7 +662,7 @@ impl Context<'_> {
         }
     }
 
-    fn updates(&mut self, first: GroupChannel, second: GroupChannel) -> Vec<TrTrunkMessage> {
+    fn updates(&mut self, first: GroupChannel, second: GroupChannel) -> Vec<TrunkMessage> {
         let mut out = vec![self.update(first)];
         if second.channel.get() == 0xffff {
             (self.note)(Divergence::NoChannel);
@@ -685,7 +670,9 @@ impl Context<'_> {
             let m = self.update(second);
             // Whole hertz, or both 0.
             #[allow(clippy::float_cmp)]
-            if m.freq == out[0].freq {
+            if let (Trunking::Update(a), Trunking::Update(b)) = (&m.kind, &out[0].kind)
+                && a.channel.freq_hz == b.channel.freq_hz
+            {
                 (self.note)(Divergence::SecondSlotUpdate);
             }
             out.push(m);
@@ -693,20 +680,24 @@ impl Context<'_> {
         out
     }
 
-    fn update(&mut self, g: GroupChannel) -> TrTrunkMessage {
-        let mut m = self.on(TrMessageType::Update, g.channel);
-        m.talkgroup = i64::from(g.group);
-        m
+    fn update(&mut self, g: GroupChannel) -> TrunkMessage {
+        self.voice(
+            Trunking::Update,
+            Some(g.channel),
+            u32::from(g.group),
+            None,
+            Options::default(),
+        )
     }
 
     fn accepted(
         &mut self,
         response: Response,
-        otherwise: Vec<TrTrunkMessage>,
-        make: impl FnOnce(&Self) -> TrTrunkMessage,
-    ) -> Vec<TrTrunkMessage> {
+        otherwise: Vec<TrunkMessage>,
+        kind: Trunking,
+    ) -> Vec<TrunkMessage> {
         if response == Response::Accept {
-            vec![make(self)]
+            vec![self.msg(kind)]
         } else {
             (self.note)(Divergence::NotAccepted);
             otherwise
@@ -714,44 +705,25 @@ impl Context<'_> {
     }
 
     /// A control channel message per known channel, or `None` if none is.
-    fn control_channels(&mut self, channels: &[ChannelId]) -> Option<Vec<TrTrunkMessage>> {
+    fn control_channels(&mut self, channels: &[ChannelId]) -> Option<Vec<TrunkMessage>> {
         let out: Vec<_> = channels
             .iter()
             .filter_map(|&c| {
-                let m = self.on(TrMessageType::ControlChannel, c);
-                (m.freq != 0.0).then_some(TrTrunkMessage {
-                    phase2_tdma: false,
-                    tdma_slot: 0,
-                    ..m
-                })
+                let freq_hz = self.channel(c).freq_hz;
+                (freq_hz != 0.0).then(|| self.msg(Trunking::ControlChannel { freq_hz }))
             })
             .collect();
         (!out.is_empty()).then_some(out)
     }
 }
 
-fn with_options(
-    mut m: TrTrunkMessage,
-    o: ServiceOptions,
-    talkgroup: i64,
-    source: i64,
-) -> TrTrunkMessage {
-    m.talkgroup = talkgroup;
-    m.source = source;
-    m.emergency = o.emergency();
-    m.encrypted = o.encrypted();
-    m.duplex = o.duplex();
-    m.mode = o.packet();
-    m.priority = i32::from(o.priority());
-    m
-}
-
-const fn patch(sg: u16, ga: [u16; 3]) -> TrPatchData {
-    TrPatchData {
-        sg: sg as u64,
-        ga1: ga[0] as u64,
-        ga2: ga[1] as u64,
-        ga3: ga[2] as u64,
+const fn options_of(o: ServiceOptions) -> Options {
+    Options {
+        emergency: o.emergency(),
+        encrypted: o.encrypted(),
+        duplex: o.duplex(),
+        packet: o.packet(),
+        priority: o.priority(),
     }
 }
 

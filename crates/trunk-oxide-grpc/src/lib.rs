@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use trunk_radio::{AudioSink, SystemInfo, TrCallData, TrCallInfo, TrTrunkMessage, TrUnitEventType};
+use trunk_radio::{AudioSink, SystemInfo, TrCallData, TrCallInfo, TrUnitEventType, TrunkMessage};
 
 pub use trunk_oxide_proto as proto;
 
@@ -119,57 +119,114 @@ fn convert_call_data(cd: &TrCallData) -> proto::CallData {
     }
 }
 
-fn convert_trunk_messages(messages: &[TrTrunkMessage]) -> Vec<proto::TrunkMessage> {
-    use trunk_radio::TrMessageType;
-    messages
-        .iter()
-        .map(|m| proto::TrunkMessage {
-            message_type: match m.message_type {
-                TrMessageType::Grant => proto::MessageType::Grant as i32,
-                TrMessageType::Status => proto::MessageType::Status as i32,
-                TrMessageType::Update => proto::MessageType::Update as i32,
-                TrMessageType::ControlChannel => proto::MessageType::ControlChannel as i32,
-                TrMessageType::Registration => proto::MessageType::Registration as i32,
-                TrMessageType::Deregistration => proto::MessageType::Deregistration as i32,
-                TrMessageType::Affiliation => proto::MessageType::Affiliation as i32,
-                TrMessageType::Sysid => proto::MessageType::Sysid as i32,
-                TrMessageType::Acknowledge => proto::MessageType::Acknowledge as i32,
-                TrMessageType::Location => proto::MessageType::Location as i32,
-                TrMessageType::PatchAdd => proto::MessageType::PatchAdd as i32,
-                TrMessageType::PatchDelete => proto::MessageType::PatchDelete as i32,
-                TrMessageType::DataGrant => proto::MessageType::DataGrant as i32,
-                TrMessageType::UuAnsReq => proto::MessageType::UuAnsReq as i32,
-                TrMessageType::UuVGrant => proto::MessageType::UuVGrant as i32,
-                TrMessageType::UuVUpdate => proto::MessageType::UuVUpdate as i32,
-                TrMessageType::InvalidCcMessage => proto::MessageType::InvalidCcMessage as i32,
-                TrMessageType::Tdulc => proto::MessageType::Tdulc as i32,
-                TrMessageType::Unknown => proto::MessageType::Unknown as i32,
-            },
-            meta: m.meta.clone(),
-            freq: m.freq,
-            talkgroup: m.talkgroup,
-            encrypted: m.encrypted,
-            emergency: m.emergency,
-            duplex: m.duplex,
-            mode: m.mode,
-            priority: m.priority,
-            tdma_slot: m.tdma_slot,
-            phase2_tdma: m.phase2_tdma,
-            source: m.source,
-            sys_id: m.sys_id,
-            rfss: m.sys_rfss,
-            site_id: m.sys_site_id,
-            nac: m.nac,
-            wacn: m.wacn,
-            patch_data: Some(proto::PatchData {
-                sg: m.patch_data.sg,
-                ga1: m.patch_data.ga1,
-                ga2: m.patch_data.ga2,
-                ga3: m.patch_data.ga3,
-            }),
-            opcode: m.opcode,
-        })
-        .collect()
+/// A trunk message on the wire: trunk-recorder's flat form, with the fields
+/// the message's kind fills in.
+#[allow(clippy::too_many_lines)] // one arm per kind
+fn proto_trunk_message(m: &TrunkMessage) -> proto::TrunkMessage {
+    use proto::MessageType as P;
+    use trunk_radio::{Patch, Trunking as K, Voice};
+    let mut out = proto::TrunkMessage {
+        message_type: P::Unknown as i32,
+        meta: String::new(),
+        freq: 0.0,
+        talkgroup: 0,
+        encrypted: false,
+        emergency: false,
+        duplex: false,
+        mode: false,
+        priority: 0,
+        tdma_slot: 0,
+        phase2_tdma: false,
+        source: -1,
+        sys_id: 0,
+        rfss: 0,
+        site_id: 0,
+        nac: u64::from(m.nac),
+        wacn: 0,
+        patch_data: None,
+        opcode: m.opcode,
+    };
+    let voice = |out: &mut proto::TrunkMessage, t: P, v: &Voice| {
+        out.message_type = t as i32;
+        out.freq = v.channel.freq_hz;
+        out.phase2_tdma = v.channel.slot.is_some();
+        out.tdma_slot = v.channel.slot.map_or(0, i32::from);
+        out.talkgroup = i64::from(v.talkgroup);
+        out.source = v.source.map_or(-1, i64::from);
+        out.emergency = v.options.emergency;
+        out.encrypted = v.options.encrypted;
+        out.duplex = v.options.duplex;
+        out.mode = v.options.packet;
+        out.priority = i32::from(v.options.priority);
+    };
+    let unit = |out: &mut proto::TrunkMessage, t: P, group: u16, unit: u32| {
+        out.message_type = t as i32;
+        out.talkgroup = i64::from(group);
+        out.source = i64::from(unit);
+    };
+    let patch = |out: &mut proto::TrunkMessage, t: P, p: &Patch| {
+        out.message_type = t as i32;
+        out.patch_data = Some(proto::PatchData {
+            sg: u64::from(p.supergroup),
+            ga1: u64::from(p.groups[0]),
+            ga2: u64::from(p.groups[1]),
+            ga3: u64::from(p.groups[2]),
+        });
+    };
+    match &m.kind {
+        K::Grant(v) => voice(&mut out, P::Grant, v),
+        K::Update(v) => voice(&mut out, P::Update, v),
+        K::UnitGrant(v) => voice(&mut out, P::UuVGrant, v),
+        K::UnitUpdate(v) => voice(&mut out, P::UuVUpdate, v),
+        K::AnswerRequest(v) => voice(&mut out, P::UuAnsReq, v),
+        K::DataGrant {
+            freq_hz,
+            unit: u,
+            options,
+        } => {
+            out.message_type = P::DataGrant as i32;
+            out.freq = *freq_hz;
+            out.source = i64::from(*u);
+            out.emergency = options.emergency;
+            out.encrypted = options.encrypted;
+            out.duplex = options.duplex;
+            out.mode = options.packet;
+        }
+        K::Acknowledge { group, unit: u } => unit(&mut out, P::Acknowledge, *group, *u),
+        K::Affiliation { group, unit: u } => unit(&mut out, P::Affiliation, *group, *u),
+        K::Location { group, unit: u } => unit(&mut out, P::Location, *group, *u),
+        K::Registration { unit: u } => unit(&mut out, P::Registration, 0, *u),
+        K::Deregistration { unit: u } => unit(&mut out, P::Deregistration, 0, *u),
+        K::ControlChannel { freq_hz } => {
+            out.message_type = P::ControlChannel as i32;
+            out.freq = *freq_hz;
+        }
+        K::Site { sys_id, rfss, site } => {
+            out.message_type = P::Sysid as i32;
+            out.sys_id = u64::from(*sys_id);
+            out.rfss = i32::from(*rfss);
+            out.site_id = i32::from(*site);
+        }
+        K::Network {
+            freq_hz,
+            wacn,
+            sys_id,
+        } => {
+            out.message_type = P::Status as i32;
+            out.freq = *freq_hz;
+            out.wacn = u64::from(*wacn);
+            out.sys_id = u64::from(*sys_id);
+        }
+        K::PatchAdd(p) => patch(&mut out, P::PatchAdd, p),
+        K::PatchDelete(p) => patch(&mut out, P::PatchDelete, p),
+        K::Tdulc { talkgroup } => {
+            out.message_type = P::Tdulc as i32;
+            out.talkgroup = talkgroup.map_or(0, i64::from);
+        }
+        K::Invalid => out.message_type = P::InvalidCcMessage as i32,
+        K::Unknown => {}
+    }
+    out
 }
 
 // ── gRPC service implementation ──
@@ -449,10 +506,10 @@ impl EventBridge {
         ));
     }
 
-    pub fn trunk_message(&self, messages: &[TrTrunkMessage], info: &SystemInfo) {
+    pub fn trunk_message(&self, messages: &[TrunkMessage], info: &SystemInfo) {
         self.send_event(proto::plugin_event::Event::TrunkMessage(
             proto::TrunkMessageEvent {
-                messages: convert_trunk_messages(messages),
+                messages: messages.iter().map(proto_trunk_message).collect(),
                 system: Some(system_info_from(info)),
             },
         ));

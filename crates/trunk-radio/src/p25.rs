@@ -343,7 +343,7 @@ mod tests {
         testgen::modulate_cqpsk(&dibits, 5)
     }
 
-    fn messages(out: &Decoded) -> Vec<&crate::types::TrTrunkMessage> {
+    fn messages(out: &Decoded) -> Vec<&crate::types::TrunkMessage> {
         out.events
             .iter()
             .filter_map(|e| match e {

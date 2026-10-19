@@ -14,7 +14,7 @@ use crate::recorder::{DB_UNSET, Kind, Recorder, Slot, SystemParams};
 use crate::source::Source;
 use crate::types::{
     AudioSink, EventSender, TrChannelConfig, TrRecorderConfig, TrRecorderStatus,
-    TrStopRecordingResult, TrTransmission, TrTrunkMessage,
+    TrStopRecordingResult, TrTransmission,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -264,9 +264,9 @@ impl Radio {
     }
 
     /// Note a system's site (first time only); true if this was it.
-    pub fn update_sysid(&self, msg: &TrTrunkMessage) -> bool {
+    pub fn update_sysid(&self, sys_num: i32, rfss: u8, site: u8) -> bool {
         let mut i = self.lock();
-        let Some(s) = usize::try_from(msg.sys_num)
+        let Some(s) = usize::try_from(sys_num)
             .ok()
             .and_then(|n| i.systems.get_mut(n))
         else {
@@ -277,16 +277,16 @@ impl Radio {
         }
         s.sysid_received = true;
         tracing::info!(
-            system = %s.setup.short_name, rfss = msg.sys_rfss, site_id = msg.sys_site_id,
+            system = %s.setup.short_name, rfss, site_id = site,
             "decoding system site"
         );
         true
     }
 
     /// Note a system's id and WACN (first time only); true if this was it.
-    pub fn update_status(&self, msg: &TrTrunkMessage) -> bool {
+    pub fn update_status(&self, sys_num: i32, sys_id: u16, wacn: u32, nac: u16) -> bool {
         let mut i = self.lock();
-        let Some(s) = usize::try_from(msg.sys_num)
+        let Some(s) = usize::try_from(sys_num)
             .ok()
             .and_then(|n| i.systems.get_mut(n))
         else {
@@ -298,9 +298,9 @@ impl Radio {
         s.status_received = true;
         tracing::info!(
             system = %s.setup.short_name,
-            sys_id = format_args!("{:X}", msg.sys_id),
-            wacn = format_args!("{:X}", msg.wacn),
-            nac = format_args!("{:X}", msg.nac),
+            sys_id = format_args!("{sys_id:X}"),
+            wacn = format_args!("{wacn:X}"),
+            nac = format_args!("{nac:X}"),
             "decoding system id"
         );
         true

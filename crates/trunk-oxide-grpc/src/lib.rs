@@ -4,9 +4,7 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use trunk_radio::{
-    AudioSink, CallId, SystemInfo, TrCallData, TrCallInfo, TrUnitEventType, TrunkMessage,
-};
+use trunk_radio::{AudioSink, CallData, CallId, CallInfo, SystemInfo, TrunkMessage, UnitEventType};
 
 pub use trunk_oxide_proto as proto;
 
@@ -52,7 +50,7 @@ const fn recorder_info(rec_num: i32) -> proto::RecorderInfo {
     }
 }
 
-fn convert_call_data(cd: &TrCallData) -> proto::CallData {
+fn convert_call_data(cd: &CallData) -> proto::CallData {
     proto::CallData {
         talkgroup: cd.talkgroup,
         color_code: cd.color_code,
@@ -336,7 +334,7 @@ impl EventBridge {
         4096
     }
 
-    fn call_info_from(&self, info: &TrCallInfo) -> proto::CallInfo {
+    fn call_info_from(&self, info: &CallInfo) -> proto::CallInfo {
         let meta = self
             .talkgroups
             .get(&(info.short_name.clone(), info.talkgroup));
@@ -400,7 +398,7 @@ impl EventBridge {
         }
     }
 
-    pub fn signal(&self, unit_id: i64, info: &TrCallInfo) {
+    pub fn signal(&self, unit_id: i64, info: &CallInfo) {
         self.send_event(proto::plugin_event::Event::Signal(proto::SignalEvent {
             unit_id,
             signaling_type: String::new(),
@@ -451,7 +449,7 @@ impl EventBridge {
         }
     }
 
-    pub fn call_start(&self, info: &TrCallInfo, traceparent: String) {
+    pub fn call_start(&self, info: &CallInfo, traceparent: String) {
         let mut call = self.call_info_from(info);
         call.traceparent = traceparent;
         self.send_event(proto::plugin_event::Event::CallStart(
@@ -461,7 +459,7 @@ impl EventBridge {
 
     pub fn call_end(
         &self,
-        call_data: &TrCallData,
+        call_data: &CallData,
         segments: &[proto::CallSegment],
         is_conventional: bool,
     ) {
@@ -473,7 +471,7 @@ impl EventBridge {
         }));
     }
 
-    pub fn calls_active(&self, infos: &[TrCallInfo]) {
+    pub fn calls_active(&self, infos: &[CallInfo]) {
         self.send_event(proto::plugin_event::Event::CallsActive(
             proto::CallsActiveEvent {
                 calls: infos.iter().map(|i| self.call_info_from(i)).collect(),
@@ -517,18 +515,18 @@ impl EventBridge {
     pub fn unit_event(
         &self,
         info: &SystemInfo,
-        event_type: TrUnitEventType,
+        event_type: UnitEventType,
         source_id: i64,
         talkgroup: i64,
     ) {
         let proto_type = match event_type {
-            TrUnitEventType::Registration => proto::UnitEventType::Registration,
-            TrUnitEventType::Deregistration => proto::UnitEventType::Deregistration,
-            TrUnitEventType::Affiliation => proto::UnitEventType::GroupAffiliation,
-            TrUnitEventType::Acknowledge => proto::UnitEventType::AcknowledgeResponse,
-            TrUnitEventType::Location => proto::UnitEventType::Location,
-            TrUnitEventType::DataGrant => proto::UnitEventType::DataGrant,
-            TrUnitEventType::AnswerRequest => proto::UnitEventType::AnswerRequest,
+            UnitEventType::Registration => proto::UnitEventType::Registration,
+            UnitEventType::Deregistration => proto::UnitEventType::Deregistration,
+            UnitEventType::Affiliation => proto::UnitEventType::GroupAffiliation,
+            UnitEventType::Acknowledge => proto::UnitEventType::AcknowledgeResponse,
+            UnitEventType::Location => proto::UnitEventType::Location,
+            UnitEventType::DataGrant => proto::UnitEventType::DataGrant,
+            UnitEventType::AnswerRequest => proto::UnitEventType::AnswerRequest,
         };
         self.send_event(proto::plugin_event::Event::Unit(proto::UnitEvent {
             r#type: proto_type as i32,

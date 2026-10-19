@@ -869,16 +869,7 @@ impl std::ops::Deref for Effects {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum UnitEventType {
-    Registration,
-    Deregistration,
-    Affiliation,
-    Acknowledge,
-    Location,
-    DataGrant,
-    AnswerRequest,
-}
+pub(crate) use trunk_radio::UnitEventType;
 
 // ── What the state machine reads off a voice grant or update ──
 

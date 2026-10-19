@@ -7,8 +7,7 @@ use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Gauge, Histogram};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use trunk_radio::{
-    DetectedSignal, Radio, TrCallData, TrCallDataStatus, TrRecorderConfig, TrUnitEventType,
-    TrunkMessage, Trunking,
+    CallData, CallDataStatus, DetectedSignal, Radio, RecorderConfig, TrunkMessage, Trunking,
 };
 use trunk_radio::{Squelch, SystemInfo};
 
@@ -20,7 +19,7 @@ use crate::ConventionalMetricsSnapshot;
 
 use crate::call_state::{
     CallEndReason, CallId, CallState, CallView, Effect, Effects, Freq, RecorderNum,
-    RecordingResult, RejectReason, Talkgroup, TrunkStateMachine, UnitEventType,
+    RecordingResult, RejectReason, Talkgroup, TrunkStateMachine,
 };
 
 pub use crate::call_state::{
@@ -52,19 +51,6 @@ const fn system_type_to_proto(st: SystemType) -> i32 {
     }
 }
 
-const fn format_recorder_state(state: i32) -> &'static str {
-    match state {
-        1 => "Recording",
-        2 => "Inactive",
-        3 => "Active",
-        4 => "Idle",
-        6 => "Stopped",
-        7 => "Available",
-        8 => "Ignored",
-        _ => "Unknown",
-    }
-}
-
 /// op25 decode-quality counters (errored / spiked voice codewords and total
 /// samples) summed from a recorder's transmission list. The headless sink
 /// accumulates these for the whole recording, so for a `Span` boundary — where
@@ -85,7 +71,7 @@ struct VoiceCounters {
 }
 
 impl VoiceCounters {
-    fn from_transmissions(list: &[trunk_radio::TrTransmission]) -> Self {
+    fn from_transmissions(list: &[trunk_radio::Transmission]) -> Self {
         let mut c = Self::default();
         for t in list {
             c.errors += t.error_count;
@@ -636,7 +622,7 @@ impl CallManager {
                     self.state.on_transmission_rotated(call_id, source_id);
                 }
                 Effect::EmitCallsActive => {
-                    let infos: Vec<trunk_radio::TrCallInfo> = self
+                    let infos: Vec<trunk_radio::CallInfo> = self
                         .state
                         .iter_calls()
                         .map(|v| self.build_call_info_from_view(&v))
@@ -655,18 +641,8 @@ impl CallManager {
                     source_id,
                     talkgroup,
                 } => {
-                    let ffi_type = match type_ {
-                        UnitEventType::Registration => TrUnitEventType::Registration,
-                        UnitEventType::Deregistration => TrUnitEventType::Deregistration,
-                        UnitEventType::Affiliation => TrUnitEventType::Affiliation,
-                        UnitEventType::Acknowledge => TrUnitEventType::Acknowledge,
-                        UnitEventType::Location => TrUnitEventType::Location,
-                        UnitEventType::DataGrant => TrUnitEventType::DataGrant,
-                        UnitEventType::AnswerRequest => TrUnitEventType::AnswerRequest,
-                    };
                     let info = self.get_system_info(sys_num);
-                    self.bridge
-                        .unit_event(&info, ffi_type, source_id, talkgroup);
+                    self.bridge.unit_event(&info, type_, source_id, talkgroup);
                 }
                 Effect::EmitSetupSystem { sys_num } => {
                     let info = self.get_system_info(sys_num);
@@ -1131,7 +1107,7 @@ impl CallManager {
                     // transmissions to expose P25 audio loss (clipping).
                     let (mut tx_errors, mut tx_spikes, mut tx_samples) = (0i64, 0i64, 0i64);
                     let (mut tx_terms, mut tx_after) = (0i64, 0i64);
-                    let mut tally = |list: &[trunk_radio::TrTransmission]| {
+                    let mut tally = |list: &[trunk_radio::Transmission]| {
                         for t in list {
                             tx_errors += t.error_count;
                             tx_spikes += t.spike_count;
@@ -1527,7 +1503,7 @@ impl CallManager {
         let rec_num = match self.radio.add_conventional_recorder(
             sys_num,
             source_idx,
-            &trunk_radio::TrChannelConfig {
+            &trunk_radio::ChannelConfig {
                 id: channel.talkgroup.0,
                 freq: channel.freq.as_hz(),
                 tone: channel.tone,
@@ -1598,7 +1574,6 @@ impl CallManager {
     /// call so the `calls_ended` metric can facet by algorithm.
     pub fn handle_crypto(&mut self, call_id: CallId, alg_id: u32, key_id: u32) {
         // ALGID is 8 bits and KeyID 16 on the wire; the decoder already masks.
-        let call_id = call_id;
         let (alg_id, key_id) = (
             u8::try_from(alg_id & 0xFF).unwrap_or(0),
             u16::try_from(key_id & 0xFFFF).unwrap_or(0),
@@ -1695,8 +1670,8 @@ impl CallManager {
         }
     }
 
-    /// Build a `TrRecorderConfig` from a [`CallView`] and system metadata.
-    fn build_recorder_config_from_view(&self, view: &CallView<'_>) -> TrRecorderConfig {
+    /// Build a `RecorderConfig` from a [`CallView`] and system metadata.
+    fn build_recorder_config_from_view(&self, view: &CallView<'_>) -> RecorderConfig {
         let policy = self
             .state
             .config
@@ -1723,7 +1698,7 @@ impl CallManager {
             .unwrap_or(0.0);
         let tune_freq = true_freq + correction_hz;
 
-        TrRecorderConfig {
+        RecorderConfig {
             talkgroup: view.talkgroup(),
             call_num: view.call_num(),
             freq: tune_freq,
@@ -1774,17 +1749,17 @@ impl CallManager {
             tracing::info!(
                 rec_num = r.rec_num,
                 rec_type = %r.rec_type,
-                rec_state = format_recorder_state(r.rec_state),
+                rec_state = ?r.rec_state,
                 "  recorder"
             );
         }
     }
 
-    // ── Helper: build TrCallInfo from CallView ──
+    // ── Helper: build CallInfo from CallView ──
 
-    fn build_call_info_from_view(&self, view: &CallView<'_>) -> trunk_radio::TrCallInfo {
+    fn build_call_info_from_view(&self, view: &CallView<'_>) -> trunk_radio::CallInfo {
         let elapsed = self.state.clock().since(view.start_time());
-        trunk_radio::TrCallInfo {
+        trunk_radio::CallInfo {
             talkgroup: view.talkgroup(),
             call_num: view.call_num(),
             sys_num: view.sys_num(),
@@ -1812,7 +1787,7 @@ impl CallManager {
         }
     }
 
-    fn build_call_data(&self, call_id: CallId) -> TrCallData {
+    fn build_call_data(&self, call_id: CallId) -> CallData {
         let view = self.state.get_call_view(call_id).unwrap();
         let audio_type = if view.is_analog() {
             "analog"
@@ -1824,7 +1799,7 @@ impl CallManager {
 
         let now = crate::call_state::system_time_to_unix(self.state.clock().wall_now());
 
-        TrCallData {
+        CallData {
             talkgroup: view.talkgroup(),
             color_code: 0,
             patched_talkgroups: self
@@ -1865,7 +1840,7 @@ impl CallManager {
             transmission_source_list: Vec::new(),
             transmission_error_list: Vec::new(),
             transmission_list: Vec::new(),
-            status: TrCallDataStatus::Initial,
+            status: CallDataStatus::Initial,
         }
     }
 
@@ -1933,8 +1908,8 @@ impl CallManager {
 mod tests {
     use super::VoiceCounters;
 
-    fn tx(error_count: i64, spike_count: i64, sample_count: i64) -> trunk_radio::TrTransmission {
-        trunk_radio::TrTransmission {
+    fn tx(error_count: i64, spike_count: i64, sample_count: i64) -> trunk_radio::Transmission {
+        trunk_radio::Transmission {
             source: 0,
             talkgroup: 0,
             slot: 0,

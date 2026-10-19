@@ -1,34 +1,30 @@
 //! What the radio and the call state machine say to each other.
-//!
-//! These were the cxx bridge's shared structs; their names and fields are
-//! kept so the state machine, the gRPC bridge and the replay tooling read
-//! the same.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
+/// A unit's doing on the control channel, reported as an event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum TrUnitEventType {
-    Registration = 0,
-    Deregistration = 1,
-    Affiliation = 2,
-    Acknowledge = 3,
-    Location = 4,
-    DataGrant = 5,
-    AnswerRequest = 6,
+pub enum UnitEventType {
+    Registration,
+    Deregistration,
+    Affiliation,
+    Acknowledge,
+    Location,
+    DataGrant,
+    AnswerRequest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
-pub enum TrCallDataStatus {
+pub enum CallDataStatus {
     Initial = 0,
     Success = 1,
     Retry = 2,
     Failed = 3,
 }
 
-impl TrCallDataStatus {
+impl CallDataStatus {
     pub const fn repr(self) -> u8 {
         self as u8
     }
@@ -162,7 +158,7 @@ pub struct Patch {
 
 /// One recording's audio accounting.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct TrTransmission {
+pub struct Transmission {
     pub source: i64,
     pub talkgroup: i64,
     pub slot: u32,
@@ -178,7 +174,7 @@ pub struct TrTransmission {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct TrCallSource {
+pub struct CallSource {
     pub source: i64,
     pub position: f64,
     pub emergency: bool,
@@ -187,7 +183,7 @@ pub struct TrCallSource {
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct TrCallError {
+pub struct CallError {
     pub position: f64,
     pub total_len: f64,
     pub error_count: f64,
@@ -196,7 +192,7 @@ pub struct TrCallError {
 
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::struct_excessive_bools)]
-pub struct TrCallData {
+pub struct CallData {
     pub talkgroup: i64,
     pub color_code: u32,
     pub patched_talkgroups: Vec<u64>,
@@ -222,16 +218,16 @@ pub struct TrCallData {
     pub tdma_slot: i32,
     pub length: f64,
     pub phase2_tdma: bool,
-    pub transmission_source_list: Vec<TrCallSource>,
-    pub transmission_error_list: Vec<TrCallError>,
-    pub transmission_list: Vec<TrTransmission>,
-    pub status: TrCallDataStatus,
+    pub transmission_source_list: Vec<CallSource>,
+    pub transmission_error_list: Vec<CallError>,
+    pub transmission_list: Vec<Transmission>,
+    pub status: CallDataStatus,
 }
 
 /// Live-call info for events (call start, calls active, signal).
 #[derive(Debug, Clone, PartialEq)]
 #[allow(clippy::struct_excessive_bools)]
-pub struct TrCallInfo {
+pub struct CallInfo {
     pub talkgroup: i64,
     pub call_num: i64,
     pub sys_num: i32,
@@ -269,7 +265,7 @@ impl std::fmt::Display for CallId {
 
 /// What a recorder needs to know to start a call.
 #[derive(Debug, Clone, PartialEq)]
-pub struct TrRecorderConfig {
+pub struct RecorderConfig {
     pub talkgroup: i64,
     pub call_num: i64,
     /// Where to tune (software clock correction already applied).
@@ -286,37 +282,35 @@ pub struct TrRecorderConfig {
 
 /// What stopping a recorder reports.
 #[derive(Debug, Clone, Default, PartialEq)]
-pub struct TrStopRecordingResult {
+pub struct StopReport {
     pub freq_error: i32,
     pub recorder_pwr: f64,
     pub has_recorder: bool,
 }
 
 #[derive(Debug, Clone, PartialEq)]
-pub struct TrRecorderStatus {
+pub struct RecorderStatus {
     pub source_num: i32,
     pub source_center: f64,
     pub source_device: String,
     pub rec_num: i32,
     pub rec_type: String,
-    pub rec_state: i32,
+    pub rec_state: RecorderState,
 }
 
-/// trunk-recorder's recorder states, as the status log prints them.
+/// What a recorder is doing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(i32)]
 pub enum RecorderState {
-    Recording = 1,
-    Inactive = 2,
-    Active = 3,
-    Idle = 4,
-    Stopped = 6,
-    Available = 7,
+    /// Started on a call, no audio yet.
+    Idle,
+    Recording,
+    /// Free for a call.
+    Available,
 }
 
 /// A conventional channel, for a dedicated recorder.
 #[derive(Debug, Clone, PartialEq)]
-pub struct TrChannelConfig {
+pub struct ChannelConfig {
     pub id: i64,
     pub freq: f64,
     pub tone: f64,
@@ -326,7 +320,7 @@ pub struct TrChannelConfig {
 
 /// A P25 voice call's outcome, when it ends (metrics).
 #[derive(Debug, Clone, PartialEq)]
-pub struct TrCallReport {
+pub struct CallReport {
     pub system: String,
     pub recorder: i32,
     pub talkgroup: i64,

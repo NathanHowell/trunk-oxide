@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::{Mutex, PoisonError};
 
-use crate::types::TrCallReport;
+use crate::types::CallReport;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Phase {
@@ -37,7 +37,7 @@ pub struct CallTally {
 
 static CALLS: Mutex<BTreeMap<(String, Phase), CallTally>> = Mutex::new(BTreeMap::new());
 
-pub fn observe_call(report: &TrCallReport) {
+pub fn observe_call(report: &CallReport) {
     let phase = if report.phase2 {
         Phase::Two
     } else {

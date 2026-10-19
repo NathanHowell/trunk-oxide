@@ -9,13 +9,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result};
 use num_complex::Complex32;
-use trunk_channelizer::{ConditioningSettings, ConditioningSpec, DetectorConfig, NARROW};
+use trunk_channelizer::{ConditioningSettings, DetectorConfig, NARROW};
 use trunk_p25::Modulation;
 use trunk_sdr::{Running, Stream};
 
 use crate::ChannelizerStats;
 use crate::p25::{ControlChannel, ControlSlot};
-use crate::recorder::{Chz, EXCESS_BW_PUB, NARROW_RATE};
+use crate::recorder::{Chz, NARROW_RATE, p25_conditioning};
 use crate::types::{AudioSink, Decoded, DetectedSignal, EventSender, RadioEvent};
 
 /// How long a block read waits before the thread checks for a stop.
@@ -250,16 +250,9 @@ impl Source {
         tap_base: &str,
     ) -> usize {
         let port = self.alloc_port();
-        let cfg = self.channelizer.config();
         self.channelizer.set_slot_conditioning(
             port,
-            ConditioningSpec {
-                sps: 5,
-                excess_bw: EXCESS_BW_PUB,
-                in_rate: cfg.out_rate(NARROW),
-                out_rate: NARROW_RATE,
-                squelch: None,
-            },
+            p25_conditioning(self.channelizer.config(), false, false),
         );
         let channel = ControlChannel {
             system: system.to_owned(),

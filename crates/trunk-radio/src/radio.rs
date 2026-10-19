@@ -13,8 +13,8 @@ use trunk_sdr::{Running, Stream};
 use crate::recorder::{DB_UNSET, Kind, Recorder, Slot, SystemParams};
 use crate::source::Source;
 use crate::types::{
-    AudioSink, CallId, EventSender, TrChannelConfig, TrRecorderConfig, TrRecorderStatus,
-    TrStopRecordingResult, TrTransmission,
+    AudioSink, CallId, ChannelConfig, EventSender, RecorderConfig, RecorderStatus, StopReport,
+    Transmission,
 };
 
 #[derive(Clone, Debug, Default)]
@@ -357,7 +357,7 @@ impl Radio {
         &self,
         sys_num: i32,
         source_idx: i32,
-        channel: &TrChannelConfig,
+        channel: &ChannelConfig,
     ) -> Result<i32> {
         let mut i = self.lock();
         let kind = match usize::try_from(sys_num)
@@ -420,7 +420,7 @@ impl Radio {
         source_idx: i32,
         call_id: CallId,
         analog: bool,
-        cfg: &TrRecorderConfig,
+        cfg: &RecorderConfig,
     ) -> Option<i32> {
         let mut i = self.lock();
         let sys_num = i.calls.get(&call_id)?.sys_num;
@@ -447,7 +447,7 @@ impl Radio {
 
     /// Stop `rec`, sending the audio its audibility hold still kept under
     /// the call before the state machine ends it.
-    fn stop_recorder(&self, rec: &mut Recorder) -> TrStopRecordingResult {
+    fn stop_recorder(&self, rec: &mut Recorder) -> StopReport {
         let s = rec.stop();
         if let Some((call, tail)) = &s.tail
             && !tail.is_empty()
@@ -478,17 +478,17 @@ impl Radio {
 
     /// Stop the call's recorder (the binding stays until the call is removed
     /// so its transmission list can still be read).
-    pub fn stop_recording(&self, call_id: CallId) -> TrStopRecordingResult {
+    pub fn stop_recording(&self, call_id: CallId) -> StopReport {
         let mut i = self.lock();
         let Some(r) = Self::bound(&i, call_id) else {
-            return TrStopRecordingResult::default();
+            return StopReport::default();
         };
         let rec = &mut i.recorders[r];
         if rec.call() == Some(call_id) {
             self.stop_recorder(rec)
         } else {
             // Stopped already (and possibly recording another call now).
-            TrStopRecordingResult {
+            StopReport {
                 freq_error: rec.freq_error(),
                 recorder_pwr: rec.pwr_db(),
                 has_recorder: true,
@@ -496,7 +496,7 @@ impl Radio {
         }
     }
 
-    pub fn transmission_list(&self, call_id: CallId) -> Vec<TrTransmission> {
+    pub fn transmission_list(&self, call_id: CallId) -> Vec<Transmission> {
         let i = self.lock();
         Self::bound(&i, call_id).map_or_else(Vec::new, |r| {
             let rec = &i.recorders[r];
@@ -510,7 +510,7 @@ impl Radio {
 
     /// Start a conventional call's recorder (the first time, and again
     /// after each idle timeout).
-    pub fn restart(&self, call_id: CallId, cfg: &TrRecorderConfig) {
+    pub fn restart(&self, call_id: CallId, cfg: &RecorderConfig) {
         let mut i = self.lock();
         let Some(r) = Self::bound(&i, call_id) else {
             return;
@@ -563,20 +563,20 @@ impl Radio {
 
     // ── Status ──
 
-    pub fn recorder_status(&self) -> Vec<TrRecorderStatus> {
+    pub fn recorder_status(&self) -> Vec<RecorderStatus> {
         let i = self.lock();
-        let mut out: Vec<TrRecorderStatus> = i
+        let mut out: Vec<RecorderStatus> = i
             .recorders
             .iter()
             .map(|r| {
                 let s = &i.sources[r.source];
-                TrRecorderStatus {
+                RecorderStatus {
                     source_num: s.idx,
                     source_center: s.center_hz,
                     source_device: s.device.clone(),
                     rec_num: r.num,
                     rec_type: r.type_string().into(),
-                    rec_state: r.state() as i32,
+                    rec_state: r.state(),
                 }
             })
             .collect();
@@ -613,7 +613,7 @@ impl Drop for Radio {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::RadioEvent;
+    use crate::types::{RadioEvent, RecorderState};
     use num_complex::Complex32;
 
     struct NoAudio;
@@ -683,7 +683,7 @@ mod tests {
         assert_eq!(radio.available_recorders(0, false), 2);
         assert_eq!(radio.available_recorders(0, true), 1);
         radio.create_call(CallId(11), 0);
-        let cfg = TrRecorderConfig {
+        let cfg = RecorderConfig {
             talkgroup: 929,
             call_num: 1,
             freq: 771_881_250.0,
@@ -708,7 +708,7 @@ mod tests {
                     0,
                     CallId(12),
                     false,
-                    &TrRecorderConfig {
+                    &RecorderConfig {
                         phase2_tdma: true,
                         call_id: CallId(12),
                         ..cfg
@@ -729,7 +729,11 @@ mod tests {
         assert_eq!(radio.current_control_channel(0), 772_031_250.0);
         let status = radio.recorder_status();
         assert_eq!(status.len(), 3);
-        assert!(status.iter().all(|s| s.rec_state == 7));
+        assert!(
+            status
+                .iter()
+                .all(|s| s.rec_state == RecorderState::Available)
+        );
         std::thread::sleep(std::time::Duration::from_millis(300));
         assert!(radio.check_sources().is_ok());
     }
@@ -750,7 +754,7 @@ mod tests {
                 digital_levels: 1.0,
             })
             .unwrap();
-        let ch = TrChannelConfig {
+        let ch = ChannelConfig {
             id: 2,
             freq: 771_600_000.0,
             tone: 162.2,
@@ -762,7 +766,7 @@ mod tests {
         assert_eq!(radio.recorder_num(CallId(5)), num);
         // the pool is untouched
         assert_eq!(radio.available_recorders(0, true), 1);
-        let cfg = TrRecorderConfig {
+        let cfg = RecorderConfig {
             talkgroup: 2,
             call_num: 1,
             freq: ch.freq,

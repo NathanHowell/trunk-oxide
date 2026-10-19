@@ -30,7 +30,7 @@ cargo fmt
 ## Workspace Structure
 
 - **trunk-oxide** — Main binary. Loads TOML config, calibrates and opens the sources, builds the `trunk-radio::Radio`, and runs the call state machine (`call_state.rs` pure, `call_manager.rs` executor) on a monitor thread inside tokio; gRPC/timers/signals on tokio.
-- **trunk-radio** — The radio: sources (one DSP thread each) feeding shared channelizers; recorder pool (P25 voice via trunk-p25, analog via trunk-fm) and control-channel decoders on channelizer slots; `Radio` is the API the state machine drives (calls bound to recorders). `types.rs` keeps the old bridge struct names (`TrTrunkMessage`, `TrCallData`, …).
+- **trunk-radio** — The radio: sources (one DSP thread each) feeding shared channelizers; recorder pool (P25 voice via trunk-p25, analog via trunk-fm) and control-channel decoders on channelizer slots; `Radio` is the API the state machine drives (calls bound to recorders). `types.rs` holds what the radio and the state machine say to each other (`TrunkMessage`/`Trunking`, `RadioEvent`, `CallId`, `CallData`, …).
 - **trunk-oxide-proto** / **trunk-transcriber-proto** — Protobuf definitions compiled with tonic-prost-build. `trunk-transcriber-proto` defines a generic `Transcriber` gRPC service implemented by both speech-to-text backends.
 - **trunk-oxide-grpc** — EventBridge: central hub that receives call events and audio and serves them over gRPC (Unix socket).
 - **trunk-config** — TOML config parser with CSV overlay support for talkgroups/channels.

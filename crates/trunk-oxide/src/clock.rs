@@ -2,7 +2,7 @@
 //!
 //! Everything inside runs on monotonic [`Instant`]s from [`Clock::now`].
 //! Wall time exists only at the edge, where a call's start or a segment is
-//! reported (Discord, gRPC, `TrCallData`): [`Clock::wall`] maps an instant
+//! reported (Discord, gRPC, `CallData`): [`Clock::wall`] maps an instant
 //! to wall time through one anchor taken when the clock was made, so
 //! reported times never step backwards with NTP and a duration is always
 //! the difference of two instants.

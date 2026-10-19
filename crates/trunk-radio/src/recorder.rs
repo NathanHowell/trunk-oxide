@@ -26,8 +26,8 @@ use crate::fm;
 use crate::p25_calls;
 use crate::p25_voice::P25VoiceHandle;
 use crate::types::{
-    CallCounts, CallId, Decoded, RadioEvent, RecorderState, Squelch, TrCallReport,
-    TrRecorderConfig, TrStopRecordingResult, TrTransmission, VoiceTagKind,
+    CallCounts, CallId, CallReport, Decoded, RadioEvent, RecorderConfig, RecorderState, Squelch,
+    StopReport, Transmission, VoiceTagKind,
 };
 
 /// The channelizer as the recorders use it.
@@ -41,7 +41,24 @@ pub const WIDE_RATE: f64 = 96_000.0;
 const P25_AUDIO_RATE: f64 = 8_000.0;
 /// Conditioner roll-off, as `channel_control` set it.
 const EXCESS_BW: f32 = 0.2;
-pub(crate) const EXCESS_BW_PUB: f32 = EXCESS_BW;
+
+/// How a P25 slot of `cfg`'s channelizer is conditioned: 5 samples per
+/// symbol for phase 1 (4800 baud), 4 for phase 2 (6000), and the power
+/// squelch only on a conventional channel (a trunked call has the control
+/// channel to say when it ends).
+pub(crate) fn p25_conditioning(
+    cfg: &trunk_channelizer::Config,
+    phase2: bool,
+    conventional: bool,
+) -> ConditioningSpec {
+    ConditioningSpec {
+        sps: if phase2 { 4 } else { 5 },
+        excess_bw: EXCESS_BW,
+        in_rate: cfg.out_rate(NARROW),
+        out_rate: NARROW_RATE,
+        squelch: conventional.then_some(SquelchMode::DIGITAL),
+    }
+}
 /// The analog channel's width, for its filter (cutoff `max_dev`,
 /// transition half of this).
 const ANALOG_BANDWIDTH_HZ: f64 = 12_000.0;
@@ -152,14 +169,14 @@ impl Accounting {
         }
     }
 
-    fn transmission(&self) -> Option<TrTransmission> {
+    fn transmission(&self) -> Option<Transmission> {
         if self.sample_count == 0 {
             return None;
         }
         let secs = |t: SystemTime| {
             i64::try_from(t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())).unwrap_or(0)
         };
-        Some(TrTransmission {
+        Some(Transmission {
             source: 0,
             talkgroup: self.talkgroup,
             slot: 0,
@@ -176,9 +193,9 @@ impl Accounting {
     }
 
     /// A P25 call's outcome, for the metrics.
-    fn report(&self, recorder: i32) -> TrCallReport {
+    fn report(&self, recorder: i32) -> CallReport {
         let t = self.transmission();
-        TrCallReport {
+        CallReport {
             system: self.system.clone(),
             recorder,
             talkgroup: self.talkgroup,
@@ -547,7 +564,7 @@ pub struct Slot<'a> {
 /// the audio the audibility hold still kept, to send under the call before
 /// the call ends.
 pub struct Stopped {
-    pub result: TrStopRecordingResult,
+    pub result: StopReport,
     pub tail: Option<(CallId, Vec<i16>)>,
 }
 
@@ -564,13 +581,7 @@ impl Recorder {
         ) = match kind {
             Kind::P25 => (
                 NARROW,
-                ConditioningSpec {
-                    sps: 5,
-                    excess_bw: EXCESS_BW,
-                    in_rate: cfg.out_rate(NARROW),
-                    out_rate: NARROW_RATE,
-                    squelch: conventional.then_some(SquelchMode::DIGITAL),
-                },
+                p25_conditioning(cfg, false, conventional),
                 Box::new(P25Slot {
                     num,
                     voice: P25VoiceHandle::new(NARROW_RATE, num),
@@ -663,7 +674,7 @@ impl Recorder {
 
     /// Record `cfg`'s call. A pool recorder enables its slot; a conventional
     /// one waits for [`Self::set_enabled`].
-    pub fn start(&mut self, cfg: &TrRecorderConfig, sys: &SystemParams) -> bool {
+    pub fn start(&mut self, cfg: &RecorderConfig, sys: &SystemParams) -> bool {
         if self.call.is_some() {
             tracing::error!(
                 rec_num = self.num,
@@ -682,13 +693,7 @@ impl Recorder {
         if self.kind == Kind::P25 {
             self.chz.set_slot_conditioning(
                 self.port,
-                ConditioningSpec {
-                    sps: if cfg.phase2_tdma { 4 } else { 5 },
-                    excess_bw: EXCESS_BW,
-                    in_rate: self.chz.config().out_rate(NARROW),
-                    out_rate: NARROW_RATE,
-                    squelch: self.conventional.then_some(SquelchMode::DIGITAL),
-                },
+                p25_conditioning(self.chz.config(), cfg.phase2_tdma, self.conventional),
             );
         } else {
             self.chz
@@ -730,7 +735,7 @@ impl Recorder {
     /// Stop recording: the slot is disabled and the decoder told; returns
     /// the FLL error and power the call ends with, and the held audio.
     pub fn stop(&mut self) -> Stopped {
-        let result = TrStopRecordingResult {
+        let result = StopReport {
             freq_error: self.freq_error(),
             recorder_pwr: self.pwr_db(),
             has_recorder: true,
@@ -779,7 +784,7 @@ impl Recorder {
         lock(&self.rec).as_ref().map(|r| r.acct.clone())
     }
 
-    pub fn transmission_list(&self) -> Vec<TrTransmission> {
+    pub fn transmission_list(&self) -> Vec<Transmission> {
         self.accounting()
             .and_then(|a| a.transmission())
             .into_iter()
@@ -889,7 +894,7 @@ mod tests {
             digital_levels: 1.0,
         };
         assert!(rec.start(
-            &TrRecorderConfig {
+            &RecorderConfig {
                 talkgroup: 2,
                 call_num: 1,
                 freq: 488_761_750.0,

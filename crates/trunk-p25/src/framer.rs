@@ -8,7 +8,8 @@
 //! keeps working far below the BCH decoder's limit.
 
 use crate::bch;
-use crate::symbols::{FRAME_SYNC, LEVELS, SYNC_DIBITS, dist2, is_status, slice};
+use crate::symbols::{FRAME_SYNC, FRAME_SYNC_MASK, LEVELS, SYNC_DIBITS, dist2, is_status, slice};
+use crate::trellis::BLOCK_DIBITS;
 use crate::types::Nac;
 
 /// Bit errors allowed in a sync found by search.
@@ -22,9 +23,33 @@ const NID_LEARN_ERRORS: u32 = 4;
 /// matched against the learned NAC. Codewords sharing a NAC are ≥ 23 apart.
 const NID_ML_ERRORS: u32 = 16;
 
+/// Dibits of the NID: a 64-bit word, the status dibit inside it not counted
+/// (BAAA-A §8.5).
+pub const NID_DIBITS: usize = 32;
+pub const NID_BITS: usize = 2 * NID_DIBITS;
+/// The DUID occupies the low bits of the BCH information word, under the NAC
+/// (BAAA-A §8.5, Table 8-3).
+const DUID_BITS: u32 = 4;
+const DUID_MASK: u16 = (1 << DUID_BITS) - 1;
+
 const NID_START: usize = SYNC_DIBITS;
 /// Sync, NID and the status dibit inside the NID.
-pub const HEADER_DIBITS: usize = SYNC_DIBITS + 33;
+pub const HEADER_DIBITS: usize = SYNC_DIBITS + NID_DIBITS + 1;
+
+/// Data unit lengths in dibits, sync, NID, nulls and status symbols included.
+/// Header data unit: 792 bits (BAAA-A §8.2.1).
+pub const HDU_DIBITS: usize = 396;
+/// Logical link data unit 1 or 2: 1728 bits (BAAA-A §8.2.2).
+pub const LDU_DIBITS: usize = 864;
+/// Terminator without link control: sync, NID, 28 nulls (BAAA-A §8.2.3).
+pub const TDU_DIBITS: usize = 72;
+/// Terminator with link control: sync, NID, 288-bit LC, 20 nulls (BAAA-A
+/// §8.2.3).
+pub const TDULC_DIBITS: usize = 216;
+/// A TSDU of three TSBKs: ten micro-slots (AABB-B §5). One- and two-TSBK
+/// TSDUs are five and eight micro-slots, but every TSDU is framed at this
+/// length; a shorter one ends at the next sync.
+pub const TSDU_TRIPLE_DIBITS: usize = 360;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 #[repr(u8)]
@@ -62,7 +87,9 @@ impl Duid {
         })
     }
 
-    /// The NID's 64th bit (TIA-102.BAAC): set for voice frames only.
+    /// The NID's 64th bit, P (BAAA-A §8.5.1, Table 8-4; BAAC-A §2.11). The
+    /// generator matrix (BAAA-A §8.5.2) makes it S1 ⊕ S0: of these DUIDs, set
+    /// for the two LDUs only.
     pub const fn parity(self) -> u64 {
         match self {
             Self::Ldu1 | Self::Ldu2 => 1,
@@ -74,19 +101,23 @@ impl Duid {
     /// their header says how many blocks follow.
     pub const fn dibits(self) -> usize {
         match self {
-            Self::Hdu => 396,
-            Self::Tdu => 72,
-            Self::Ldu1 | Self::Ldu2 => 864,
-            Self::Tsdu => 360,
+            Self::Hdu => HDU_DIBITS,
+            Self::Tdu => TDU_DIBITS,
+            Self::Ldu1 | Self::Ldu2 => LDU_DIBITS,
+            Self::Tsdu => TSDU_TRIPLE_DIBITS,
             Self::Pdu => frame_dibits_for(1),
-            Self::TduLc => 216,
+            Self::TduLc => TDULC_DIBITS,
         }
     }
 }
 
 /// Dibits (including status) a frame needs to carry `blocks` 98-dibit blocks.
+///
+/// This stops at the last data dibit (and a status dibit right after it); the
+/// trailing nulls that fill a packet out to its micro-slot (BAAA-A §8.2.4)
+/// are not counted.
 pub const fn frame_dibits_for(blocks: usize) -> usize {
-    let data = SYNC_DIBITS + 32 + 98 * blocks;
+    let data = SYNC_DIBITS + NID_DIBITS + BLOCK_DIBITS * blocks;
     let mut total = 0;
     let mut have = 0;
     while have < data {
@@ -104,7 +135,7 @@ pub const fn frame_dibits_for(blocks: usize) -> usize {
 
 /// The 64-bit NID: BCH codeword of NAC and DUID, then the parity bit.
 pub const fn nid_word(nac: Nac, duid: Duid) -> u64 {
-    (bch::encode((nac.get() << 4) | duid as u16) << 1) | duid.parity()
+    (bch::encode((nac.get() << DUID_BITS) | duid as u16) << 1) | duid.parity()
 }
 
 /// A complete (or truncated) frame.
@@ -224,7 +255,7 @@ impl Framer {
     pub fn push(&mut self, s: f32, out: &mut Vec<Frame>) {
         let idx = self.n;
         self.n += 1;
-        self.acc = ((self.acc << 2) | u64::from(slice(s))) & ((1 << 48) - 1);
+        self.acc = ((self.acc << 2) | u64::from(slice(s))) & FRAME_SYNC_MASK;
         #[allow(clippy::cast_possible_truncation)]
         {
             self.recent[(idx % SYNC_DIBITS as u64) as usize] = s;
@@ -270,7 +301,7 @@ impl Framer {
                 start,
                 sync_errors: errors,
                 seen: SYNC_DIBITS,
-                nid: Vec::with_capacity(32),
+                nid: Vec::with_capacity(NID_DIBITS),
                 header: None,
                 body: Vec::new(),
                 raw: self.recent_sync(),
@@ -400,16 +431,16 @@ fn decode_nid(
     learned: Option<Nac>,
     candidate: &mut Option<Nac>,
 ) -> Option<NidResult> {
-    debug_assert_eq!(soft.len(), 32);
+    debug_assert_eq!(soft.len(), NID_DIBITS);
     let hard = soft
         .iter()
         .fold(0u64, |acc, &s| (acc << 2) | u64::from(slice(s)));
 
     let hard_result = bch::decode(hard >> 1).and_then(|(cw, errors)| {
         let info = bch::info(cw);
-        let nac = Nac::new(info >> 4)?;
+        let nac = Nac::new(info >> DUID_BITS)?;
         #[allow(clippy::cast_possible_truncation)]
-        let duid = Duid::from_bits((info & 0xf) as u8)?;
+        let duid = Duid::from_bits((info & DUID_MASK) as u8)?;
         (hard & 1 == duid.parity()).then_some(NidResult {
             duid,
             nac,
@@ -442,7 +473,7 @@ fn decode_nid(
             .enumerate()
             .map(|(i, &s)| {
                 #[allow(clippy::cast_possible_truncation)]
-                let d = ((word >> (62 - 2 * i)) & 3) as u8;
+                let d = ((word >> (NID_BITS - 2 - 2 * i)) & 3) as u8;
                 dist2(s, d)
             })
             .sum();
@@ -483,8 +514,8 @@ mod tests {
 
     #[test]
     fn frame_lengths_are_consistent_with_status_spacing() {
-        assert_eq!(frame_dibits_for(3), 360);
-        assert_eq!(testgen::tsdu(NAC, &[[0; 10]; 3]).len(), 360);
+        assert_eq!(frame_dibits_for(3), TSDU_TRIPLE_DIBITS);
+        assert_eq!(testgen::tsdu(NAC, &[[0; 10]; 3]).len(), TSDU_TRIPLE_DIBITS);
         assert_eq!(testgen::nid_info(NAC, Duid::Tsdu), (NAC.get() << 4) | 7);
     }
 

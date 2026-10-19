@@ -19,7 +19,7 @@
 //! check changes nothing, where op25 may take a miscorrected one.
 
 use crate::control::Received;
-use crate::tdma::mac::MacPdu;
+use crate::tdma::mac::{END_PTT_GROUP, MacPdu};
 use crate::tdma::{AmbeFrame, BurstContent, BurstType, MacOpcode, Op25View, TdmaEvent};
 use crate::voice::regenerate::SpikeDetector;
 use crate::voice::signalling::ALGID_CLEAR;
@@ -372,9 +372,53 @@ const MAC_MSG_LEN: [u8; 256] = [
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, //
     11, 0, 0, 8, 15, 12, 15, 32, 12, 12, 0, 27, 14, 29, 29, 32, //
     0, 0, 0, 0, 0, 0, 9, 0, 14, 29, 11, 27, 14, 0, 40, 11, //
+    // 0xe4: BBAC-1 Table 8-2 says 14, but its Fig. 8-43 (and length octet) 17.
     28, 0, 0, 14, 17, 14, 0, 0, 16, 8, 11, 0, 13, 19, 0, 0, //
     0, 0, 16, 14, 0, 0, 12, 0, 22, 0, 11, 13, 11, 0, 15, 0, //
 ];
+
+/// MAC message opcodes (B1 B2 MCO) matched here (BBAC §8.3 Table 8-2).
+const NULL_INFORMATION: u8 = 0x00;
+const GRP_V_CH_USR_ABBREVIATED: u8 = 0x01;
+const GRP_V_CH_USR_EXTENDED: u8 = 0x21;
+const INDIRECT_GROUP_PAGING: u8 = 0x11;
+const INDIVIDUAL_PAGING: u8 = 0x12;
+
+/// B1 B2: the opcode's top two bits, and the manufacturer partition
+/// (BBAC §8.2.3 Table 8-1).
+const B1B2_SHIFT: u32 = 6;
+const B1B2_MANUFACTURER: u8 = 0b10;
+
+/// A message's length octet holds the length in its low 6 bits (BBAC §8.3).
+const LENGTH_MASK: u8 = 0x3f;
+/// Manufacturer message: MFID in octet 2, length in octet 3 (BBAC-1
+/// §8.3.1.37 Fig. 8-63); offsets from the opcode octet.
+const MFR_MFID: usize = 1;
+const MFR_LENGTH: usize = 2;
+
+/// Paging messages: the ID count less one in the low 2 bits of octet 2
+/// (BBAC §8.3.1.38–39).
+const PAGING_LEN_MASK: u8 = 0b11;
+
+/// Individual Paging with Priority: 2 octets, then 3 per ID (BBAC
+/// §8.3.1.38 Table 8-4).
+const fn individual_paging_len(len: u8) -> usize {
+    (len as usize + 1) * 3 + 2
+}
+
+/// Indirect Group Paging without Priority: 2 octets, then 2 per ID (BBAC
+/// §8.3.1.39 Table 8-5).
+const fn group_paging_len(len: u8) -> usize {
+    (len as usize + 1) * 2 + 2
+}
+
+/// Group Voice Channel User, offsets from the opcode octet: group address
+/// octets 3–4, source address 5–7 (abbreviated), and in the extended format
+/// the Source SUID's source ID, octets 12–14 (BBAC §8.3.1.2 Figs. 8-13,
+/// 8-14, 8-11).
+const GVCU_GROUP: usize = 2;
+const GVCU_SOURCE: usize = 4;
+const GVCU_SUID_SOURCE: usize = 11;
 
 /// Phase 2: op25's `p25p2_tdma`, for one logical channel.
 #[derive(Clone, Debug)]
@@ -485,8 +529,9 @@ impl Phase2Assembler {
                 }
             }
             MacOpcode::EndPtt => {
-                if b.len() >= 18 {
-                    heard(-1, i64::from(u16::from_be_bytes([b[16], b[17]])), out);
+                if b.len() >= END_PTT_GROUP.end {
+                    let g = END_PTT_GROUP.start;
+                    heard(-1, i64::from(u16::from_be_bytes([b[g], b[g + 1]])), out);
                 }
                 self.cached = Cached::default();
             }
@@ -516,28 +561,30 @@ impl Phase2Assembler {
         let mut p = 1;
         while p < b.len() {
             let op = b[p];
-            let b1b2 = op >> 6;
+            let b1b2 = op >> B1B2_SHIFT;
             let mut mfid = 0;
+            let (grp, src, suid) = (p + GVCU_GROUP, p + GVCU_SOURCE, p + GVCU_SUID_SOURCE);
             let len = match op {
-                0x00 => b.len() - p,
-                0x01 => {
-                    let group = u16::from_be_bytes([at(p + 2), at(p + 3)]);
-                    let source = u32::from_be_bytes([0, at(p + 4), at(p + 5), at(p + 6)]);
+                NULL_INFORMATION => b.len() - p,
+                GRP_V_CH_USR_ABBREVIATED => {
+                    let group = u16::from_be_bytes([at(grp), at(grp + 1)]);
+                    let source = u32::from_be_bytes([0, at(src), at(src + 1), at(src + 2)]);
                     self.heard(i64::from(source), i64::from(group), now_ms, out);
-                    7
+                    usize::from(MAC_MSG_LEN[usize::from(op)])
                 }
-                0x08 => usize::from(at(p + 1) & 0x3f),
-                0x11 => (usize::from(at(p + 1) & 3) + 1) * 2 + 2,
-                0x12 => (usize::from(at(p + 1) & 3) + 1) * 3 + 2,
-                0x21 => {
-                    let group = u16::from_be_bytes([at(p + 2), at(p + 3)]);
-                    let source = u32::from_be_bytes([0, at(p + 11), at(p + 12), at(p + 13)]);
+                // Not in BBAC or BBAC-1; op25 reads its length octet.
+                0x08 => usize::from(at(p + 1) & LENGTH_MASK),
+                INDIRECT_GROUP_PAGING => group_paging_len(at(p + 1) & PAGING_LEN_MASK),
+                INDIVIDUAL_PAGING => individual_paging_len(at(p + 1) & PAGING_LEN_MASK),
+                GRP_V_CH_USR_EXTENDED => {
+                    let group = u16::from_be_bytes([at(grp), at(grp + 1)]);
+                    let source = u32::from_be_bytes([0, at(suid), at(suid + 1), at(suid + 2)]);
                     self.heard(i64::from(source), i64::from(group), now_ms, out);
-                    14
+                    usize::from(MAC_MSG_LEN[usize::from(op)])
                 }
-                _ if b1b2 == 2 => {
-                    mfid = at(p + 1);
-                    usize::from(at(p + 2) & 0x3f)
+                _ if b1b2 == B1B2_MANUFACTURER => {
+                    mfid = at(p + MFR_MFID);
+                    usize::from(at(p + MFR_LENGTH) & LENGTH_MASK)
                 }
                 _ => usize::from(MAC_MSG_LEN[usize::from(op)]),
             };

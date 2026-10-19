@@ -12,6 +12,7 @@ use crate::fec::{
     BlockCode, GOLAY_18, GOLAY_24, HAMMING_10, RS_24_12, RS_24_16, RS_36_20, ReedSolomon,
 };
 use crate::gf64::Gf64;
+use crate::trunking::osp::{mfid, service_options};
 
 /// A decoded word and what it took.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,26 +67,51 @@ pub enum LcMessage {
     },
 }
 
+/// Standard link control opcodes, by their TIA-102.AABF-A aliases (§7.3,
+/// LCO table).
+pub mod lco {
+    /// Group Voice Channel User (§7.3.1; explicit MFID).
+    pub const LC_GRP_V_CH_USR: u8 = 0x00;
+    /// Group Voice Channel Update (§7.3.2; implicit MFID).
+    pub const LC_GRP_V_CH_UPDT: u8 = 0x02;
+    /// Group Voice Channel Update – Explicit (§7.3.4; implicit MFID). The
+    /// alias is the standard's, without its `_V`.
+    pub const LC_GRP_CH_UPDT_EXP: u8 = 0x04;
+}
+
 /// A 72-bit link-control word.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LinkControl(pub [u8; 9]);
 
-/// Manufacturer IDs whose LCO 0 is the standard group voice user.
-const STANDARD_MFIDS: [u8; 4] = [0x00, 0x01, 0x90, 0xa4];
+/// Manufacturer IDs whose LCO 0 is the standard group voice user (the
+/// standard two, and Motorola and Harris as op25 reads them).
+const STANDARD_MFIDS: [u8; 4] = [
+    mfid::STANDARD,
+    mfid::STANDARD_ALT,
+    mfid::MOTOROLA,
+    mfid::HARRIS,
+];
 
 impl LinkControl {
+    /// Protected flag: octet 0, bit 7 (TIA-102.AABF-A §7.1).
+    pub const P: u8 = 0x80;
+    /// Implicit/Explicit MFID Format flag: octet 0, bit 6 (TIA-102.AABF-A §7.1).
+    pub const SF: u8 = 0x40;
+    /// Link Control Opcode: octet 0, bits 5–0 (TIA-102.AABF-A §7.1).
+    pub const LCO: u8 = 0x3f;
+
     /// The word itself is encrypted.
     pub const fn protected(&self) -> bool {
-        self.0[0] & 0x80 != 0
+        self.0[0] & Self::P != 0
     }
 
     /// The manufacturer ID is implicit (standard) rather than in byte 1.
     pub const fn implicit_mfid(&self) -> bool {
-        self.0[0] & 0x40 != 0
+        self.0[0] & Self::SF != 0
     }
 
     pub const fn opcode(&self) -> u8 {
-        self.0[0] & 0x3f
+        self.0[0] & Self::LCO
     }
 
     pub const fn mfid(&self) -> u8 {
@@ -103,13 +129,13 @@ impl LinkControl {
         let b = &self.0;
         Some(if self.implicit_mfid() {
             match self.opcode() {
-                0x02 => LcMessage::GroupVoiceUpdate {
+                lco::LC_GRP_V_CH_UPDT => LcMessage::GroupVoiceUpdate {
                     channel_a: self.u16_at(1),
                     talkgroup_a: self.u16_at(3),
                     channel_b: self.u16_at(5),
                     talkgroup_b: self.u16_at(7),
                 },
-                0x04 => LcMessage::GroupVoiceUpdateExplicit {
+                lco::LC_GRP_CH_UPDT_EXP => LcMessage::GroupVoiceUpdateExplicit {
                     service_options: b[2],
                     talkgroup: self.u16_at(3),
                     transmit: self.u16_at(5),
@@ -119,15 +145,17 @@ impl LinkControl {
             }
         } else {
             match (self.opcode(), b[1]) {
-                (0x00, mfid) if is_standard(mfid) => LcMessage::GroupVoice(GroupVoice {
-                    talkgroup: self.u16_at(4),
-                    source: u32::from_be_bytes([0, b[6], b[7], b[8]]),
-                    emergency: b[2] & 0x80 != 0,
-                    encrypted: b[2] & 0x40 != 0,
-                }),
-                (0x15, 0x90) => LcMessage::MotorolaAlias { header: true },
-                (0x17, 0x90) => LcMessage::MotorolaAlias { header: false },
-                (op @ 0x32..=0x35, 0xa4) => LcMessage::HarrisAlias {
+                (lco::LC_GRP_V_CH_USR, mfid) if is_standard(mfid) => {
+                    LcMessage::GroupVoice(GroupVoice {
+                        talkgroup: self.u16_at(4),
+                        source: u32::from_be_bytes([0, b[6], b[7], b[8]]),
+                        emergency: b[2] & service_options::EMERGENCY != 0,
+                        encrypted: b[2] & service_options::PROTECTED != 0,
+                    })
+                }
+                (0x15, mfid::MOTOROLA) => LcMessage::MotorolaAlias { header: true },
+                (0x17, mfid::MOTOROLA) => LcMessage::MotorolaAlias { header: false },
+                (op @ 0x32..=0x35, mfid::HARRIS) => LcMessage::HarrisAlias {
                     part_b: op & 1 == 1,
                     even: op >= 0x34,
                 },
@@ -148,7 +176,7 @@ const fn is_standard(mfid: u8) -> bool {
     false
 }
 
-/// Algorithm ID meaning "not encrypted".
+/// Algorithm ID meaning "not encrypted" (TIA-102.BAAC-A §2.8).
 pub const ALGID_CLEAR: u8 = 0x80;
 
 /// Encryption sync (LDU2): message indicator, algorithm and key.

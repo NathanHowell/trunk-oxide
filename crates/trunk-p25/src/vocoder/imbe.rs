@@ -39,6 +39,23 @@ impl Default for ImbeVocoder {
     }
 }
 
+/// The largest valid pitch index b̂0; larger values are reserved and the
+/// frame is repeated (TIA-102.BABA §7.7).
+const MAX_PITCH_INDEX: u32 = 207;
+/// The error rate's decay and weight per error: `ε_R(0) = 0.95 ε_R(−1) +
+/// 0.000365 ε_T` (BABA Eq. 96).
+const EPS_R_DECAY: f64 = 0.95;
+const EPS_R_PER_ERROR: f64 = 0.000365;
+/// Frames are muted above this error rate (BABA §7.8).
+const MUTE_EPS_R: f64 = 0.0875;
+/// Frame repeat thresholds: `ε0 ≥ 2` (Eq. 97) and `ε_T ≥ 10 + 40 ε_R`
+/// (Eq. 98). The spec repeats when both hold; op25 when either does.
+const REPEAT_EPS_0: u32 = 2;
+const REPEAT_EPS_T_BASE: f32 = 10.0;
+const REPEAT_EPS_T_PER_RATE: f32 = 40.0;
+/// op25 mutes rather than repeat a fourth frame in a row; BABA has no limit.
+const OP25_MAX_REPEATS: u32 = 3;
+
 /// op25's b̂0 of a frame: the pitch, 0..=207 for voice.
 const fn b0(u: &[u32; 8]) -> u32 {
     ((u[0] >> 4) & 0xfc) | ((u[7] >> 1) & 0x3)
@@ -87,7 +104,7 @@ impl ImbeVocoder {
     /// else the last again (three times at most), else silence.
     fn soft(&mut self, frame: &ImbeFrame) -> Option<Pcm> {
         let u = frame.params.to_op25();
-        self.last = if frame.reliability >= PLAY_MARGIN && b0(&u) <= 207 {
+        self.last = if frame.reliability >= PLAY_MARGIN && b0(&u) <= MAX_PITCH_INDEX {
             self.repeats = 0;
             self.decode_model(&u);
             let se = self.synth.enhance();
@@ -95,7 +112,7 @@ impl ImbeVocoder {
             Decision::Played
         } else {
             self.repeats += 1;
-            if self.repeats < 4 {
+            if self.repeats <= OP25_MAX_REPEATS {
                 self.repeat_last();
                 self.synth.smooth(0.0, 0.0, 0.0);
                 Decision::Repeated
@@ -114,15 +131,19 @@ impl ImbeVocoder {
     /// (silence).
     pub fn decode(&mut self, u: &[u32; 8], e0: u32, et: u32) -> Option<Pcm> {
         let b0 = b0(u);
-        self.error_rate = (0.95 * f64::from(self.error_rate) + 0.000365 * f64::from(et)) as f32;
+        self.error_rate =
+            (EPS_R_DECAY * f64::from(self.error_rate) + EPS_R_PER_ERROR * f64::from(et)) as f32;
         let mut se = 0.0;
-        self.last = if f64::from(self.error_rate) > 0.0875 {
+        self.last = if f64::from(self.error_rate) > MUTE_EPS_R {
             // Muting (7.8).
             Decision::Muted
-        } else if b0 > 207 || e0 >= 2 || et as f32 >= 10.0 + 40.0 * self.error_rate {
+        } else if b0 > MAX_PITCH_INDEX
+            || e0 >= REPEAT_EPS_0
+            || et as f32 >= REPEAT_EPS_T_BASE + REPEAT_EPS_T_PER_RATE * self.error_rate
+        {
             // Repeat (7.7), at most three in a row.
             self.repeats += 1;
-            if self.repeats < 4 {
+            if self.repeats <= OP25_MAX_REPEATS {
                 self.repeat_last();
                 Decision::Repeated
             } else {

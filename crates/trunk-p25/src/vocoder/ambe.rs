@@ -22,6 +22,7 @@
 )]
 
 use std::f64::consts::{LN_2, PI, SQRT_2};
+use std::ops::RangeInclusive;
 
 use super::synth::{HARMONICS, Pcm, SAMPLES_PER_FRAME, Synthesizer};
 use super::tables::{
@@ -46,7 +47,72 @@ pub struct AmbeVocoder {
     synth: Synthesizer,
 }
 
+/// The error rate ε<sub>R</sub> above which frames are muted (TIA-102.BABA-1 §5.7).
 const MAX_ERROR_RATE: f64 = 0.096;
+
+/// ε<sub>R</sub>'s decay from frame to frame (BABA-1 Eq. 56).
+const ERROR_RATE_DECAY: f64 = 0.95;
+/// ε<sub>R</sub>'s weight on the frame's errors ε<sub>T</sub> (BABA-1 Eq. 56).
+const ERROR_RATE_PER_ERROR: f64 = 0.001064;
+
+/// Consecutive invalid frames at which the decoder mutes instead of
+/// repeating (BABA-1 §5.7): three repeats, then silence.
+const MUTE_AFTER_INVALID: u32 = 4;
+
+/// b0 of an erasure frame (BABA-1 Table 4).
+const ERASURE_B0: RangeInclusive<usize> = 120..=123;
+/// b0 of a silence frame (BABA-1 Table 4).
+const SILENCE_B0: RangeInclusive<usize> = 124..=125;
+/// The least b0 of a tone frame (BABA-1 Table 4). One that reaches the
+/// voice path failed `ToneFrame::of`'s tests (trunk-oxide-13y.3).
+const FIRST_TONE_B0: usize = 126;
+
+/// A silence frame's pitch period, ω0 = 2π/32 (BABA-1 Eq. 1).
+const SILENCE_PERIOD: f64 = 32.0;
+/// A silence frame's L (BABA-1 Eq. 2).
+const SILENCE_L: usize = 14;
+
+/// Frame repeat (BABA-1 §5.6): ε0 ≥ 4, or ε0 ≥ 2 (Eq. 57) and ε<sub>T</sub> ≥ 6
+/// (Eq. 58).
+const REPEAT_E0: u32 = 4;
+const REPEAT_E0_WITH_TOTAL: u32 = 2;
+const REPEAT_TOTAL: u32 = 6;
+
+/// Whether a frame's error counts call for a frame repeat (BABA-1 §5.6).
+/// The thresholds are the spec's; the counts given them are op25's, not
+/// the bits corrected or detected (trunk-oxide-13y.2, see
+/// [`crate::tdma::ambe`]'s `op25_golay_23`).
+const fn repeat_for_errors(e0: u32, e1: u32) -> bool {
+    e0 >= REPEAT_E0 || (e0 >= REPEAT_E0_WITH_TOTAL && e0 + e1 >= REPEAT_TOTAL)
+}
+
+/// The previous frame's gain's weight in this one's (BABA-1 Eq. 26).
+const GAIN_PREDICTION: f32 = 0.5;
+/// The previous frame's log amplitudes' weight in the prediction
+/// (BABA-1 Eq. 43).
+const AMPLITUDE_PREDICTION: f32 = 0.65;
+/// Elements of each higher order coefficient vector, so C̃i,k for
+/// 3 ≤ k ≤ 6 (BABA-1 §4.3.2; Eq. 37 as printed says k ≤ 4, a misprint).
+const HOC_LEN: usize = 4;
+const LAST_HOC_K: usize = 2 + HOC_LEN;
+/// An unvoiced amplitude's scale, 0.2046/√ω0 (BABA-1 Eq. 46).
+const UNVOICED_GAIN: f32 = 0.2046;
+/// exp(0.693 Λ) for 2^Λ (BABA-1 Eq. 46).
+const LOG_AMPLITUDE_SCALE: f32 = 0.693;
+
+/// u0[11:6] of a tone frame (BABA-1 §7, Table 10).
+const TONE_MARKER: u16 = 63;
+/// A single tone's frequency step, f1 = 31.25 ID Hz (BABA-1 Table 9).
+const SINGLE_TONE_STEP_HZ: f64 = 31.25;
+/// op25's linear tone amplitude, AD × 75; BABA-1 §7.2 makes AD a log
+/// amplitude, 0.711 dB a step up to +3.17 dBm0 (trunk-oxide-13y.4).
+const OP25_TONE_AMPLITUDE_SCALE: u16 = 75;
+
+/// The error rate and errors op25 gives the adaptive smoothing for phase
+/// 2: none, so it never reacts to errors (trunk-oxide-13y.5; BABA §9 takes
+/// ε<sub>R</sub> and ε<sub>T</sub>).
+const OP25_SMOOTHING_ERROR_RATE: f32 = 0.0;
+const OP25_SMOOTHING_ERRORS: f32 = 0.0;
 
 impl Default for AmbeVocoder {
     fn default() -> Self {
@@ -63,7 +129,7 @@ impl AmbeVocoder {
     pub fn with_policy(policy: Policy) -> Self {
         Self {
             policy,
-            model: Model::INITIAL,
+            model: Model::MBELIB_INITIAL,
             tone: Tone::default(),
             error_rate: 0.0,
             rejected: 0,
@@ -112,6 +178,9 @@ impl AmbeVocoder {
     /// (silence) for errors or too many repeats.
     pub fn decode(&mut self, dibits: &[u8; 36]) -> Option<Pcm> {
         let (u, errors) = self.receive(dibits);
+        // op25's order: the frame is taken in (its model kept, the repeat
+        // count reset) before the error rate mutes it, where BABA-1 §5.7
+        // mutes with the repeat's update instead (trunk-oxide-13y.8).
         let render = self.decide(u, errors) && self.error_rate <= MAX_ERROR_RATE;
         if !render {
             self.last = Decision::Muted;
@@ -138,6 +207,10 @@ impl AmbeVocoder {
             }
             ToneFrame::Erased => self.reject(self.tone_frame),
             ToneFrame::Voice => match self.model.dequantize(&indices(u), errors) {
+                // mbelib's: a silence frame's model replaces the last voice
+                // frame's as the next one's prediction, where BABA-1 Eq. 26
+                // and §4.4.3 predict from voice frames only
+                // (trunk-oxide-13y.1).
                 Some(model) => {
                     self.model = model;
                     self.accept(false)
@@ -154,7 +227,8 @@ impl AmbeVocoder {
 
     fn receive(&mut self, dibits: &[u8; 36]) -> (AmbeParams, [u32; 2]) {
         let (u, errors) = AmbeCodeword::from_dibits(dibits).decode_op25();
-        self.error_rate = 0.95 * self.error_rate + 0.001064 * f64::from(errors[0] + errors[1]);
+        self.error_rate = ERROR_RATE_DECAY * self.error_rate
+            + ERROR_RATE_PER_ERROR * f64::from(errors[0] + errors[1]);
         (u, errors)
     }
 
@@ -168,9 +242,13 @@ impl AmbeVocoder {
     /// A frame that would not decode: the last one again if fewer than four
     /// have been rejected in a row and `repeatable` (the last frame was of
     /// the same kind), else silence.
+    ///
+    /// `repeatable` is op25's: BABA-1 §5.6 and §7.3 repeat whatever the
+    /// last frame was (trunk-oxide-13y.6). Muting is silence, not §5.7's
+    /// comfort noise.
     const fn reject(&mut self, repeatable: bool) -> bool {
         self.rejected += 1;
-        if self.rejected < 4 && repeatable {
+        if self.rejected < MUTE_AFTER_INVALID && repeatable {
             self.last = Decision::Repeated;
             true
         } else {
@@ -190,7 +268,7 @@ impl AmbeVocoder {
         cur.voiced[1..=m.l].copy_from_slice(&m.voiced[1..=m.l]);
         cur.mu[1..=m.l].copy_from_slice(&m.ml[1..=m.l]);
         let se = s.enhance();
-        s.smooth(se, 0.0, 0.0);
+        s.smooth(se, OP25_SMOOTHING_ERROR_RATE, OP25_SMOOTHING_ERRORS);
         let pcm = s.synthesize();
         s.advance();
         pcm
@@ -211,8 +289,10 @@ struct Model {
 }
 
 impl Model {
-    /// `mbe_initMbeParms`.
-    const INITIAL: Self = Self {
+    /// mbelib's (`mbe_initMbeParms`): log2 Ml = 0 and L = 30, where
+    /// BABA-1 §4.4.3 starts from Λ̃l(−1) = 1 and L̃(−1) = 15
+    /// (trunk-oxide-13y.7). γ̃(−1) = 0 is the spec's (Eq. 26).
+    const MBELIB_INITIAL: Self = Self {
         w0: 0.09378,
         l: 30,
         voiced: [false; HARMONICS],
@@ -225,16 +305,17 @@ impl Model {
     /// from this one's; `None` for an erasure (too many errors, or b0 a
     /// value no voice frame has).
     #[allow(clippy::many_single_char_names)]
+    #[allow(clippy::too_many_lines)] // BABA-1 §4.4, equation by equation
     fn dequantize(&self, b: &[usize; 9], [e0, e1]: [u32; 2]) -> Option<Self> {
-        if (120..=123).contains(&b[0]) || e0 >= 4 || (e0 >= 2 && e0 + e1 >= 6) || b[0] >= 126 {
+        if ERASURE_B0.contains(&b[0]) || repeat_for_errors(e0, e1) || b[0] >= FIRST_TONE_B0 {
             return None;
         }
         let mut cur = *self;
-        if b[0] >= 124 {
-            // Silence.
-            cur.w0 = ((2.0 * PI) / 32.0) as f32;
-            cur.l = 14;
-            cur.voiced[1..=14].fill(false);
+        if SILENCE_B0.contains(&b[0]) {
+            // Silence (BABA-1 Eqs. 1–3).
+            cur.w0 = ((2.0 * PI) / SILENCE_PERIOD) as f32;
+            cur.l = SILENCE_L;
+            cur.voiced[1..=SILENCE_L].fill(false);
         } else {
             let f0 = AMBE_W0[b[0]];
             cur.w0 = (f64::from(f0 * 2.0) * PI) as f32;
@@ -245,8 +326,8 @@ impl Model {
             }
         }
         let l_cur = cur.l;
-        let unvoiced_gain = 0.2046f32 / cur.w0.sqrt();
-        cur.gamma = AMBE_GAIN[b[2]] + 0.5 * self.gamma;
+        let unvoiced_gain = UNVOICED_GAIN / cur.w0.sqrt();
+        cur.gamma = AMBE_GAIN[b[2]] + GAIN_PREDICTION * self.gamma;
 
         // The PRBA vector, and from it each block's first two coefficients.
         let mut gm = [0f32; 9];
@@ -279,7 +360,11 @@ impl Model {
         ];
         for i in 1..=4 {
             for k in 3..=ji[i - 1] {
-                cik[i][k] = if k > 6 { 0.0 } else { hoc[i - 1][k - 3] };
+                cik[i][k] = if k > LAST_HOC_K {
+                    0.0
+                } else {
+                    hoc[i - 1][k - 3]
+                };
             }
         }
         let mut tl = [0f32; HARMONICS];
@@ -314,7 +399,7 @@ impl Model {
             deltal[l] = flokl - kl[l] as f32;
             sum43 += (1.0 - deltal[l]) * prev_log2[kl[l]] + deltal[l] * prev_log2[kl[l] + 1];
         }
-        sum43 *= 0.65 / l_cur as f32;
+        sum43 *= AMPLITUDE_PREDICTION / l_cur as f32;
         let mut sum42 = 0f32;
         for &t in &tl[1..=l_cur] {
             sum42 += t;
@@ -323,10 +408,10 @@ impl Model {
         let big_gamma =
             (f64::from(cur.gamma) - 0.5 * ((l_cur as f64).ln() / LN_2) - f64::from(sum42)) as f32;
         for l in 1..=l_cur {
-            let c1 = 0.65 * (1.0 - deltal[l]) * prev_log2[kl[l]];
-            let c2 = 0.65 * deltal[l] * prev_log2[kl[l] + 1];
+            let c1 = AMPLITUDE_PREDICTION * (1.0 - deltal[l]) * prev_log2[kl[l]];
+            let c2 = AMPLITUDE_PREDICTION * deltal[l] * prev_log2[kl[l] + 1];
             cur.log2_ml[l] = tl[l] + c1 + c2 - sum43 + big_gamma;
-            let ml = f64::from(0.693f32 * cur.log2_ml[l]).exp();
+            let ml = f64::from(LOG_AMPLITUDE_SCALE * cur.log2_ml[l]).exp();
             cur.ml[l] = if cur.voiced[l] {
                 ml as f32
             } else {
@@ -366,7 +451,10 @@ enum ToneFrame {
 
 impl ToneFrame {
     fn of(AmbeParams(u): AmbeParams, [e0, e1]: [u32; 2]) -> Self {
-        if (u[0] >> 6) & 0x3f != 63 || u[3] & 0xf != 0 {
+        // The marker is BABA-1 §7's test; u3[3:0] = 0 is mbelib's besides
+        // (§7 sends it, but detects a tone by u0 alone): with an error
+        // there, a tone frame falls through as voice (trunk-oxide-13y.3).
+        if (u[0] >> 6) & 0x3f != TONE_MARKER || u[3] & 0xf != 0 {
             return Self::Voice;
         }
         let amplitude = ((u[0] & 0x3f) << 1) + ((u[3] >> 4) & 0x1);
@@ -377,7 +465,7 @@ impl ToneFrame {
             ((u[2] & 0x7f) << 1) + ((u[3] >> 13) & 0x1),
             (u[3] & 0x1fe0) >> 5,
         ];
-        if e0 >= 4 || (e0 >= 2 && e0 + e1 >= 6) {
+        if repeat_for_errors(e0, e1) {
             return Self::Erased;
         }
         let Some(agreed) = id
@@ -404,7 +492,7 @@ fn tone_frequencies(id: u16) -> Option<(f32, f32)> {
     match id {
         // Single tones.
         5..=122 => {
-            let f = (31.25 * f64::from(id)) as f32;
+            let f = (SINGLE_TONE_STEP_HZ * f64::from(id)) as f32;
             Some((f, f))
         }
         // DTMF.
@@ -478,7 +566,7 @@ impl Tone {
         }
         let step1 = (2.0 * PI * f64::from(f1) / 8000.0) as f32;
         let step2 = (2.0 * PI * f64::from(f2) / 8000.0) as f32;
-        let amplitude = f32::from(self.amplitude * 75);
+        let amplitude = f32::from(self.amplitude * OP25_TONE_AMPLITUDE_SCALE);
         std::array::from_fn(|_| {
             let n = self.n as f32;
             self.n += 1;

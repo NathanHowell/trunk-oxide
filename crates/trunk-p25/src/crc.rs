@@ -1,9 +1,30 @@
 //! CRCs used by P25 data blocks.
 
+/// Header CRC generator `G_H(x)` = x¹⁶ + x¹² + x⁵ + 1 (CRC-CCITT), the x¹⁶
+/// term implied (BAAA-A §6.2).
+pub const CRC16_POLY: u16 = 0x1021;
+/// Header CRC: the register starts at zero and the result is inverted by
+/// `I_H(x)` = x¹⁵ + … + 1 (BAAA-A §6.2).
+const CRC16_INIT: u32 = 0;
+const CRC16_INVERT: u32 = 0xffff;
+/// Packet CRC generator `G_M(x)` = x³² + x²⁶ + x²³ + x²² + x¹⁶ + x¹² + x¹¹ +
+/// x¹⁰ + x⁸ + x⁷ + x⁵ + x⁴ + x² + x + 1, the x³² term implied (BAAA-A §6.3.3).
+pub const CRC32_POLY: u32 = 0x04c1_1db7;
+/// Packet CRC: zero initial register, inverted by `I_M(x)` = x³¹ + … + 1
+/// (BAAA-A §6.3.3).
+const CRC32_INIT: u64 = 0;
+const CRC32_INVERT: u64 = 0xffff_ffff;
+/// Phase 2 MAC PDU CRC generator x¹² + x¹¹ + x⁷ + x⁴ + x² + x + 1, the x¹²
+/// term implied; zero initial register, result inverted (BBAC §8.4.5).
+pub const CRC12_POLY: u16 = 0x897;
+const CRC12_INIT: u16 = 0;
+const CRC12_INVERT: u16 = 0xfff;
+
 /// CRC-16 of a TSBK or PDU header: CCITT polynomial, zero initial value,
-/// inverted (CRC-16/GSM). Returns the two check bytes to append to `data`.
+/// inverted (CRC-16/GSM; BAAA-A §6.2). Returns the two check bytes to append
+/// to `data`.
 pub const fn crc16(data: &[u8]) -> u16 {
-    let mut reg: u32 = 0;
+    let mut reg: u32 = CRC16_INIT;
     let mut i = 0;
     while i < data.len() {
         let mut j = 8;
@@ -13,13 +34,13 @@ pub const fn crc16(data: &[u8]) -> u16 {
             let top = ((reg >> 15) & 1) ^ bit;
             reg = (reg << 1) & 0xffff;
             if top == 1 {
-                reg ^= 0x1021;
+                reg ^= CRC16_POLY as u32;
             }
         }
         i += 1;
     }
     #[allow(clippy::cast_possible_truncation)]
-    let crc = (reg ^ 0xffff) as u16;
+    let crc = (reg ^ CRC16_INVERT) as u16;
     crc
 }
 
@@ -29,11 +50,11 @@ pub const fn crc16_ok(block: &[u8]) -> bool {
     crc16(data) == u16::from_be_bytes([check[0], check[1]])
 }
 
-/// CRC-32 over the first `nbits` bits of `buf` (MBT payloads), as op25
-/// computes it.
+/// The packet CRC-32 over the first `nbits` bits of `buf` (MBT payloads;
+/// BAAA-A §6.3.3), as op25 computes it.
 pub const fn crc32(buf: &[u8], nbits: usize) -> u32 {
-    const G: u64 = 0x04c1_1db7;
-    let mut crc: u64 = 0;
+    const G: u64 = CRC32_POLY as u64;
+    let mut crc: u64 = CRC32_INIT;
     let mut i = 0;
     while i < nbits {
         crc <<= 1;
@@ -44,26 +65,25 @@ pub const fn crc32(buf: &[u8], nbits: usize) -> u32 {
         i += 1;
     }
     #[allow(clippy::cast_possible_truncation)]
-    let crc = ((crc & 0xffff_ffff) ^ 0xffff_ffff) as u32;
+    let crc = ((crc & 0xffff_ffff) ^ CRC32_INVERT) as u32;
     crc
 }
 
 /// CRC-12 of a Phase 2 MAC PDU over the first `nbits` bits of `buf`:
 /// g(x) = x¹² + x¹¹ + x⁷ + x⁴ + x² + x + 1, zero initial value, inverted.
 pub const fn crc12(buf: &[u8], nbits: usize) -> u16 {
-    const G: u16 = 0x897;
-    let mut reg: u16 = 0;
+    let mut reg: u16 = CRC12_INIT;
     let mut i = 0;
     while i < nbits {
         let b = ((buf[i / 8] >> (7 - (i % 8))) & 1) as u16;
         let top = ((reg >> 11) & 1) ^ b;
         reg = (reg << 1) & 0xfff;
         if top == 1 {
-            reg ^= G;
+            reg ^= CRC12_POLY;
         }
         i += 1;
     }
-    reg ^ 0xfff
+    reg ^ CRC12_INVERT
 }
 
 /// `count` bits of `buf` from bit `from`, first bit highest.

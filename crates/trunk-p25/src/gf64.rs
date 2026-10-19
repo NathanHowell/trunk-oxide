@@ -6,6 +6,11 @@ use std::ops::{Add, AddAssign, Div, Mul, MulAssign, Sub};
 
 const ORDER: usize = 63;
 
+/// The field's primitive polynomial, x⁶ + x + 1 (BBAC Annex A; BAAA).
+pub const PRIMITIVE: u8 = 0x43;
+/// x⁶, the bit the primitive polynomial reduces.
+const DEGREE_BIT: u8 = 1 << 6;
+
 const fn tables() -> ([u8; 2 * ORDER], [u8; 64]) {
     let mut exp = [0u8; 2 * ORDER];
     let mut log = [0u8; 64];
@@ -19,8 +24,8 @@ const fn tables() -> ([u8; 2 * ORDER], [u8; 64]) {
             log[x as usize] = i as u8;
         }
         x <<= 1;
-        if x & 0x40 != 0 {
-            x ^= 0x43;
+        if x & DEGREE_BIT != 0 {
+            x ^= PRIMITIVE;
         }
         i += 1;
     }

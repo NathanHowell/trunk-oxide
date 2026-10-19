@@ -36,6 +36,13 @@ impl fmt::Display for Nac {
 pub struct Tsbk([u8; 10]);
 
 impl Tsbk {
+    /// Last Block flag: octet 0, bit 7 (TIA-102.AABB-B §5.1).
+    pub const LB: u8 = 0x80;
+    /// Protected trunking block flag: octet 0, bit 6 (TIA-102.AABB-B §5.1).
+    pub const P: u8 = 0x40;
+    /// Opcode: octet 0, bits 5–0 (TIA-102.AABB-B §5.1).
+    pub const OPCODE: u8 = 0x3f;
+
     pub const fn new(bytes: [u8; 10]) -> Self {
         Self(bytes)
     }
@@ -46,15 +53,15 @@ impl Tsbk {
 
     /// Last block of its TSDU.
     pub const fn is_last(&self) -> bool {
-        self.0[0] & 0x80 != 0
+        self.0[0] & Self::LB != 0
     }
 
     pub const fn is_protected(&self) -> bool {
-        self.0[0] & 0x40 != 0
+        self.0[0] & Self::P != 0
     }
 
     pub const fn opcode(&self) -> u8 {
-        self.0[0] & 0x3f
+        self.0[0] & Self::OPCODE
     }
 
     pub const fn manufacturer(&self) -> u8 {

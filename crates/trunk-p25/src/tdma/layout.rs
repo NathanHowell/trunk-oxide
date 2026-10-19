@@ -15,7 +15,7 @@ pub const ISCH_DIBITS: usize = 20;
 pub const BURSTS_PER_SUPERFRAME: usize = 12;
 pub const SUPERFRAME_DIBITS: usize = BURST_DIBITS * BURSTS_PER_SUPERFRAME;
 
-/// The DUID's four dibits, first-sent first.
+/// The DUID's four dibits, first-sent first (BBAC-1 Annex E).
 pub const DUID_AT: [usize; 4] = [20, 57, 142, 179];
 
 pub const PAYLOAD_DIBITS: usize = 156;
@@ -34,10 +34,12 @@ pub const fn mask_index(slot: usize, p: usize) -> usize {
 }
 
 /// Which logical channel (0 or 1) each superframe slot carries: they
-/// alternate, except that the two SACCH slots at the end are swapped.
+/// alternate, except that the two SACCH slots at the end are swapped
+/// (BBAC §3.2.1 Fig. 3-1).
 pub const CHANNEL_OF_SLOT: [u8; BURSTS_PER_SUPERFRAME] = [0, 1, 0, 1, 0, 1, 0, 1, 0, 1, 1, 0];
 
-/// Slots whose ISCH is the sync word rather than information.
+/// Slots whose ISCH is the sync word rather than information (BBAC §5.5
+/// Fig. 5-3).
 pub const fn is_sync_slot(slot: usize) -> bool {
     slot % 4 >= 2
 }
@@ -53,7 +55,8 @@ pub const ESS_B: Range<usize> = 72..84;
 /// A 2V burst's encryption sync parity (ESS-A): 28 hexbits.
 pub const ESS_A: Range<usize> = 72..156;
 
-/// FACCH carries no data in these payload dibits.
+/// FACCH carries no data in these payload dibits: the S-OEMI sync (BBAC
+/// §4.3 Fig. 4-7).
 pub const FACCH_GAP: Range<usize> = 67..88;
 
 #[cfg(test)]

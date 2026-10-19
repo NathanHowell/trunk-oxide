@@ -65,6 +65,46 @@ impl Model {
     };
 }
 
+// Spectral amplitude enhancement (TIA-102.BABA §8). Each constant keeps the
+// precision of the literal op25 uses, so the arithmetic is unchanged.
+
+/// The 0.96 of Eq. 107's spectral weights `W_l`.
+const W_SCALE: f64 = 0.96;
+/// Harmonics `l` with `8 l ≤ L` are not enhanced (Eq. 108).
+const UNENHANCED_DIVISOR: usize = 8;
+/// Bounds on the enhancement weight `W_l` (Eq. 108).
+const W_MAX: f64 = 1.2;
+const W_MIN: f64 = 0.5;
+/// `S_E`'s weight on the frame energy `R_M0`, and its floor (Eq. 111).
+/// op25 keeps no `S_E(−1)` term, so `0.95 S_E(−1)` is missing.
+const S_E_WEIGHT: f64 = 0.05;
+const S_E_MIN: f32 = 10000.0;
+
+// Adaptive smoothing (TIA-102.BABA §9).
+
+/// Error rate and error count at or below which no band is forced voiced
+/// (Eq. 112) and the amplitude threshold is its maximum (Eq. 115).
+const EPS_R_CLEAN: f64 = 0.005;
+const EPS_T_CLEAN_VOICING: f32 = 4.0;
+const EPS_T_CLEAN_AMPLITUDE: f32 = 6.0;
+/// Eq. 112's `V_M = ∞`.
+const V_M_INFINITE: f32 = 1e38;
+/// Eq. 112's middle branch: `ε_R ≤ 0.0125` (and no errors), where
+/// `V_M = 45.255 S_E^0.375 / exp(277.26 ε_R)`. The spec prints `ε_4 = 0`
+/// for "no errors"; op25 tests `ε_T`.
+const EPS_R_QUIET: f64 = 0.0125;
+const V_M_QUIET_SCALE: f64 = 45.255;
+/// op25's exponent rate; Eq. 112 has 277.26.
+const OP25_V_M_EPS_R_RATE: f64 = 277.6;
+/// Eq. 112's last branch: `V_M = 1.414 S_E^0.375`.
+const V_M_SCALE: f64 = 1.414;
+const V_M_EXPONENT: f32 = 0.375;
+/// Eq. 115's amplitude threshold `τ_M`: 20480 when clean, otherwise
+/// `6000 − 300 ε_T` (op25 drops the spec's `+ τ_M(−1)`).
+const TAU_M_CLEAN: f32 = 20480.0;
+const TAU_M_BASE: f32 = 6000.0;
+const TAU_M_PER_ERROR: f32 = 300.0;
+
 /// Noise samples drawn per frame: 160 new, 51 kept for the window's overlap.
 const NOISE: usize = 211;
 /// The time-domain block an unvoiced frame is synthesised in.
@@ -172,18 +212,18 @@ impl Synthesizer {
             rm0 += t;
             rm1 += t * (w0 * ell as f32).cos();
         }
-        let k1 = (0.96 * PI / f64::from(w0 * rm0 * (rm0 * rm0 - rm1 * rm1))) as f32;
+        let k1 = (W_SCALE * PI / f64::from(w0 * rm0 * (rm0 * rm0 - rm1 * rm1))) as f32;
         let k2 = rm0 * rm0 + rm1 * rm1;
         let k3 = 2.0 * rm0 * rm1;
         let mut sum = 0f32;
         for ell in 1..=l {
             let w = cur.mu[ell].sqrt() * (k1 * (k2 - k3 * (w0 * ell as f32).cos())).powf(0.25);
-            cur.m[ell] = if 8 * ell <= l {
+            cur.m[ell] = if UNENHANCED_DIVISOR * ell <= l {
                 cur.mu[ell]
-            } else if w > 1.2 {
-                (f64::from(cur.mu[ell]) * 1.2) as f32
-            } else if w < 0.5 {
-                (f64::from(cur.mu[ell]) * 0.5) as f32
+            } else if w > W_MAX as f32 {
+                (f64::from(cur.mu[ell]) * W_MAX) as f32
+            } else if w < W_MIN as f32 {
+                (f64::from(cur.mu[ell]) * W_MIN) as f32
             } else {
                 cur.mu[ell] * w
             };
@@ -193,8 +233,8 @@ impl Synthesizer {
         for ell in 1..=l {
             cur.m[ell] *= gain;
         }
-        let se = (0.05 * f64::from(rm0)) as f32;
-        if se < 10000.0 { 10000.0 } else { se }
+        let se = (S_E_WEIGHT * f64::from(rm0)) as f32;
+        if se < S_E_MIN { S_E_MIN } else { se }
     }
 
     /// Adaptive smoothing: with error rate `er` and
@@ -202,12 +242,13 @@ impl Synthesizer {
     /// the frame's total amplitude is capped.
     pub fn smooth(&mut self, se: f32, er: f32, et: f32) {
         let (er64, l) = (f64::from(er), self.l);
-        let vm: f32 = if er64 <= 0.005 && et <= 4.0 {
-            1e38
-        } else if er64 <= 0.0125 && et == 0.0 {
-            (45.255 * f64::from(se.powf(0.375)) / (277.6 * er64).exp()) as f32
+        let vm: f32 = if er64 <= EPS_R_CLEAN && et <= EPS_T_CLEAN_VOICING {
+            V_M_INFINITE
+        } else if er64 <= EPS_R_QUIET && et == 0.0 {
+            (V_M_QUIET_SCALE * f64::from(se.powf(V_M_EXPONENT))
+                / (OP25_V_M_EPS_R_RATE * er64).exp()) as f32
         } else {
-            (1.414 * f64::from(se.powf(0.375))) as f32
+            (V_M_SCALE * f64::from(se.powf(V_M_EXPONENT))) as f32
         };
         let cur = self.current();
         let mut am = 0f32;
@@ -217,10 +258,10 @@ impl Synthesizer {
             }
             am += cur.m[ell];
         }
-        let tm: f32 = if er64 <= 0.005 && et <= 6.0 {
-            20480.0
+        let tm: f32 = if er64 <= EPS_R_CLEAN && et <= EPS_T_CLEAN_AMPLITUDE {
+            TAU_M_CLEAN
         } else {
-            6000.0 - 300.0 * et
+            TAU_M_BASE - TAU_M_PER_ERROR * et
         };
         if tm <= am {
             let ym = tm / am;

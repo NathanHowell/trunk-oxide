@@ -100,7 +100,10 @@ impl FrameBits {
     }
 }
 
+/// The header code word: 36 Golay(18,6) words, 648 bits (BAAA-A §5.2).
 const HDU_PAYLOAD_BITS: usize = 36 * 18;
+/// The terminator's link control: 12 Golay(24,12) words, 288 bits (BAAA-A
+/// §5.5.1).
 const TDULC_PAYLOAD_BITS: usize = 12 * 24;
 
 /// Decode one framed unit; `None` for frames that are not voice-channel

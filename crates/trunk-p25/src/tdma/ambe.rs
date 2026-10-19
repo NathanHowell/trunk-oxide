@@ -74,6 +74,12 @@ impl AmbeCodeword {
     /// op25's decision (`p25p2_vf::process_vcw`): hard, u0 first, c0 as
     /// Golay(23) without its parity bit. The parameters and op25's error
     /// counts for c0 and c1 ([`op25_golay_23`]).
+    ///
+    /// Not TIA-102.BABA-1's ε0 and ε1 (§5.5, the bits corrected or
+    /// detected, c0 as the [24,12] code): c0's parity bit is neither
+    /// checked nor counted, so four errors go undetected, and the counts are
+    /// op25's (trunk-oxide-13y.2). The vocoder's repeat and mute thresholds
+    /// take these.
     pub const fn decode_op25(self) -> (AmbeParams, [u32; 2]) {
         let c = self.0;
         let (u0, e0) = op25_golay_23(c[0] >> 1);

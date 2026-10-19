@@ -1,4 +1,4 @@
-//! The rate-1/2 trellis code of TSBKs and PDU headers (TIA-102.BAAA 7.2).
+//! The rate-1/2 trellis code of TSBKs and PDU headers (BAAA-A §7).
 //!
 //! 48 data dibits plus one flush dibit drive a 4-state encoder; each step emits
 //! a 4-bit constellation point, sent as two dibits. The 98 dibits are then
@@ -8,14 +8,20 @@
 
 use crate::symbols::{LEVELS, dist2, slice};
 
+/// Output dibits of a block (BAAA-A §7, Table 7-1).
 pub const BLOCK_DIBITS: usize = 98;
 /// Soft symbols of one interleaved block.
 pub type SoftBlock = [f32; BLOCK_DIBITS];
+/// Input bytes of a rate-1/2 block: 12 octets (BAAA-A §6.1).
 pub const DATA_BYTES: usize = 12;
-const STEPS: usize = 49;
+/// Input dibits of a rate-1/2 block (BAAA-A §7, Table 7-1).
+const INPUT_DIBITS: usize = 4 * DATA_BYTES;
+/// Encoder steps: the input and the %00 flush dibit (BAAA-A §7).
+const STEPS: usize = INPUT_DIBITS + 1;
 
-/// Constellation point for (state, input dibit). The state is the previous
-/// input dibit.
+/// Constellation point for (state, input dibit), as its two dibits: BAAA-A
+/// Table 7-2 mapped through Table 7-3. The state is the previous input
+/// dibit (BAAA-A §7.1).
 const NEXT_WORDS: [[u8; 4]; 4] = [
     [0x2, 0xC, 0x1, 0xF],
     [0xE, 0x0, 0xD, 0x3],
@@ -24,7 +30,7 @@ const NEXT_WORDS: [[u8; 4]; 4] = [
 ];
 
 /// Position in the interleaved block of the first dibit of codeword `i`
-/// (the second follows it).
+/// (the second follows it): BAAA-A §7.2, Table 7-4.
 pub const fn interleave_pos(i: usize) -> usize {
     const COL: [usize; 4] = [0, 26, 50, 74];
     COL[i % 4] + 2 * (i / 4)
@@ -40,7 +46,11 @@ pub const fn encode(data: &[u8; DATA_BYTES]) -> [u8; BLOCK_DIBITS] {
     let mut state = 0usize;
     let mut i = 0;
     while i < STEPS {
-        let input = if i < 48 { data_dibit(data, i) } else { 0 };
+        let input = if i < INPUT_DIBITS {
+            data_dibit(data, i)
+        } else {
+            0
+        };
         let cw = NEXT_WORDS[state][input as usize];
         let p = interleave_pos(i);
         out[p] = cw >> 2;
@@ -96,7 +106,7 @@ pub fn decode(soft: &SoftBlock) -> Decoded {
     }
 
     let mut data = [0u8; DATA_BYTES];
-    for (i, &d) in inputs.iter().take(48).enumerate() {
+    for (i, &d) in inputs.iter().take(INPUT_DIBITS).enumerate() {
         data[i / 4] |= d << (6 - 2 * (i % 4));
     }
     let corrected = encode(&data)
@@ -183,7 +193,7 @@ pub fn decode_list(soft: &SoftBlock, list: usize) -> Vec<(Decoded, f32)> {
             r = usize::from(e.prev_rank);
         }
         let mut data = [0u8; DATA_BYTES];
-        for (i, &d) in inputs.iter().take(48).enumerate() {
+        for (i, &d) in inputs.iter().take(INPUT_DIBITS).enumerate() {
             data[i / 4] |= d << (6 - 2 * (i % 4));
         }
         let corrected = encode(&data)
@@ -246,7 +256,7 @@ pub fn decode_greedy(soft: &SoftBlock) -> Option<[u8; DATA_BYTES]> {
         if best.next().is_some() {
             return None;
         }
-        if i < 48 {
+        if i < INPUT_DIBITS {
             #[allow(clippy::cast_possible_truncation)]
             {
                 data[i / 4] |= (input as u8) << (6 - 2 * (i % 4));

@@ -6,17 +6,20 @@
 //! (`voice_codeword_bits`, `hdu_codeword_bits`, `imbe_ldu_ls_data_bits`) are
 //! these maps evaluated and stored.
 
-/// Sync (48) and NID (64): the data bits before any frame's payload.
-pub const PAYLOAD: usize = 112;
+use crate::framer::NID_BITS;
+use crate::symbols::{FRAME_SYNC_BITS, MICRO_SLOT_DATA_DIBITS};
 
-/// Raw bit of data bit `p`: every 35 data dibits are followed by a status
-/// dibit.
+/// Sync (48) and NID (64): the data bits before any frame's payload.
+pub const PAYLOAD: usize = FRAME_SYNC_BITS + NID_BITS;
+
+/// Raw bit of data bit `p`: every 35 data dibits (a micro-slot's 70 bits)
+/// are followed by a status dibit (BAAA-A §8.2).
 pub const fn raw_bit(p: usize) -> usize {
     let d = p / 2;
-    2 * (d + d / 35) + p % 2
+    2 * (d + d / MICRO_SLOT_DATA_DIBITS) + p % 2
 }
 
-/// IMBE codewords per voice frame (LDU) and their size.
+/// IMBE codewords per voice frame (LDU) and their size (BAAA-A §5.1, §5.3).
 pub const IMBE_PER_LDU: usize = 9;
 pub const IMBE_BITS: usize = 144;
 
@@ -41,7 +44,10 @@ pub const IMBE_BASE: [usize; IMBE_PER_LDU] = {
 /// Data bits in an LDU: 1680, i.e. 864 dibits with status.
 pub const LDU_DATA_BITS: usize = IMBE_BASE[IMBE_PER_LDU - 1] + IMBE_BITS;
 
+/// Four Hamming(10,6) words of link control or encryption sync between
+/// voice codewords (BAAA-A §8.2.2, Figures 8-3 and 8-4).
 const SIGNALLING_GROUP: usize = 40;
+/// Two (16,8) low-speed data words (BAAA-A §5.6, §8.2.2).
 const LSD_BITS: usize = 32;
 
 /// Data bit of bit `j` of an IMBE codeword starting at `base`. The 144 bits
@@ -59,7 +65,8 @@ pub const fn signalling_bit(j: usize) -> usize {
     IMBE_BASE[2 + j / SIGNALLING_GROUP] - SIGNALLING_GROUP + j % SIGNALLING_GROUP
 }
 
-/// The signalling field: 24 Hamming(10,6) codewords, one hexbit each.
+/// The signalling field: 24 Hamming(10,6) codewords, one hexbit each
+/// (BAAA-A §5.4, §5.5).
 pub const SIGNALLING_BITS: usize = 6 * SIGNALLING_GROUP;
 
 #[cfg(test)]
@@ -119,7 +126,11 @@ mod tests {
     #[test]
     fn an_ldu_is_864_dibits() {
         assert_eq!(LDU_DATA_BITS, 1680);
-        assert_eq!(raw_bit(LDU_DATA_BITS - 1) + 1 + 2, 1728); // + the final status dibit
+        // + the final status dibit
+        assert_eq!(
+            raw_bit(LDU_DATA_BITS - 1) + 1 + 2,
+            2 * crate::framer::LDU_DIBITS
+        );
     }
 
     #[test]

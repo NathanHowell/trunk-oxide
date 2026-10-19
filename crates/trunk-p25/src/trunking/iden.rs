@@ -12,6 +12,10 @@ use std::fmt;
 pub struct ChannelId(u16);
 
 impl ChannelId {
+    /// Channel Number: the low 12 bits; the Channel Identifier is the top 4
+    /// (TIA-102.AABC-B §2.3.9, Figure 2.3.9-1).
+    pub const NUMBER_BITS: u32 = 12;
+
     pub const fn new(v: u16) -> Self {
         Self(v)
     }
@@ -21,11 +25,11 @@ impl ChannelId {
     }
 
     pub const fn iden(self) -> Iden {
-        Iden((self.0 >> 12) as u8)
+        Iden((self.0 >> Self::NUMBER_BITS) as u8)
     }
 
     pub const fn number(self) -> u16 {
-        self.0 & 0xfff
+        self.0 & ((1 << Self::NUMBER_BITS) - 1)
     }
 }
 
@@ -79,6 +83,9 @@ pub struct Channel {
 }
 
 impl ChannelPlan {
+    /// SU receive frequency = Base Frequency + Channel Number × Channel
+    /// Spacing (TIA-102.AABC-B §2.3.9.2); a TDMA carrier holds `slots`
+    /// consecutive channel numbers.
     pub const fn resolve(&self, id: ChannelId) -> Channel {
         let n = id.number() as u64;
         match self.access {

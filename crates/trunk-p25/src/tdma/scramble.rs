@@ -10,10 +10,17 @@
 use super::layout::{SUPERFRAME_DIBITS, mask_index};
 use crate::types::Nac;
 
+/// The LFSR's length (BBAC §7.2.5).
 const WIDTH: u32 = 44;
 const MASK: u64 = (1 << WIDTH) - 1;
-/// The taps of p(x) below x⁴⁴.
+/// The taps of G(x) = x⁴⁴ + x⁴⁰ + x³⁵ + x²⁹ + x²⁴ + x¹⁰ + 1 below x⁴⁴
+/// (BBAC §7.2.5 eq. 4).
 const TAPS: [u32; 6] = [40, 35, 29, 24, 10, 0];
+/// `seed_external` = WACN·2²⁴ + System ID·2¹² + CC (BBAC §7.2.5 eq. 5).
+const WACN_SHIFT: u32 = 24;
+const SYSTEM_ID_SHIFT: u32 = 12;
+/// System ID is 12 bits (BBAC §7.2.5).
+const SYSTEM_ID_MASK: u64 = 0xfff;
 
 const fn feedback() -> u64 {
     let mut f = 0;
@@ -37,7 +44,9 @@ impl std::fmt::Debug for Scrambler {
 
 impl Scrambler {
     pub const fn new(wacn: u32, system: u16, nac: Nac) -> Self {
-        let id = ((wacn as u64) << 24) | ((system as u64 & 0xfff) << 12) | nac.get() as u64;
+        let id = ((wacn as u64) << WACN_SHIFT)
+            | ((system as u64 & SYSTEM_ID_MASK) << SYSTEM_ID_SHIFT)
+            | nac.get() as u64;
         // The seed is the identity times (1 + Σ x^-(44−t)) over the taps.
         let mut reg = id;
         let mut i = 0;

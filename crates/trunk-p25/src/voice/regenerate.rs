@@ -19,8 +19,8 @@ use super::{Terminator, VoiceEvent, VoiceStats, decode_frame};
 use crate::assemble::CallCounter;
 use crate::control::Received;
 use crate::demod::{DemodConfig, Demodulator};
-use crate::framer::{Frame, Framer, nid_word};
-use crate::symbols::{LEVELS, slice, sync_dibits};
+use crate::framer::{Frame, Framer, NID_BITS, nid_word};
+use crate::symbols::{FRAME_SYNC_BITS, LEVELS, slice, sync_dibits};
 
 /// A frame's dibits, written in data-bit coordinates.
 struct FrameDibits(Vec<u8>);
@@ -51,8 +51,8 @@ pub fn regenerate(frame: &Frame, event: &VoiceEvent) -> Vec<u8> {
     d.write(0, &sync);
     let nid = nid_word(frame.nac, frame.duid);
     d.write(
-        48,
-        &(0..64)
+        FRAME_SYNC_BITS,
+        &(0..NID_BITS)
             .rev()
             .map(|b| (nid >> b) & 1 == 1)
             .collect::<Vec<_>>(),

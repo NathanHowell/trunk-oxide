@@ -25,6 +25,40 @@ use num_complex::Complex32;
 
 use crate::symbols::{LEVELS, PHASE2_SYMBOL_RATE, SYMBOL_RATE, slice, wrap};
 
+/// Roll-off of the optional receive filter, that of the Phase 1 transmit
+/// raised cosine (TIA-102.BAAA-A §9.3). The transmit pulse is a full raised
+/// cosine, not a root, so this filter only limits noise; it is not matched.
+const RRC_ROLLOFF: f64 = 0.2;
+/// Matched filter length, in symbols.
+const RRC_SPAN_SYMBOLS: usize = 8;
+/// Damping of the timing loop (critically damped is 1; 1/√2 settles fastest
+/// without ringing).
+const TIMING_DAMPING: f64 = 0.707;
+/// Default for [`DemodConfig::timing_bandwidth`].
+const DEFAULT_TIMING_BANDWIDTH: f32 = 0.0025;
+/// Default for [`DemodConfig::bias_gain`].
+const DEFAULT_BIAS_GAIN: f32 = 0.02;
+
+/// Timing-loop correction limit, as a fraction of the nominal symbol period.
+const MAX_PERIOD_ADJUST: f64 = 0.01;
+/// The phase bias tracker never follows more than this: a quarter of the
+/// spacing between decision levels.
+const MAX_PHASE_BIAS: f32 = PI / 8.0;
+/// Weight of each new symbol in the running signal power and eye noise
+/// estimates (exponential averages).
+const POWER_SMOOTHING: f32 = 0.01;
+const NOISE_SMOOTHING: f32 = 0.005;
+/// Keeps divisions by a signal power or magnitude finite.
+const POWER_FLOOR: f32 = 1e-9;
+/// Noise variance floor of [`DemodStats::symbol_snr_db`] (60 dB).
+const NOISE_VAR_FLOOR: f32 = 1e-6;
+/// Phase change of the outermost symbols (±3 deviation units); a C4FM
+/// timing error is normalised by its square.
+const OUTER_SYMBOL_PHASE: f32 = 3.0 * FRAC_PI_4;
+/// Slack, in samples, kept behind the two-symbol look-back for the
+/// interpolator's taps.
+const HISTORY_MARGIN_SAMPLES: f64 = 3.0;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Modulation {
     Cqpsk,
@@ -54,9 +88,9 @@ impl DemodConfig {
             symbol_rate: SYMBOL_RATE,
             modulation,
             matched_filter: false,
-            timing_bandwidth: 0.0025,
+            timing_bandwidth: DEFAULT_TIMING_BANDWIDTH,
             reference_memory: 0.0,
-            bias_gain: 0.02,
+            bias_gain: DEFAULT_BIAS_GAIN,
         }
     }
 
@@ -95,7 +129,7 @@ impl DemodStats {
     /// Eye quality as an SNR: ideal levels are 2 apart, so a noise variance
     /// of 1 (σ = 1) is 0 dB.
     pub fn symbol_snr_db(&self) -> f32 {
-        -10.0 * self.noise_var.max(1e-6).log10()
+        -10.0 * self.noise_var.max(NOISE_VAR_FLOOR).log10()
     }
 
     /// Symbol clock error against the nominal rate, ppm.
@@ -130,11 +164,11 @@ impl Demodulator {
         let sps = cfg.sample_rate / cfg.symbol_rate;
         assert!(sps >= 2.0, "need at least 2 samples per symbol");
         let taps = if cfg.matched_filter {
-            rrc_taps(sps, 0.2, 8)
+            rrc_taps(sps, RRC_ROLLOFF, RRC_SPAN_SYMBOLS)
         } else {
             vec![1.0]
         };
-        let (kp, ki) = loop_gains(f64::from(cfg.timing_bandwidth), 0.707);
+        let (kp, ki) = loop_gains(f64::from(cfg.timing_bandwidth), TIMING_DAMPING);
         Self {
             sps,
             hist: vec![Complex32::new(0.0, 0.0); taps.len()],
@@ -225,15 +259,18 @@ impl Demodulator {
             }
             let z = self.at(self.t);
             let mid = self.at(self.t - f64::midpoint(self.sps, self.period_adj));
-            self.power = 0.99f32.mul_add(self.power, 0.01 * z.norm_sqr());
+            self.power =
+                (1.0 - POWER_SMOOTHING).mul_add(self.power, POWER_SMOOTHING * z.norm_sqr());
 
             let step = z * self.prev.conj();
             let error = match self.cfg.modulation {
-                Modulation::Cqpsk => ((self.prev - z) * mid.conj()).re / self.power.max(1e-9),
+                Modulation::Cqpsk => {
+                    ((self.prev - z) * mid.conj()).re / self.power.max(POWER_FLOOR)
+                }
                 Modulation::C4fm => {
                     let phase = step.arg();
                     let mid_phase = (mid * self.prev_mid.conj()).arg();
-                    let e = (self.prev_phase - phase) * mid_phase / (3.0 * FRAC_PI_4).powi(2);
+                    let e = (self.prev_phase - phase) * mid_phase / OUTER_SYMBOL_PHASE.powi(2);
                     self.prev_phase = phase;
                     e
                 }
@@ -243,14 +280,16 @@ impl Demodulator {
             self.period_adj = self
                 .ki
                 .mul_add(error, self.period_adj)
-                .clamp(-0.01 * self.sps, 0.01 * self.sps);
+                .clamp(-MAX_PERIOD_ADJUST * self.sps, MAX_PERIOD_ADJUST * self.sps);
 
             out.push(self.decide(z));
             self.prev = z;
             self.t += self.kp.mul_add(error, self.sps + self.period_adj);
         }
         // Keep enough history for the interpolator and the mid-point.
-        let keep_from = (2.0f64.mul_add(-self.sps, self.t) - 3.0).floor().max(0.0) as usize;
+        let keep_from = (2.0f64.mul_add(-self.sps, self.t) - HISTORY_MARGIN_SAMPLES)
+            .floor()
+            .max(0.0) as usize;
         if keep_from > 0 {
             self.buf.drain(..keep_from);
             self.t -= keep_from as f64;
@@ -270,11 +309,11 @@ impl Demodulator {
         let err = s - decided;
         self.bias = (self.cfg.bias_gain * err)
             .mul_add(FRAC_PI_4, self.bias)
-            .clamp(-PI / 8.0, PI / 8.0);
-        self.noise = 0.995f32.mul_add(self.noise, 0.005 * err * err);
+            .clamp(-MAX_PHASE_BIAS, MAX_PHASE_BIAS);
+        self.noise = (1.0 - NOISE_SMOOTHING).mul_add(self.noise, NOISE_SMOOTHING * err * err);
         if self.cfg.reference_memory > 0.0 {
             let rot = Complex32::from_polar(1.0, decided.mul_add(FRAC_PI_4, self.bias));
-            let norm = z.norm().max(1e-9);
+            let norm = z.norm().max(POWER_FLOOR);
             self.reference = z / norm + self.reference * rot * self.cfg.reference_memory;
         }
         s

@@ -15,9 +15,21 @@ use crate::fec::{Decision, GOLAY_23, HAMMING_15};
 
 pub const CODEWORD_BITS: usize = 144;
 
-/// Width of each vector's codeword, and where it starts in the 144 bits.
+/// Width of each vector u0–u7 (BAAA-A §5.3; BABA §7.1).
+pub const VECTOR_BITS: [usize; 8] = [12, 12, 12, 12, 11, 11, 11, 7];
+/// Width of each vector's codeword: Golay(23,12) for c0–c3, Hamming(15,11)
+/// for c4–c6, u7 bare (BAAA-A §5.3, Figure 5-4).
 const CODE_BITS: [usize; 8] = [23, 23, 23, 23, 15, 15, 15, 7];
+/// Where each codeword starts in the 144 bits.
 const OFFSET: [usize; 8] = [0, 23, 46, 69, 92, 107, 122, 137];
+
+/// The PN scrambler (BAAA-A §5.3; BABA §7.4): p₀ = 16·u0, then
+/// pₙ = (173·pₙ₋₁ + 13849) mod 65536, whose bit 15 is the mask bit.
+const PN_SEED_SHIFT: u32 = 4;
+const PN_MULTIPLIER: u32 = 173;
+const PN_INCREMENT: u32 = 13849;
+const PN_MODULUS_MASK: u32 = 0xffff;
+const PN_OUTPUT_BIT: u32 = 15;
 
 /// u0–u7 of one 20 ms frame: 12, 12, 12, 12, 11, 11, 11 and 7 bits.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -32,14 +44,14 @@ pub struct ImbeCodeword(pub [u32; 8]);
 /// whose top bit, 23 or 15 times over, is each mask.
 pub const fn pn_masks(u0: u16) -> [u32; 8] {
     let mut masks = [0u32; 8];
-    let mut p = (u0 as u32) << 4;
+    let mut p = (u0 as u32) << PN_SEED_SHIFT;
     let mut v = 1;
     while v <= 6 {
         let mut m = 0;
         let mut i = 0;
         while i < CODE_BITS[v] {
-            p = (173 * p + 13849) & 0xffff;
-            m = (m << 1) | ((p >> 15) & 1);
+            p = (PN_MULTIPLIER * p + PN_INCREMENT) & PN_MODULUS_MASK;
+            m = (m << 1) | ((p >> PN_OUTPUT_BIT) & 1);
             i += 1;
         }
         masks[v] = m;
@@ -67,7 +79,9 @@ impl ImbeParams {
         Self(p)
     }
 
-    /// op25's `u[0..8]`, as its vocoder takes them (u7 shifted left).
+    /// op25's `u[0..8]`, as its vocoder takes them (u7 shifted left). op25's
+    /// rearrangement reads u7 as if unshifted, so its b̂0, b̂2 and last
+    /// scanned bits come from u7 one bit low of BABA §7.1, Figure 24.
     pub const fn to_op25(self) -> [u32; 8] {
         let mut u = [0u32; 8];
         let mut i = 0;
@@ -97,7 +111,8 @@ impl ImbeParams {
 }
 
 impl ImbeCodeword {
-    /// Bit `j` of the 144, in transmission order.
+    /// Bit `j` of the 144 in codeword order, c0's MSB first ([`super::layout`]
+    /// interleaves them for transmission, BAAA-A Table 5-1).
     pub const fn bit(&self, j: usize) -> bool {
         let mut v = 7;
         while OFFSET[v] > j {
@@ -281,10 +296,9 @@ mod tests {
     }
 
     fn random_params(rng: &mut Rng) -> ImbeParams {
-        let widths = [12, 12, 12, 12, 11, 11, 11, 7];
         #[allow(clippy::cast_possible_truncation)]
         ImbeParams(std::array::from_fn(|i| {
-            (rng.next_u64() & ((1 << widths[i]) - 1)) as u16
+            (rng.next_u64() & ((1 << VECTOR_BITS[i]) - 1)) as u16
         }))
     }
 

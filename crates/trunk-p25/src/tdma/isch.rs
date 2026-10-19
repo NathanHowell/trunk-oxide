@@ -13,11 +13,14 @@ use super::layout::{BURSTS_PER_SUPERFRAME, is_sync_slot};
 
 pub const BITS: usize = 40;
 
-/// The synchronisation word, first-sent bit highest.
+/// The VCH S-ISCH synchronisation word, first-sent bit highest (BBAC §5.1
+/// Table 5-1, as dibits per BBAB Table 1).
 pub const S_ISCH: u64 = 0x57_5d57_f7ff;
-/// c(0).
+/// The code word offset vector c₀ (BBAC §5.5 eq. 3).
 const OFFSET: u64 = 0x18_4229_d461;
-/// gₖ for information bit k (least significant first).
+/// gₖ for information bit k (least significant first): the last seven rows
+/// of the generator matrix (BBAC §5.5 Table 5-4); the two reserved bits are
+/// always zero.
 const ROWS: [u64; 7] = [
     0x00_343d_8597,
     0x00_58cb_aa4e,
@@ -28,7 +31,8 @@ const ROWS: [u64; 7] = [
     0x10_0f4b_1758,
 ];
 
-/// An I-ISCH's seven bits: channel (2), location (2), flag (1), count (2).
+/// An I-ISCH's seven bits: channel (2), location (2), flag (1), count (2)
+/// (BBAC §5.5 Fig. 5-2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct IschInfo(u8);
 

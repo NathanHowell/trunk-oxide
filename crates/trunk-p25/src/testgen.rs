@@ -7,7 +7,10 @@ use num_complex::Complex32;
 
 use crate::bch;
 use crate::crc;
-use crate::framer::{Duid, nid_word};
+use crate::framer::{
+    Duid, HDU_DIBITS, LDU_DIBITS, NID_DIBITS, TDU_DIBITS, TDULC_DIBITS, TSDU_TRIPLE_DIBITS,
+    nid_word,
+};
 use crate::symbols::{LEVELS, STATUS_PERIOD, sync_dibits};
 use crate::trellis;
 use crate::types::Nac;
@@ -87,17 +90,18 @@ fn push_u64_dibits(out: &mut Vec<u8>, word: u64, ndibits: usize) {
 /// Sync + NID dibits (data only, no status).
 pub fn header(nac: Nac, duid: Duid) -> Vec<u8> {
     let mut d = sync_dibits().to_vec();
-    push_u64_dibits(&mut d, nid_word(nac, duid), 32);
+    push_u64_dibits(&mut d, nid_word(nac, duid), NID_DIBITS);
     d
 }
 
-/// A TSDU of 360 dibits carrying `tsbks` (1–3); the last is flagged.
+/// A TSDU carrying `tsbks` (1–3), the last flagged, always padded to the
+/// three-TSBK length the framer expects (on air, shorter TSDUs end sooner).
 pub fn tsdu(nac: Nac, tsbks: &[[u8; 10]]) -> Vec<u8> {
     let mut d = header(nac, Duid::Tsdu);
     for (i, t) in tsbks.iter().enumerate() {
         d.extend_from_slice(&trellis::encode(&tsbk_block(t, i + 1 == tsbks.len())));
     }
-    with_status(&d, 360)
+    with_status(&d, TSDU_TRIPLE_DIBITS)
 }
 
 fn dibits_of(bits: &[bool]) -> Vec<u8> {
@@ -142,28 +146,28 @@ pub fn ldu(
     for (j, &b) in signalling.iter().enumerate() {
         bits[signalling_bit(j)] = b;
     }
-    with_status(&dibits_of(&bits), 864)
+    with_status(&dibits_of(&bits), LDU_DIBITS)
 }
 
-/// A header data unit (396 dibits).
+/// A header data unit.
 pub fn hdu(nac: Nac, mi: &[u8; 9], mfid: u8, algid: u8, keyid: u16, talkgroup: u16) -> Vec<u8> {
     let mut bits = header_bits(nac, Duid::Hdu);
     bits.extend(crate::voice::signalling::encode::header(
         mi, mfid, algid, keyid, talkgroup,
     ));
-    with_status(&dibits_of(&bits), 396)
+    with_status(&dibits_of(&bits), HDU_DIBITS)
 }
 
-/// A terminator with link control (216 dibits).
+/// A terminator with link control.
 pub fn tdulc(nac: Nac, lc: &[u8; 9]) -> Vec<u8> {
     let mut bits = header_bits(nac, Duid::TduLc);
     bits.extend(crate::voice::signalling::encode::link_control_tdulc(lc));
-    with_status(&dibits_of(&bits), 216)
+    with_status(&dibits_of(&bits), TDULC_DIBITS)
 }
 
-/// A frame with only a header (TDU: 72 dibits).
+/// A frame with only a header (TDU).
 pub fn tdu(nac: Nac) -> Vec<u8> {
-    with_status(&header(nac, Duid::Tdu), 72)
+    with_status(&header(nac, Duid::Tdu), TDU_DIBITS)
 }
 
 /// Random TSBK payloads.

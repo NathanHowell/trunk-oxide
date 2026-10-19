@@ -6,9 +6,25 @@
 
 use crate::fec::{BinaryCode, Decision};
 
-/// Systematic: the four information bits, then parity. Information bit 3
-/// contributes 1101, bit 2 1011, bit 1 1110, bit 0 0111.
-pub static DUID_CODE: BinaryCode<4, 16> = BinaryCode::from_parity_rows(8, [0xd, 0xb, 0xe, 0x7]);
+/// The parity half of the (8,4,4) generator matrix, information bit 3
+/// first: bit 3 contributes 1101, bit 2 1011, bit 1 1110, bit 0 0111
+/// (BBAC §5.4.1 Table 5-2).
+pub const DUID_PARITY_ROWS: [u32; 4] = [0xd, 0xb, 0xe, 0x7];
+
+/// Systematic: the four information bits, then parity.
+pub static DUID_CODE: BinaryCode<4, 16> = BinaryCode::from_parity_rows(8, DUID_PARITY_ROWS);
+
+/// DUID information values on a voice channel (BBAC §5.4.1 Table 5-3).
+pub const DUID_4V: u8 = 0b0000;
+pub const DUID_SACCH_SCRAMBLED: u8 = 0b0011;
+pub const DUID_2V: u8 = 0b0110;
+pub const DUID_FACCH_SCRAMBLED: u8 = 0b1001;
+pub const DUID_SACCH_UNSCRAMBLED: u8 = 0b1100;
+pub const DUID_FACCH_UNSCRAMBLED: u8 = 0b1111;
+/// Reserved in BBAC Table 5-3; op25 reads these as the TDMA control
+/// channel's LCCH.
+const LCCH_SCRAMBLED: u8 = 4;
+const LCCH_UNSCRAMBLED: u8 = 13;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BurstType {
@@ -29,28 +45,28 @@ pub enum BurstType {
 impl BurstType {
     pub const fn from_duid(v: u8) -> Self {
         match v & 15 {
-            0 => Self::Voice4,
-            6 => Self::Voice2,
-            3 => Self::Sacch { scrambled: true },
-            12 => Self::Sacch { scrambled: false },
-            9 => Self::Facch { scrambled: true },
-            15 => Self::Facch { scrambled: false },
-            4 => Self::Lcch { scrambled: true },
-            13 => Self::Lcch { scrambled: false },
+            DUID_4V => Self::Voice4,
+            DUID_2V => Self::Voice2,
+            DUID_SACCH_SCRAMBLED => Self::Sacch { scrambled: true },
+            DUID_SACCH_UNSCRAMBLED => Self::Sacch { scrambled: false },
+            DUID_FACCH_SCRAMBLED => Self::Facch { scrambled: true },
+            DUID_FACCH_UNSCRAMBLED => Self::Facch { scrambled: false },
+            LCCH_SCRAMBLED => Self::Lcch { scrambled: true },
+            LCCH_UNSCRAMBLED => Self::Lcch { scrambled: false },
             v => Self::Reserved(v),
         }
     }
 
     pub const fn duid(self) -> u8 {
         match self {
-            Self::Voice4 => 0,
-            Self::Voice2 => 6,
-            Self::Sacch { scrambled: true } => 3,
-            Self::Sacch { scrambled: false } => 12,
-            Self::Facch { scrambled: true } => 9,
-            Self::Facch { scrambled: false } => 15,
-            Self::Lcch { scrambled: true } => 4,
-            Self::Lcch { scrambled: false } => 13,
+            Self::Voice4 => DUID_4V,
+            Self::Voice2 => DUID_2V,
+            Self::Sacch { scrambled: true } => DUID_SACCH_SCRAMBLED,
+            Self::Sacch { scrambled: false } => DUID_SACCH_UNSCRAMBLED,
+            Self::Facch { scrambled: true } => DUID_FACCH_SCRAMBLED,
+            Self::Facch { scrambled: false } => DUID_FACCH_UNSCRAMBLED,
+            Self::Lcch { scrambled: true } => LCCH_SCRAMBLED,
+            Self::Lcch { scrambled: false } => LCCH_UNSCRAMBLED,
             Self::Reserved(v) => v,
         }
     }

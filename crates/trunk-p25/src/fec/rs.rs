@@ -41,6 +41,10 @@ impl<const N: usize, const K: usize> Default for ReedSolomon<N, K> {
     }
 }
 
+/// The generator's first consecutive root, α¹: g(x) = ∏ (x − αⁱ) for
+/// i = 1 … N − K (BBAC Annex A eq. 13; BAAA).
+pub const FIRST_ROOT: usize = 1;
+
 impl<const N: usize, const K: usize> ReedSolomon<N, K> {
     const R: usize = N - K;
 
@@ -50,8 +54,8 @@ impl<const N: usize, const K: usize> ReedSolomon<N, K> {
         g[0] = Gf64::ONE;
         let mut i = 1;
         while i <= Self::R {
-            // g ← g · (x + αⁱ)
-            let root = Gf64::alpha(i);
+            // g ← g · (x + α^(FIRST_ROOT + i − 1))
+            let root = Gf64::alpha(FIRST_ROOT + i - 1);
             let mut d = i;
             while d > 0 {
                 g[d] = g[d - 1].plus(g[d].times(root));
@@ -100,10 +104,12 @@ impl<const N: usize, const K: usize> ReedSolomon<N, K> {
         word
     }
 
-    /// S(x) = Σ c(α^(i+1)) xⁱ; zero for a codeword.
+    /// S(x) = Σ c(α^(`FIRST_ROOT` + i)) xⁱ; zero for a codeword.
     fn syndromes(word: &[Gf64]) -> Poly {
         let c = Self::polynomial(word);
-        (1..=Self::R).map(|i| c.eval(Gf64::alpha(i))).collect()
+        (FIRST_ROOT..FIRST_ROOT + Self::R)
+            .map(|i| c.eval(Gf64::alpha(i)))
+            .collect()
     }
 
     pub fn is_codeword(&self, word: &[Gf64; N]) -> bool {

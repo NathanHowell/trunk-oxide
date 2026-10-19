@@ -14,18 +14,77 @@
 //! acceptance rule (distance below the mother code's 29) becomes exactly the
 //! punctured code's own bound. Symbol reliabilities come from the bit LLRs.
 
+use std::ops::Range;
+
 use super::layout::{ESS_A, ESS_B, FACCH_GAP, PAYLOAD_DIBITS};
 use crate::crc::{crc12, crc12_ok};
 use crate::fec::ReedSolomon;
 use crate::gf64::Gf64;
 use crate::voice::{Checked, EncryptionSync};
 
-/// Encryption sync: 16 data hexbits (in the four 4V bursts), 28 parity (2V).
-pub const RS_ESS: ReedSolomon<44, 16> = ReedSolomon::new();
-/// FACCH: 26 data hexbits, 19 parity sent, 9 punctured.
-pub const RS_FACCH: ReedSolomon<54, 26> = ReedSolomon::new();
-/// SACCH: 30 data hexbits, 22 parity sent, 6 punctured.
-pub const RS_SACCH: ReedSolomon<58, 30> = ReedSolomon::new();
+/// The mother code, RS(63,35,29) over GF(64) (BBAC §5.6 Table 5-5).
+pub const MOTHER_N: usize = 63;
+pub const MOTHER_K: usize = 35;
+/// Leading information hexbits shortened (known zero), per application
+/// (BBAC §5.6 Table 5-5, S).
+pub const ESS_SHORTENED: usize = 19;
+pub const S_OEMI_SHORTENED: usize = 9;
+pub const I_OEMI_SHORTENED: usize = 5;
+/// Least significant parity hexbits punctured (not sent), per application
+/// (BBAC §5.6 Table 5-5, U; ESS has none).
+pub const S_OEMI_PUNCTURED: usize = 9;
+pub const I_OEMI_PUNCTURED: usize = 6;
+/// Information hexbits of each derived code (K′ = K − S).
+pub const ESS_INFO: usize = MOTHER_K - ESS_SHORTENED;
+pub const S_OEMI_INFO: usize = MOTHER_K - S_OEMI_SHORTENED;
+pub const I_OEMI_INFO: usize = MOTHER_K - I_OEMI_SHORTENED;
+/// The ESS code word's length (N′ = N − S − U).
+pub const ESS_LEN: usize = MOTHER_N - ESS_SHORTENED;
+
+/// Encryption sync, (44,16,29): 16 data hexbits (in the four 4V bursts), 28
+/// parity (2V) (BBAC §5.6.2).
+pub const RS_ESS: ReedSolomon<ESS_LEN, ESS_INFO> = ReedSolomon::new();
+/// FACCH, the S-OEMI (45,26,20): 26 data hexbits, 19 parity sent, 9
+/// punctured (BBAC §5.6.1.2).
+pub const RS_FACCH: ReedSolomon<{ MOTHER_N - S_OEMI_SHORTENED }, S_OEMI_INFO> = ReedSolomon::new();
+/// SACCH, the I-OEMI (52,30,23): 30 data hexbits, 22 parity sent, 6
+/// punctured (BBAC §5.6.1.3).
+pub const RS_SACCH: ReedSolomon<{ MOTHER_N - I_OEMI_SHORTENED }, I_OEMI_INFO> = ReedSolomon::new();
+
+/// ESS-B hexbits in each 4V burst and ESS-A hexbits in the 2V (BBAC §5.6.2
+/// Fig. 5-9).
+pub const ESS_B_HEXBITS: usize = 4;
+pub const ESS_A_HEXBITS: usize = 28;
+/// The ESS information octets: ALGID, KID, MI (BBAC §5.6.2 Fig. 5-9).
+pub const ESS_ALGID: usize = 0;
+pub const ESS_KID: Range<usize> = 1..3;
+pub const ESS_MI: Range<usize> = 3..12;
+
+/// A MAC PDU's octets before its CRC-12: 19.5-octet S-OEMI (FACCH) and
+/// 22.5-octet I-OEMI (SACCH) PDUs (BBAC §8.1.1 Fig. 8-2).
+pub const S_OEMI_PDU_OCTETS: usize = 18;
+pub const I_OEMI_PDU_OCTETS: usize = 21;
+
+/// MAC header: 3-bit opcode, 3-bit offset, 2 reserved bits (BBAC §8.1).
+const OPCODE_SHIFT: u32 = 5;
+const OFFSET_SHIFT: u32 = 2;
+const OFFSET_MASK: u8 = 0b111;
+
+/// MAC PDU opcodes (BBAC §8.4.1 Table 8-6).
+pub const MAC_PTT: u8 = 0b001;
+pub const MAC_END_PTT: u8 = 0b010;
+pub const MAC_IDLE: u8 = 0b011;
+pub const MAC_ACTIVE: u8 = 0b100;
+pub const MAC_HANGTIME: u8 = 0b110;
+
+/// `MAC_PTT` fields, by octet (BBAC §8.2.1 Figs. 8-4 to 8-6).
+pub const PTT_MI: Range<usize> = 1..10;
+pub const PTT_ALGID: usize = 10;
+pub const PTT_KID: Range<usize> = 11..13;
+pub const PTT_SOURCE: Range<usize> = 13..16;
+pub const PTT_GROUP: Range<usize> = 16..18;
+/// `MAC_END_PTT`'s group address octets (BBAC §8.2.2 Figs. 8-7 to 8-9).
+pub const END_PTT_GROUP: Range<usize> = 16..18;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum MacChannel {
@@ -37,16 +96,16 @@ impl MacChannel {
     /// PDU length in bytes, before the CRC.
     pub const fn pdu_bytes(self) -> usize {
         match self {
-            Self::Facch => 18,
-            Self::Sacch => 21,
+            Self::Facch => S_OEMI_PDU_OCTETS,
+            Self::Sacch => I_OEMI_PDU_OCTETS,
         }
     }
 
     /// Hexbits sent.
     pub const fn sent(self) -> usize {
         match self {
-            Self::Facch => 45,
-            Self::Sacch => 52,
+            Self::Facch => MOTHER_N - S_OEMI_SHORTENED - S_OEMI_PUNCTURED,
+            Self::Sacch => MOTHER_N - I_OEMI_SHORTENED - I_OEMI_PUNCTURED,
         }
     }
 
@@ -74,12 +133,13 @@ pub enum MacOpcode {
 impl MacOpcode {
     pub const fn from_bits(v: u8) -> Self {
         match v & 7 {
+            // Reserved in BBAC Table 8-6; op25's MAC_SIGNAL.
             0 => Self::Signal,
-            1 => Self::Ptt,
-            2 => Self::EndPtt,
-            3 => Self::Idle,
-            4 => Self::Active,
-            6 => Self::Hangtime,
+            MAC_PTT => Self::Ptt,
+            MAC_END_PTT => Self::EndPtt,
+            MAC_IDLE => Self::Idle,
+            MAC_ACTIVE => Self::Active,
+            MAC_HANGTIME => Self::Hangtime,
             v => Self::Reserved(v),
         }
     }
@@ -113,12 +173,12 @@ impl MacPdu {
     }
 
     pub const fn opcode(&self) -> MacOpcode {
-        MacOpcode::from_bits(self.bytes[0] >> 5)
+        MacOpcode::from_bits(self.bytes[0] >> OPCODE_SHIFT)
     }
 
     /// The offset field: bursts until the first 4V of the voice that follows.
     pub const fn offset(&self) -> u8 {
-        (self.bytes[0] >> 2) & 7
+        (self.bytes[0] >> OFFSET_SHIFT) & OFFSET_MASK
     }
 
     pub const fn ptt(&self) -> Option<MacPtt> {
@@ -128,18 +188,19 @@ impl MacPdu {
         let b = &self.bytes;
         let mut mi = [0u8; 9];
         let mut i = 0;
-        while i < 9 {
-            mi[i] = b[1 + i];
+        while i < mi.len() {
+            mi[i] = b[PTT_MI.start + i];
             i += 1;
         }
+        let (kid, src, grp) = (PTT_KID.start, PTT_SOURCE.start, PTT_GROUP.start);
         Some(MacPtt {
             encryption: EncryptionSync {
                 mi,
-                algid: b[10],
-                keyid: u16::from_be_bytes([b[11], b[12]]),
+                algid: b[PTT_ALGID],
+                keyid: u16::from_be_bytes([b[kid], b[kid + 1]]),
             },
-            source: u32::from_be_bytes([0, b[13], b[14], b[15]]),
-            group: u16::from_be_bytes([b[16], b[17]]),
+            source: u32::from_be_bytes([0, b[src], b[src + 1], b[src + 2]]),
+            group: u16::from_be_bytes([b[grp], b[grp + 1]]),
         })
     }
 }
@@ -215,11 +276,11 @@ pub fn decode_acch(channel: MacChannel, payload: &[f32]) -> Option<Checked<MacPd
     let (data, corrected, erased) = match channel {
         MacChannel::Facch => {
             let (w, c, e) = outer(&RS_FACCH, &sent)?;
-            (pack(&w[..26]), c, e)
+            (pack(&w[..S_OEMI_INFO]), c, e)
         }
         MacChannel::Sacch => {
             let (w, c, e) = outer(&RS_SACCH, &sent)?;
-            (pack(&w[..30]), c, e)
+            (pack(&w[..I_OEMI_INFO]), c, e)
         }
     };
     let n = channel.pdu_bytes() * 8;
@@ -231,7 +292,7 @@ pub fn decode_acch(channel: MacChannel, payload: &[f32]) -> Option<Checked<MacPd
 }
 
 /// The ESS-B hexbits of a 4V burst, with reliabilities.
-pub fn ess_b(payload: &[f32]) -> [(Gf64, f32); 4] {
+pub fn ess_b(payload: &[f32]) -> [(Gf64, f32); ESS_B_HEXBITS] {
     std::array::from_fn(|h| {
         let at = 2 * ESS_B.start + 6 * h;
         hexbit(&payload[at..at + 6])
@@ -239,7 +300,7 @@ pub fn ess_b(payload: &[f32]) -> [(Gf64, f32); 4] {
 }
 
 /// The ESS-A hexbits of a 2V burst.
-pub fn ess_a(payload: &[f32]) -> [(Gf64, f32); 28] {
+pub fn ess_a(payload: &[f32]) -> [(Gf64, f32); ESS_A_HEXBITS] {
     std::array::from_fn(|h| {
         let at = 2 * ESS_A.start + 6 * h;
         hexbit(&payload[at..at + 6])
@@ -249,25 +310,25 @@ pub fn ess_a(payload: &[f32]) -> [(Gf64, f32); 28] {
 /// Encryption sync from the four 4V bursts' ESS-B (`None` for a burst that
 /// was missed: its symbols are erased) and the 2V's ESS-A.
 pub fn decode_ess(
-    b: &[Option<[(Gf64, f32); 4]>; 4],
-    a: &[(Gf64, f32); 28],
+    b: &[Option<[(Gf64, f32); ESS_B_HEXBITS]>; 4],
+    a: &[(Gf64, f32); ESS_A_HEXBITS],
 ) -> Option<Checked<EncryptionSync>> {
-    let mut sent = [(Gf64::ZERO, 0.0f32); 44];
+    let mut sent = [(Gf64::ZERO, 0.0f32); ESS_LEN];
     for (i, part) in b.iter().enumerate() {
         if let Some(part) = part {
-            sent[4 * i..4 * i + 4].copy_from_slice(part);
+            sent[ESS_B_HEXBITS * i..ESS_B_HEXBITS * (i + 1)].copy_from_slice(part);
         }
     }
-    sent[16..].copy_from_slice(a);
+    sent[ESS_INFO..].copy_from_slice(a);
     let (w, corrected, erased) = outer(&RS_ESS, &sent)?;
-    let bytes = pack(&w[..16]);
+    let bytes = pack(&w[..ESS_INFO]);
     let mut mi = [0u8; 9];
-    mi.copy_from_slice(&bytes[3..12]);
+    mi.copy_from_slice(&bytes[ESS_MI]);
     Some(Checked {
         value: EncryptionSync {
             mi,
-            algid: bytes[0],
-            keyid: u16::from_be_bytes([bytes[1], bytes[2]]),
+            algid: bytes[ESS_ALGID],
+            keyid: u16::from_be_bytes([bytes[ESS_KID.start], bytes[ESS_KID.start + 1]]),
         },
         corrected,
         erased,
@@ -278,48 +339,53 @@ pub fn decode_ess(
 /// shortened and punctured symbols all erased, bounded-distance decoding.
 pub mod op25 {
     use super::{
-        EncryptionSync, Gf64, MacChannel, MacPdu, ReedSolomon, acch_bits, crc12_ok, hexbit, pack,
+        ESS_A_HEXBITS, ESS_ALGID, ESS_INFO, ESS_KID, ESS_LEN, ESS_MI, EncryptionSync, Gf64,
+        I_OEMI_INFO, I_OEMI_SHORTENED, MOTHER_K, MOTHER_N, MacChannel, MacPdu, ReedSolomon,
+        S_OEMI_INFO, S_OEMI_SHORTENED, acch_bits, crc12_ok, hexbit, pack,
     };
 
     /// The full RS(63,35).
-    const RS_63_35: ReedSolomon<63, 35> = ReedSolomon::new();
+    const RS_63_35: ReedSolomon<MOTHER_N, MOTHER_K> = ReedSolomon::new();
 
     pub fn decode_acch(channel: MacChannel, payload: &[f32]) -> Option<MacPdu> {
         let bits = acch_bits(channel, payload);
         let (lead, data) = match channel {
-            MacChannel::Facch => (9, 26),
-            MacChannel::Sacch => (5, 30),
+            MacChannel::Facch => (S_OEMI_SHORTENED, S_OEMI_INFO),
+            MacChannel::Sacch => (I_OEMI_SHORTENED, I_OEMI_INFO),
         };
-        let mut word = [Gf64::ZERO; 63];
+        let mut word = [Gf64::ZERO; MOTHER_N];
         for (j, c) in bits.as_chunks::<6>().0.iter().enumerate() {
             word[lead + j] = hexbit(c).0;
         }
-        let erasures: Vec<usize> = (0..lead).chain(lead + channel.sent()..63).collect();
+        let erasures: Vec<usize> = (0..lead).chain(lead + channel.sent()..MOTHER_N).collect();
         RS_63_35.decode(&mut word, &erasures).ok()?;
         let bytes = pack(&word[lead..lead + data]);
         crc12_ok(&bytes, channel.pdu_bytes() * 8).then(|| MacPdu::new(channel, &bytes))
     }
 
     /// op25 decodes ESS with up to 14 corrections, no erasures.
-    pub fn decode_ess(b: &[Gf64; 16], a: &[Gf64; 28]) -> Option<EncryptionSync> {
-        let mut word = [Gf64::ZERO; 44];
-        word[..16].copy_from_slice(b);
-        word[16..].copy_from_slice(a);
+    pub fn decode_ess(b: &[Gf64; ESS_INFO], a: &[Gf64; ESS_A_HEXBITS]) -> Option<EncryptionSync> {
+        let mut word = [Gf64::ZERO; ESS_LEN];
+        word[..ESS_INFO].copy_from_slice(b);
+        word[ESS_INFO..].copy_from_slice(a);
         super::RS_ESS.decode(&mut word, &[]).ok()?;
-        let bytes = pack(&word[..16]);
+        let bytes = pack(&word[..ESS_INFO]);
         let mut mi = [0u8; 9];
-        mi.copy_from_slice(&bytes[3..12]);
+        mi.copy_from_slice(&bytes[ESS_MI]);
         Some(EncryptionSync {
             mi,
-            algid: bytes[0],
-            keyid: u16::from_be_bytes([bytes[1], bytes[2]]),
+            algid: bytes[ESS_ALGID],
+            keyid: u16::from_be_bytes([bytes[ESS_KID.start], bytes[ESS_KID.start + 1]]),
         })
     }
 }
 
 /// Encoders, for regeneration and tests.
 pub mod encode {
-    use super::{EncryptionSync, Gf64, MacChannel, PAYLOAD_DIBITS, RS_ESS, RS_FACCH, RS_SACCH};
+    use super::{
+        ESS_ALGID, ESS_KID, ESS_LEN, ESS_MI, EncryptionSync, Gf64, MacChannel, PAYLOAD_DIBITS,
+        RS_ESS, RS_FACCH, RS_SACCH,
+    };
     use super::{crc12, unpack};
 
     fn bits(symbols: &[Gf64]) -> impl Iterator<Item = bool> + '_ {
@@ -345,8 +411,8 @@ pub mod encode {
     pub fn acch(channel: MacChannel, pdu: &[u8]) -> Vec<bool> {
         let data = data_bytes(channel, pdu);
         let sent: Vec<bool> = match channel {
-            MacChannel::Facch => bits(&RS_FACCH.encode(&unpack(&data))[..45]).collect(),
-            MacChannel::Sacch => bits(&RS_SACCH.encode(&unpack(&data))[..52]).collect(),
+            MacChannel::Facch => bits(&RS_FACCH.encode(&unpack(&data))[..channel.sent()]).collect(),
+            MacChannel::Sacch => bits(&RS_SACCH.encode(&unpack(&data))[..channel.sent()]).collect(),
         };
         let mut out = vec![false; 2 * PAYLOAD_DIBITS];
         let mut it = sent.into_iter();
@@ -358,11 +424,11 @@ pub mod encode {
     }
 
     /// The ESS codeword: 16 data hexbits (four per 4V), 28 parity (the 2V).
-    pub fn ess(es: &EncryptionSync) -> [Gf64; 44] {
-        let mut b = [0u8; 12];
-        b[0] = es.algid;
-        b[1..3].copy_from_slice(&es.keyid.to_be_bytes());
-        b[3..].copy_from_slice(&es.mi);
+    pub fn ess(es: &EncryptionSync) -> [Gf64; ESS_LEN] {
+        let mut b = [0u8; ESS_MI.end];
+        b[ESS_ALGID] = es.algid;
+        b[ESS_KID].copy_from_slice(&es.keyid.to_be_bytes());
+        b[ESS_MI].copy_from_slice(&es.mi);
         RS_ESS.encode(&unpack(&b))
     }
 

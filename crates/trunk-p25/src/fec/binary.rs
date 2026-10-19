@@ -324,7 +324,15 @@ impl<const K: usize, const L: usize> BlockCode for BinaryCode<K, L> {
     }
 }
 
-/// Hamming parity columns: every 4-bit value of weight ≥ 2, descending.
+/// Golay generator g(x) = x¹¹ + x¹⁰ + x⁶ + x⁵ + x⁴ + x² + 1, octal 6165
+/// (BAAA-A §5.7; BABA §7.3).
+pub const GOLAY_GENERATOR: u32 = 0o6165;
+/// Parity rows of the shortened Hamming(10,6,3) code (BAAA-A §5.8, Table
+/// 5-4): chosen rows of the (15,11) code, not simply its last six.
+pub const HAMMING_10_PARITY: [u32; 6] = [0b1110, 0b1101, 0b1011, 0b0111, 0b0011, 0b1100];
+
+/// Hamming(15,11) parity columns: every 4-bit value of weight ≥ 2,
+/// descending (BAAA-A §5.8, Table 5-4; BABA §7.3).
 const fn hamming_columns() -> [u32; 11] {
     let mut rows = [0u32; 11];
     let (mut c, mut i) = (15u32, 0);
@@ -338,18 +346,20 @@ const fn hamming_columns() -> [u32; 11] {
     rows
 }
 
-/// Golay(23,12,7): cyclic, g(x) = x¹¹+x¹⁰+x⁶+x⁵+x⁴+x²+1. Perfect, t = 3.
+/// Golay(23,12,7): cyclic, [`GOLAY_GENERATOR`]. Perfect, t = 3.
 /// Protects IMBE vectors u0–u3.
-pub static GOLAY_23: BinaryCode<12, 2048> = BinaryCode::cyclic(23, 0xc75);
-/// Extended Golay(24,12,8), for TDULC link control.
+pub static GOLAY_23: BinaryCode<12, 2048> = BinaryCode::cyclic(23, GOLAY_GENERATOR);
+/// Extended Golay(24,12,8), for TDULC link control: Golay(23,12) plus an
+/// even-parity bit (BAAA-A §5.7, Table 5-3).
 pub static GOLAY_24: BinaryCode<12, 4096> = GOLAY_23.extended();
-/// Shortened Golay(18,6,8), for the header data unit.
+/// Shortened Golay(18,6,8), for the header data unit: the (24,12) code less
+/// its left six bits (BAAA-A §5.7, Table 5-3).
 pub static GOLAY_18: BinaryCode<6, 4096> = GOLAY_24.shortened();
 /// Hamming(15,11,3), protecting IMBE vectors u4–u6.
 pub static HAMMING_15: BinaryCode<11, 16> = BinaryCode::from_parity_rows(15, hamming_columns());
 /// Shortened Hamming(10,6,3): P25's parity columns for the hexbits of link
 /// control and encryption sync in voice frames.
-pub static HAMMING_10: BinaryCode<6, 16> = BinaryCode::from_parity_rows(10, [14, 13, 11, 7, 3, 12]);
+pub static HAMMING_10: BinaryCode<6, 16> = BinaryCode::from_parity_rows(10, HAMMING_10_PARITY);
 
 #[cfg(test)]
 mod tests {

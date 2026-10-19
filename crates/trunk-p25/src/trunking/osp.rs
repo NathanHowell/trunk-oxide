@@ -52,6 +52,21 @@ impl Fields<'_> {
     }
 }
 
+/// Service Options bits (TIA-102.AABC-B §2.3.24, Figure 2.3.24-1). Data
+/// Service Options (§2.3.12) share bits 7–4; their bits 3–0 are the NSAPI.
+pub mod service_options {
+    /// Bit 7: special (emergency) processing.
+    pub const EMERGENCY: u8 = 0x80;
+    /// Bit 6: the resources are presented protected (encrypted).
+    pub const PROTECTED: u8 = 0x40;
+    /// Bit 5: full duplex.
+    pub const DUPLEX: u8 = 0x20;
+    /// Bit 4: packet (rather than circuit) mode.
+    pub const MODE: u8 = 0x10;
+    /// Bits 2–0: the priority level.
+    pub const PRIORITY_LEVEL: u8 = 0x07;
+}
+
 /// Service options of a voice or data grant.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct ServiceOptions(u8);
@@ -68,24 +83,24 @@ impl ServiceOptions {
     }
 
     pub const fn emergency(self) -> bool {
-        self.0 & 0x80 != 0
+        self.0 & service_options::EMERGENCY != 0
     }
 
     pub const fn encrypted(self) -> bool {
-        self.0 & 0x40 != 0
+        self.0 & service_options::PROTECTED != 0
     }
 
     pub const fn duplex(self) -> bool {
-        self.0 & 0x20 != 0
+        self.0 & service_options::DUPLEX != 0
     }
 
     /// Packet (rather than circuit) mode.
     pub const fn packet(self) -> bool {
-        self.0 & 0x10 != 0
+        self.0 & service_options::MODE != 0
     }
 
     pub const fn priority(self) -> u8 {
-        self.0 & 7
+        self.0 & service_options::PRIORITY_LEVEL
     }
 }
 
@@ -126,11 +141,81 @@ pub struct Site {
 
 /// Manufacturer IDs.
 pub mod mfid {
+    /// The standard MFID (TIA-102.BAAC-A §2.3).
     pub const STANDARD: u8 = 0x00;
-    /// Also standard (TIA-102.AABC: MFID 0x01 is the standard set too).
+    /// Also standard, since 2001 (TIA-102.BAAC-A §2.3; TIA-102.AABB-B §5.1).
     pub const STANDARD_ALT: u8 = 0x01;
     pub const MOTOROLA: u8 = 0x90;
     pub const HARRIS: u8 = 0xa4;
+}
+
+/// Standard OSP opcodes, by their TIA-102.AABC-B aliases (Annex D; section
+/// given per opcode).
+pub mod opcode {
+    /// §4.2.1.
+    pub const GRP_V_CH_GRANT: u8 = 0x00;
+    /// §4.2.2.
+    pub const GRP_V_CH_GRANT_UPDT: u8 = 0x02;
+    /// §4.2.3.
+    pub const GRP_V_CH_GRANT_UPDT_EXP: u8 = 0x03;
+    /// §4.2.5.
+    pub const UU_V_CH_GRANT: u8 = 0x04;
+    /// §4.2.4.
+    pub const UU_ANS_REQ: u8 = 0x05;
+    /// §4.2.8.
+    pub const UU_V_CH_GRANT_UPDT: u8 = 0x06;
+    /// §5.2.5 (`SN-DATA_CHN_GNT`).
+    pub const SN_DATA_CHN_GNT: u8 = 0x14;
+    /// §6.2.1.
+    pub const ACK_RSP_FNE: u8 = 0x20;
+    /// §6.2.8.
+    pub const GRP_AFF_RSP: u8 = 0x28;
+    /// §6.2.28.
+    pub const SCCB_EXP: u8 = 0x29;
+    /// §6.2.23.
+    pub const LOC_REG_RSP: u8 = 0x2b;
+    /// §6.2.21.
+    pub const U_REG_RSP: u8 = 0x2c;
+    /// §6.2.22.
+    pub const U_DE_REG_ACK: u8 = 0x2f;
+    /// TIA-102.BBAC-1 Table B-1 (§8.3.1.36).
+    pub const IDEN_UP_TDMA: u8 = 0x33;
+    /// §6.2.29.
+    pub const IDEN_UP_VU: u8 = 0x34;
+    /// §6.2.16.
+    pub const SCCB: u8 = 0x39;
+    /// §6.2.15.
+    pub const RFSS_STS_BCST: u8 = 0x3a;
+    /// §6.2.11.
+    pub const NET_STS_BCST: u8 = 0x3b;
+    /// §6.2.2.
+    pub const ADJ_STS_BCST: u8 = 0x3c;
+    /// §6.2.9.
+    pub const IDEN_UP: u8 = 0x3d;
+}
+
+/// Identifier update field units and widths (TIA-102.AABC-B).
+pub mod iden_up {
+    /// Base Frequency: 0.000005 MHz steps (§6.2.29; §2.3.5).
+    pub const BASE_FREQUENCY_HZ: u64 = 5;
+    /// Channel Spacing: 0.125 kHz steps (§2.3.10).
+    pub const CHANNEL_SPACING_HZ: u32 = 125;
+    /// BW: 0.125 kHz steps (§2.3.6).
+    pub const BW_HZ: u32 = 125;
+    /// Transmit Offset: 0.250 MHz steps (§2.3.35).
+    pub const TRANSMIT_OFFSET_HZ: i64 = 250_000;
+    /// Transmit Offset: a High/Low flag (b8) and an 8-bit value (§2.3.35).
+    pub const TRANSMIT_OFFSET_BITS: u32 = 9;
+    /// Transmit Offset VU: a High/Low flag (b13) and a 13-bit value, in
+    /// units of the channel spacing (§2.3.36).
+    pub const TRANSMIT_OFFSET_VU_BITS: u32 = 14;
+    /// Transmit Offset TDMA: 14 bits (TIA-102.BBAC field table), read like
+    /// Transmit Offset VU.
+    pub const TRANSMIT_OFFSET_TDMA_BITS: u32 = 14;
+    /// BW VU: 6.25 kHz receiver bandwidth (§2.3.7, Table 2.3.7-1).
+    pub const BW_VU_6_25_KHZ: u8 = 0b0100;
+    /// BW VU: 12.5 kHz receiver bandwidth (§2.3.7, Table 2.3.7-1).
+    pub const BW_VU_12_5_KHZ: u8 = 0b0101;
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -264,10 +349,13 @@ pub enum Osp {
     Other { opcode: u8, mfid: u8 },
 }
 
+/// A transmit offset field: its top bit the High/Low flag, the rest the
+/// magnitude (TIA-102.AABC-B §2.3.35, §2.3.36).
 #[allow(clippy::cast_possible_wrap)] // at most 13 bits
 const fn iden_offset(sign_and_magnitude: u64, bits: u32) -> i64 {
     let magnitude = (sign_and_magnitude & ((1 << (bits - 1)) - 1)) as i64;
-    // The sign bit set means the mobile transmits above the base.
+    // The High/Low flag set means the mobile transmits above the receive
+    // frequency.
     if (sign_and_magnitude >> (bits - 1)) & 1 == 1 {
         magnitude
     } else {
@@ -321,13 +409,13 @@ impl Osp {
     #[allow(clippy::too_many_lines)] // the opcode table
     const fn standard(t: &Fields<'_>, opcode: u8, mfid: u8) -> Self {
         match opcode {
-            0x00 => Self::GroupVoiceGrant {
+            opcode::GRP_V_CH_GRANT => Self::GroupVoiceGrant {
                 options: ServiceOptions(t.u8(72, 8)),
                 channel: t.channel(56),
                 group: t.u16(40, 16),
                 source: t.u32(16, 24),
             },
-            0x02 => Self::GroupVoiceGrantUpdate {
+            opcode::GRP_V_CH_GRANT_UPDT => Self::GroupVoiceGrantUpdate {
                 first: GroupChannel {
                     channel: t.channel(64),
                     group: t.u16(48, 16),
@@ -337,71 +425,72 @@ impl Osp {
                     group: t.u16(16, 16),
                 },
             },
-            0x03 => Self::GroupVoiceGrantUpdateExplicit {
+            opcode::GRP_V_CH_GRANT_UPDT_EXP => Self::GroupVoiceGrantUpdateExplicit {
                 options: ServiceOptions(t.u8(72, 8)),
                 tx: t.channel(48),
                 rx: t.channel(32),
                 group: t.u16(16, 16),
             },
-            0x04 => Self::UnitVoiceGrant {
+            opcode::UU_V_CH_GRANT => Self::UnitVoiceGrant {
                 options: ServiceOptions::NONE,
                 channel: t.channel(64),
                 target: t.u32(40, 24),
                 source: t.u32(16, 24),
             },
-            0x05 => Self::UnitAnswerRequest {
+            opcode::UU_ANS_REQ => Self::UnitAnswerRequest {
                 options: ServiceOptions(t.u8(72, 8)),
                 target: t.u32(40, 24),
                 source: t.u32(16, 24),
             },
-            0x06 => Self::UnitVoiceGrantUpdate {
+            opcode::UU_V_CH_GRANT_UPDT => Self::UnitVoiceGrantUpdate {
                 channel: t.channel(64),
                 target: t.u32(40, 24),
                 source: t.u32(16, 24),
             },
-            0x14 => Self::DataGrant {
+            opcode::SN_DATA_CHN_GNT => Self::DataGrant {
                 options: ServiceOptions(t.u8(72, 8)),
                 tx: t.channel(56),
                 rx: t.channel(40),
                 target: t.u32(16, 24),
             },
-            0x20 => Self::Acknowledge {
+            opcode::ACK_RSP_FNE => Self::Acknowledge {
                 group: t.u16(40, 16),
                 target: t.u32(16, 24),
             },
-            0x28 => Self::GroupAffiliation {
+            opcode::GRP_AFF_RSP => Self::GroupAffiliation {
                 response: Response::from_bits(t.u8(72, 2)),
                 announcement: t.u16(56, 16),
                 group: t.u16(40, 16),
                 target: t.u32(16, 24),
             },
-            0x29 => Self::SecondaryControlExplicit {
+            opcode::SCCB_EXP => Self::SecondaryControlExplicit {
                 rfss: t.u8(72, 8),
                 site: t.u8(64, 8),
                 tx: t.channel(48),
                 rx: t.channel(24),
             },
-            0x2b => Self::LocationRegistration {
+            opcode::LOC_REG_RSP => Self::LocationRegistration {
                 response: Response::from_bits(t.u8(72, 2)),
                 group: t.u16(56, 16),
                 target: t.u32(16, 24),
             },
-            0x2c => Self::UnitRegistration {
+            opcode::U_REG_RSP => Self::UnitRegistration {
                 response: Response::from_bits(t.u8(76, 2)),
                 source_id: t.u32(40, 24),
                 source_address: t.u32(16, 24),
             },
-            0x2f => Self::UnitDeregistration {
+            opcode::U_DE_REG_ACK => Self::UnitDeregistration {
                 source: t.u32(16, 24),
             },
-            0x33 => {
-                let toff = field(t.0, 2, 58, 14);
-                let spacing = t.u32(48, 10) * 125;
+            opcode::IDEN_UP_TDMA => {
+                let toff = field(t.0, 2, 58, iden_up::TRANSMIT_OFFSET_TDMA_BITS as usize);
+                let spacing = t.u32(48, 10) * iden_up::CHANNEL_SPACING_HZ;
                 let plan = match ChannelPlan::tdma_channel_type(t.u8(72, 4)) {
                     Some((access, bandwidth_hz)) => Some(ChannelPlan {
-                        base_hz: t.u32(16, 32) as u64 * 5,
+                        base_hz: t.u32(16, 32) as u64 * iden_up::BASE_FREQUENCY_HZ,
                         spacing_hz: spacing,
-                        tx_offset_hz: iden_offset(toff, 14) * spacing as i64,
+                        tx_offset_hz: iden_offset(toff, iden_up::TRANSMIT_OFFSET_TDMA_BITS)
+                            * spacing as i64,
                         bandwidth_hz,
                         access,
                     }),
@@ -412,30 +501,31 @@ impl Osp {
                     plan,
                 }
             }
-            0x34 => {
-                let toff = field(t.0, 2, 58, 14);
-                let spacing = t.u32(48, 10) * 125;
+            opcode::IDEN_UP_VU => {
+                let toff = field(t.0, 2, 58, iden_up::TRANSMIT_OFFSET_VU_BITS as usize);
+                let spacing = t.u32(48, 10) * iden_up::CHANNEL_SPACING_HZ;
                 Self::IdenUpdate {
                     iden: Iden::new(t.u8(76, 4)),
                     plan: Some(ChannelPlan {
-                        base_hz: t.u32(16, 32) as u64 * 5,
+                        base_hz: t.u32(16, 32) as u64 * iden_up::BASE_FREQUENCY_HZ,
                         spacing_hz: spacing,
-                        tx_offset_hz: iden_offset(toff, 14) * spacing as i64,
+                        tx_offset_hz: iden_offset(toff, iden_up::TRANSMIT_OFFSET_VU_BITS)
+                            * spacing as i64,
                         bandwidth_hz: match t.u8(72, 4) {
-                            4 => 6_250,
-                            5 => 12_500,
+                            iden_up::BW_VU_6_25_KHZ => 6_250,
+                            iden_up::BW_VU_12_5_KHZ => 12_500,
                             _ => 0,
                         },
                         access: Access::Fdma,
                     }),
                 }
             }
-            0x39 => Self::SecondaryControl {
+            opcode::SCCB => Self::SecondaryControl {
                 rfss: t.u8(72, 8),
                 site: t.u8(64, 8),
                 channels: [t.channel(48), t.channel(24)],
             },
-            0x3a => Self::RfssStatus {
+            opcode::RFSS_STS_BCST => Self::RfssStatus {
                 site: Site {
                     system: t.u16(56, 12),
                     rfss: t.u8(48, 8),
@@ -443,12 +533,12 @@ impl Osp {
                 },
                 channel: t.channel(24),
             },
-            0x3b => Self::NetworkStatus {
+            opcode::NET_STS_BCST => Self::NetworkStatus {
                 wacn: t.u32(52, 20),
                 system: t.u16(40, 12),
                 channel: t.channel(24),
             },
-            0x3c => Self::AdjacentStatus {
+            opcode::ADJ_STS_BCST => Self::AdjacentStatus {
                 site: Site {
                     system: t.u16(56, 12),
                     rfss: t.u8(48, 8),
@@ -456,13 +546,16 @@ impl Osp {
                 },
                 channel: t.channel(24),
             },
-            0x3d => Self::IdenUpdate {
+            opcode::IDEN_UP => Self::IdenUpdate {
                 iden: Iden::new(t.u8(76, 4)),
                 plan: Some(ChannelPlan {
-                    base_hz: t.u32(16, 32) as u64 * 5,
-                    spacing_hz: t.u32(48, 10) * 125,
-                    tx_offset_hz: iden_offset(field(t.0, 2, 58, 9), 9) * 250_000,
-                    bandwidth_hz: t.u32(67, 9) * 125,
+                    base_hz: t.u32(16, 32) as u64 * iden_up::BASE_FREQUENCY_HZ,
+                    spacing_hz: t.u32(48, 10) * iden_up::CHANNEL_SPACING_HZ,
+                    tx_offset_hz: iden_offset(
+                        field(t.0, 2, 58, iden_up::TRANSMIT_OFFSET_BITS as usize),
+                        iden_up::TRANSMIT_OFFSET_BITS,
+                    ) * iden_up::TRANSMIT_OFFSET_HZ,
+                    bandwidth_hz: t.u32(67, 9) * iden_up::BW_HZ,
                     access: Access::Fdma,
                 }),
             },
@@ -485,7 +578,7 @@ impl Osp {
         let opcode = h.u8(32, 6);
         #[allow(clippy::cast_possible_truncation)]
         match opcode {
-            0x00 => Self::GroupVoiceGrant {
+            opcode::GRP_V_CH_GRANT => Self::GroupVoiceGrant {
                 options: ServiceOptions(h.u8(24, 8)),
                 channel: dch(64),
                 group: d(32, 16) as u16,
@@ -497,13 +590,13 @@ impl Osp {
                 supergroup: d(48, 16) as u16,
                 source: None,
             },
-            0x04 => Self::UnitVoiceGrant {
+            opcode::UU_V_CH_GRANT => Self::UnitVoiceGrant {
                 options: ServiceOptions(h.u8(24, 8)),
                 channel: h.channel(16),
                 target: d(24, 24),
                 source: h.u32(48, 24),
             },
-            0x3a => Self::RfssStatus {
+            opcode::RFSS_STS_BCST => Self::RfssStatus {
                 site: Site {
                     system: h.u16(48, 12),
                     rfss: d(88, 8) as u8,
@@ -511,7 +604,7 @@ impl Osp {
                 },
                 channel: dch(64),
             },
-            0x3b => Self::NetworkStatus {
+            opcode::NET_STS_BCST => Self::NetworkStatus {
                 wacn: d(76, 20),
                 system: h.u16(48, 12),
                 channel: dch(56),

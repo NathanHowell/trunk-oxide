@@ -11,15 +11,24 @@ pub const SYMBOL_RATE: f64 = 4800.0;
 /// P25 Phase 2 (TDMA) symbol rate.
 pub const PHASE2_SYMBOL_RATE: f64 = 6000.0;
 
-/// The 48-bit frame sync, first transmitted dibit in the top bits.
+/// The 48-bit frame sync, first transmitted dibit in the top bits
+/// (BAAA-A §8.3, Table 8-1).
 pub const FRAME_SYNC: u64 = 0x5575_F5FF_77FF;
+/// Dibits of [`FRAME_SYNC`].
 pub const SYNC_DIBITS: usize = 24;
+/// Width of [`FRAME_SYNC`] in bits.
+pub const FRAME_SYNC_BITS: usize = 2 * SYNC_DIBITS;
+/// Selects the sync-sized tail of a shift register of dibits.
+pub const FRAME_SYNC_MASK: u64 = (1u64 << FRAME_SYNC_BITS) - 1;
 
 /// Every 36th dibit of a frame (counting from the first sync dibit) is a
-/// status symbol, not data.
+/// status symbol, not data: one micro-slot, 70 bits then the status symbol
+/// (BAAA-A §8.2; AABB-B §4).
 pub const STATUS_PERIOD: usize = 36;
+/// Data dibits in a micro-slot, before its status symbol (70 bits).
+pub const MICRO_SLOT_DATA_DIBITS: usize = STATUS_PERIOD - 1;
 
-/// Dibit to symbol level (TIA-102.BAAA): 01 → +3, 00 → +1, 10 → −1, 11 → −3.
+/// Dibit to symbol level (BAAA-A §9.2, Table 9-1): 01 → +3, 00 → +1, 10 → −1, 11 → −3.
 pub const LEVELS: [f32; 4] = [1.0, 3.0, -1.0, -3.0];
 
 pub const fn is_status(frame_dibit: usize) -> bool {
@@ -69,7 +78,7 @@ pub const fn sync_dibits() -> [u8; SYNC_DIBITS] {
     let mut i = 0;
     while i < SYNC_DIBITS {
         #[allow(clippy::cast_possible_truncation)]
-        let d = ((FRAME_SYNC >> (46 - 2 * i)) & 3) as u8;
+        let d = ((FRAME_SYNC >> (FRAME_SYNC_BITS - 2 - 2 * i)) & 3) as u8;
         out[i] = d;
         i += 1;
     }

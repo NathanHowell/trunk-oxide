@@ -19,8 +19,24 @@ use crate::symbols::LEVELS;
 use crate::trellis::{self, BLOCK_DIBITS, SoftBlock};
 use crate::types::{Nac, Recovery, Tsbk};
 
-/// MBT data blocks accepted after a header.
+/// MBT data blocks accepted after a header (our limit, not the spec's).
 const MAX_MBT_BLOCKS: usize = 8;
+/// Bytes in a decoded rate-1/2 trellis block: a PDU header or unconfirmed
+/// data block (BAAA-A §6.2, §6.3.1).
+const BLOCK_BYTES: usize = trellis::DATA_BYTES;
+/// Bytes of a TSBK in its block; the rest is the block's CRC-16 (AABB-B
+/// §5.1).
+const TSBK_BYTES: usize = 10;
+/// The packet CRC closing the last block of a multi-block PDU (BAAA-A
+/// §6.3.3).
+const PDU_CRC_BYTES: usize = 4;
+/// Service access point of trunking control PDUs: $3D "Trunking Control"
+/// (BAAC-A §2.9; AABB-B §6.1).
+const SAP_TRUNKING_CONTROL: u8 = 61;
+/// PDU formats of multi-block trunking (AABB-B §6.1): %10101 unconfirmed
+/// (the unconfirmed data header of BAAA-A §6.6) and %10111 alternative.
+const FORMAT_MBT_UNCONFIRMED: u8 = 0x15;
+const FORMAT_MBT_ALTERNATE: u8 = 0x17;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Message {
@@ -33,7 +49,7 @@ pub enum Message {
     /// sends it) and the data blocks without their CRC-32.
     Mbt {
         nac: Nac,
-        header: [u8; 12],
+        header: [u8; BLOCK_BYTES],
         data: Vec<u8>,
     },
     /// Terminator; with link control it tells a control channel decoder it
@@ -113,14 +129,21 @@ pub struct DecoderConfig {
     pub timeout_symbols: u64,
 }
 
+/// Defaults of [`DecoderConfig`]. The list-decoder excess admits a runner-up
+/// up to three adjacent-level symbol errors worse than the best path.
+const DEFAULT_LIST_SIZE: usize = 8;
+const DEFAULT_LIST_MAX_EXTRA: f32 = 12.0;
+/// One second of Phase 1 symbols.
+const DEFAULT_TIMEOUT_SYMBOLS: u64 = 4800;
+
 impl DecoderConfig {
     pub const fn new(demod: DemodConfig) -> Self {
         Self {
             demod,
-            list_size: 8,
-            list_max_extra: 12.0,
+            list_size: DEFAULT_LIST_SIZE,
+            list_max_extra: DEFAULT_LIST_MAX_EXTRA,
             nac: None,
-            timeout_symbols: 4800,
+            timeout_symbols: DEFAULT_TIMEOUT_SYMBOLS,
         }
     }
 }
@@ -292,7 +315,7 @@ impl ControlChannelDecoder {
     }
 
     /// A CRC-16 protected block, decoded as hard as the config allows.
-    fn block(&self, soft: &SoftBlock) -> Option<([u8; 12], Recovery)> {
+    fn block(&self, soft: &SoftBlock) -> Option<([u8; BLOCK_BYTES], Recovery)> {
         let c = trellis::decode_checked(soft, self.cfg.list_size, self.cfg.list_max_extra)?;
         let corrected = c.decoded.corrected;
         let recovery = match (c.rank, corrected) {
@@ -315,7 +338,7 @@ impl ControlChannelDecoder {
                 continue;
             };
             self.stats.count(recovery);
-            let tsbk = Tsbk::new(data[..10].try_into().unwrap_or([0; 10]));
+            let tsbk = Tsbk::new(data[..TSBK_BYTES].try_into().unwrap_or([0; TSBK_BYTES]));
             self.emit(
                 out,
                 Message::Tsbk {
@@ -348,11 +371,11 @@ impl ControlChannelDecoder {
             .take(n)
             .flat_map(|b| trellis::decode(b).data)
             .collect();
-        if data.len() < n * 12 {
+        if data.len() < n * BLOCK_BYTES {
             self.stats.mbt_failed += 1;
             return;
         }
-        let len = n * 12 - 4;
+        let len = n * BLOCK_BYTES - PDU_CRC_BYTES;
         let want = u32::from_be_bytes([data[len], data[len + 1], data[len + 2], data[len + 3]]);
         if crc::crc32(&data, len * 8) != want {
             self.stats.mbt_failed += 1;
@@ -372,12 +395,14 @@ impl ControlChannelDecoder {
 
 /// Data blocks following an MBT header (alternate or unconfirmed trunking
 /// format, SAP 61), or `None` for any other PDU.
-fn mbt_header_blocks(h: &[u8; 12]) -> Option<usize> {
+fn mbt_header_blocks(h: &[u8; BLOCK_BYTES]) -> Option<usize> {
     let fmt = h[0] & 0x1f;
     let sap = h[1] & 0x3f;
     let blocks = usize::from(h[6] & 0x7f);
-    (sap == 61 && (fmt == 0x17 || fmt == 0x15) && (1..=MAX_MBT_BLOCKS).contains(&blocks))
-        .then_some(blocks)
+    (sap == SAP_TRUNKING_CONTROL
+        && (fmt == FORMAT_MBT_ALTERNATE || fmt == FORMAT_MBT_UNCONFIRMED)
+        && (1..=MAX_MBT_BLOCKS).contains(&blocks))
+    .then_some(blocks)
 }
 
 #[cfg(test)]

@@ -1,4 +1,5 @@
-//! BCH(63,16,23) code protecting the NID, over GF(2^6) with x^6 + x + 1.
+//! BCH(63,16,23) code protecting the NID, over GF(2^6) with x^6 + x + 1
+//! (BAAA-A §8.5.2).
 //!
 //! A codeword is a `u64` whose bit `i` is the coefficient of `x^i`; bit 62 is
 //! transmitted first. The 16 information bits (NAC then DUID) occupy bits
@@ -14,6 +15,8 @@ pub const T: usize = 11;
 /// Generator polynomial: ∏ (x − αʲ) over every j in the cyclotomic cosets of
 /// 1 … 2T, i.e. the product of their minimal polynomials. As a bitmask
 /// (degree 47, so bit 47 is set).
+///
+/// BAAA-A §8.5.2 gives it as octal 6331 1413 6723 5453.
 pub const GENERATOR: u64 = {
     let mut covered = [false; 63];
     // GF(64) coefficients, lowest degree first.
@@ -156,6 +159,7 @@ mod tests {
         ];
         let g = GENERATOR;
         assert_eq!(g.ilog2(), 47);
+        assert_eq!(g, 0o6331_1413_6723_5453, "BAAA-A §8.5.2");
         let ours: Vec<u8> = (0..48).rev().map(|d| u8::from((g >> d) & 1 == 1)).collect();
         let reversed: Vec<u8> = BCH_G.iter().rev().copied().collect();
         assert!(ours == BCH_G || ours == reversed, "{ours:?}");

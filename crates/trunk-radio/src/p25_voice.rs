@@ -63,7 +63,7 @@ pub enum CallOutput {
     Event(CallEvent),
 }
 
-/// One recorder's voice receiver.
+/// One channel's voice receiver.
 pub struct VoicePipeline {
     rate: f64,
     phase2: bool,

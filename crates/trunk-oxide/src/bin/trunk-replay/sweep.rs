@@ -81,23 +81,6 @@ pub struct SweepJob<'a> {
     pub axes: &'a [Axis],
     pub jobs: usize,
     pub limit_s: Option<f64>,
-    /// Run children in separate IPC namespaces (see [`run`]).
-    pub isolate_ipc: bool,
-}
-
-/// GNU Radio backs every circular buffer with a SysV shared-memory segment, and
-/// one replay uses ~900 of the host's 4096, so more than four concurrent
-/// children fail with "shmget: No space left on device". An IPC namespace per
-/// child (unprivileged, via a user namespace that maps the current user) gives
-/// each its own limit.
-fn child_command(exe: &Path, isolate_ipc: bool) -> Command {
-    if isolate_ipc {
-        let mut cmd = Command::new("unshare");
-        cmd.args(["--user", "--map-current-user", "--ipc"]).arg(exe);
-        cmd
-    } else {
-        Command::new(exe)
-    }
 }
 
 pub fn run(job: &SweepJob<'_>) -> Result<()> {
@@ -117,7 +100,7 @@ pub fn run(job: &SweepJob<'_>) -> Result<()> {
             let dir = job.out.join(&name);
             std::fs::create_dir_all(&dir)?;
             let log = std::fs::File::create(dir.join("run.log"))?;
-            let mut cmd = child_command(&exe, job.isolate_ipc);
+            let mut cmd = Command::new(&exe);
             cmd.arg("run")
                 .arg("--capture")
                 .arg(job.capture)

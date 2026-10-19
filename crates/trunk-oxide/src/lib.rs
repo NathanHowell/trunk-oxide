@@ -1,4 +1,4 @@
-//! The recorder host: opens the sources, builds the radio
+//! The scanner: opens the sources, builds the radio
 //! ([`trunk_radio::Radio`]) and runs the call state machine over its events.
 //!
 //! Events flow: SDR → trunk-radio (channelizer, decoders) → `RadioEvent` →
@@ -315,8 +315,8 @@ fn calibrate_sources_parallel(
 }
 
 /// An `rtlsdr` source's tuning: its centre with the software `error`
-/// folded in, and the whole-ppm hardware correction (the fraction is
-/// applied per recorder, see `CallManager::build_recorder_config_from_view`).
+/// folded in, and the whole-ppm hardware correction (the fraction is the
+/// radio's per-source software correction, see `trunk_radio::correction`).
 #[allow(clippy::cast_possible_truncation)]
 fn rtl_tuning(src: &SourceConfig, gain: trunk_sdr::Gain) -> trunk_sdr::Tuning {
     trunk_sdr::Tuning {
@@ -336,9 +336,9 @@ const STREAM_QUEUE_SECS: f64 = 1.0;
 /// Configures and initializes the radio without starting the call state
 /// machine.
 ///
-/// Call [`start()`](TrunkRecorderBuilder::start) to consume the builder and
+/// Call [`start()`](ScannerBuilder::start) to consume the builder and
 /// begin receiving radio traffic.
-pub struct TrunkRecorderBuilder {
+pub struct ScannerBuilder {
     radio: Arc<Radio>,
     event_rx: tokio::sync::mpsc::Receiver<RadioEvent>,
     pending: Arc<AtomicUsize>,
@@ -383,7 +383,7 @@ pub fn talkgroup_meta_map(
     map
 }
 
-/// Options for [`TrunkRecorder::run_monitor_with`].
+/// Options for [`Scanner::run_monitor_with`].
 pub struct MonitorOptions {
     /// Exit the process when a source stops delivering samples (production
     /// behaviour). Disable for finite IQ-file replay.
@@ -402,7 +402,7 @@ impl Default for MonitorOptions {
 }
 
 /// A running radio. Stops automatically on drop.
-pub struct TrunkRecorder {
+pub struct Scanner {
     radio: Arc<Radio>,
     call_mgr_config: CallManagerConfig,
     bridge: Arc<EventBridge>,
@@ -417,7 +417,7 @@ pub struct TrunkRecorder {
     conv_metrics: Arc<Mutex<ConventionalMetricsSnapshot>>,
 }
 
-impl TrunkRecorderBuilder {
+impl ScannerBuilder {
     /// Build from a parsed TOML config: calibrate and open the sources,
     /// start their channelizers, and set up every system's decoders.
     ///
@@ -746,9 +746,9 @@ impl TrunkRecorderBuilder {
     }
 
     /// Hand over to the running state: the sources are already streaming;
-    /// use [`TrunkRecorder::run_monitor`] on a dedicated thread to drive the
+    /// use [`Scanner::run_monitor`] on a dedicated thread to drive the
     /// main loop.
-    pub fn start(self) -> TrunkRecorder {
+    pub fn start(self) -> Scanner {
         let mut pending_conventional_calls = Vec::new();
         // In system order, so channel numbers are the same run to run. (A
         // channel no source covers is rejected when it cannot be opened.)
@@ -758,7 +758,7 @@ impl TrunkRecorderBuilder {
             pending_conventional_calls.extend((0..policy.channels.len()).map(|i| (sys_num, i)));
         }
 
-        TrunkRecorder {
+        Scanner {
             radio: self.radio,
             call_mgr_config: self.call_mgr_config,
             bridge: self.bridge,
@@ -771,7 +771,7 @@ impl TrunkRecorderBuilder {
     }
 }
 
-impl TrunkRecorder {
+impl Scanner {
     /// Shared counter of events queued but not yet consumed by the monitor loop.
     pub fn event_channel_depth(&self) -> Arc<AtomicUsize> {
         Arc::clone(&self.pending)
@@ -925,7 +925,7 @@ impl TrunkRecorder {
     }
 }
 
-impl Drop for TrunkRecorder {
+impl Drop for Scanner {
     fn drop(&mut self) {
         self.radio.stop();
     }

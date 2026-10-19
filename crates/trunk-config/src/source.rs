@@ -41,7 +41,7 @@ pub struct SourceConfig {
     /// Hz-precise and is what the FLL measures.
     #[serde(default)]
     pub ppm: f64,
-    /// Fine clock correction in Hz, applied in software as a per-recorder tune
+    /// Fine clock correction in Hz, applied in software as a per-channel tune
     /// offset (`tune = chan_freq + freq_correction_hz`). This is the everyday
     /// knob: set it to the negative of the measured `freq_error` for the source
     /// (so `trunk.oxide.freq_error_hz{source}` centers on 0). Hz-precise, unlike

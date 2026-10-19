@@ -197,7 +197,7 @@ impl Default for GrpcConfig {
 }
 
 /// Audio metadata registered by Rust for each active call, keyed by `CallId`.
-/// This avoids FFI round-trips in the hot audio callback path.
+/// Kept here so the audio path never touches the state machine.
 #[derive(Debug, Clone)]
 pub struct AudioMeta {
     pub talkgroup: i64,
@@ -206,7 +206,7 @@ pub struct AudioMeta {
     pub sample_rate: i32,
 }
 
-/// Bridges trunk-recorder events to gRPC subscribers via a single broadcast channel.
+/// Bridges the scanner's events to gRPC subscribers via a single broadcast channel.
 ///
 /// All methods take `&self` — no mutex needed. The broadcast sender is
 /// inherently `Sync`, talkgroups are read-only after construction, and

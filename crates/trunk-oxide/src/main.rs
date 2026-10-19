@@ -1,8 +1,6 @@
-//! trunk-oxide: Drives trunk-recorder as a linked library.
-//!
-//! This binary replaces the trunk-recorder executable. It links against
-//! libtrunk-recorder.so, reads the TOML config file, and routes all events
-//! through the gRPC EventBridge to downstream consumers.
+//! trunk-oxide: the scanner. Reads the TOML config, builds the radio and the
+//! call state machine ([`trunk_oxide::ScannerBuilder`]), and serves calls,
+//! audio and events over the gRPC EventBridge to downstream consumers.
 
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
@@ -12,7 +10,7 @@ use clap::Parser;
 use opentelemetry::KeyValue;
 use opentelemetry::trace::TracerProvider;
 use tracing_subscriber::prelude::*;
-use trunk_oxide::TrunkRecorderBuilder;
+use trunk_oxide::ScannerBuilder;
 use trunk_oxide_grpc::EventBridge;
 
 #[derive(Parser)]
@@ -127,7 +125,7 @@ fn main() -> Result<()> {
         .init();
 
     let config_path = &args.config;
-    tracing::info!(config = %config_path, "starting trunk-oxide driver");
+    tracing::info!(config = %config_path, "starting trunk-oxide");
 
     let config = trunk_config::Config::load(config_path).context("failed to load TOML config")?;
 
@@ -136,15 +134,15 @@ fn main() -> Result<()> {
     let (bridge, stream_tx) = EventBridge::new(tg_map);
     let bridge = Arc::new(bridge);
 
-    let mut recorder = TrunkRecorderBuilder::from_config(&config, bridge.clone())
-        .context("failed to initialize trunk-recorder")?
+    let mut scanner = ScannerBuilder::from_config(&config, bridge.clone())
+        .context("failed to build the scanner")?
         .start();
 
     // Single runtime for gRPC server, timers, and signal handling
     let rt = tokio::runtime::Runtime::new()?;
 
     if meter_provider.is_some() {
-        let depth = recorder.event_channel_depth();
+        let depth = scanner.event_channel_depth();
         let meter = opentelemetry::global::meter(env!("CARGO_PKG_NAME"));
         // ── The process and its sources, for the chart to explain steps ──
         let started = i64::try_from(
@@ -250,7 +248,7 @@ fn main() -> Result<()> {
             .build();
 
         // ── Conventional channel metrics ──
-        let conv_metrics = recorder.conv_metrics();
+        let conv_metrics = scanner.conv_metrics();
 
         let _conv_state = meter
             .f64_observable_gauge("trunk.oxide.conventional.state")
@@ -369,17 +367,17 @@ fn main() -> Result<()> {
     let socket_path = config.grpc.listen_path.clone();
     rt.spawn(trunk_oxide_grpc::serve_grpc(socket_path, stream_tx));
 
-    tracing::info!("trunk-recorder engine running, press Ctrl+C to stop");
+    tracing::info!("scanner running, press Ctrl+C to stop");
 
-    // The monitor loop makes FFI calls into C++ (TrContext), which is !Send and
-    // must stay on a single OS thread. We spawn a dedicated thread and use
-    // Handle::block_on to drive the async monitor future on that thread while
-    // sharing the runtime's I/O reactor, timers, and signal handler.
+    // The monitor loop (the call state machine and the radio it drives) gets
+    // a thread of its own, so a slow tick never holds up the runtime's
+    // workers serving gRPC; Handle::block_on drives it there while sharing
+    // the runtime's I/O reactor, timers and signal handler.
     let monitor_handle = {
         let rt_handle = rt.handle().clone();
         std::thread::Builder::new()
             .name("monitor".into())
-            .spawn(move || rt_handle.block_on(recorder.run_monitor()))
+            .spawn(move || rt_handle.block_on(scanner.run_monitor()))
             .context("failed to spawn monitor thread")?
     };
 

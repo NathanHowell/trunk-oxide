@@ -117,14 +117,14 @@ impl ParserMetrics {
     }
 }
 
-/// Voice regenerators, one per recorder.
+/// Voice decoders, one per open voice channel.
 struct VoiceMetrics {
     units: Counter<u64>,
     imbe_frames: Counter<u64>,
     imbe_bit_errors: Counter<u64>,
     words: Counter<u64>,
     symbol_snr_db: Gauge<f64>,
-    /// By recorder and implementation (a recorder can run two).
+    /// By decoder (see [`trunk_radio::registry`]).
     prev: HashMap<Key, VoiceStats>,
     tdma: TdmaMetrics,
 }

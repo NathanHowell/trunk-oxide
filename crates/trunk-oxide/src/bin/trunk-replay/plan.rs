@@ -2,7 +2,7 @@
 //!
 //! The capture directory holds `capture.json` (what was recorded), the
 //! `config.toml` that was live at capture time and the talkgroup/channel CSVs.
-//! Replay keeps everything from that config (systems, recorders, squelch) and
+//! Replay keeps everything from that config (systems, budget, squelch) and
 //! swaps each hardware source for its recorded IQ file.
 
 use std::path::{Path, PathBuf};
@@ -12,8 +12,6 @@ use serde::Deserialize;
 
 #[derive(Debug, Deserialize)]
 pub struct Capture {
-    pub start_utc: String,
-    pub duration_s: f64,
     pub sources: Vec<CaptureSource>,
 }
 
@@ -22,7 +20,6 @@ pub struct CaptureSource {
     pub serial: String,
     pub center_hz: f64,
     pub rate_sps: f64,
-    pub gain_db: f64,
     pub file: String,
 }
 

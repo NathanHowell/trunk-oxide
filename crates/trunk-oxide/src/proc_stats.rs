@@ -1,7 +1,8 @@
 //! Process CPU time from `/proc`, per thread group.
 //!
-//! GNU Radio runs each block on its own thread named after the block, so CPU
-//! time grouped by thread name shows which stage of the pipeline is expensive.
+//! Each source's DSP runs on its own thread (`source-N`), the state machine
+//! on `monitor`, tokio's workers under one name; CPU time by thread name
+//! shows where the time goes.
 //! Linux only: elsewhere (or if `/proc` is unreadable) nothing is reported.
 
 use std::collections::BTreeMap;
@@ -37,13 +38,6 @@ pub fn parse_stat(line: &str) -> Option<(String, CpuTimes)> {
     ))
 }
 
-/// Group key for a thread name: GNU Radio appends the block instance number
-/// (`fll_band_edge_cc12`), which would otherwise make one series per recorder.
-pub fn thread_group(comm: &str) -> &str {
-    let trimmed = comm.trim_end_matches(|c: char| c.is_ascii_digit());
-    if trimmed.is_empty() { comm } else { trimmed }
-}
-
 /// Whole-process CPU time (all threads, including exited ones).
 pub fn process_cpu() -> Option<CpuTimes> {
     let line = std::fs::read_to_string("/proc/self/stat").ok()?;
@@ -61,7 +55,7 @@ pub fn thread_cpu_by_group() -> BTreeMap<String, f64> {
             continue; // thread exited between readdir and read
         };
         if let Some((comm, t)) = parse_stat(&line) {
-            *groups.entry(thread_group(&comm).to_string()).or_default() += t.user + t.system;
+            *groups.entry(comm).or_default() += t.user + t.system;
         }
     }
     groups
@@ -95,13 +89,5 @@ mod tests {
     fn rejects_garbage() {
         assert!(parse_stat("not a stat line").is_none());
         assert!(parse_stat("1 (x) S 1 2").is_none());
-    }
-
-    #[test]
-    fn groups_gnuradio_block_instances() {
-        assert_eq!(thread_group("fll_band_edge_c12"), "fll_band_edge_c");
-        assert_eq!(thread_group("selector3"), "selector");
-        assert_eq!(thread_group("123"), "123");
-        assert_eq!(thread_group("tokio-runtime-w"), "tokio-runtime-w");
     }
 }

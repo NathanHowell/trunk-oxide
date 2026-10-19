@@ -61,9 +61,9 @@ struct VoiceCounters {
     errors: i64,
     spikes: i64,
     samples: i64,
-    /// op25 terminator (TDU) events seen, and audio samples produced after the
+    /// Terminator (TDU) events seen, and audio samples produced after the
     /// terminator position within the same work call (candidate end-of-call
-    /// clipping; see `headless_sink`).
+    /// clipping).
     term_events: i64,
     after_term_samples: i64,
 }
@@ -124,7 +124,7 @@ impl Tally {
     }
 }
 
-/// Executor: processes effects from the state machine against real FFI/bridge.
+/// Executor: applies the state machine's effects to the radio and the bridge.
 pub struct CallManager {
     state: TrunkStateMachine,
     bridge: Arc<EventBridge>,
@@ -145,16 +145,16 @@ pub struct CallManager {
     freq_correction_gauge: Gauge<f64>,
     calls_started: Counter<u64>,
     calls_ended: Counter<u64>,
-    /// Errored / spiked voice codewords reported by the op25 (P25) decoder,
+    /// Errored / spiked voice codewords reported by the P25 voice decoder,
     /// summed per call. High rates — especially on TDMA — indicate decode loss
     /// (the cause of P25 audio clipping), typically driven by frequency error.
     voice_frame_errors: Counter<u64>,
     voice_frame_spikes: Counter<u64>,
-    /// op25 terminator (TDU) events per call and the audio produced after the
+    /// Terminator (TDU) events per call and the audio produced after the
     /// terminator position (ms at 8 kHz). Tests whether end-of-call clipping
     /// coincides with audio landing behind the terminator tag.
     terminator_events: Counter<u64>,
-    /// Seconds since the recorder last wrote audio, sampled when a call is
+    /// Seconds since the channel last wrote audio, sampled when a call is
     /// concluded, by stop reason. A grant-timeout stop with audio still flowing
     /// (age near 0) cut a live transmission; idle-timeout stops sit at the
     /// call timeout by construction.
@@ -165,11 +165,11 @@ pub struct CallManager {
     call_stop_voice_age: Histogram<f64>,
     calls_cut: Counter<u64>,
     terminator_after_ms: Histogram<f64>,
-    /// Per-call FLL frequency error (Hz) at recorder stop, bucketed by source.
+    /// Per-call FLL frequency error (Hz) at channel close, bucketed by source.
     /// Distribution (not last value) so the per-dongle median = clock bias and
     /// the spread = decode margin, both trendable over time to watch TCXO drift.
     freq_error_hz: Histogram<f64>,
-    /// 1 Hz samples of the recorder's channel power probe (dB, uncalibrated,
+    /// 1 Hz samples of the channel's power probe (dB, uncalibrated,
     /// relative to full scale) while a trunked call is carrying audio.
     signal_power_db: Histogram<f64>,
     /// Same probe while the call is still up but no audio has been written for
@@ -228,7 +228,7 @@ const BLOCK_TIME_US_BOUNDARIES: [f64; 12] = [
     10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2000.0, 4000.0, 6000.0, 8000.0, 16000.0,
 ];
 
-/// Bucket edges for the recorder power histograms (dB re full scale, 3 dB steps).
+/// Bucket edges for the channel power histograms (dB re full scale, 3 dB steps).
 const POWER_DB_BOUNDARIES: [f64; 27] = [
     -90.0, -87.0, -84.0, -81.0, -78.0, -75.0, -72.0, -69.0, -66.0, -63.0, -60.0, -57.0, -54.0,
     -51.0, -48.0, -45.0, -42.0, -39.0, -36.0, -33.0, -30.0, -27.0, -24.0, -21.0, -18.0, -12.0,
@@ -290,11 +290,13 @@ impl CallManager {
                 .build(),
             voice_frame_errors: meter
                 .u64_counter("trunk.oxide.voice_frame_errors")
-                .with_description("op25-reported errored voice codewords, summed per call")
+                .with_description(
+                    "Errored voice codewords the P25 decoder reported, summed per call",
+                )
                 .build(),
             voice_frame_spikes: meter
                 .u64_counter("trunk.oxide.voice_frame_spikes")
-                .with_description("op25-reported voice codeword spikes, summed per call")
+                .with_description("Voice codeword spikes the P25 decoder reported, summed per call")
                 .build(),
             call_stop_audio_age: meter
                 .f64_histogram("trunk.oxide.call_stop_audio_age_seconds")
@@ -320,7 +322,7 @@ impl CallManager {
                 .build(),
             terminator_events: meter
                 .u64_counter("trunk.oxide.terminator_events")
-                .with_description("op25 call-terminator (TDU) events, summed per call")
+                .with_description("Call-terminator (TDU) events, summed per call")
                 .build(),
             terminator_after_ms: meter
                 .f64_histogram("trunk.oxide.terminator_after_ms")
@@ -332,7 +334,7 @@ impl CallManager {
                 .build(),
             freq_error_hz: meter
                 .f64_histogram("trunk.oxide.freq_error_hz")
-                .with_description("Per-call FLL frequency error (Hz) at recorder stop, by source")
+                .with_description("Per-call FLL frequency error (Hz) at channel close, by source")
                 .with_boundaries(vec![
                     -1000.0, -500.0, -300.0, -200.0, -150.0, -100.0, -60.0, -30.0, 0.0, 30.0, 60.0,
                     100.0, 150.0, 200.0, 300.0, 500.0, 1000.0,
@@ -340,12 +342,12 @@ impl CallManager {
                 .build(),
             signal_power_db: meter
                 .f64_histogram("trunk.oxide.signal_power_db")
-                .with_description("Recorder channel power (dB re full scale) while audio flows")
+                .with_description("Channel power (dB re full scale) while audio flows")
                 .with_boundaries(POWER_DB_BOUNDARIES.to_vec())
                 .build(),
             noise_floor_db: meter
                 .f64_histogram("trunk.oxide.noise_floor_db")
-                .with_description("Recorder channel power (dB re full scale) with no audio")
+                .with_description("Channel power (dB re full scale) with no audio")
                 .with_boundaries(POWER_DB_BOUNDARIES.to_vec())
                 .build(),
             chz_blocks: meter
@@ -743,7 +745,7 @@ impl CallManager {
             slot = view.tdma_slot(),
             freq_error = format_args!("{:+.0} Hz", report.freq_error),
             preferred_ppm = format_args!("{:.2}", report.preferred_ppm),
-            "stopping recorder"
+            "closing channel"
         );
         self.state
             .feed_channel_power(call_id, report.power_db, was_idle);
@@ -1226,8 +1228,8 @@ impl CallManager {
         self.process_effects(effects);
     }
 
-    /// An in-band P25 source (unit) change decoded by op25 on the voice channel,
-    /// keyed by the recorder's `call_id`. Cuts a per-speaker transmission
+    /// An in-band P25 source (unit) change decoded on the voice channel, keyed
+    /// by the channel's `call_id`. Cuts a per-speaker transmission
     /// boundary (see [`TrunkStateMachine::on_source_change`]).
     pub fn handle_source_change(&mut self, call_id: CallId, unit: u32) {
         let effects = self.state.on_source_change(call_id, unit);
@@ -1560,7 +1562,7 @@ mod tests {
 
     #[test]
     fn per_speaker_deltas_sum_to_call_total() {
-        // The recorder spans the whole call, so its counters are cumulative.
+        // The channel spans the whole call, so its counters are cumulative.
         // Three per-speaker boundaries snapshot the running total; each speaker's
         // reported slice is the delta since the prior snapshot, and the slices
         // must sum back to the final cumulative total (no double counting).

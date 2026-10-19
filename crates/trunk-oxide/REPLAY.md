@@ -41,10 +41,6 @@ system) and `freq_correction_hz` (every source). `--grid` takes comma-separated
 values and runs the cartesian product. Adaptive ppm correction is off in replay
 unless you set `recorder.adaptive_freq_correction=true`.
 
-Each sweep child runs in its own IPC namespace (`unshare`), a habit from the
-GNU Radio days (it used ~900 SysV shared-memory segments per process); the
-Rust radio needs none, so `--share-ipc` is safe now.
-
 ## Output (per run)
 
 - `events.jsonl` — one JSON object per control-channel message, unit event,

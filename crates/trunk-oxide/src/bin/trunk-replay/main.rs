@@ -18,7 +18,7 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use serde_json::json;
 use tokio::sync::Notify;
-use trunk_oxide::{MonitorOptions, TrunkRecorderBuilder};
+use trunk_oxide::{MonitorOptions, ScannerBuilder};
 use trunk_oxide_grpc::EventBridge;
 
 use plan::Override;
@@ -73,10 +73,6 @@ enum Cmd {
         jobs: usize,
         #[arg(long)]
         limit_s: Option<f64>,
-        /// Do not put each replay in its own IPC namespace (limits parallelism
-        /// to ~4 because of the SysV shared-memory segment limit).
-        #[arg(long)]
-        share_ipc: bool,
     },
     /// Tabulate the summary.json of every run under a directory.
     Compare { dir: PathBuf },
@@ -105,7 +101,6 @@ fn main() -> Result<()> {
             set,
             jobs,
             limit_s,
-            share_ipc,
         } => sweep::run(&sweep::SweepJob {
             capture: &capture,
             out: &out,
@@ -113,7 +108,6 @@ fn main() -> Result<()> {
             axes: &grid,
             jobs,
             limit_s,
-            isolate_ipc: !share_ipc,
         }),
         Cmd::Compare { dir } => {
             println!("{}", sweep::compare(&dir)?);
@@ -157,8 +151,8 @@ fn run(
         })
     };
 
-    let mut recorder = TrunkRecorderBuilder::from_config(&config, bridge)
-        .context("initializing trunk-recorder")?
+    let mut scanner = ScannerBuilder::from_config(&config, bridge)
+        .context("building the scanner")?
         .start();
 
     let shutdown = Arc::new(Notify::new());
@@ -170,7 +164,7 @@ fn run(
         };
         std::thread::Builder::new()
             .name("monitor".into())
-            .spawn(move || handle.block_on(recorder.run_monitor_with(opts)))?
+            .spawn(move || handle.block_on(scanner.run_monitor_with(opts)))?
     };
 
     let replay_s = limit_s.map_or(plan.duration_s, |l| l.min(plan.duration_s));

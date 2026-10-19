@@ -149,7 +149,7 @@ fn next_call_id() -> CallId {
     CallId(NEXT_CALL_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed))
 }
 
-/// Monotonic call number counter, replacing C++'s `Call::call_counter`.
+/// Monotonic call number counter.
 static NEXT_CALL_NUM: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
 pub(crate) fn next_call_num() -> i64 {
@@ -1229,7 +1229,7 @@ impl TrunkStateMachine {
                         tdma = entry.phase2_tdma,
                         slot = entry.tdma_slot,
                         kind = entry.recipe.as_ref().map_or("", |r| r.kind()),
-                        "starting recorder"
+                        "opening channel"
                     );
                 }
                 return Effects::new();
@@ -1645,8 +1645,8 @@ impl TrunkStateMachine {
         true
     }
 
-    /// Record the P25 encryption parameters (ESS `ALGID` / `KeyID`) decoded by
-    /// op25 on the voice channel (keyed by its [`CallId`]). The
+    /// Record the P25 encryption parameters (ESS `ALGID` / `KeyID`) decoded
+    /// on the voice channel (keyed by its [`CallId`]). The
     /// ESS is authoritative, so this also marks the call encrypted. Unknown
     /// calls are ignored.
     pub(crate) fn on_crypto(&mut self, call_id: CallId, encryption: Encryption) {

@@ -71,8 +71,6 @@ pub struct SystemConfig {
     #[serde(default = "default_true")]
     pub record_unknown: bool,
 
-    // Talkgroup display (for C++ console logging)
-
     // Talkgroups — CSV file (RadioReference export) with optional TOML overrides
     #[serde(default)]
     pub talkgroup_file: Option<String>,
@@ -209,7 +207,7 @@ impl TalkgroupMode {
 
 /// Talkgroup entry for trunked systems.
 /// Descriptive fields stay in Rust for enrichment.
-/// Operational fields are passed to C++ for recording decisions.
+/// Operational fields decide whether and how its calls are recorded.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TalkgroupConfig {
     pub id: i64,

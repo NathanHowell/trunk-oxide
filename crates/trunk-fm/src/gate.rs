@@ -32,6 +32,9 @@ pub struct Config {
     pub attack: usize,
     /// Failing hops in a row that close it.
     pub release: usize,
+    /// Samples ramped in at an open and out at a close, so a transmission
+    /// begins and ends at zero and two joined back to back do not click.
+    pub fade: usize,
 }
 
 impl Config {
@@ -50,6 +53,9 @@ impl Config {
             tone_min_prominence: 4.0,
             attack: 3,
             release: 3,
+            // 5 ms at 16 kHz: below what is heard as a fade, well above
+            // what is heard as a click.
+            fade: 80,
         }
     }
 }
@@ -169,7 +175,9 @@ impl Gate {
 
     /// Feed one hop. `audio` is that hop's samples (any length, normally
     /// [`HOP`]). Audio of hops the gate is open for is appended to `out`,
-    /// `attack` hops late; events to `events`.
+    /// `attack` hops late, the opening hop faded in and the closing one's
+    /// first [`Config::fade`] samples appended faded out; events to
+    /// `events`.
     pub fn push(
         &mut self,
         m: &Measurement,
@@ -228,8 +236,26 @@ impl Gate {
                 reason: oldest.fail,
             });
         }
+        let hop_audio = &self.audio[self.pos];
+        let fade = self.cfg.fade.min(hop_audio.len());
         if pass {
-            out.extend_from_slice(&self.audio[self.pos]);
+            let start = out.len();
+            out.extend_from_slice(hop_audio);
+            if events
+                .last()
+                .is_some_and(|e| matches!(e, Event::Open { hop: h, .. } if *h == hop))
+            {
+                for (i, s) in out[start..start + fade].iter_mut().enumerate() {
+                    *s *= ramp(i, fade);
+                }
+            }
+        } else if matches!(events.last(), Some(Event::Close { hop: h, .. }) if *h == hop) {
+            out.extend(
+                hop_audio[..fade]
+                    .iter()
+                    .enumerate()
+                    .map(|(i, s)| s * ramp(fade - 1 - i, fade)),
+            );
         }
 
         // Replace the oldest with this hop.
@@ -260,6 +286,13 @@ impl Gate {
         self.run_before = 0;
         self.open = false;
     }
+}
+
+/// Sample `i` of an `n`-sample raised-cosine fade in (0 to 1).
+#[allow(clippy::cast_precision_loss)]
+fn ramp(i: usize, n: usize) -> f32 {
+    let x = std::f32::consts::PI * (i as f32 + 0.5) / n as f32;
+    0.5 * (1.0 - x.cos())
 }
 
 #[cfg(test)]
@@ -309,6 +342,8 @@ mod tests {
     /// Runs `seq` through a gate, each hop's audio being its index as a
     /// one-sample "hop", and returns the events and the audio let through.
     fn run(cfg: Config, seq: &[Measurement]) -> (Vec<Event>, Vec<f32>) {
+        // one-sample hops: no fades, so the audio is just the hop indices
+        let cfg = Config { fade: 0, ..cfg };
         let mut g = Gate::new(cfg);
         let (mut out, mut events) = (Vec::new(), Vec::new());
         for (i, m) in seq.iter().enumerate() {
@@ -443,5 +478,32 @@ mod tests {
         let s = seq(&[(5, noise()), (10, faded), (5, noise())]);
         let (ev, _) = run(Config::for_tone(Some(T)), &s);
         assert!(ev.is_empty(), "a faded signal does not open: {ev:?}");
+    }
+
+    #[test]
+    fn a_transmission_fades_in_and_out_so_joins_do_not_click() {
+        let cfg = Config::for_tone(Some(T));
+        let mut g = Gate::new(cfg);
+        let (mut out, mut events) = (Vec::new(), Vec::new());
+        let s = seq(&[(5, noise()), (6, carrier(T)), (8, noise())]);
+        for m in &s {
+            g.push(m, &[1.0; HOP], &mut out, &mut events);
+        }
+        assert_eq!(events.len(), 2, "{events:?}");
+        // six hops of audio plus the faded-out start of the closing hop
+        assert_eq!(out.len(), 6 * HOP + cfg.fade);
+        assert!(out[0] < 0.01 && out[cfg.fade - 1] > 0.99, "fades in");
+        assert!(
+            out[cfg.fade..6 * HOP].iter().all(|&v| v == 1.0),
+            "untouched between"
+        );
+        assert!(
+            out[6 * HOP] > 0.99 && *out.last().unwrap() < 0.01,
+            "fades out"
+        );
+        assert!(
+            out.windows(2).all(|w| (w[1] - w[0]).abs() < 0.05),
+            "no step anywhere"
+        );
     }
 }

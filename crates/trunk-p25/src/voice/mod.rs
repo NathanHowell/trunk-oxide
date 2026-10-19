@@ -355,10 +355,7 @@ mod tests {
             seed: 4,
         }
         .apply(&testgen::modulate_cqpsk(&dibits, 5), 5);
-        let cfg = DemodConfig {
-            matched_filter: true,
-            ..DemodConfig::new(24000.0, Modulation::Cqpsk)
-        };
+        let cfg = DemodConfig::new(24000.0, Modulation::Cqpsk);
         let mut dec = VoiceDecoder::new(cfg);
         let mut out = Vec::new();
         for chunk in iq.chunks(960) {

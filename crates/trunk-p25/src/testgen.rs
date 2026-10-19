@@ -187,24 +187,14 @@ pub fn random_tsbks(rng: &mut Rng, n: usize) -> Vec<[u8; 10]> {
         .collect()
 }
 
-/// Raised-cosine (`root == false`) or root-raised-cosine pulse, `span`
-/// symbols long, unit energy-ish (peak 1 for RC).
+/// Raised-cosine pulse, `span` symbols long, peak 1.
 #[allow(clippy::cast_precision_loss)]
-pub fn pulse(sps: usize, alpha: f64, span: usize, root: bool) -> Vec<f64> {
+pub fn raised_cosine(sps: usize, alpha: f64, span: usize) -> Vec<f64> {
     let n = sps * span + 1;
     let mid = (n / 2) as f64;
-    let taps: Vec<f64> = (0..n)
-        .map(|i| {
-            let t = (i as f64 - mid) / sps as f64;
-            if root { rrc(t, alpha) } else { rc(t, alpha) }
-        })
-        .collect();
-    let norm: f64 = if root {
-        taps.iter().map(|x| x * x).sum::<f64>().sqrt() / (sps as f64).sqrt()
-    } else {
-        1.0
-    };
-    taps.iter().map(|x| x / norm).collect()
+    (0..n)
+        .map(|i| rc((i as f64 - mid) / sps as f64, alpha))
+        .collect()
 }
 
 fn sinc(x: f64) -> f64 {
@@ -222,22 +212,6 @@ fn rc(t: f64, a: f64) -> f64 {
     } else {
         sinc(t) * (PI * a * t).cos() / d
     }
-}
-
-fn rrc(t: f64, a: f64) -> f64 {
-    if t.abs() < 1e-12 {
-        return 1.0 - a + 4.0 * a / PI;
-    }
-    if (t.abs() - 1.0 / (4.0 * a)).abs() < 1e-9 {
-        return a / 2f64.sqrt()
-            * (1.0 - 2.0 / PI).mul_add(
-                (PI / (4.0 * a)).cos(),
-                (1.0 + 2.0 / PI) * (PI / (4.0 * a)).sin(),
-            );
-    }
-    let num = (4.0 * a * t).mul_add((PI * t * (1.0 + a)).cos(), (PI * t * (1.0 - a)).sin());
-    let den = PI * t * (4.0 * a * t).mul_add(-(4.0 * a * t), 1.0);
-    num / den
 }
 
 fn convolve(x: &[Complex32], taps: &[f64]) -> Vec<Complex32> {
@@ -261,16 +235,20 @@ fn convolve(x: &[Complex32], taps: &[f64]) -> Vec<Complex32> {
 }
 
 /// CQPSK (π/4-DQPSK) at `sps` samples per symbol: each dibit is a phase step
-/// of its level × 45°, shaped with a root-raised-cosine (α = 0.2).
+/// of its level × 45°.
+///
+/// I and Q are shaped with the Nyquist raised cosine (α = 0.2) of
+/// TIA-102.BAAA-A §9.3, as §9.5 specifies: a full raised cosine, not a root,
+/// so the signal is free of inter-symbol interference with no receive filter.
 #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 pub fn modulate_cqpsk(dibits: &[u8], sps: usize) -> Vec<Complex32> {
     let mut x = vec![Complex32::new(0.0, 0.0); dibits.len() * sps];
     let mut phase = 0.0f64;
     for (k, &d) in dibits.iter().enumerate() {
         phase += f64::from(LEVELS[usize::from(d)]) * PI / 4.0;
-        x[k * sps] = Complex32::from_polar(1.0, phase as f32) * sps as f32;
+        x[k * sps] = Complex32::from_polar(1.0, phase as f32);
     }
-    let shaped = convolve(&x, &pulse(sps, 0.2, 8, true));
+    let shaped = convolve(&x, &raised_cosine(sps, 0.2, 8));
     normalize(shaped)
 }
 
@@ -374,18 +352,60 @@ impl Channel {
         let step = self.clock_ppm.mul_add(1e-6, 1.0);
         let mut out = Vec::with_capacity(x.len());
         let count = ((x.len() as f64 - 2.0 - self.delay) / step).ceil().max(0.0) as usize;
-        for n in 0..count {
+        let noise: Vec<Complex32> = (0..count)
+            .map(|_| Complex32::new((sigma * rng.gauss()) as f32, (sigma * rng.gauss()) as f32))
+            .collect();
+        let noise = convolve(&noise, &channel_filter(fs));
+        for (n, noise) in noise.into_iter().enumerate() {
             let t = (n as f64).mul_add(step, self.delay);
             let i = t.floor() as usize;
             let mu = (t - t.floor()) as f32;
             let y = [x[i.saturating_sub(1)], x[i], x[i + 1], x[i + 2]];
             let v = crate::demod::cubic(&y, mu);
             let rot = 2.0 * PI * self.freq_offset_hz * n as f64 / fs;
-            let noise = Complex32::new((sigma * rng.gauss()) as f32, (sigma * rng.gauss()) as f32);
             out.push(v * Complex32::from_polar(1.0, rot as f32) + noise);
         }
         out
     }
+}
+
+/// The receiver's channel filter, which every decoder input has been
+/// through: trunk-channelizer's narrow profile, `low_pass_2(6250 Hz,
+/// 3125 Hz, 60 dB)` with a Blackman-Harris window, unit gain in the
+/// passband. A P25 signal lies inside the passband, so [`Channel::apply`]
+/// filters only the noise, which would otherwise reach the decoder white
+/// across the whole sample rate and charge it for noise no receiver lets in.
+#[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_precision_loss,
+    clippy::cast_sign_loss
+)]
+fn channel_filter(fs: f64) -> Vec<f64> {
+    const CUTOFF_HZ: f64 = 6_250.0;
+    const TRANSITION_HZ: f64 = 3_125.0;
+    const ATTEN_DB: f64 = 60.0;
+    let n = (ATTEN_DB * fs / (22.0 * TRANSITION_HZ)) as usize | 1;
+    let m = (n - 1) as f64;
+    let half = (n - 1) / 2;
+    let w0 = 2.0 * PI * CUTOFF_HZ / fs;
+    let taps: Vec<f64> = (0..n)
+        .map(|i| {
+            let x = 2.0 * PI * i as f64 / m;
+            let window = 0.01168f64.mul_add(
+                -(3.0 * x).cos(),
+                0.14128f64.mul_add((2.0 * x).cos(), 0.48829f64.mul_add(-x.cos(), 0.35875)),
+            );
+            let k = i as f64 - half as f64;
+            let sinc = if i == half {
+                w0 / PI
+            } else {
+                (k * w0).sin() / (k * PI)
+            };
+            sinc * window
+        })
+        .collect();
+    let dc: f64 = taps.iter().sum();
+    taps.into_iter().map(|t| t / dc).collect()
 }
 
 /// Info word of a NID, for tests that poke at BCH directly.

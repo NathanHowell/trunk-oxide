@@ -366,17 +366,17 @@ mod tests {
         let mut d = call(&mut rng, &scrambler(), &ES, 6, 12, &mut sent);
         d.extend(vec![0u8; 1500]);
         let iq = Channel {
-            es_n0_db: 12.0,
+            // The edge of what it survives (13 dB fails), as 12 dB was with the
+            // root-raised-cosine transmitter and receive filter it had before: that
+            // pair let in noise from one symbol rate, the channel filter from 12.5 kHz.
+            es_n0_db: 14.0,
             freq_offset_hz: 20.0,
             delay: 0.3,
             clock_ppm: 10.0,
             seed: 7,
         }
         .apply(&modulate_cqpsk(&d, 4), 4);
-        let cfg = DemodConfig {
-            matched_filter: true,
-            ..DemodConfig::phase2(24000.0)
-        };
+        let cfg = DemodConfig::phase2(24000.0);
         let mut r = TdmaRegenerator::new(cfg, Some(scrambler()));
         let (mut out, mut events) = (Vec::new(), Vec::new());
         for chunk in iq.chunks(960) {

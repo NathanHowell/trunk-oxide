@@ -67,10 +67,7 @@ fn noisy_call_over_the_air() {
         seed: 5,
     }
     .apply(&modulate_cqpsk(&d, 4), 4);
-    let cfg = DemodConfig {
-        matched_filter: true,
-        ..DemodConfig::phase2(24000.0)
-    };
+    let cfg = DemodConfig::phase2(24000.0);
     let mut dec = TdmaDecoder::new(cfg, Some(scrambler()));
     let mut out = Vec::new();
     for chunk in iq.chunks(960) {

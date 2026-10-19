@@ -332,17 +332,17 @@ mod tests {
         let mut rng = Rng::new(92);
         let (dibits, sent) = call(&mut rng, 6);
         let iq = Channel {
-            es_n0_db: 12.0,
+            // The edge of what it survives (13 dB fails), as 12 dB was with the
+            // root-raised-cosine transmitter and receive filter it had before: that
+            // pair let in noise from one symbol rate, the channel filter from 12.5 kHz.
+            es_n0_db: 14.0,
             freq_offset_hz: 30.0,
             delay: 0.3,
             clock_ppm: 10.0,
             seed: 6,
         }
         .apply(&testgen::modulate_cqpsk(&dibits, 5), 5);
-        let cfg = DemodConfig {
-            matched_filter: true,
-            ..DemodConfig::new(24000.0, Modulation::Cqpsk)
-        };
+        let cfg = DemodConfig::new(24000.0, Modulation::Cqpsk);
         let mut r = Regenerator::new(cfg);
         let (mut out, mut events) = (Vec::new(), Vec::new());
         for chunk in iq.chunks(960) {

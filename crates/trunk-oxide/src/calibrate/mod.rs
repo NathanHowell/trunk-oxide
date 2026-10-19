@@ -211,6 +211,7 @@ pub fn calibrate(
 
     let mparams = policy.measure_params();
     let mut points = Vec::with_capacity(gains.len());
+    let mut failed = 0usize;
     for gain in gains {
         match probe.capture(gain) {
             Ok(iq) => {
@@ -227,12 +228,26 @@ pub fn calibrate(
                 });
             }
             Err(e) => {
-                tracing::warn!(gain_db = gain, error = %e, "gain sweep capture failed; skipping step");
+                tracing::warn!(gain_db = gain, error = %e, "gain sweep capture failed");
+                failed += 1;
             }
         }
     }
 
-    let selection = select_gain(&points, &policy.select_params(), fallback_gain);
+    // A device that failed mid-sweep (on 2026-10-19 a hot dongle dropped off
+    // the bus, and the steps before it picked 29.7 dB at a 9 dB penalty) has
+    // not shown its curve: keep the configured gain and cache nothing.
+    let selection = if failed > 0 {
+        tracing::warn!(failed, "gain sweep incomplete; keeping the configured gain");
+        GainSelection {
+            gain_db: fallback_gain,
+            noise_floor_db: f64::NAN,
+            penalty_db: f64::NAN,
+            reason: SelectReason::Fallback,
+        }
+    } else {
+        select_gain(&points, &policy.select_params(), fallback_gain)
+    };
     Ok(Sweep { selection, points })
 }
 
@@ -292,6 +307,26 @@ mod tests {
             curve.starts_with("0.0:") && curve.contains(" 32.0:"),
             "{curve}"
         );
+    }
+
+    #[test]
+    fn a_sweep_with_failed_captures_falls_back() {
+        struct Dying(usize);
+        impl IqProbe for Dying {
+            fn supported_gains(&mut self) -> Result<Vec<f64>> {
+                Ok(vec![0.0, 10.0, 20.0, 26.0, 32.0, 38.0])
+            }
+            fn capture(&mut self, gain_db: f64) -> Result<Vec<Complex32>> {
+                self.0 += 1;
+                anyhow::ensure!(self.0 <= 4, "i2c write failed");
+                let power = 1.0 + 10f64.powf((gain_db - 20.0) / 10.0);
+                Ok(noise(1 << 16, (0.02 * power.sqrt()) as f32, self.0 as u64))
+            }
+        }
+        let sweep = calibrate(&mut Dying(0), &CalibrationPolicy::default(), 40.0).unwrap();
+        assert_eq!(sweep.selection.reason, SelectReason::Fallback);
+        assert_eq!(sweep.selection.gain_db, 40.0);
+        assert_eq!(sweep.points.len(), 4);
     }
 
     #[test]

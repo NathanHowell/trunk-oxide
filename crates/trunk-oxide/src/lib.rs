@@ -86,7 +86,7 @@ impl From<&TrunkMessage> for TrunkMsgKey {
             K::Site { .. }
             | K::PatchAdd(_)
             | K::PatchDelete(_)
-            | K::Tdulc { .. }
+            | K::Tdulc
             | K::Invalid
             | K::Unknown => (0, None, 0.0),
         };

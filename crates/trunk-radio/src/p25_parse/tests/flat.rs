@@ -175,10 +175,7 @@ impl From<&TrunkMessage> for TrTrunkMessage {
             }
             K::PatchAdd(p) => patch(&mut out, TrMessageType::PatchAdd, p),
             K::PatchDelete(p) => patch(&mut out, TrMessageType::PatchDelete, p),
-            K::Tdulc { talkgroup } => {
-                out.message_type = TrMessageType::Tdulc;
-                out.talkgroup = talkgroup.map_or(0, i64::from);
-            }
+            K::Tdulc => out.message_type = TrMessageType::Tdulc,
             K::Invalid => out.message_type = TrMessageType::InvalidCcMessage,
             K::Unknown => {}
         }

@@ -98,11 +98,10 @@ pub enum Trunking {
     },
     PatchAdd(Patch),
     PatchDelete(Patch),
-    /// A terminator with link control, naming the talkgroup when it does
-    /// (a control channel's never does).
-    Tdulc {
-        talkgroup: Option<u32>,
-    },
+    /// A terminator with link control (a control channel's names no
+    /// talkgroup; the voice channel's own terminators reach the state
+    /// machine as `term_events`).
+    Tdulc,
     /// A packet that could not be read.
     Invalid,
     /// A packet the state machine has no use for.

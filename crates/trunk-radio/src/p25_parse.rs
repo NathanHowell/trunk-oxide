@@ -341,7 +341,7 @@ impl Packet {
             Message::Mbt { .. } => Self::Malformed,
             Message::Terminator {
                 link_control: true, ..
-            } => Self::Bare(TDULC),
+            } => Self::Bare(Trunking::Tdulc),
             Message::Terminator { .. } | Message::Voice { .. } => Self::Bare(Trunking::Unknown),
             // op25 sends a timeout without a body, which trunk-recorder
             // counts as invalid.
@@ -376,7 +376,7 @@ impl Packet {
                 Some((header, data)) if data.len() >= 8 => (Osp::from_mbt(header, data), header[7]),
                 _ => return Self::Malformed,
             },
-            op25::TDULC => return Self::Bare(TDULC),
+            op25::TDULC => return Self::Bare(Trunking::Tdulc),
             _ => return Self::Bare(Trunking::Unknown),
         };
         Self::Osp {
@@ -395,9 +395,6 @@ fn opcode_of(osp: &Osp, raw: u8) -> u64 {
         _ => u64::from(raw & 0x3f),
     }
 }
-
-/// A control channel's terminator: it never names the talkgroup.
-const TDULC: Trunking = Trunking::Tdulc { talkgroup: None };
 
 /// A message of `kind` from system `sys_num`.
 const fn message(sys_num: i32, kind: Trunking, nac: u16, opcode: u64) -> TrunkMessage {

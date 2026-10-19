@@ -219,10 +219,7 @@ fn proto_trunk_message(m: &TrunkMessage) -> proto::TrunkMessage {
         }
         K::PatchAdd(p) => patch(&mut out, P::PatchAdd, p),
         K::PatchDelete(p) => patch(&mut out, P::PatchDelete, p),
-        K::Tdulc { talkgroup } => {
-            out.message_type = P::Tdulc as i32;
-            out.talkgroup = talkgroup.map_or(0, i64::from);
-        }
+        K::Tdulc => out.message_type = P::Tdulc as i32,
         K::Invalid => out.message_type = P::InvalidCcMessage as i32,
         K::Unknown => {}
     }

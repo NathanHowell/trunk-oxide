@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Gauge, Meter};
-use trunk_recorder_sys::fm::{AnalogReport, AnalogStats, analog_channels};
+use trunk_radio::fm::{AnalogReport, AnalogStats, analog_channels};
 
 /// A decoder's identity across polls: (source, channelizer port).
 type Key = (i32, u32);

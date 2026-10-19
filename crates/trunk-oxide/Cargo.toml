@@ -8,11 +8,10 @@ rust-version.workspace = true
 workspace = true
 
 [dependencies]
-trunk-recorder-sys.workspace = true
+trunk-radio.workspace = true
 trunk-oxide-grpc.workspace = true
 trunk-config.workspace = true
 trunk-sdr.workspace = true
-cxx.workspace = true
 tokio = { workspace = true, features = ["signal"] }
 tracing.workspace = true
 tracing-subscriber.workspace = true

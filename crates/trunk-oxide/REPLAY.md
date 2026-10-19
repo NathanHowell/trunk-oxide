@@ -1,6 +1,6 @@
 # trunk-replay: offline IQ replay and parameter sweeps
 
-`trunk-replay` runs the real trunk-oxide pipeline (shared channelizer, C++
+`trunk-replay` runs the real trunk-oxide pipeline (shared channelizer, Rust
 recorders and decoders, call state machine) against recorded IQ instead of
 dongles, and records what came out. Use it to tune squelch / tuning, to compare
 builds, and as the baseline for replacing C++ decoders.
@@ -41,8 +41,9 @@ system) and `freq_correction_hz` (every source). `--grid` takes comma-separated
 values and runs the cartesian product. Adaptive ppm correction is off in replay
 unless you set `recorder.adaptive_freq_correction=true`.
 
-Each sweep child runs in its own IPC namespace (`unshare`): GNU Radio uses ~900
-SysV shared-memory segments per process and the host allows 4096.
+Each sweep child runs in its own IPC namespace (`unshare`), a habit from the
+GNU Radio days (it used ~900 SysV shared-memory segments per process); the
+Rust radio needs none, so `--share-ipc` is safe now.
 
 ## Output (per run)
 
@@ -111,7 +112,7 @@ Offline, without a replay:
   an emulation of op25's TDMA chain on its own symbols, trunk-p25 on those
   symbols and on the IQ, and op25 again on trunk-p25's regenerated stream
   (the defaults are svrcs's scrambling parameters);
-- `TRUNK_P25_TAPS=RUN/taps cargo test -p trunk-recorder-sys --release --lib
+- `TRUNK_P25_TAPS=RUN/taps cargo test -p trunk-radio --release --lib
   voice_capture -- --ignored --nocapture` runs every voice tap's IQ through
   trunk-p25's voice path and reports each call; with `VOICE_CORPUS=<dir>`
   it writes the speech corpus the vocoder examples use. While op25's frame
@@ -138,7 +139,7 @@ never better than playing the soft decode as received.
 The vocoders were checked frame by frame against op25's on random streams
 that reach every pitch, repeat, mute, tone and erasure, 16k frames a phase,
 and on every tapped call's frames; op25's audio is frozen as hashes in the
-trunk-recorder-sys `p25_voice` tests (`the_imbe_vocoder_is_op25s`,
+trunk-radio `p25_voice` tests (`the_imbe_vocoder_is_op25s`,
 `the_ambe_vocoder_is_op25s`, the clean-call tests) and the C++ oracles are
 gone. The match needed op25's vocoder sources built with
 `-ffp-contract=off` (GCC fuses multiply-adds under `-march=znver2`, Rust

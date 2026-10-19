@@ -2190,7 +2190,7 @@ impl TrunkStateMachine {
                 // Squelch closed — debounce: don't transition immediately.
                 // tick_conventional() finalizes if squelch stays closed past
                 // SQUELCH_DEBOUNCE.
-                entry.noise = trunk_recorder_sys::signal_from_ffi(pwr_db);
+                entry.noise = trunk_radio::signal_from_ffi(pwr_db);
                 if entry.state == CallState::Recording {
                     entry.squelch_closed_at.get_or_insert_with(Instant::now);
                 } else if entry.idle_since.is_none() {
@@ -2198,7 +2198,7 @@ impl TrunkStateMachine {
                 }
             } else {
                 // Squelch open
-                entry.signal = trunk_recorder_sys::signal_from_ffi(pwr_db);
+                entry.signal = trunk_radio::signal_from_ffi(pwr_db);
                 if entry.squelch_closed_at.take().is_some() {
                     // Reopened before debounce expired — cancel pending close,
                     // stay in Recording. No audio lost.
@@ -2246,7 +2246,7 @@ impl TrunkStateMachine {
     pub(crate) fn on_signals_detected(
         &mut self,
         source_center_freq: f64,
-        signals: &[trunk_recorder_sys::DetectedSignal],
+        signals: &[trunk_radio::DetectedSignal],
     ) -> Effects {
         let mut effects = Effects::new();
         for signal in signals {
@@ -2390,9 +2390,9 @@ impl TrunkStateMachine {
     pub(crate) fn feed_recorder_power(&mut self, call_id: CallId, pwr: f64, was_idle: bool) {
         if let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) {
             if was_idle {
-                entry.noise = trunk_recorder_sys::signal_from_ffi(pwr);
+                entry.noise = trunk_radio::signal_from_ffi(pwr);
             } else {
-                entry.signal = trunk_recorder_sys::signal_from_ffi(pwr);
+                entry.signal = trunk_radio::signal_from_ffi(pwr);
             }
         }
     }
@@ -3791,7 +3791,7 @@ mod tests {
         assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Disabled);
 
         // Signal detected again → Idle + EnableRecorder
-        let signals = vec![trunk_recorder_sys::DetectedSignal {
+        let signals = vec![trunk_radio::DetectedSignal {
             center_freq: 1_000_000.0,
             max_rssi: -20,
             threshold: -45,
@@ -3832,7 +3832,7 @@ mod tests {
         assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Disabled);
 
         // Source center 487 MHz, signal at +1 MHz offset → 488 MHz absolute
-        let signals = vec![trunk_recorder_sys::DetectedSignal {
+        let signals = vec![trunk_radio::DetectedSignal {
             center_freq: 1_000_000.0,
             max_rssi: -20,
             threshold: -45,
@@ -3857,7 +3857,7 @@ mod tests {
         let (call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
 
         // Signal at 490 MHz, channel at 488 MHz — 2 MHz apart, way beyond 12.5kHz tolerance
-        let signals = vec![trunk_recorder_sys::DetectedSignal {
+        let signals = vec![trunk_radio::DetectedSignal {
             center_freq: 3_000_000.0,
             max_rssi: -20,
             threshold: -45,
@@ -3876,7 +3876,7 @@ mod tests {
         let (call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
         sm.calls[0].state = CallState::Recording;
 
-        let signals = vec![trunk_recorder_sys::DetectedSignal {
+        let signals = vec![trunk_radio::DetectedSignal {
             center_freq: 1_000_000.0,
             max_rssi: -20,
             threshold: -45,
@@ -3941,7 +3941,7 @@ mod tests {
         let (call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
 
         // Signal at 488_010_000 Hz (10kHz offset from channel) — within 12.5kHz tolerance
-        let signals = vec![trunk_recorder_sys::DetectedSignal {
+        let signals = vec![trunk_radio::DetectedSignal {
             center_freq: 1_010_000.0,
             max_rssi: -20,
             threshold: -45,
@@ -4015,7 +4015,7 @@ mod tests {
         assert_eq!(sm.get_call(call_id).unwrap().state, CallState::Disabled);
 
         // 2. Signal detected → Idle + EnableRecorder, no idle timer
-        let signals = vec![trunk_recorder_sys::DetectedSignal {
+        let signals = vec![trunk_radio::DetectedSignal {
             center_freq: 1_000_000.0,
             max_rssi: -20,
             threshold: -45,
@@ -4074,7 +4074,7 @@ mod tests {
         let (call_id, _) = sm.add_conventional_call(&channel, 1, &policy, Some(RecorderNum(12)));
 
         // Signal detected → Idle with no idle timer
-        let signals = vec![trunk_recorder_sys::DetectedSignal {
+        let signals = vec![trunk_radio::DetectedSignal {
             center_freq: 1_000_000.0,
             max_rssi: -20,
             threshold: -45,

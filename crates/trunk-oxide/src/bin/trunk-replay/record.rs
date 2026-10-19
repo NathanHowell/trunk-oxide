@@ -90,10 +90,10 @@ pub struct Summary {
     pub decoders: Value,
 }
 
-/// The P25 voice calls' tallies (`trunk_recorder_sys::p25_calls`) and the
+/// The P25 voice calls' tallies (`trunk_radio::p25_calls`) and the
 /// control channel parser's counts, as JSON.
 pub fn decoder_tallies() -> Value {
-    let calls: BTreeMap<String, Value> = trunk_recorder_sys::p25_calls::call_tally()
+    let calls: BTreeMap<String, Value> = trunk_radio::p25_calls::call_tally()
         .iter()
         .map(|((s, p), t)| {
             (
@@ -106,7 +106,7 @@ pub fn decoder_tallies() -> Value {
             )
         })
         .collect();
-    let parser: Vec<Value> = trunk_recorder_sys::p25_parse::parse_stats()
+    let parser: Vec<Value> = trunk_radio::p25_parse::parse_stats()
         .into_iter()
         .map(|r| {
             let s = r.stats;

@@ -1,7 +1,6 @@
 [workspace]
 resolver = "3"
 members = [
-    "crates/trunk-recorder-sys",
     "crates/trunk-oxide-proto",
     "crates/trunk-oxide-grpc",
     "crates/trunk-oxide",
@@ -18,9 +17,9 @@ members = [
     "crates/trunk-fm",
     "crates/trunk-rtlsdr-sys",
     "crates/trunk-sdr",
+    "crates/trunk-radio",
 ]
 default-members = [
-    "crates/trunk-recorder-sys",
     "crates/trunk-oxide-proto",
     "crates/trunk-oxide-grpc",
     "crates/trunk-database",
@@ -53,12 +52,12 @@ module_name_repetitions = "allow"
 must_use_candidate = "allow"
 
 [workspace.dependencies]
-trunk-recorder-sys = { path = "crates/trunk-recorder-sys" }
 trunk-oxide = { path = "crates/trunk-oxide" }
 trunk-oxide-proto = { path = "crates/trunk-oxide-proto" }
 trunk-fm = { path = "crates/trunk-fm" }
 trunk-rtlsdr-sys = { path = "crates/trunk-rtlsdr-sys" }
 trunk-sdr = { path = "crates/trunk-sdr" }
+trunk-radio = { path = "crates/trunk-radio" }
 trunk-oxide-grpc = { path = "crates/trunk-oxide-grpc" }
 trunk-transcriber-proto = { path = "crates/trunk-transcriber-proto" }
 trunk-channelizer = { path = "crates/trunk-channelizer" }
@@ -69,8 +68,6 @@ audiopus = "0.2"
 audiopus_sys = { version = "0.1", features = ["static"] }
 anyhow = "1"
 chrono = "0.4"
-cxx = "1"
-cxx-build = "1"
 ogg = "0.9"
 image = { version = "0.25", default-features = false, features = ["png"] }
 plotters = { version = "0.3", default-features = false, features = ["bitmap_backend", "ab_glyph", "line_series", "chrono"] }

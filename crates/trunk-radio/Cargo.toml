@@ -1,0 +1,22 @@
+[package]
+name = "trunk-radio"
+description = "The radio in Rust: SDR sources feeding shared channelizers, recorders (P25 voice, analog FM) and control-channel decoders on their slots, and the call handles the state machine drives."
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+num-complex.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tracing.workspace = true
+trunk-channelizer.workspace = true
+trunk-fm.workspace = true
+trunk-p25.workspace = true
+trunk-sdr.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
+
+[lints]
+workspace = true

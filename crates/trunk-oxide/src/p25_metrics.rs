@@ -8,11 +8,11 @@ use std::collections::{BTreeMap, HashMap};
 
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Gauge, Meter};
-use trunk_recorder_sys::p25::{
+use trunk_radio::p25::{
     ControlChannelReport, DecoderStats, TdmaStats, VoiceChannelReport, VoiceStats,
 };
-use trunk_recorder_sys::p25_calls::{self, CallTally, Phase};
-use trunk_recorder_sys::p25_parse::{self, ParseStats};
+use trunk_radio::p25_calls::{self, CallTally, Phase};
+use trunk_radio::p25_parse::{self, ParseStats};
 
 /// A decoder's identity across polls: (source, channelizer port).
 type Key = (i32, u32);
@@ -259,7 +259,7 @@ impl VoiceMetrics {
     }
 
     fn poll(&mut self) {
-        let reports = trunk_recorder_sys::p25::voice_channels();
+        let reports = trunk_radio::p25::voice_channels();
         for r in &reports {
             self.export(r);
         }
@@ -503,7 +503,7 @@ impl P25Metrics {
         self.voice.poll();
         self.calls.poll();
         self.parser.poll();
-        let reports = trunk_recorder_sys::p25::control_channels();
+        let reports = trunk_radio::p25::control_channels();
         self.prev.retain(|k, _| {
             reports
                 .iter()

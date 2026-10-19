@@ -1,10 +1,8 @@
-//! Driver that links against `libtrunk-recorder.so` and drives it via FFI.
+//! The recorder host: opens the sources, builds the radio
+//! ([`trunk_radio::Radio`]) and runs the call state machine over its events.
 //!
-//! This inverts the typical plugin relationship: instead of trunk-recorder
-//! loading a Rust plugin via dlopen, this crate links against trunk-recorder
-//! as a shared library and drives it directly.
-//!
-//! Events flow: SDR → C++ gnuradio graph → cxx callbacks → EventBridge
+//! Events flow: SDR → trunk-radio (channelizer, decoders) → `RadioEvent` →
+//! call state machine → EventBridge (gRPC)
 
 mod adaptive_squelch;
 pub mod calibrate;
@@ -12,8 +10,8 @@ mod call_manager;
 mod call_state;
 pub mod clock;
 mod dedup;
-mod p25_lfsr;
 mod fm_metrics;
+mod p25_lfsr;
 mod p25_metrics;
 pub mod proc_stats;
 
@@ -24,18 +22,14 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Context as _;
-use trunk_recorder_sys::{EventNotifier, GrEvent};
+use trunk_radio::radio::SystemKind;
+use trunk_radio::{
+    ConditioningSettings, EventSender, Radio, RadioConfig, RadioEvent, SourceSetup, SystemSetup,
+    TrTrunkMessage,
+};
 
 pub use call_manager::{CallManagerConfig, ConventionalChannel, SystemPolicy, TalkgroupPolicy};
 pub use call_state::{Freq, Talkgroup};
-
-/// Snapshot of GNU Radio block-level performance counters, collected
-/// periodically on the monitor thread and read by OTel observable callbacks.
-#[derive(Default)]
-pub struct GrMetricsSnapshot {
-    pub recorders: Vec<ffi::TrRecorderMetrics>,
-    pub sources: Vec<ffi::TrSourceMetrics>,
-}
 
 /// Per-channel metrics for a single conventional channel.
 pub struct ConventionalChannelMetrics {
@@ -78,11 +72,11 @@ struct TrunkMsgKey {
     freq_bits: u64,
 }
 
-impl From<&ffi::TrTrunkMessage> for TrunkMsgKey {
-    fn from(msg: &ffi::TrTrunkMessage) -> Self {
+impl From<&TrTrunkMessage> for TrunkMsgKey {
+    fn from(msg: &TrTrunkMessage) -> Self {
         Self {
             sys_num: msg.sys_num,
-            message_type: msg.message_type.repr,
+            message_type: msg.message_type.repr(),
             opcode: msg.opcode,
             talkgroup: msg.talkgroup,
             source: msg.source,
@@ -110,14 +104,10 @@ use call_manager::CallManager;
 use std::collections::HashMap;
 
 use trunk_config::{
-    Config, ConditionerReset, DefaultMode, Modulation, SourceConfig, SourceDriver, SystemType,
+    ConditionerReset, Config, DefaultMode, Modulation, SourceConfig, SourceDriver, SystemType,
 };
 use trunk_oxide_grpc::EventBridge;
-use trunk_recorder_sys::ffi;
 
-/// Run one pre-flight gain-calibration sweep and return the chosen gain.
-/// Falls back to `fallback_gain` on any failure so calibration can't block
-/// startup. Runs on its own thread via [`calibrate_sources_parallel`].
 /// What a source's gain calibration came to.
 #[derive(Clone, Debug)]
 struct Calibrated {
@@ -140,40 +130,13 @@ impl Calibrated {
     }
 }
 
-/// How to open a source's device for its pre-flight sweep.
-enum ProbeSpec {
-    /// Through gr-osmosdr in C++.
-    Osmosdr(ffi::TrProbeConfig),
-    /// Through trunk-sdr.
-    Rtlsdr {
-        spec: trunk_sdr::DeviceSpec,
-        tuning: trunk_sdr::Tuning,
-    },
-}
-
-impl ProbeSpec {
-    fn open(
-        &self,
-        policy: &calibrate::CalibrationPolicy,
-    ) -> anyhow::Result<Box<dyn calibrate::probe::IqProbe>> {
-        Ok(match self {
-            Self::Osmosdr(cfg) => Box::new(calibrate::preflight::PreflightProbe::open(
-                cfg,
-                policy.capture_samples,
-                policy.settle_samples,
-            )?),
-            Self::Rtlsdr { spec, tuning } => Box::new(calibrate::rtl::RtlProbe::open(
-                spec,
-                tuning,
-                policy.capture_samples,
-                policy.settle_samples,
-            )?),
-        })
-    }
-}
-
+/// Run one pre-flight gain-calibration sweep (or re-check of the cached
+/// one) on an RTL-SDR and return the chosen gain. Falls back to
+/// `fallback_gain` on any failure so calibration can't block startup. Runs
+/// on its own thread via [`calibrate_sources_parallel`].
 fn run_calibration(
-    probe_spec: &ProbeSpec,
+    spec: &trunk_sdr::DeviceSpec,
+    tuning: &trunk_sdr::Tuning,
     policy: &calibrate::CalibrationPolicy,
     fallback_gain: f64,
     device: &str,
@@ -181,7 +144,12 @@ fn run_calibration(
 ) -> Calibrated {
     // The probe holds the device open for the sweep and releases it on drop
     // (end of this function), before the real source is opened.
-    let mut probe = match probe_spec.open(policy) {
+    let mut probe = match calibrate::rtl::RtlProbe::open(
+        spec,
+        tuning,
+        policy.capture_samples,
+        policy.settle_samples,
+    ) {
         Ok(probe) => probe,
         Err(e) => {
             tracing::warn!(
@@ -194,7 +162,7 @@ fn run_calibration(
 
     // The last sweep's pick stands while the floor it was made at holds.
     if let Some(c) = cached {
-        match calibrate::recheck(&mut *probe, policy, c) {
+        match calibrate::recheck(&mut probe, policy, c) {
             Ok((true, moved)) => {
                 tracing::info!(
                     device = %device,
@@ -223,7 +191,7 @@ fn run_calibration(
     }
 
     tracing::info!(device = %device, "starting gain auto-calibration sweep");
-    match calibrate::calibrate(&mut *probe, policy, fallback_gain) {
+    match calibrate::calibrate(&mut probe, policy, fallback_gain) {
         Ok(sweep) => {
             let sel = sweep.selection;
             tracing::info!(
@@ -258,9 +226,8 @@ fn run_calibration(
 ///
 /// Each thread opens and releases its own device, and all threads are joined
 /// before any source is opened for real, so the devices are free again by the
-/// time the main flowgraph is built. Non-osmosdr drivers are skipped with a
-/// warning. Each device's last sweep is read from, and a fresh one written
-/// to, the cache in `state_dir`.
+/// time the sources are built. Each device's last sweep is read from, and a
+/// fresh one written to, the cache in `state_dir`.
 fn calibrate_sources_parallel(
     sources: &[SourceConfig],
     state_dir: &std::path::Path,
@@ -273,33 +240,20 @@ fn calibrate_sources_parallel(
         if src.enabled == Some(false) || !src.auto_gain {
             continue;
         }
-        let probe_spec = match src.driver {
-            SourceDriver::Osmosdr => ProbeSpec::Osmosdr(ffi::TrProbeConfig {
-                driver: "osmosdr".into(),
-                device: src.device.clone(),
-                center: src.center,
-                rate: src.rate,
-                error: src.error,
-                ppm: src.ppm,
-                antenna: src.antenna.clone(),
-            }),
-            SourceDriver::Rtlsdr => ProbeSpec::Rtlsdr {
-                spec: trunk_sdr::DeviceSpec::parse(&src.device),
-                tuning: rtl_tuning(src, trunk_sdr::Gain::Manual(src.gain)),
-            },
-            SourceDriver::Usrp | SourceDriver::Iqfile => {
-                tracing::warn!(
-                    device = %src.device,
-                    "auto_gain is only supported for the osmosdr and rtlsdr drivers; using configured gain"
-                );
-                continue;
-            }
-        };
+        if src.driver != SourceDriver::Rtlsdr {
+            tracing::warn!(
+                device = %src.device,
+                "auto_gain is only supported for the rtlsdr driver; using configured gain"
+            );
+            continue;
+        }
+        let spec = trunk_sdr::DeviceSpec::parse(&src.device);
+        let tuning = rtl_tuning(src, trunk_sdr::Gain::Manual(src.gain));
         let device = src.device.clone();
         let fallback = src.gain;
         let cached = cache.get(&device).cloned();
         handles.push(std::thread::spawn(move || {
-            let c = run_calibration(&probe_spec, &policy, fallback, &device, cached.as_ref());
+            let c = run_calibration(&spec, &tuning, &policy, fallback, &device, cached.as_ref());
             (idx, device, c)
         }));
     }
@@ -362,21 +316,21 @@ fn rtl_tuning(src: &SourceConfig, gain: trunk_sdr::Gain) -> trunk_sdr::Tuning {
     }
 }
 
-/// Samples per block a host-owned stream queues (a quarter of a USB transfer).
-const RTL_STREAM_BLOCK: usize = 32_768;
-/// How much of a host-owned stream may wait for the channelizer: one second.
-/// A dongle drops blocks beyond that; a file player waits.
-const RTL_STREAM_QUEUE_SECS: f64 = 1.0;
+/// Samples per block a source stream queues (a quarter of a USB transfer).
+const STREAM_BLOCK: usize = 32_768;
+/// How much of a stream may wait for the channelizer: one second. A dongle
+/// drops blocks beyond that; a file player waits.
+const STREAM_QUEUE_SECS: f64 = 1.0;
 
-/// Configures and initializes a trunk-recorder instance without starting it.
+/// Configures and initializes the radio without starting the call state
+/// machine.
 ///
 /// Call [`start()`](TrunkRecorderBuilder::start) to consume the builder and
 /// begin receiving radio traffic.
 pub struct TrunkRecorderBuilder {
-    ctx: cxx::UniquePtr<ffi::TrContext>,
-    /// Devices and file players trunk-oxide streams itself (`rtlsdr` and
-    /// `iqfile` sources); dropping one ends its stream.
-    streams: Vec<Box<dyn trunk_sdr::Running>>,
+    radio: Arc<Radio>,
+    event_rx: tokio::sync::mpsc::Receiver<RadioEvent>,
+    pending: Arc<AtomicUsize>,
     call_mgr_config: CallManagerConfig,
     bridge: Arc<EventBridge>,
     /// Per-source frequency coverage, indexed by source position.
@@ -441,14 +395,12 @@ impl Default for MonitorOptions {
     }
 }
 
-/// A running trunk-recorder instance. Stops automatically on drop.
+/// A running radio. Stops automatically on drop.
 pub struct TrunkRecorder {
-    ctx: cxx::UniquePtr<ffi::TrContext>,
-    /// See [`TrunkRecorderBuilder::streams`]; stopped after the flowgraph.
-    streams: Vec<Box<dyn trunk_sdr::Running>>,
+    radio: Arc<Radio>,
     call_mgr_config: CallManagerConfig,
     bridge: Arc<EventBridge>,
-    event_rx: tokio::sync::mpsc::Receiver<GrEvent>,
+    event_rx: tokio::sync::mpsc::Receiver<RadioEvent>,
     pending: Arc<AtomicUsize>,
     /// Per-source frequency coverage, indexed by source position.
     source_ranges: Vec<RangeInclusive<f64>>,
@@ -457,67 +409,60 @@ pub struct TrunkRecorder {
     /// Per-source software Hz tune correction, indexed by source position.
     source_freq_corrections_hz: Vec<f64>,
     clock: clock::Clock,
-    /// Conventional calls created before the flowgraph starts, pending
-    /// registration with the [`CallManager`].
+    /// Conventional channels whose calls the [`CallManager`] creates when
+    /// it starts.
     pending_conventional_calls: Vec<PendingConventionalCall>,
-    /// Shared snapshot of GR block metrics, updated periodically on the
-    /// monitor thread and read by OTel observable callbacks.
-    gr_metrics: Arc<Mutex<GrMetricsSnapshot>>,
     /// Shared snapshot of conventional-channel metrics, updated on the
     /// monitor thread and read by OTel observable callbacks.
     conv_metrics: Arc<Mutex<ConventionalMetricsSnapshot>>,
 }
 
 struct PendingConventionalCall {
-    call: cxx::UniquePtr<ffi::TrCall>,
     sys_num: i32,
     channel_idx: usize,
+    source_idx: i32,
 }
 
-// Safety: TrContext is used exclusively from a single thread (the monitor thread).
-// All FFI calls happen on that thread — no concurrent access.
-#[allow(unsafe_code)]
-unsafe impl Send for TrunkRecorder {}
-
 impl TrunkRecorderBuilder {
-    /// Build from a parsed TOML config using the builder FFI.
-    ///
-    /// This bypasses JSON config parsing entirely — Rust owns all config
-    /// interpretation and drives C++ via structured setter calls.
+    /// Build from a parsed TOML config: calibrate and open the sources,
+    /// start their channelizers, and set up every system's decoders.
     ///
     /// # Errors
     ///
     /// Returns an error if an SDR source fails to open or system setup fails.
     pub fn from_config(config: &Config, bridge: Arc<EventBridge>) -> anyhow::Result<Self> {
-        let handler_box = trunk_recorder_sys::EventHandlerBox::new(bridge.clone());
-        let mut ctx = ffi::tr_create_from_builder(Box::new(handler_box))?;
-
-        // ── Config ──
-        if let Some(rec) = &config.recorder {
-            ffi::tr_config_set_temp_dir(ctx.pin_mut(), &rec.temp_dir);
-            ffi::tr_config_set_soft_vocoder(ctx.pin_mut(), rec.soft_vocoder);
-            let c = &rec.conditioner;
-            trunk_recorder_sys::set_conditioning_settings(trunk_recorder_sys::ConditioningSettings {
-                params: trunk_recorder_sys::ConditionerParams {
+        let rec = config.recorder.as_ref();
+        let pending = Arc::new(AtomicUsize::new(0));
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(256);
+        let events = EventSender::new(event_tx, Arc::clone(&pending));
+        let conditioning = rec.map_or_else(ConditioningSettings::default, |r| {
+            let c = &r.conditioner;
+            ConditioningSettings {
+                params: trunk_radio::ConditionerParams {
                     agc_alpha: c.agc_alpha,
                     agc_reference: c.agc_reference,
                     fll_bw_scale: c.fll_bw_scale,
-                    ..trunk_recorder_sys::ConditionerParams::DEFAULT
+                    ..trunk_radio::ConditionerParams::DEFAULT
                 },
                 reset: match c.reset {
-                    ConditionerReset::Never => trunk_recorder_sys::ResetPolicy::Never,
-                    ConditionerReset::Enable => trunk_recorder_sys::ResetPolicy::Enable,
-                    ConditionerReset::Retune => trunk_recorder_sys::ResetPolicy::Retune,
+                    ConditionerReset::Never => trunk_radio::ResetPolicy::Never,
+                    ConditionerReset::Enable => trunk_radio::ResetPolicy::Enable,
+                    ConditionerReset::Retune => trunk_radio::ResetPolicy::Retune,
                 },
-            });
-            if let Some(dir) = &rec.tap_dir {
-                ffi::tr_config_set_tap_dir(ctx.pin_mut(), dir);
             }
-            ffi::tr_config_set_debug_recorder(
-                ctx.pin_mut(),
-                rec.debug.enabled,
-                &rec.debug.address,
-                rec.debug.port,
+        });
+        let sink: Arc<dyn trunk_radio::AudioSink> = bridge.clone();
+        let radio = Arc::new(Radio::new(
+            RadioConfig {
+                tap_dir: rec.and_then(|r| r.tap_dir.clone()),
+                conditioning,
+            },
+            sink,
+            events,
+        ));
+        if rec.is_some_and(|r| r.debug.enabled) {
+            tracing::warn!(
+                "recorder.debug (the UDP debug recorder) is no longer supported; ignored"
             );
         }
 
@@ -525,10 +470,7 @@ impl TrunkRecorderBuilder {
         // Pre-flight gain calibration for all auto_gain sources runs first, in
         // parallel (one thread per device), so the devices are free before any
         // source is opened below. Maps source index → calibrated gain.
-        let state_dir = config
-            .recorder
-            .as_ref()
-            .map_or("/var/lib/trunk-oxide", |r| r.state_dir.as_str());
+        let state_dir = rec.map_or("/var/lib/trunk-oxide", |r| r.state_dir.as_str());
         let calibrated_gains =
             calibrate_sources_parallel(&config.source, std::path::Path::new(state_dir));
         calibrate::report::record(
@@ -556,58 +498,16 @@ impl TrunkRecorderBuilder {
         let mut source_ranges = Vec::new();
         let mut source_ppms = Vec::new();
         let mut source_freq_corrections_hz = Vec::new();
-        let mut streams = Vec::new();
         for (idx, src) in config.source.iter().enumerate() {
             if src.enabled == Some(false) {
                 continue;
             }
-
-            let driver_str = match src.driver {
-                SourceDriver::Osmosdr => "osmosdr",
-                SourceDriver::Rtlsdr => "rtlsdr",
-                SourceDriver::Usrp => "usrp",
-                SourceDriver::Iqfile => "iqfile",
-            };
-
-            // Collect all gain stages into a flat list
-            let mut gain_stages: Vec<ffi::TrGainStage> = src
-                .gain_settings
-                .iter()
-                .map(|(name, &value)| ffi::TrGainStage {
-                    name: name.clone(),
-                    value,
-                })
-                .collect();
-            let named_gains = [
-                ("IF", src.if_gain),
-                ("BB", src.bb_gain),
-                ("MIX", src.mix_gain),
-                ("LNA", src.lna_gain),
-                ("TIA", src.tia_gain),
-                ("PGA", src.pga_gain),
-                ("AMP", src.amp_gain),
-                ("VGA", src.vga_gain),
-                ("VGA1", src.vga1_gain),
-                ("VGA2", src.vga2_gain),
-            ];
-            for (name, value) in named_gains {
-                if value != 0.0 {
-                    gain_stages.push(ffi::TrGainStage {
-                        name: name.into(),
-                        value,
-                    });
-                }
-            }
-
             // Use the pre-flight calibrated gain if this source was swept,
             // otherwise the configured gain.
             let gain = calibrated_gains.get(&idx).map_or(src.gain, |c| c.gain_db);
-
-            // An rtlsdr source is opened here, tuned and gained, and its
-            // stream handed to the flowgraph; the rate the dongle settled
-            // on is what the channelizer is built for. An iqfile source is
-            // played from here the same way.
-            let rtl = match src.driver {
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let capacity = ((src.rate * STREAM_QUEUE_SECS) as usize).max(4 * STREAM_BLOCK);
+            let (stream, running, rate) = match src.driver {
                 SourceDriver::Rtlsdr => {
                     let gain = if src.agc {
                         trunk_sdr::Gain::Auto
@@ -630,72 +530,44 @@ impl TrunkRecorderBuilder {
                         agc = src.agc,
                         "opened RTL-SDR"
                     );
-                    Some(rtl)
-                }
-                _ => None,
-            };
-            let rate = rtl.as_ref().map_or(src.rate, |r| r.info().rate_hz.round());
-
-            let source_cfg = ffi::TrSourceConfig {
-                    driver: driver_str.into(),
-                    device: src.device.clone(),
-                    center: src.center,
-                    rate,
-                    error: src.error,
-                    gain,
-                    agc: src.agc,
-                    // Hybrid clock correction: the hardware knob is integer-ppm
-                    // only (rtl-sdr truncates), so it takes the *coarse* rounded
-                    // ppm here — a whole-dongle correction (incl. control
-                    // channel) for free. The fractional remainder (and any
-                    // real-time adaptive delta) is applied in software as a
-                    // per-recorder tune offset in
-                    // CallManager::build_recorder_config_from_view, so sub-ppm
-                    // precision works. Total = round(ppm) + (ppm - round(ppm)).
-                    ppm: src.ppm.round(),
-                    antenna: src.antenna.clone(),
-                    silence_frames: src.silence_frames,
-                    signal_detector_threshold: src.signal_detector_threshold.unwrap_or(0.0).into(),
-                    has_signal_detector_threshold: src.signal_detector_threshold.is_some(),
-                    gain_stages,
-                    digital_recorders: src.digital_recorders,
-                    analog_recorders: src.analog_recorders,
-                    sigmf_recorders: src.sigmf_recorders,
-                    iq_format: src.iq_format.clone(),
-                    iq_repeat: src.iq_repeat,
-            };
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let capacity = ((rate * RTL_STREAM_QUEUE_SECS) as usize).max(4 * RTL_STREAM_BLOCK);
-            let stream = match (rtl, src.driver) {
-                (Some(rtl), _) => {
                     let (stream, streaming) = rtl
-                        .stream(RTL_STREAM_BLOCK, capacity)
+                        .stream(STREAM_BLOCK, capacity)
                         .with_context(|| format!("streaming RTL-SDR source '{}'", src.device))?;
-                    streams.push(Box::new(streaming) as Box<dyn trunk_sdr::Running>);
-                    Some(stream)
+                    (
+                        stream,
+                        Box::new(streaming) as Box<dyn trunk_sdr::Running>,
+                        info.rate_hz.round(),
+                    )
                 }
-                (None, SourceDriver::Iqfile) => {
+                SourceDriver::Iqfile => {
                     let spec = trunk_sdr::FileSpec {
                         path: src.device.clone().into(),
                         format: trunk_sdr::Format::parse(&src.iq_format)?,
                         rate_hz: src.rate,
                         repeat: src.iq_repeat,
                     };
-                    let (stream, playing) = trunk_sdr::file::play(&spec, RTL_STREAM_BLOCK, capacity)
+                    let (stream, playing) = trunk_sdr::file::play(&spec, STREAM_BLOCK, capacity)
                         .with_context(|| format!("playing IQ file '{}'", src.device))?;
-                    streams.push(playing);
-                    Some(stream)
+                    (stream, playing, src.rate)
                 }
-                (None, _) => None,
+                SourceDriver::Osmosdr | SourceDriver::Usrp => anyhow::bail!(
+                    "source '{}': the {:?} driver is no longer supported; use driver = \"rtlsdr\" (an RTL-SDR by serial) or \"iqfile\"",
+                    src.device,
+                    src.driver
+                ),
             };
-            match stream {
-                Some(stream) => ffi::tr_add_stream_source(
-                    ctx.pin_mut(),
-                    &source_cfg,
-                    trunk_recorder_sys::iq_stream_handle(stream),
-                )?,
-                None => ffi::tr_add_source_from_config(ctx.pin_mut(), &source_cfg)?,
-            };
+            radio
+                .add_source(SourceSetup {
+                    device: src.device.clone(),
+                    center_hz: src.center + src.error,
+                    rate_hz: rate,
+                    stream,
+                    running,
+                    digital_recorders: src.digital_recorders,
+                    analog_recorders: src.analog_recorders,
+                    signal_detector_threshold: src.signal_detector_threshold,
+                })
+                .with_context(|| format!("starting source '{}'", src.device))?;
             let half_rate = src.rate / 2.0;
             source_ranges.push((src.center - half_rate)..=(src.center + half_rate));
             source_ppms.push(src.ppm);
@@ -704,75 +576,30 @@ impl TrunkRecorderBuilder {
 
         // ── Systems ──
         let mut system_policies = HashMap::new();
-        for (short_name, sys) in &config.system {
-            let type_str = match sys.system_type {
-                SystemType::Conventional => "conventional",
-                SystemType::ConventionalP25 => "conventionalP25",
-                SystemType::ConventionalDMR => "conventionalDMR",
-                SystemType::ConventionalSigmf => "conventionalSIGMF",
-                SystemType::Smartnet => "smartnet",
-                SystemType::P25 => "p25",
+        for (sys_idx, (short_name, sys)) in (0i32..).zip(&config.system) {
+            let kind = match sys.system_type {
+                SystemType::P25 => SystemKind::P25,
+                SystemType::Conventional => SystemKind::Conventional,
+                SystemType::ConventionalP25 => SystemKind::ConventionalP25,
+                SystemType::Smartnet
+                | SystemType::ConventionalDMR
+                | SystemType::ConventionalSigmf => {
+                    anyhow::bail!(
+                        "system '{short_name}': {:?} is not supported by the Rust radio (see beads trunk-oxide-a2m and trunk-oxide-map)",
+                        sys.system_type
+                    )
+                }
             };
-
-            let sys_idx = ffi::tr_add_system_from_config(
-                ctx.pin_mut(),
-                &ffi::TrSystemConfig {
-                    short_name: short_name.clone(),
-                    system_type: type_str.into(),
-                    qpsk_mod: sys.modulation == Modulation::Qpsk,
-                    analog_levels: sys.analog_levels,
-                    tau: sys.deemphasis_tau.into(),
-                    max_dev: sys.max_dev,
-                    decode_mdc: sys.decode_mdc,
-                    decode_fsync: sys.decode_fsync,
-                    decode_star: sys.decode_star,
-                    decode_tps: sys.decode_tps,
-                    bandplan: sys.bandplan.clone().unwrap_or_default(),
-                    bandplan_base: sys.bandplan_base,
-                    bandplan_high: sys.bandplan_high,
-                    bandplan_spacing: sys.bandplan_spacing,
-                    bandplan_offset: sys.bandplan_offset,
-                    bandfreq: 0.0,
-                    sys_id: sys.sys_id,
-                    wacn: sys.wacn,
-                    nac: sys.nac,
-                    control_channels: sys.control_channels.clone(),
-                    channels: sys
-                        .channel
-                        .iter()
-                        .map(|ch| ffi::TrChannelConfig {
-                            id: ch.id,
-                            freq: ch.freq,
-                            tone: ch.tone,
-                            squelch_db: ch.squelch_db.unwrap_or(sys.squelch),
-                            signal_detection: ch.signal_detection,
-                        })
-                        .collect(),
-                    talkgroups: sys
-                        .talkgroup
-                        .iter()
-                        .map(|tg| ffi::TrTalkgroupConfig {
-                            id: tg.id,
-                            mode: tg.mode.as_str().into(),
-                            priority: tg.priority,
-                            preferred_nac: tg.preferred_nac,
-                        })
-                        .collect(),
-                    unit_tags: sys
-                        .unit_tag
-                        .iter()
-                        .map(|ut| ffi::TrUnitTagConfig {
-                            pattern: ut.pattern.clone(),
-                            tag: ut.tag.clone(),
-                        })
-                        .collect(),
-                    unit_tags_mode: sys
-                        .unit_tags
-                        .as_ref()
-                        .map(|s| s.mode.clone())
-                        .unwrap_or_default(),
-                },
-            )?;
+            radio.add_system(SystemSetup {
+                sys_num: sys_idx,
+                short_name: short_name.clone(),
+                kind,
+                qpsk: sys.modulation == Modulation::Qpsk,
+                control_channels: sys.control_channels.clone(),
+                max_dev: sys.max_dev,
+                analog_levels: sys.analog_levels,
+                digital_levels: sys.digital_levels,
+            })?;
 
             // Build recording policy for this system
             let talkgroups = sys
@@ -843,12 +670,9 @@ impl TrunkRecorderBuilder {
             );
         }
 
-        // ── Finalize: setup_systems (C++) then fire events (Rust) ──
-        ffi::tr_finalize(ctx.pin_mut())?;
-
         // Fire setup events now that systems are initialized
         {
-            let infos: Vec<trunk_recorder_sys::SystemInfo> = system_policies
+            let infos: Vec<trunk_radio::SystemInfo> = system_policies
                 .iter()
                 .map(|(&sys_idx, policy)| {
                     use trunk_oxide_grpc::proto::SystemType as P;
@@ -860,7 +684,7 @@ impl TrunkRecorderBuilder {
                         trunk_config::SystemType::Smartnet => P::Smartnet as i32,
                         trunk_config::SystemType::P25 => P::P25 as i32,
                     };
-                    trunk_recorder_sys::SystemInfo {
+                    trunk_radio::SystemInfo {
                         sys_num: sys_idx,
                         system_type,
                         short_name: policy.short_name.clone(),
@@ -885,7 +709,6 @@ impl TrunkRecorderBuilder {
             }
         }
 
-        let rec = config.recorder.as_ref();
         let temp_dir = rec.map_or_else(
             || std::env::temp_dir().display().to_string(),
             |r| r.temp_dir.clone(),
@@ -901,8 +724,9 @@ impl TrunkRecorderBuilder {
         };
 
         Ok(Self {
-            ctx,
-            streams,
+            radio,
+            event_rx,
+            pending,
             call_mgr_config,
             bridge,
             source_ranges,
@@ -920,22 +744,10 @@ impl TrunkRecorderBuilder {
         self
     }
 
-    /// Start the gnuradio flowgraph (without the C++ monitor thread).
-    ///
-    /// After calling this, use [`TrunkRecorder::run_monitor`] on a dedicated
-    /// thread to drive the main loop from Rust.
-    pub fn start(mut self) -> TrunkRecorder {
-        // Create the event channel and wire notifiers before starting GR
-        let pending = Arc::new(AtomicUsize::new(0));
-        let (event_tx, event_rx) = tokio::sync::mpsc::channel(256);
-        let notifier = EventNotifier::new(event_tx, Arc::clone(&pending));
-        ffi::tr_context_set_event_notifier(self.ctx.pin_mut(), Box::new(notifier));
-        ffi::tr_context_wire_event_notifiers(self.ctx.pin_mut());
-
-        // Create conventional recorders BEFORE starting the flowgraph so the
-        // blocks are part of the initial graph topology. Adding hier_block2
-        // blocks to a running GNU Radio graph via lock/unlock crashes in
-        // block_detail::output() during the graph restart.
+    /// Hand over to the running state: the sources are already streaming;
+    /// use [`TrunkRecorder::run_monitor`] on a dedicated thread to drive the
+    /// main loop.
+    pub fn start(self) -> TrunkRecorder {
         let mut pending_conventional_calls = Vec::new();
         for (&sys_num, policy) in &self.call_mgr_config.systems {
             for (ch_idx, channel) in policy.channels.iter().enumerate() {
@@ -954,49 +766,25 @@ impl TrunkRecorderBuilder {
                     );
                     continue;
                 };
-                let ffi_channel = ffi::TrChannelConfig {
-                    id: channel.talkgroup.0,
-                    freq: freq_hz,
-                    tone: channel.tone,
-                    squelch_db: channel.squelch_db,
-                    signal_detection: channel.signal_detection,
-                };
-                let call = ffi::tr_create_conventional_call(
-                    self.ctx.pin_mut(),
-                    sys_num,
-                    source_idx,
-                    &ffi_channel,
-                );
-                if call.is_null() {
-                    tracing::error!(
-                        sys_num,
-                        freq = freq_hz,
-                        "failed to create conventional call"
-                    );
-                    continue;
-                }
                 pending_conventional_calls.push(PendingConventionalCall {
-                    call,
                     sys_num,
                     channel_idx: ch_idx,
+                    source_idx,
                 });
             }
         }
 
-        ffi::tr_start_gnuradio(self.ctx.pin_mut());
         TrunkRecorder {
-            ctx: self.ctx,
-            streams: self.streams,
+            radio: self.radio,
             call_mgr_config: self.call_mgr_config,
             bridge: self.bridge,
-            event_rx,
-            pending,
+            event_rx: self.event_rx,
+            pending: self.pending,
             source_ranges: self.source_ranges,
             source_ppms: self.source_ppms,
             source_freq_corrections_hz: self.source_freq_corrections_hz,
             clock: self.clock,
             pending_conventional_calls,
-            gr_metrics: Arc::new(Mutex::new(GrMetricsSnapshot::default())),
             conv_metrics: Arc::new(Mutex::new(ConventionalMetricsSnapshot::default())),
         }
     }
@@ -1008,11 +796,6 @@ impl TrunkRecorder {
         Arc::clone(&self.pending)
     }
 
-    /// Shared GR block metrics snapshot, updated every 15s on the monitor thread.
-    pub fn gr_metrics(&self) -> Arc<Mutex<GrMetricsSnapshot>> {
-        Arc::clone(&self.gr_metrics)
-    }
-
     /// Shared conventional-channel metrics snapshot.
     pub fn conv_metrics(&self) -> Arc<Mutex<ConventionalMetricsSnapshot>> {
         Arc::clone(&self.conv_metrics)
@@ -1021,8 +804,7 @@ impl TrunkRecorder {
     /// Run the monitor loop until ctrl_c is received.
     ///
     /// Must be called from within a tokio runtime context (e.g. via
-    /// `Handle::block_on`). All FFI calls are made on the calling thread,
-    /// keeping `TrContext` (C++ objects) pinned.
+    /// `Handle::block_on`).
     pub async fn run_monitor(&mut self) -> anyhow::Result<()> {
         self.run_monitor_with(MonitorOptions::default()).await
     }
@@ -1038,6 +820,7 @@ impl TrunkRecorder {
         let mut call_mgr = CallManager::new(
             self.call_mgr_config.clone(),
             self.bridge.clone(),
+            Arc::clone(&self.radio),
             self.source_ranges.clone(),
             self.source_ppms.clone(),
             self.source_freq_corrections_hz.clone(),
@@ -1045,13 +828,12 @@ impl TrunkRecorder {
             self.clock.clone(),
         );
 
-        // Register conventional calls that were pre-created before the
-        // flowgraph started (see TrunkRecorderBuilder::start).
+        // Create the conventional channels' calls and recorders.
         let pending_calls = std::mem::take(&mut self.pending_conventional_calls);
         for pending in pending_calls {
             let channel =
                 &self.call_mgr_config.systems[&pending.sys_num].channels[pending.channel_idx];
-            call_mgr.add_call(self.ctx.pin_mut(), pending.call, channel, pending.sys_num);
+            call_mgr.add_conventional_call(channel, pending.sys_num, pending.source_idx);
         }
 
         // The same packet decoded by several control channel decoders arrives
@@ -1061,13 +843,12 @@ impl TrunkRecorder {
 
         let mut tick = delayed_interval(Duration::from_secs(1));
         let mut status = delayed_interval(Duration::from_secs(200));
-        let mut metrics_tick = delayed_interval(Duration::from_secs(1));
 
         loop {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => {
                     tracing::info!("shutting down");
-                    call_mgr.conclude_all(self.ctx.pin_mut());
+                    call_mgr.conclude_all();
                     return Ok(());
                 },
                 () = async {
@@ -1077,13 +858,13 @@ impl TrunkRecorder {
                     }
                 } => {
                     tracing::info!("shutdown requested");
-                    call_mgr.conclude_all(self.ctx.pin_mut());
+                    call_mgr.conclude_all();
                     return Ok(());
                 },
                 Some(event) = self.event_rx.recv() => {
                     self.pending.fetch_sub(1, Ordering::Relaxed);
                     match event {
-                        GrEvent::TrunkMessages(messages) => {
+                        RadioEvent::TrunkMessages(messages) => {
                             let now = call_mgr.clock().now();
                             let messages: Vec<_> = messages
                                 .into_iter()
@@ -1101,81 +882,69 @@ impl TrunkRecorder {
                                     by_system.entry(msg.sys_num).or_default().push(i);
                                 }
                                 for (&sys_num, indices) in &by_system {
-                                    let sys_msgs: Vec<ffi::TrTrunkMessage> =
+                                    let sys_msgs: Vec<TrTrunkMessage> =
                                         indices.iter().map(|&i| messages[i].clone()).collect();
                                     let info = call_mgr.get_system_info(sys_num);
                                     self.bridge.trunk_message(&sys_msgs, &info);
                                 }
                             }
                             for msg in &messages {
-                                call_mgr.handle_message(self.ctx.pin_mut(), msg);
+                                call_mgr.handle_message(msg);
                             }
                         }
-                        GrEvent::Squelch {
+                        RadioEvent::Squelch {
                             recorder_num,
                             muted,
                             pwr_db,
                         } => {
-                            call_mgr.handle_squelch_event(
-                                self.ctx.pin_mut(),
-                                recorder_num,
-                                muted,
-                                pwr_db,
-                            );
+                            call_mgr.handle_squelch_event(recorder_num, muted, pwr_db);
                         }
-                        GrEvent::SourceChange {
+                        RadioEvent::SourceChange {
                             rust_call_id,
                             src_id,
                         } => {
-                            call_mgr.handle_source_change(
-                                self.ctx.pin_mut(),
-                                rust_call_id,
-                                src_id,
-                            );
+                            call_mgr.handle_source_change(rust_call_id, src_id);
                         }
-                        GrEvent::Crypto {
+                        RadioEvent::Crypto {
                             rust_call_id,
                             alg_id,
                             key_id,
                         } => {
                             call_mgr.handle_crypto(rust_call_id, alg_id, key_id);
                         }
-                        GrEvent::SignalsDetected {
+                        RadioEvent::SignalsDetected {
                             source_center_freq,
                             signals,
                             ..
                         } => {
-                            call_mgr.handle_signals_detected(
-                                self.ctx.pin_mut(),
-                                source_center_freq,
-                                &signals,
+                            call_mgr.handle_signals_detected(source_center_freq, &signals);
+                        }
+                        RadioEvent::UnitAlias { sys_num, alias } => {
+                            let info = call_mgr.get_system_info(sys_num);
+                            self.bridge.unit_alias_discovered(
+                                &info.short_name,
+                                alias.radio_id,
+                                &alias.alias,
+                                &alias.source,
+                                alias.talkgroup_id,
                             );
                         }
-
                     }
                 },
                 _ = tick.tick() => {
-                    call_mgr.tick(self.ctx.pin_mut());
+                    call_mgr.tick();
                     call_mgr.clear_stale_patches();
                     if check_sources
-                        && let Err(e) = ffi::tr_context_check_sources(self.ctx.pin_mut())
+                        && let Err(e) = self.radio.check_sources()
                     {
                         tracing::error!(%e, "source health check failed, exiting");
                         std::process::exit(1);
                     }
                 },
                 _ = status.tick() => {
-                    call_mgr.print_status(self.ctx.pin_mut());
+                    call_mgr.print_status();
                     call_mgr.print_active_patches();
-                    call_mgr.print_recorder_status(&self.ctx);
-                },
-                _ = metrics_tick.tick() => {
-                    let recorders = ffi::tr_collect_recorder_metrics(&self.ctx);
-                    let sources = ffi::tr_collect_source_metrics(&self.ctx);
-                    if let Ok(mut snap) = self.gr_metrics.lock() {
-                        snap.recorders = recorders;
-                        snap.sources = sources;
-                    }
+                    call_mgr.print_recorder_status();
                 },
             }
         }
@@ -1184,10 +953,6 @@ impl TrunkRecorder {
 
 impl Drop for TrunkRecorder {
     fn drop(&mut self) {
-        ffi::tr_stop_gnuradio(self.ctx.pin_mut());
-        // The flowgraph has stopped reading; now the dongles can stop.
-        for s in &mut self.streams {
-            s.stop();
-        }
+        self.radio.stop();
     }
 }

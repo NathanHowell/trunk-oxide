@@ -22,8 +22,6 @@ services:
     environment:
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
       - OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://victoriametrics:8428/opentelemetry/api/v1/push
-      # GNU Radio per-block performance counters (gr.block.work_time_total etc.).
-      - GR_CONF_PERFCOUNTERS_ON=True
       - RUST_LOG=info
     healthcheck:
       test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr", "unix:///run/service/grpc.sock"]

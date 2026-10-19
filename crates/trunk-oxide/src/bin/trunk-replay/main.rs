@@ -187,7 +187,7 @@ fn run(
                 _ = report.tick() => tracing::info!(elapsed_s = start.elapsed().as_secs(), "replaying"),
             }
         }
-        trunk_recorder_sys::channelizer_stats()
+        trunk_radio::channelizer_stats()
             .into_iter()
             .map(|s| {
                 json!({

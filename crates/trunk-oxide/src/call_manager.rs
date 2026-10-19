@@ -1,16 +1,14 @@
 use std::collections::HashMap;
 use std::ops::RangeInclusive;
-use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
-use cxx::UniquePtr;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Gauge, Histogram};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-use trunk_recorder_sys::SystemInfo;
-use trunk_recorder_sys::ffi::{
-    self, TrCall, TrCallData, TrCallDataStatus, TrContext, TrMessageType, TrRecorderConfig,
+use trunk_radio::SystemInfo;
+use trunk_radio::{
+    DetectedSignal, Radio, TrCallData, TrCallDataStatus, TrMessageType, TrRecorderConfig,
     TrTrunkMessage, TrUnitEventType,
 };
 
@@ -87,7 +85,7 @@ struct VoiceCounters {
 }
 
 impl VoiceCounters {
-    fn from_transmissions(list: &[ffi::TrTransmission]) -> Self {
+    fn from_transmissions(list: &[trunk_radio::TrTransmission]) -> Self {
         let mut c = Self::default();
         for t in list {
             c.errors += t.error_count;
@@ -128,8 +126,8 @@ struct RecorderUse {
 pub struct CallManager {
     state: TrunkStateMachine,
     bridge: Arc<EventBridge>,
-    /// C++ call handles, keyed by CallId.
-    handles: HashMap<CallId, UniquePtr<TrCall>>,
+    /// The radio: sources, recorders and the calls bound to them.
+    radio: Arc<Radio>,
     /// Recorder-side tracing spans, opened at `EmitCallStart` and closed at
     /// conclude. Held (not entered) so each span's lifetime tracks the call's
     /// real duration; its context is serialized into the CallStart event so the
@@ -197,7 +195,7 @@ pub struct CallManager {
     chz_block_time_us: Histogram<f64>,
     chz_active: Gauge<u64>,
     /// Counters seen at the previous poll, by source, for delta computation.
-    chz_prev: HashMap<i32, trunk_recorder_sys::ChannelizerCounters>,
+    chz_prev: HashMap<i32, trunk_radio::ChannelizerCounters>,
     /// Host-owned SDR streams (trunk-sdr), polled at the 1 Hz tick.
     src_samples: Counter<u64>,
     src_dropped: Counter<u64>,
@@ -241,9 +239,11 @@ const POWER_DB_BOUNDARIES: [f64; 27] = [
 ];
 
 impl CallManager {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: CallManagerConfig,
         bridge: Arc<EventBridge>,
+        radio: Arc<Radio>,
         source_ranges: Vec<RangeInclusive<f64>>,
         source_ppms: Vec<f64>,
         source_freq_corrections_hz: Vec<f64>,
@@ -282,7 +282,7 @@ impl CallManager {
         Self {
             state: TrunkStateMachine::with_clock(config, clock),
             bridge,
-            handles: HashMap::new(),
+            radio,
             call_spans: HashMap::new(),
             recorder_last: HashMap::new(),
             voice_snapshots: HashMap::new(),
@@ -390,11 +390,15 @@ impl CallManager {
             chz_prev: HashMap::new(),
             src_samples: meter
                 .u64_counter("trunk.oxide.source.samples")
-                .with_description("Samples a host-owned SDR stream delivered to the channelizer's queue")
+                .with_description(
+                    "Samples a host-owned SDR stream delivered to the channelizer's queue",
+                )
                 .build(),
             src_dropped: meter
                 .u64_counter("trunk.oxide.source.dropped_samples")
-                .with_description("Samples dropped at the SDR stream because the channelizer fell behind")
+                .with_description(
+                    "Samples dropped at the SDR stream because the channelizer fell behind",
+                )
                 .build(),
             src_drops: meter
                 .u64_counter("trunk.oxide.source.drops")
@@ -523,7 +527,7 @@ impl CallManager {
             TrMessageType::Location => MessageType::Location,
             TrMessageType::DataGrant => MessageType::DataGrant,
             TrMessageType::UuAnsReq => MessageType::UuAnsReq,
-            _ => MessageType::Unknown(msg.message_type.repr),
+            _ => MessageType::Unknown(msg.message_type.repr()),
         };
 
         TrunkMessage {
@@ -569,11 +573,11 @@ impl CallManager {
 
     // ── Effect processing ──
 
-    fn process_effects(&mut self, effects: Effects, ctx: &mut Pin<&mut TrContext>) {
+    fn process_effects(&mut self, effects: Effects) {
         for effect in effects {
             match effect {
                 Effect::CreateCall { call_id } => {
-                    self.exec_create_call(call_id, ctx);
+                    self.exec_create_call(call_id);
                 }
                 Effect::RequestRecording {
                     call_id,
@@ -581,7 +585,7 @@ impl CallManager {
                     is_analog,
                     priority,
                 } => {
-                    self.exec_request_recording(call_id, freq, is_analog, priority, ctx);
+                    self.exec_request_recording(call_id, freq, is_analog, priority);
                 }
                 Effect::StopRecording { call_id } => {
                     self.exec_stop_recorder(call_id);
@@ -591,9 +595,7 @@ impl CallManager {
                         .update_audio_meta_freq(call_id.as_u64(), freq.as_hz());
                 }
                 Effect::SetSource { call_id, source_id } => {
-                    if let Some(handle) = self.handles.get_mut(&call_id) {
-                        ffi::call_recorder_set_source(handle.pin_mut(), source_id);
-                    }
+                    self.radio.set_source(call_id.as_u64(), source_id);
                 }
                 Effect::EmitCallStart { call_id } => {
                     // Open the recorder-side call span here (held in `call_spans`,
@@ -687,7 +689,7 @@ impl CallManager {
                     self.state.on_transmission_rotated(call_id, source_id);
                 }
                 Effect::EmitCallsActive => {
-                    let infos: Vec<ffi::TrCallInfo> = self
+                    let infos: Vec<trunk_radio::TrCallInfo> = self
                         .state
                         .iter_calls()
                         .map(|v| self.build_call_info_from_view(&v))
@@ -731,7 +733,7 @@ impl CallManager {
                     }
                 }
                 Effect::AddControlChannel { sys_num, freq } => {
-                    ffi::tr_system_add_control_channel_runtime(ctx.as_mut(), sys_num, freq.as_hz());
+                    self.radio.add_control_channel(sys_num, freq.as_hz());
                 }
                 Effect::ConventionalRestart { call_id } => {
                     if let Some(view) = self.state.get_call_view(call_id) {
@@ -739,24 +741,18 @@ impl CallManager {
                             m.idle_timeout_count += 1;
                         });
                         let cfg = self.build_recorder_config_from_view(&view);
-                        if let Some(handle) = self.handles.get_mut(&call_id) {
-                            ffi::call_restart(handle.pin_mut(), &cfg);
-                            // Update recorder number — C++ may assign a different one
-                            let rec_num = if ffi::call_has_recorder(handle) {
-                                Some(RecorderNum(ffi::call_get_recorder_num(handle)))
-                            } else {
-                                None
-                            };
-                            self.state.on_conventional_restarted(call_id, rec_num);
-                        }
+                        self.radio.restart(call_id.as_u64(), &cfg);
+                        let rec_num = self
+                            .radio
+                            .has_recorder(call_id.as_u64())
+                            .then(|| RecorderNum(self.radio.recorder_num(call_id.as_u64())));
+                        self.state.on_conventional_restarted(call_id, rec_num);
                     }
                 }
                 Effect::InitRecorder { call_id } => {
                     if let Some(view) = self.state.get_call_view(call_id) {
                         let cfg = self.build_recorder_config_from_view(&view);
-                        if let Some(handle) = self.handles.get_mut(&call_id) {
-                            ffi::call_start_initial_recording(handle.pin_mut(), &cfg);
-                        }
+                        self.radio.restart(call_id.as_u64(), &cfg);
                     }
                 }
                 Effect::EnableRecorder { call_id } => {
@@ -770,9 +766,7 @@ impl CallManager {
                             m.enable_count += 1;
                         });
                     }
-                    if let Some(handle) = self.handles.get_mut(&call_id) {
-                        ffi::call_set_recorder_enabled(handle.pin_mut(), true);
-                    }
+                    self.radio.set_recorder_enabled(call_id.as_u64(), true);
                 }
                 Effect::DisableRecorder { call_id } => {
                     if let Some(view) = self.state.get_call_view(call_id) {
@@ -785,9 +779,7 @@ impl CallManager {
                             m.disable_count += 1;
                         });
                     }
-                    if let Some(handle) = self.handles.get_mut(&call_id) {
-                        ffi::call_set_recorder_enabled(handle.pin_mut(), false);
-                    }
+                    self.radio.set_recorder_enabled(call_id.as_u64(), false);
                 }
                 Effect::UpdateSquelch {
                     call_id,
@@ -804,12 +796,10 @@ impl CallManager {
                             m.adaptive_squelch_db = Some(threshold_db);
                         });
                     }
-                    if let Some(handle) = self.handles.get_mut(&call_id) {
-                        ffi::call_set_squelch_db(handle.pin_mut(), threshold_db);
-                    }
+                    self.radio.set_squelch_db(call_id.as_u64(), threshold_db);
                 }
                 Effect::RemoveCall { call_id } => {
-                    self.handles.remove(&call_id);
+                    self.radio.remove_call(call_id.as_u64());
                     self.voice_snapshots.remove(&call_id);
                     self.state.remove_call(call_id);
                     // Unregister audio meta last: the write lock waits for any
@@ -826,21 +816,12 @@ impl CallManager {
 
     // ── Effect executors ──
 
-    fn exec_create_call(&mut self, call_id: CallId, ctx: &mut Pin<&mut TrContext>) {
-        let view = match self.state.get_call_view(call_id) {
-            Some(v) => v,
-            None => return,
+    fn exec_create_call(&mut self, call_id: CallId) {
+        let Some(sys_num) = self.state.get_call_view(call_id).map(|v| v.sys_num()) else {
+            return;
         };
-
-        // Build a minimal TrTrunkMessage for C++ call creation (it only reads
-        // freq, talkgroup, sys_num from it). Rust owns all call state.
-        let ffi_msg = build_ffi_message_from_view(&view);
-        let mut handle = ffi::tr_context_create_call(ctx.as_mut(), &ffi_msg);
-
-        // Set rust_call_id on C++ Call for audio callback round-trip
-        ffi::call_set_rust_call_id(handle.pin_mut(), call_id.as_u64());
+        self.radio.create_call(call_id.as_u64(), sys_num);
         self.register_audio_meta(call_id);
-        self.handles.insert(call_id, handle);
     }
 
     fn exec_request_recording(
@@ -849,7 +830,6 @@ impl CallManager {
         freq: Freq,
         is_analog: bool,
         priority: i32,
-        ctx: &mut Pin<&mut TrContext>,
     ) {
         let view = match self.state.get_call_view(call_id) {
             Some(v) => v,
@@ -868,13 +848,12 @@ impl CallManager {
         let freq_hz = freq.as_hz();
         let source_idx = self.find_source(freq_hz);
 
-        let handle = match self.handles.get_mut(&call_id) {
-            Some(h) => h,
-            None => return,
-        };
+        if !self.radio.has_call(call_id.as_u64()) {
+            return;
+        }
 
         let result = if let Some(source_idx) = source_idx {
-            let available = ffi::tr_source_available_recorders(ctx, source_idx, is_analog);
+            let available = self.radio.available_recorders(source_idx, is_analog);
             if priority > available {
                 tracing::error!(
                     talkgroup,
@@ -884,14 +863,10 @@ impl CallManager {
                     "not recording: priority exceeds available recorders"
                 );
                 RecordingResult::NoRecorder
-            } else if ffi::tr_source_start_recording(
-                ctx.as_mut(),
-                source_idx,
-                handle.pin_mut(),
-                is_analog,
-                &cfg,
-            ) {
-                let rec_num = ffi::call_get_recorder_num(handle);
+            } else if let Some(rec_num) =
+                self.radio
+                    .start_recording(source_idx, call_id.as_u64(), is_analog, &cfg)
+            {
                 RecordingResult::Started {
                     rec_num: RecorderNum(rec_num),
                 }
@@ -919,7 +894,7 @@ impl CallManager {
         let followup = self.state.on_recording_result(call_id, result);
         // A retune starts another recorder under the same span.
         self.record_recorder(call_id);
-        self.process_effects(followup, ctx);
+        self.process_effects(followup);
     }
 
     /// Records the call's recorder, and what it recorded last, on its span.
@@ -946,23 +921,19 @@ impl CallManager {
     }
 
     fn exec_stop_recorder(&mut self, call_id: CallId) {
-        let handle = match self.handles.get_mut(&call_id) {
-            Some(h) => h,
-            None => return,
-        };
-
-        // Consult the C++ Call — not the state machine — to decide whether a
+        // Consult the radio — not the state machine — to decide whether a
         // recorder is attached. On retune, on_grant clears entry.recorder
         // *before* this StopRecording effect is processed, so a
         // `view.recorder().is_some()` guard here would always be false and the
         // old digital recorder would never be stopped, leaking the slot until
         // the source's recorder pool is exhausted.
-        if !ffi::call_has_recorder(handle) {
+        let id = call_id.as_u64();
+        if !self.radio.has_recorder(id) {
             return;
         }
-        let rec_num = ffi::call_get_recorder_num(handle);
+        let rec_num = self.radio.recorder_num(id);
 
-        let metrics = ffi::call_stop_recording(handle.pin_mut());
+        let metrics = self.radio.stop_recording(id);
 
         let mut was_idle = false;
         if let Some(view) = self.state.get_call_view(call_id) {
@@ -1006,14 +977,10 @@ impl CallManager {
         // exit path of this function; record the stop reason up front.
         let span = self.call_spans.remove(&call_id);
         // How stale the audio was at the moment we concluded the call.
-        let audio_age = self
-            .handles
-            .get(&call_id)
-            .map(|h| ffi::call_recorder_since_last_write_secs(h));
-        let voice_age = self
-            .handles
-            .get(&call_id)
-            .map(|h| ffi::call_recorder_since_last_voice_secs(h));
+        let id = call_id.as_u64();
+        let has_call = self.radio.has_call(id);
+        let audio_age = has_call.then(|| self.radio.since_last_write_secs(id));
+        let voice_age = has_call.then(|| self.radio.since_last_voice_secs(id));
         if let (Some(age), Some(voice), Some(view)) =
             (audio_age, voice_age, self.state.get_call_view(call_id))
         {
@@ -1089,21 +1056,19 @@ impl CallManager {
                 // Per-speaker op25 decode metrics: read the recorder's cumulative
                 // counters (cheap lock-free atomics; valid mid-recording) and
                 // subtract what earlier per-speaker transmissions already claimed.
-                let delta =
-                    self.handles
-                        .get(&call_id)
-                        .map_or_else(VoiceCounters::default, |handle| {
-                            let cumulative = VoiceCounters::from_transmissions(
-                                &ffi::call_get_transmission_list(handle),
-                            );
-                            new_snapshot = Some(cumulative);
-                            cumulative.since(
-                                self.voice_snapshots
-                                    .get(&call_id)
-                                    .copied()
-                                    .unwrap_or_default(),
-                            )
-                        });
+                let delta = if has_call {
+                    let cumulative =
+                        VoiceCounters::from_transmissions(&self.radio.transmission_list(id));
+                    new_snapshot = Some(cumulative);
+                    cumulative.since(
+                        self.voice_snapshots
+                            .get(&call_id)
+                            .copied()
+                            .unwrap_or_default(),
+                    )
+                } else {
+                    VoiceCounters::default()
+                };
 
                 if let Some(s) = &span {
                     s.record("recording_length", recording_length);
@@ -1172,14 +1137,12 @@ impl CallManager {
         ) || (is_conventional && state == CallState::Disabled);
 
         if should_stop_recording {
+            if !has_call {
+                return;
+            }
             // Stop recorder and collect metrics
-            let handle = match self.handles.get_mut(&call_id) {
-                Some(h) => h,
-                None => return,
-            };
-
             if let Some(rec_num) = rec_num {
-                let metrics = ffi::call_stop_recording(handle.pin_mut());
+                let metrics = self.radio.stop_recording(id);
 
                 // Feed recorder power back into state machine (all recorder
                 // types; DB_UNSET maps to None inside feed_recorder_power).
@@ -1237,12 +1200,11 @@ impl CallManager {
                         });
                     }
 
-                    let handle = self.handles.get(&call_id).unwrap();
-                    // Sum op25 decode-quality counters across the call's
+                    // Sum the decoder's quality counters across the call's
                     // transmissions to expose P25 audio loss (clipping).
                     let (mut tx_errors, mut tx_spikes, mut tx_samples) = (0i64, 0i64, 0i64);
                     let (mut tx_terms, mut tx_after) = (0i64, 0i64);
-                    let mut tally = |list: &[ffi::TrTransmission]| {
+                    let mut tally = |list: &[trunk_radio::TrTransmission]| {
                         for t in list {
                             tx_errors += t.error_count;
                             tx_spikes += t.spike_count;
@@ -1251,22 +1213,11 @@ impl CallManager {
                             tx_after += t.after_term_samples;
                         }
                     };
-                    if metrics.is_dmr {
-                        for slot in 0..2i32 {
-                            let mut data = self.build_call_data(call_id);
-                            data.tdma_slot = slot;
-                            data.length = recording_length;
-                            data.freq_error = metrics.freq_error;
-                            data.transmission_list =
-                                ffi::call_get_dmr_transmission_list(handle, slot);
-                            tally(&data.transmission_list);
-                            self.bridge.call_end(&data, &segments, is_conventional);
-                        }
-                    } else {
+                    {
                         let mut data = self.build_call_data(call_id);
                         data.length = recording_length;
                         data.freq_error = metrics.freq_error;
-                        data.transmission_list = ffi::call_get_transmission_list(handle);
+                        data.transmission_list = self.radio.transmission_list(id);
                         tally(&data.transmission_list);
                         self.bridge.call_end(&data, &segments, is_conventional);
                     }
@@ -1337,8 +1288,8 @@ impl CallManager {
                 // call_end or the call never finalizes downstream — it lingers
                 // showing only a partial transcription. Stop any recorder the
                 // C++ side still holds first, so we don't re-leak the slot.
-                if ffi::call_has_recorder(handle) {
-                    let _ = ffi::call_stop_recording(handle.pin_mut());
+                if self.radio.has_recorder(id) {
+                    let _ = self.radio.stop_recording(id);
                 }
                 let talkgroup = self
                     .state
@@ -1429,7 +1380,7 @@ impl CallManager {
         );
     }
 
-    pub fn handle_message(&mut self, mut ctx: Pin<&mut TrContext>, msg: &TrTrunkMessage) {
+    pub fn handle_message(&mut self, msg: &TrTrunkMessage) {
         let rust_msg = Self::convert_message(msg);
 
         if !matches!(rust_msg.message_type, MessageType::InvalidCcMessage) {
@@ -1439,13 +1390,13 @@ impl CallManager {
             );
         }
 
-        // Sysid/Status need FFI call before state machine processes them
-        let ffi_ok = match rust_msg.message_type {
-            MessageType::Sysid => ffi::tr_system_update_sysid(ctx.as_mut(), msg),
-            MessageType::Status => ffi::tr_system_update_status(ctx.as_mut(), msg),
+        // Sysid/Status are noted once per system; repeats go no further.
+        let first = match rust_msg.message_type {
+            MessageType::Sysid => self.radio.update_sysid(msg),
+            MessageType::Status => self.radio.update_status(msg),
             _ => true,
         };
-        if !ffi_ok {
+        if !first {
             return;
         }
 
@@ -1456,7 +1407,7 @@ impl CallManager {
             self.note_ptt_ends(&rust_msg);
         }
         let effects = self.state.on_message(&rust_msg);
-        self.process_effects(effects, &mut ctx);
+        self.process_effects(effects);
     }
 
     /// Before a grant reaches the state machine: tell it which of the
@@ -1473,9 +1424,9 @@ impl CallManager {
                     && v.state() == CallState::Recording
             })
             .filter_map(|v| {
-                let handle = self.handles.get(&v.id())?;
-                let now =
-                    VoiceCounters::from_transmissions(&ffi::call_get_transmission_list(handle));
+                let now = VoiceCounters::from_transmissions(
+                    &self.radio.transmission_list(v.id().as_u64()),
+                );
                 let then = self
                     .voice_snapshots
                     .get(&v.id())
@@ -1511,7 +1462,7 @@ impl CallManager {
     /// export the deltas as metrics, and fold the interval's worst block into
     /// each in-flight call on that source.
     fn poll_channelizers(&mut self) {
-        let stats = trunk_recorder_sys::channelizer_stats();
+        let stats = trunk_radio::channelizer_stats();
         let mut worst: HashMap<i32, u64> = HashMap::new();
         for st in stats {
             let attrs = [KeyValue::new("source", i64::from(st.source))];
@@ -1572,7 +1523,7 @@ impl CallManager {
         }
     }
 
-    pub fn tick(&mut self, mut ctx: Pin<&mut TrContext>) {
+    pub fn tick(&mut self) {
         self.poll_sources();
         self.poll_channelizers();
         self.p25_metrics.poll();
@@ -1586,8 +1537,8 @@ impl CallManager {
             if view.is_conventional() || view.state() != CallState::Recording {
                 continue;
             }
-            if let Some(handle) = self.handles.get(&view.id()) {
-                let since_write = ffi::call_recorder_since_last_write_secs(handle);
+            if self.radio.has_recorder(view.id().as_u64()) {
+                let since_write = self.radio.since_last_write_secs(view.id().as_u64());
                 if since_write > timeout {
                     timed_out_ids.push(view.id());
                 }
@@ -1604,7 +1555,7 @@ impl CallManager {
                 };
                 if let Some(hist) = hist
                     && let Some(pwr_db) =
-                        trunk_recorder_sys::signal_from_ffi(ffi::call_get_pwr_db(handle))
+                        trunk_radio::signal_from_ffi(self.radio.pwr_db(view.id().as_u64()))
                 {
                     hist.record(
                         pwr_db,
@@ -1624,7 +1575,7 @@ impl CallManager {
         // Expire timed-out-by-write calls through the effect system
         for call_id in timed_out_ids {
             let effects = self.state.expire_call(call_id);
-            self.process_effects(effects, &mut ctx);
+            self.process_effects(effects);
         }
 
         // Poll instantaneous power from the squelch block for each conventional
@@ -1637,32 +1588,33 @@ impl CallManager {
             .collect();
 
         for (call_id, tg, freq) in conv_analog {
-            if let Some(handle) = self.handles.get(&call_id) {
-                let pwr_db = ffi::call_get_pwr_db(handle);
+            if self.radio.has_recorder(call_id.as_u64()) {
+                let pwr_db = self.radio.pwr_db(call_id.as_u64());
                 self.update_conv_metric(tg, freq, |m| {
                     m.last_power_reading_db = Some(pwr_db);
                 });
                 #[allow(clippy::cast_possible_truncation)]
                 let effects = self.state.feed_power_sample(call_id, pwr_db as f32);
-                self.process_effects(effects, &mut ctx);
+                self.process_effects(effects);
             }
         }
 
         // Now run the state machine tick (handles update timeouts + conventional)
         let effects = self.state.tick();
-        self.process_effects(effects, &mut ctx);
+        self.process_effects(effects);
 
         self.active_calls_gauge
             .record(self.state.call_count() as u64, &[]);
         self.sync_conv_states();
     }
 
-    pub fn add_call(
+    /// A conventional channel's call: a recorder of its own on `source_idx`,
+    /// then the state machine's call bound to it.
+    pub fn add_conventional_call(
         &mut self,
-        mut ctx: Pin<&mut TrContext>,
-        mut call: UniquePtr<TrCall>,
         channel: &ConventionalChannel,
         sys_num: i32,
+        source_idx: i32,
     ) {
         let policy = self
             .state
@@ -1672,31 +1624,38 @@ impl CallManager {
             .cloned()
             .unwrap_or_else(|| crate::call_state::DEFAULT_POLICY.clone());
 
-        let rec_num = if ffi::call_has_recorder(&call) {
-            Some(RecorderNum(ffi::call_get_recorder_num(&call)))
-        } else {
-            None
+        let rec_num = match self.radio.add_conventional_recorder(
+            sys_num,
+            source_idx,
+            &trunk_radio::TrChannelConfig {
+                id: channel.talkgroup.0,
+                freq: channel.freq.as_hz(),
+                tone: channel.tone,
+                squelch_db: channel.squelch_db,
+                signal_detection: channel.signal_detection,
+            },
+        ) {
+            Ok(n) => n,
+            Err(e) => {
+                tracing::error!(
+                    sys_num, freq = %channel.freq, talkgroup = channel.talkgroup.0, error = %e,
+                    "cannot create the conventional channel's recorder"
+                );
+                return;
+            }
         };
 
-        let (call_id, effects) = self
-            .state
-            .add_conventional_call(channel, sys_num, &policy, rec_num);
-
-        // Set rust_call_id on the C++ handle for audio callback round-trip
-        ffi::call_set_rust_call_id(call.pin_mut(), call_id.as_u64());
+        let (call_id, effects) =
+            self.state
+                .add_conventional_call(channel, sys_num, &policy, Some(RecorderNum(rec_num)));
+        self.radio
+            .bind_conventional_call(call_id.as_u64(), sys_num, rec_num);
         self.register_audio_meta(call_id);
-        self.handles.insert(call_id, call);
 
-        self.process_effects(effects, &mut ctx);
+        self.process_effects(effects);
     }
 
-    pub fn handle_squelch_event(
-        &mut self,
-        mut ctx: Pin<&mut TrContext>,
-        recorder_num: i32,
-        muted: bool,
-        pwr_db: f64,
-    ) {
+    pub fn handle_squelch_event(&mut self, recorder_num: i32, muted: bool, pwr_db: f64) {
         // Record signal quality metrics before mutating state
         if let Some(view) = self
             .state
@@ -1724,22 +1683,17 @@ impl CallManager {
         let effects = self
             .state
             .on_squelch(RecorderNum(recorder_num), muted, pwr_db);
-        self.process_effects(effects, &mut ctx);
+        self.process_effects(effects);
     }
 
     /// An in-band P25 source (unit) change decoded by op25 on the voice channel,
     /// keyed by the recorder's `rust_call_id`. Cuts a per-speaker transmission
     /// boundary (see [`TrunkStateMachine::on_source_change`]).
-    pub fn handle_source_change(
-        &mut self,
-        mut ctx: Pin<&mut TrContext>,
-        rust_call_id: u64,
-        src_id: i64,
-    ) {
+    pub fn handle_source_change(&mut self, rust_call_id: u64, src_id: i64) {
         let effects = self
             .state
             .on_source_change(CallId::from_u64(rust_call_id), src_id);
-        self.process_effects(effects, &mut ctx);
+        self.process_effects(effects);
     }
 
     /// P25 encryption parameters (ESS `ALGID` / `KeyID`) decoded by op25 for an
@@ -1776,12 +1730,7 @@ impl CallManager {
         self.state.on_crypto(call_id, alg_id, key_id);
     }
 
-    pub fn handle_signals_detected(
-        &mut self,
-        mut ctx: Pin<&mut TrContext>,
-        source_center_freq: f64,
-        signals: &[trunk_recorder_sys::DetectedSignal],
-    ) {
+    pub fn handle_signals_detected(&mut self, source_center_freq: f64, signals: &[DetectedSignal]) {
         for signal in signals {
             let abs_freq = source_center_freq + signal.center_freq;
             tracing::info!(
@@ -1805,7 +1754,7 @@ impl CallManager {
             }
         }
         let effects = self.state.on_signals_detected(source_center_freq, signals);
-        self.process_effects(effects, &mut ctx);
+        self.process_effects(effects);
     }
 
     pub fn clear_stale_patches(&mut self) {
@@ -1816,10 +1765,9 @@ impl CallManager {
         self.state.print_active_patches();
     }
 
-    pub fn conclude_all(&mut self, ctx: Pin<&mut TrContext>) {
-        let mut ctx = ctx;
+    pub fn conclude_all(&mut self) {
         let effects = self.state.conclude_all();
-        self.process_effects(effects, &mut ctx);
+        self.process_effects(effects);
     }
 
     pub(crate) fn get_system_info(&self, sys_num: i32) -> SystemInfo {
@@ -1893,7 +1841,7 @@ impl CallManager {
         }
     }
 
-    pub fn print_status(&self, _ctx: Pin<&mut TrContext>) {
+    pub fn print_status(&self) {
         tracing::info!(count = self.state.call_count(), "Active Calls");
         for view in self.state.iter_calls() {
             let elapsed = view.start_time();
@@ -1913,8 +1861,8 @@ impl CallManager {
         }
     }
 
-    pub fn print_recorder_status(&self, ctx: &TrContext) {
-        let recorders = ffi::tr_context_get_recorder_status(ctx);
+    pub fn print_recorder_status(&self) {
+        let recorders = self.radio.recorder_status();
         let mut current_source = -1i32;
         for r in &recorders {
             if r.source_num != current_source {
@@ -1937,15 +1885,15 @@ impl CallManager {
 
     // ── Helper: build TrCallInfo from CallView ──
 
-    fn build_call_info_from_view(&self, view: &CallView<'_>) -> ffi::TrCallInfo {
+    fn build_call_info_from_view(&self, view: &CallView<'_>) -> trunk_radio::TrCallInfo {
         let elapsed = self.state.clock().since(view.start_time());
-        ffi::TrCallInfo {
+        trunk_radio::TrCallInfo {
             talkgroup: view.talkgroup(),
             call_num: view.call_num(),
             sys_num: view.sys_num(),
             freq: view.freq().as_hz(),
-            signal: trunk_recorder_sys::signal_to_ffi(view.signal()),
-            noise: trunk_recorder_sys::signal_to_ffi(view.noise()),
+            signal: trunk_radio::signal_to_ffi(view.signal()),
+            noise: trunk_radio::signal_to_ffi(view.noise()),
             freq_error: 0,
             encrypted: view.encrypted(),
             emergency: view.emergency(),
@@ -1998,8 +1946,8 @@ impl CallManager {
             freq_error: 0,
             source_num: 0,
             recorder_num: view.recorder().map_or(-1, |r| r.0),
-            signal: trunk_recorder_sys::signal_to_ffi(view.signal()),
-            noise: trunk_recorder_sys::signal_to_ffi(view.noise()),
+            signal: trunk_radio::signal_to_ffi(view.signal()),
+            noise: trunk_radio::signal_to_ffi(view.noise()),
             start_time: crate::call_state::system_time_to_unix(
                 self.state.clock().wall(view.start_time()),
             ),
@@ -2084,43 +2032,12 @@ impl CallManager {
     }
 }
 
-/// Build a minimal `TrTrunkMessage` from a [`CallView`] for C++ call creation.
-fn build_ffi_message_from_view(view: &CallView<'_>) -> TrTrunkMessage {
-    TrTrunkMessage {
-        message_type: TrMessageType::Grant,
-        sys_num: view.sys_num(),
-        talkgroup: view.talkgroup(),
-        freq: view.freq().as_hz(),
-        source: view.current_source_id(),
-        tdma_slot: view.tdma_slot(),
-        phase2_tdma: view.phase2_tdma(),
-        mode: view.mode(),
-        duplex: view.duplex(),
-        emergency: view.emergency(),
-        encrypted: view.encrypted(),
-        priority: view.priority(),
-        wacn: view.trunked_fields().map_or(0, |t| t.wacn),
-        nac: 0,
-        sys_id: 0,
-        sys_rfss: view.trunked_fields().map_or(0, |t| t.rfss),
-        sys_site_id: view.trunked_fields().map_or(0, |t| t.site_id),
-        patch_data: ffi::TrPatchData {
-            sg: 0,
-            ga1: 0,
-            ga2: 0,
-            ga3: 0,
-        },
-        meta: String::new(),
-        opcode: 0,
-    }
-}
-
 #[cfg(test)]
 mod tests {
-    use super::{VoiceCounters, ffi};
+    use super::VoiceCounters;
 
-    fn tx(error_count: i64, spike_count: i64, sample_count: i64) -> ffi::TrTransmission {
-        ffi::TrTransmission {
+    fn tx(error_count: i64, spike_count: i64, sample_count: i64) -> trunk_radio::TrTransmission {
+        trunk_radio::TrTransmission {
             source: 0,
             talkgroup: 0,
             slot: 0,

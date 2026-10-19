@@ -199,6 +199,8 @@ struct Dsp {
     counters: Counters,
     detector: Option<SignalDetector>,
     found: Vec<Detection>,
+    /// Conditioned output of one slot, for [`SharedChannelizer::run`].
+    scratch: Vec<Complex32>,
 }
 
 impl SharedChannelizer {
@@ -219,6 +221,7 @@ impl SharedChannelizer {
                 counters: Counters::default(),
                 detector: None,
                 found: Vec::new(),
+                scratch: Vec::new(),
             }),
             detections: Mutex::new(Vec::new()),
         })
@@ -374,6 +377,20 @@ impl SharedChannelizer {
             out.len() >= produced.len() * stride,
             "output buffer too small"
         );
+        self.run_block(input, Some((out, produced)));
+    }
+
+    /// Consume one block and run every slot's conditioner and decoder,
+    /// keeping no output: for hosts whose decoders consume the slots.
+    ///
+    /// # Panics
+    /// If `input.len() != hop`.
+    pub fn run(&self, input: &[Complex32]) {
+        self.run_block(input, None);
+    }
+
+    fn run_block(&self, input: &[Complex32], sink: Option<(&mut [Complex32], &mut [u32])>) {
+        let stride = self.cfg.max_out_per_block();
         let cmds = std::mem::take(
             &mut *self
                 .mailbox
@@ -390,6 +407,7 @@ impl SharedChannelizer {
             counters,
             detector,
             found,
+            scratch,
         } = &mut *dsp;
         let started = Instant::now();
 
@@ -523,27 +541,41 @@ impl SharedChannelizer {
         ch.process_block(input);
         counters.blocks += 1;
 
-        produced.fill(0);
-        for (slot, s) in slots.iter_mut().enumerate().take(produced.len()) {
-            if let Some(id) = s.id
-                && let Some(o) = ch.output(id)
-            {
-                let dst = &mut out[slot * stride..(slot + 1) * stride];
-                let n = match s.cond.as_mut() {
-                    Some((c, _, stats)) => {
-                        let n = c.process_into(o, dst);
-                        publish(c, stats);
-                        n
-                    }
-                    None => {
-                        dst[..o.len()].copy_from_slice(o);
-                        o.len()
-                    }
-                };
-                if let Some(d) = s.decoder.as_mut() {
-                    d.process(&dst[..n]);
+        let run_slot = |s: &mut Slot, dst: &mut [Complex32]| -> Option<usize> {
+            let o = ch.output(s.id?)?;
+            let n = match s.cond.as_mut() {
+                Some((c, _, stats)) => {
+                    let n = c.process_into(o, dst);
+                    publish(c, stats);
+                    n
                 }
-                produced[slot] = u32::try_from(n).unwrap_or(u32::MAX);
+                None => {
+                    dst[..o.len()].copy_from_slice(o);
+                    o.len()
+                }
+            };
+            if let Some(d) = s.decoder.as_mut() {
+                d.process(&dst[..n]);
+            }
+            Some(n)
+        };
+        match sink {
+            Some((out, produced)) => {
+                produced.fill(0);
+                for (slot, s) in slots.iter_mut().enumerate().take(produced.len()) {
+                    let dst = &mut out[slot * stride..(slot + 1) * stride];
+                    if let Some(n) = run_slot(s, dst) {
+                        produced[slot] = u32::try_from(n).unwrap_or(u32::MAX);
+                    }
+                }
+            }
+            None => {
+                if scratch.len() < stride {
+                    scratch.resize(stride, Complex32::ZERO);
+                }
+                for s in slots.iter_mut() {
+                    run_slot(s, scratch);
+                }
             }
         }
 

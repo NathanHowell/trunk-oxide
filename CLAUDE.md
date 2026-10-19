@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-trunk-oxide is a Rust SDR (Software Defined Radio) scanner that drives trunk-recorder (a C++ library) via FFI, inverting the traditional plugin model. Rust owns configuration and orchestration; C++ handles the GNU Radio signal processing. Events flow from SDR hardware through C++ into Rust via cxx bridge callbacks, then out via gRPC to downstream consumers (Discord bot, speech-to-text service).
+trunk-oxide is a Rust SDR (Software Defined Radio) scanner, all in Rust: it opens RTL-SDR dongles with librtlsdr, channelizes them, decodes P25 control and voice channels and analog FM, runs the call state machine, and publishes calls and audio over gRPC to downstream consumers (Discord bot, speech-to-text service). It began as a Rust driver for trunk-recorder (C++/GNU Radio); that stack was removed in October 2026 (epic trunk-oxide-00p).
 
 ## Build Commands
 
@@ -29,10 +29,10 @@ cargo fmt
 
 ## Workspace Structure
 
-- **trunk-oxide** — Main binary. Loads TOML config, spawns a dedicated OS thread for C++ FFI (TrContext is !Send), runs tokio for gRPC/timers/signals.
-- **trunk-recorder-sys** — cxx bridge to libtrunk-recorder.so. build.rs probes gnuradio/osmosdr/uhd via pkg-config and generates compatibility stubs.
+- **trunk-oxide** — Main binary. Loads TOML config, calibrates and opens the sources, builds the `trunk-radio::Radio`, and runs the call state machine (`call_state.rs` pure, `call_manager.rs` executor) on a monitor thread inside tokio; gRPC/timers/signals on tokio.
+- **trunk-radio** — The radio: sources (one DSP thread each) feeding shared channelizers; recorder pool (P25 voice via trunk-p25, analog via trunk-fm) and control-channel decoders on channelizer slots; `Radio` is the API the state machine drives (calls bound to recorders). `types.rs` keeps the old bridge struct names (`TrTrunkMessage`, `TrCallData`, …).
 - **trunk-oxide-proto** / **trunk-transcriber-proto** — Protobuf definitions compiled with tonic-prost-build. `trunk-transcriber-proto` defines a generic `Transcriber` gRPC service implemented by both speech-to-text backends.
-- **trunk-oxide-grpc** — EventBridge: central hub that receives C++ events and serves them over gRPC (Unix socket).
+- **trunk-oxide-grpc** — EventBridge: central hub that receives call events and audio and serves them over gRPC (Unix socket).
 - **trunk-config** — TOML config parser with CSV overlay support for talkgroups/channels.
 - **trunk-database** — SQLite storage with hourly rotating database files and schema versioning via SHA256.
 - **trunk-discord** — Discord bot that subscribes to gRPC events, posts call embeds, manages threads, encodes OGG audio.
@@ -40,15 +40,15 @@ cargo fmt
 - **trunk-parakeet** — Speech-to-text service using parakeet-rs (NVIDIA Parakeet ASR via ONNX Runtime). Drop-in replacement for trunk-whisperer — serves the same `Transcriber` gRPC service on the same Unix socket; backends are swapped at the container/image level, not via trunk-discord config.
 - **trunk-whistle** — Speech-to-text service using Cactus Whistle (16.9 MB CPU-only model) via the prebuilt `libneedle.a` C engine (FFI in `needle.rs`, the only `allow(unsafe_code)` outside the sys crates). Same `Transcriber` gRPC service/socket as the other two backends. Not in `default-members`: building needs `NEEDLE_LIB_DIR` (+ libc++ ≥ 21 static libs); use `Dockerfile.whistle` / `--profile whistle`.
 - **trunk-solver** — Z3 SMT solver for optimal SDR device frequency/sample-rate/gain assignment.
-- **trunk-channelizer** — Shared overlap-save FFT channelizer with per-slot conditioning (squelch, AGC, FLL), slot decoders (`ChannelDecoder`) and the wideband signal detector. The C++ `shared_channelizer` block is a thin wrapper over it.
+- **trunk-channelizer** — Shared overlap-save FFT channelizer with per-slot conditioning (squelch, AGC, FLL), slot decoders (`ChannelDecoder`) and the wideband signal detector.
 - **trunk-p25** / **trunk-fm** — P25 control/voice decoders and the analog FM path, run as slot decoders.
-- **trunk-rtlsdr-sys** — librtlsdr bindings (the only other `allow(unsafe_code)` crate). **trunk-sdr** — RTL-SDR dongles (`driver = "rtlsdr"`) and IQ files (`driver = "iqfile"`) opened by trunk-oxide itself and streamed into the flowgraph through the `iq_stream_source` block; gr-osmosdr remains for `driver = "osmosdr"`.
+- **trunk-rtlsdr-sys** — librtlsdr bindings (the only other `allow(unsafe_code)` crate). **trunk-sdr** — RTL-SDR dongles (`driver = "rtlsdr"`, by serial) and IQ files (`driver = "iqfile"`) as bounded sample streams.
 
 ## Architecture
 
-**Threading model**: A dedicated OS thread drives TrContext (C++ FFI, !Send). A separate tokio runtime handles gRPC, timers, and I/O. An async channel bridges C++ callbacks to the tokio world via EventNotifier.
+**Threading model**: Each source has a DSP thread (`source-N`) that reads its stream, runs the shared channelizer and every decoder on its slots, and sends `RadioEvent`s (trunk messages, squelch, source changes, crypto, detections, aliases) over an async channel to the monitor loop; audio goes straight to the EventBridge. The monitor loop (tokio) runs the call state machine and drives `Radio`.
 
-**Event flow**: SDR → GNU Radio C++ graph → cxx callbacks → EventBridge (gRPC server) → subscribers (trunk-discord, etc.)
+**Event flow**: SDR → trunk-sdr stream → trunk-channelizer → slot decoders (trunk-p25, trunk-fm) → `RadioEvent` → call state machine → EventBridge (gRPC server) → subscribers (trunk-discord, etc.)
 
 **Configuration hierarchy**: TOML config files with CSV overlays for talkgroups and channels. trunk-solver can auto-generate optimal SDR assignments.
 
@@ -59,10 +59,10 @@ cargo fmt
 - Rust edition 2024, MSRV 1.94, resolver = "3"
 - `unsafe_code = "deny"` and `unused_must_use = "deny"` workspace-wide
 - clippy::all is denied; pedantic and nursery are warnings
-- C++ integration uses cxx (not bindgen) with C++17
+- The only native library is librtlsdr (hand-written extern decls in trunk-rtlsdr-sys, no bindgen)
 - All gRPC services use Unix domain sockets
 - Protobuf code is generated at build time in build.rs scripts
-- trunk-recorder is a git submodule (forked)
+- Smartnet and DMR are not supported until their ports land (beads trunk-oxide-a2m, trunk-oxide-map)
 
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->

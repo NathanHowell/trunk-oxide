@@ -4,8 +4,7 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use trunk_recorder_sys::ffi::{TrCallData, TrCallInfo, TrSystem, TrTrunkMessage, TrUnitEventType};
-use trunk_recorder_sys::{CxxCallbacks, SystemInfo};
+use trunk_radio::{AudioSink, SystemInfo, TrCallData, TrCallInfo, TrTrunkMessage, TrUnitEventType};
 
 pub use trunk_oxide_proto as proto;
 
@@ -61,8 +60,8 @@ fn convert_call_data(cd: &TrCallData) -> proto::CallData {
         freq_error: cd.freq_error,
         source_num: cd.source_num,
         recorder_num: cd.recorder_num,
-        signal: trunk_recorder_sys::signal_from_ffi(cd.signal),
-        noise: trunk_recorder_sys::signal_from_ffi(cd.noise),
+        signal: trunk_radio::signal_from_ffi(cd.signal),
+        noise: trunk_radio::signal_from_ffi(cd.noise),
         start_time: cd.start_time,
         stop_time: cd.stop_time,
         error_count: cd.error_count,
@@ -114,14 +113,14 @@ fn convert_call_data(cd: &TrCallData) -> proto::CallData {
                 freq: t.freq,
             })
             .collect(),
-        status: i32::from(cd.status.repr),
+        status: i32::from(cd.status.repr()),
         segments: Vec::new(),   // populated by caller if applicable
         is_conventional: false, // set by caller
     }
 }
 
 fn convert_trunk_messages(messages: &[TrTrunkMessage]) -> Vec<proto::TrunkMessage> {
-    use trunk_recorder_sys::ffi::TrMessageType;
+    use trunk_radio::TrMessageType;
     messages
         .iter()
         .map(|m| proto::TrunkMessage {
@@ -145,10 +144,6 @@ fn convert_trunk_messages(messages: &[TrTrunkMessage]) -> Vec<proto::TrunkMessag
                 TrMessageType::InvalidCcMessage => proto::MessageType::InvalidCcMessage as i32,
                 TrMessageType::Tdulc => proto::MessageType::Tdulc as i32,
                 TrMessageType::Unknown => proto::MessageType::Unknown as i32,
-                other => {
-                    tracing::warn!("unknown message type: {:?}", other);
-                    proto::MessageType::Unknown as i32
-                }
             },
             meta: m.meta.clone(),
             freq: m.freq,
@@ -290,8 +285,8 @@ impl EventBridge {
             talkgroup: info.talkgroup,
             call_num: info.call_num,
             freq: info.freq,
-            signal: trunk_recorder_sys::signal_from_ffi(info.signal),
-            noise: trunk_recorder_sys::signal_from_ffi(info.noise),
+            signal: trunk_radio::signal_from_ffi(info.signal),
+            noise: trunk_radio::signal_from_ffi(info.noise),
             freq_error: info.freq_error,
             encrypted: info.encrypted,
             emergency: info.emergency,
@@ -478,10 +473,6 @@ impl EventBridge {
             TrUnitEventType::Location => proto::UnitEventType::Location,
             TrUnitEventType::DataGrant => proto::UnitEventType::DataGrant,
             TrUnitEventType::AnswerRequest => proto::UnitEventType::AnswerRequest,
-            _ => {
-                tracing::warn!("unknown unit event type: {:?}", event_type);
-                return;
-            }
         };
         self.send_event(proto::plugin_event::Event::Unit(proto::UnitEvent {
             r#type: proto_type as i32,
@@ -494,13 +485,13 @@ impl EventBridge {
 
     pub fn unit_alias_discovered(
         &self,
-        system: &TrSystem,
+        short_name: &str,
         radio_id: i64,
         alias: &str,
         source: &str,
         talkgroup_id: i64,
     ) {
-        let short_name = trunk_recorder_sys::ffi::tr_system_short_name(system);
+        let short_name = short_name.to_owned();
         self.unit_aliases
             .write()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
@@ -516,20 +507,9 @@ impl EventBridge {
     }
 }
 
-impl CxxCallbacks for EventBridge {
-    fn audio_stream(&self, rust_call_id: u64, samples: &[i16]) {
-        Self::audio_stream(self, rust_call_id, samples);
-    }
-
-    fn unit_alias_discovered(
-        &self,
-        system: &TrSystem,
-        radio_id: i64,
-        alias: &str,
-        source: &str,
-        talkgroup_id: i64,
-    ) {
-        Self::unit_alias_discovered(self, system, radio_id, alias, source, talkgroup_id);
+impl AudioSink for EventBridge {
+    fn audio(&self, rust_call_id: u64, samples: &[i16]) {
+        self.audio_stream(rust_call_id, samples);
     }
 }
 

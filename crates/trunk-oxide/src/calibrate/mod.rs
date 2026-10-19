@@ -11,15 +11,13 @@
 //! - [`probe`] — the [`IqProbe`] acquisition seam (hardware)
 //! - [`calibrate`] — the orchestrator that ties them together
 //!
-//! Pre-flight acquisition lives in [`preflight`]; it opens each device
-//! standalone before trunk-recorder builds its flowgraph, so nothing is
-//! perturbed. [`cache`] keeps each device's last sweep across restarts and
+//! Pre-flight acquisition lives in [`rtl`]; it opens each dongle
+//! standalone before the sources are built, so nothing is perturbed. [`cache`] keeps each device's last sweep across restarts and
 //! [`recheck`] decides whether it still stands; [`report`] hands the
 //! outcome to the metrics.
 
 pub mod cache;
 pub mod measure;
-pub mod preflight;
 pub mod probe;
 pub mod report;
 pub mod rtl;

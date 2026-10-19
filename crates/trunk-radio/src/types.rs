@@ -1,7 +1,9 @@
 //! What the radio and the call state machine say to each other.
 
 use std::sync::Arc;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
+pub use trunk_p25::voice::Encryption;
 
 /// A unit's doing on the control channel, reported as an event.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,8 +318,7 @@ pub enum RadioEvent {
     /// In-band encryption parameters of a call we hold no key for.
     Crypto {
         call_id: CallId,
-        alg_id: u32,
-        key_id: u32,
+        encryption: Encryption,
     },
     /// Signals the wideband detector found on a source.
     SignalsDetected {

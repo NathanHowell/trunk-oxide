@@ -320,14 +320,6 @@ pub(crate) fn track_encryption(
     }
 }
 
-/// `1 << 24 | algid << 16 | keyid`, or 0: how C++ takes encryption.
-pub(crate) const fn packed_encryption(e: Option<Encryption>) -> u32 {
-    match e {
-        Some(e) => 1 << 24 | (e.algid as u32) << 16 | e.keyid as u32,
-        None => 0,
-    }
-}
-
 static VOICE_REGISTRY: Registry<VoiceShared> = Registry::new();
 
 /// Counters of every voice decoder (see [`crate::registry`]).

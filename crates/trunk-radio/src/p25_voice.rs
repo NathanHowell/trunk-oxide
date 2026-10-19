@@ -18,7 +18,7 @@ use trunk_p25::{DemodConfig, Modulation};
 use crate::alias;
 use crate::carrier::Carrier;
 use crate::kind::{Cmd, Kind, OpenError, Opening, Tuning};
-use crate::p25::{VoiceShared, packed_encryption, track_encryption};
+use crate::p25::{VoiceShared, track_encryption};
 use crate::p25_calls;
 use crate::recording::{Accounting, Tape};
 use crate::types::{CallCounts, CallId, ChannelNum, Decoded, RadioEvent, VoiceTag, VoiceTagKind};
@@ -371,8 +371,8 @@ impl P25VoiceHandle {
     }
 
     /// Encryption confirmed on the call's slot since the last take.
-    pub const fn take_crypto(&mut self) -> u32 {
-        packed_encryption(self.pipeline.crypto_pending.take())
+    pub const fn take_crypto(&mut self) -> Option<Encryption> {
+        self.pipeline.crypto_pending.take()
     }
 
     pub fn take_call_counts(&mut self) -> CallCounts {
@@ -518,12 +518,10 @@ impl ChannelDecoder for P25VoiceChannel {
         self.audio.clear();
         self.tags.clear();
         self.voice.process(iq, &mut self.audio, &mut self.tags);
-        let crypto = self.voice.take_crypto();
-        if crypto != 0 {
+        if let Some(encryption) = self.voice.take_crypto() {
             out.events.push(RadioEvent::Crypto {
                 call_id: self.call,
-                alg_id: (crypto >> 16) & 0xff,
-                key_id: crypto & 0xffff,
+                encryption,
             });
         }
         let counts = self.voice.take_call_counts();

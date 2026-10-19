@@ -1342,15 +1342,14 @@ impl CallManager {
         self.process_effects(effects);
     }
 
-    /// P25 encryption parameters (ESS `ALGID` / `KeyID`) decoded by op25 for an
-    /// encrypted call, keyed by the recorder's `call_id`. Stored on the
-    /// call so the `calls_ended` metric can facet by algorithm.
-    pub fn handle_crypto(&mut self, call_id: CallId, alg_id: u32, key_id: u32) {
-        // ALGID is 8 bits and KeyID 16 on the wire; the decoder already masks.
-        let (alg_id, key_id) = (
-            u8::try_from(alg_id & 0xFF).unwrap_or(0),
-            u16::try_from(key_id & 0xFFFF).unwrap_or(0),
-        );
+    /// The voice channel confirmed a call's encryption (ESS `ALGID` /
+    /// `KeyID`). Stored on the call so the `calls_ended` metric can facet by
+    /// algorithm.
+    pub fn handle_crypto(&mut self, call_id: CallId, encryption: trunk_radio::Encryption) {
+        let trunk_radio::Encryption {
+            algid: alg_id,
+            keyid: key_id,
+        } = encryption;
         if let (Some(span), Some(view)) = (
             self.call_spans.get(&call_id),
             self.state.get_call_view(call_id),
@@ -1372,7 +1371,7 @@ impl CallManager {
                 );
             });
         }
-        self.state.on_crypto(call_id, alg_id, key_id);
+        self.state.on_crypto(call_id, encryption);
     }
 
     pub fn handle_signals_detected(&mut self, source_center_freq: f64, signals: &[DetectedSignal]) {

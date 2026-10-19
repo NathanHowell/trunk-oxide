@@ -7,7 +7,9 @@ use crate::clock::Clock;
 
 use trunk_config::{SystemType, TalkgroupMode};
 
-use trunk_radio::{Channel, ChannelNum, OpenError, Opener, Squelch, TrunkMessage, Trunking, Voice};
+use trunk_radio::{
+    Channel, ChannelNum, Encryption, OpenError, Opener, Squelch, TrunkMessage, Trunking, Voice,
+};
 
 // ── Read-only view ──
 
@@ -506,12 +508,10 @@ pub(crate) struct CallEntry {
     pub(crate) freq: Freq,
     pub(crate) state: CallState,
     pub(crate) encrypted: bool,
-    /// P25 encryption algorithm ID (ESS `ALGID`, e.g. `0x84` AES-256) as decoded
-    /// from the voice channel. `None` until the decoder reports one (only
-    /// encrypted calls we hold no key for).
-    pub(crate) alg_id: Option<u8>,
-    /// P25 encryption key ID (ESS `KeyID`), reported together with `alg_id`.
-    pub(crate) key_id: Option<u16>,
+    /// The encryption the voice channel confirmed (ESS `ALGID`, e.g. `0x84`
+    /// AES-256, and `KeyID`); `None` until it does (only encrypted calls we
+    /// hold no key for).
+    pub(crate) encryption: Option<Encryption>,
     /// How its channel is opened, once it is accepted for recording.
     pub(crate) recipe: Option<Arc<dyn Opener>>,
     pub(crate) current_source_id: i64,
@@ -553,8 +553,7 @@ impl Default for CallEntry {
             freq: Freq::from_hz(0.0),
             state: CallState::Idle,
             encrypted: false,
-            alg_id: None,
-            key_id: None,
+            encryption: None,
             recipe: None,
             current_source_id: 0,
             signal: None,
@@ -1630,13 +1629,12 @@ impl TrunkStateMachine {
     /// op25 on the voice channel (keyed by its [`CallId`]). The
     /// ESS is authoritative, so this also marks the call encrypted. Unknown
     /// calls are ignored.
-    pub(crate) fn on_crypto(&mut self, call_id: CallId, alg_id: u8, key_id: u16) {
+    pub(crate) fn on_crypto(&mut self, call_id: CallId, encryption: Encryption) {
         if let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) {
             entry.encrypted = true;
-            entry.alg_id = Some(alg_id);
-            entry.key_id = Some(key_id);
+            entry.encryption = Some(encryption);
             self.known_alg_ids
-                .insert((entry.sys_num, entry.talkgroup), alg_id);
+                .insert((entry.sys_num, entry.talkgroup), encryption.algid);
         }
     }
 
@@ -1645,7 +1643,7 @@ impl TrunkStateMachine {
     /// its talkgroup. A clear call has none, whatever its talkgroup did before.
     pub(crate) fn alg_id_for(&self, call_id: CallId) -> Option<u8> {
         let entry = self.calls.iter().find(|e| e.id == call_id)?;
-        entry.alg_id.or_else(|| {
+        entry.encryption.map(|e| e.algid).or_else(|| {
             (entry.state == CallState::Rejected(RejectReason::Encrypted))
                 .then(|| {
                     self.known_alg_ids
@@ -2904,16 +2902,25 @@ mod tests {
     fn crypto_records_algid_and_marks_encrypted() {
         let mut sm = TrunkStateMachine::new(test_config());
         let call_id = recording_trunked_call(&mut sm);
-        assert_eq!(sm.calls[0].alg_id, None);
+        assert_eq!(sm.calls[0].encryption, None);
 
-        sm.on_crypto(call_id, 0x84, 0x1234);
+        let aes = Encryption {
+            algid: 0x84,
+            keyid: 0x1234,
+        };
+        sm.on_crypto(call_id, aes);
         assert!(sm.calls[0].encrypted);
-        assert_eq!(sm.calls[0].alg_id, Some(0x84));
-        assert_eq!(sm.calls[0].key_id, Some(0x1234));
+        assert_eq!(sm.calls[0].encryption, Some(aes));
 
         // Unknown call ids are ignored.
-        sm.on_crypto(CallId(u64::MAX), 0xAA, 1);
-        assert_eq!(sm.calls[0].alg_id, Some(0x84));
+        sm.on_crypto(
+            CallId(u64::MAX),
+            Encryption {
+                algid: 0xAA,
+                keyid: 1,
+            },
+        );
+        assert_eq!(sm.calls[0].encryption, Some(aes));
         assert_eq!(sm.alg_id_for(call_id), Some(0x84));
 
         // A later call on the same talkgroup rejected as encrypted at the
@@ -2926,7 +2933,7 @@ mod tests {
             ..CallEntry::default()
         });
         let rejected = sm.calls[1].id;
-        assert_eq!(sm.calls[1].alg_id, None);
+        assert_eq!(sm.calls[1].encryption, None);
         assert_eq!(sm.alg_id_for(rejected), Some(0x84));
 
         // A clear call on it is not: one ESS (perhaps a miscorrection) does

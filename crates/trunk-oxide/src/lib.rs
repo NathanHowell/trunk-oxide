@@ -930,10 +930,9 @@ impl TrunkRecorder {
                         }
                         RadioEvent::Crypto {
                             call_id,
-                            alg_id,
-                            key_id,
+                            encryption,
                         } => {
-                            call_mgr.handle_crypto(call_id, alg_id, key_id);
+                            call_mgr.handle_crypto(call_id, encryption);
                         }
                         RadioEvent::SignalsDetected {
                             source_center_freq,

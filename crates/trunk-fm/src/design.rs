@@ -151,9 +151,66 @@ pub fn high_pass(
     taps
 }
 
+/// `firdes::band_pass`: unity gain at the centre of the band.
+#[must_use]
+#[allow(clippy::cast_possible_wrap, clippy::cast_sign_loss)]
+pub fn band_pass(
+    gain: f64,
+    sampling_freq: f64,
+    low_cutoff_freq: f64,
+    high_cutoff_freq: f64,
+    transition_width: f64,
+    window: Window,
+) -> Vec<f32> {
+    let ntaps = compute_ntaps(sampling_freq, transition_width, window);
+    let w = window.taps(ntaps);
+    let m = ((ntaps - 1) / 2) as i64;
+    let fw_t0 = 2.0 * PI * low_cutoff_freq / sampling_freq;
+    let fw_t1 = 2.0 * PI * high_cutoff_freq / sampling_freq;
+    let mut taps: Vec<f32> = (-m..=m)
+        .map(|n| {
+            let wn = f64::from(w[(n + m) as usize]);
+            let t = if n == 0 {
+                (fw_t1 - fw_t0) / PI * wn
+            } else {
+                ((n as f64 * fw_t1).sin() - (n as f64 * fw_t0).sin()) / (n as f64 * PI) * wn
+            };
+            t as f32
+        })
+        .collect();
+    let mut fmax = f64::from(taps[m as usize]);
+    for n in 1..=m {
+        fmax += 2.0 * f64::from(taps[(n + m) as usize]) * (n as f64 * (fw_t0 + fw_t1) * 0.5).cos();
+    }
+    let gain = gain / fmax;
+    for t in &mut taps {
+        *t = (f64::from(*t) * gain) as f32;
+    }
+    taps
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn band_pass_passes_its_centre_and_rejects_dc() {
+        let taps = band_pass(1.0, 16_000.0, 4_000.0, 6_000.0, 500.0, Window::Hann);
+        let gain_at = |f: f64| {
+            let (re, im) = taps
+                .iter()
+                .enumerate()
+                .fold((0.0f64, 0.0f64), |(re, im), (n, t)| {
+                    let w = 2.0 * PI * f * n as f64 / 16_000.0;
+                    (re + f64::from(*t) * w.cos(), im - f64::from(*t) * w.sin())
+                });
+            re.hypot(im)
+        };
+        assert!((gain_at(5_000.0) - 1.0).abs() < 1e-3);
+        assert!(gain_at(0.0) < 1e-3);
+        assert!(gain_at(2_000.0) < 1e-2);
+        assert!(gain_at(7_500.0) < 1e-2);
+    }
 
     #[test]
     fn tap_counts_match_firdes() {

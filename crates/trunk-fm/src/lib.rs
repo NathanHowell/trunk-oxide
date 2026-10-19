@@ -20,13 +20,18 @@
 mod atan;
 pub mod demod;
 pub mod design;
+pub mod detect;
 pub mod fir;
+pub mod gate;
+pub mod io;
 
 use num_complex::Complex32;
 
 pub use atan::fast_atan2;
 pub use demod::{Deemphasis, QuadratureDemod};
+pub use detect::{Detector, Measurement, Tone};
 pub use fir::Fir;
+pub use gate::{CloseReason, Event, Gate};
 
 /// Peak deviation the demodulator is scaled to (`analog_recorder`'s
 /// `d_max_dev`).
@@ -53,6 +58,19 @@ impl Audio {
     }
 }
 
+/// Which low-pass runs ahead of the decimation to [`AUDIO_RATE`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Decimation {
+    /// The recorder's: 25 Kaiser taps with the cutoff at 0.45 cycles per
+    /// *input* sample (43 kHz at 96 kS/s), so it rejects nothing above the
+    /// output Nyquist and the FM noise above 8 kHz folds into the audio.
+    /// For comparing with the C++ chain.
+    Recorder,
+    /// A real anti-alias filter: cutoff 7 kHz, 1.5 kHz transition, so the
+    /// output holds only what was below its Nyquist.
+    AntiAliased,
+}
+
 /// The audio chain from conditioned IQ to 16 kHz audio.
 #[derive(Clone, Debug)]
 pub struct FmDemod {
@@ -73,16 +91,22 @@ impl FmDemod {
     /// If `rate` is not a multiple of [`AUDIO_RATE`].
     #[must_use]
     #[allow(clippy::cast_sign_loss)]
-    pub fn new(rate: f64, tau: f64) -> Self {
+    pub fn new(rate: f64, tau: f64, decimation: Decimation) -> Self {
         let decim = rate / AUDIO_RATE;
         assert!(
             decim.fract() == 0.0 && decim >= 1.0,
             "channel rate {rate} is not a multiple of {AUDIO_RATE}"
         );
+        let taps = match decimation {
+            Decimation::Recorder => recorder_decimation_taps(),
+            Decimation::AntiAliased => {
+                design::low_pass(1.0, rate, 7_000.0, 1_500.0, design::Window::Kaiser(5.0))
+            }
+        };
         Self {
             demod: QuadratureDemod::new(rate, MAX_DEV_HZ),
             deemph: Deemphasis::new(rate, tau),
-            decim: Fir::new(&decimation_taps(decim), decim as usize),
+            decim: Fir::new(&taps, decim as usize),
             high: Fir::new(
                 &design::high_pass(1.0, AUDIO_RATE, 300.0, 50.0, design::Window::Hann),
                 1,
@@ -119,13 +143,9 @@ impl FmDemod {
     }
 }
 
-/// `analog_recorder::design_filter(1, decim)`: a 25-tap Kaiser (β 5)
-/// low-pass with its cutoff at 0.45 cycles per *input* sample, whatever the
-/// decimation. Note that this is barely a filter: at 96 kS/s the cutoff is
-/// 43 kHz, so everything above the 8 kHz output Nyquist aliases into the
-/// audio. Kept as is so the chain matches the recorder; the decimation
-/// filter is the first thing to improve once the match is on record.
-fn decimation_taps(_decim: f64) -> Vec<f32> {
+/// `analog_recorder::design_filter(1, decim)`, whatever `decim`: see
+/// [`Decimation::Recorder`].
+fn recorder_decimation_taps() -> Vec<f32> {
     let trans_width = 0.5 - 0.4;
     let mid = 0.5 - trans_width / 2.0;
     design::low_pass(1.0, 1.0, mid, trans_width, design::Window::Kaiser(5.0))
@@ -138,7 +158,7 @@ mod tests {
 
     #[test]
     fn a_voice_band_tone_comes_through_at_16_khz() {
-        let mut fm = FmDemod::new(96_000.0, TAU_US);
+        let mut fm = FmDemod::new(96_000.0, TAU_US, Decimation::AntiAliased);
         // FM-modulate a 1 kHz tone at 3 kHz deviation.
         let mut phase = 0.0f32;
         let iq: Vec<Complex32> = (0..96_000)
@@ -161,6 +181,6 @@ mod tests {
 
     #[test]
     fn decimation_taps_are_the_recorders() {
-        assert_eq!(decimation_taps(6.0).len(), 25);
+        assert_eq!(recorder_decimation_taps().len(), 25);
     }
 }

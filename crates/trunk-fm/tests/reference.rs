@@ -9,29 +9,18 @@
 
 use num_complex::Complex32;
 use trunk_fm::design::{Window, high_pass, low_pass};
-use trunk_fm::{Audio, FmDemod, TAU_US, fast_atan2};
+use trunk_fm::io::{cf32_from_bytes, f32_from_bytes};
+use trunk_fm::{Audio, Decimation, FmDemod, TAU_US, fast_atan2};
 
 fn reference() -> Option<(std::path::PathBuf, Vec<Complex32>)> {
     let dir = std::env::var_os("FM_REFERENCE_DIR")?;
     let iq_path = std::env::var_os("FM_REFERENCE_IQ")?;
-    let bytes = std::fs::read(iq_path).ok()?;
-    let n = bytes.len() / 8;
-    let iq = (0..n)
-        .map(|i| {
-            let re = f32::from_le_bytes(bytes[i * 8..i * 8 + 4].try_into().unwrap());
-            let im = f32::from_le_bytes(bytes[i * 8 + 4..i * 8 + 8].try_into().unwrap());
-            Complex32::new(re, im)
-        })
-        .collect();
+    let iq = cf32_from_bytes(&std::fs::read(iq_path).ok()?);
     Some((dir.into(), iq))
 }
 
 fn read_f32(path: &std::path::Path) -> Vec<f32> {
-    let bytes = std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-    bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes(c.try_into().unwrap()))
-        .collect()
+    f32_from_bytes(&std::fs::read(path).unwrap_or_else(|e| panic!("{}: {e}", path.display())))
 }
 
 /// Largest absolute difference over the common length, and where.
@@ -63,7 +52,8 @@ fn taps_match_firdes_exactly() {
 fn fast_atan2_matches_gnuradio_bit_for_bit() {
     let Some((dir, _)) = reference() else { return };
     let sweep = read_f32(&dir.join("atan_sweep.f32"));
-    for (k, s) in sweep.chunks_exact(3).enumerate() {
+    let (triples, _) = sweep.as_chunks::<3>();
+    for (k, s) in triples.iter().enumerate() {
         let mine = fast_atan2(s[0], s[1]);
         assert!(
             mine.to_bits() == s[2].to_bits(),
@@ -100,7 +90,7 @@ fn chain_matches_the_gnuradio_blocks() {
     assert!(e <= 1e-5, "de-emphasis differs by {e} at {i}");
 
     // The whole chain, in blocks of an odd size to exercise the boundaries.
-    let mut fm = FmDemod::new(96_000.0, TAU_US);
+    let mut fm = FmDemod::new(96_000.0, TAU_US, Decimation::Recorder);
     let mut audio = Audio::default();
     for block in iq[..n].chunks(4_091) {
         fm.process(block, &mut audio);

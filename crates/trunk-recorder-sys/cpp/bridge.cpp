@@ -453,21 +453,21 @@ public:
     int freq_error_hz(unsigned port) override { return h_->freq_error_hz(port); }
     double power_db(unsigned port) override { return h_->power_db(port); }
     void set_decoder(unsigned port, const ControlDecoderSpec &s) override {
-        TrControlDecoder kind = TrControlDecoder::None;
+        TrControlDecoderSpec spec;
+        spec.decoder = TrControlDecoder::None;
         switch (s.kind) {
-        case ControlDecoder::P25Cqpsk: kind = TrControlDecoder::P25Cqpsk; break;
-        case ControlDecoder::P25C4fm: kind = TrControlDecoder::P25C4fm; break;
+        case ControlDecoder::P25Cqpsk: spec.decoder = TrControlDecoder::P25Cqpsk; break;
+        case ControlDecoder::P25C4fm: spec.decoder = TrControlDecoder::P25C4fm; break;
         case ControlDecoder::None: break;
         }
-        h_->set_control_decoder(port, kind, s.rate, rust::Str(s.system), s.freq_hz);
+        spec.rate = s.rate;
+        spec.system = rust::String(s.system);
+        spec.freq_hz = s.freq_hz;
+        spec.sys_num = s.sys_num;
+        spec.tap_base = rust::String(s.tap_base);
+        h_->set_control_decoder(port, spec);
     }
-    bool next_message(unsigned port, DecodedMessage &msg) override {
-        TrDecodedMessage m;
-        if (!h_->next_decoded_message(port, m)) return false;
-        msg.type = static_cast<long>(m.msg_type);
-        msg.payload.assign(reinterpret_cast<const char *>(m.payload.data()), m.payload.size());
-        return true;
-    }
+    void set_event_notifier(rust::Box<EventNotifier> n) { h_->set_event_notifier(std::move(n)); }
     void process(const gr_complex *in, size_t nports, gr_complex *out, uint32_t *produced) override {
         h_->process(rust::Slice<const float>(reinterpret_cast<const float *>(in), 2 * hop_),
                     rust::Slice<float>(reinterpret_cast<float *>(out), 2 * nports * stride_),
@@ -722,11 +722,10 @@ void tr_context_set_event_notifier(TrContext &ctx, rust::Box<EventNotifier> noti
     ctx.impl->event_bridge = std::make_shared<EventBridge>(std::move(notifier));
 }
 
-// Per-system state for trunk message parsing on GR threads
+// Per-decoder state for Smartnet trunk message parsing on GR threads
 struct TrunkDrainState {
     rust::Box<EventNotifier> notifier;
-    std::unique_ptr<SmartnetParser> smartnet_parser;  // non-null for Smartnet
-    std::optional<rust::Box<P25TrunkParser>> p25_parser; // non-empty for P25
+    std::unique_ptr<SmartnetParser> smartnet_parser;
 
     // Offline baseline: every raw decoder message, before parsing
     // (Config::tap_dir). One decoder = one GR thread, so no locking.
@@ -759,28 +758,32 @@ void tr_context_wire_event_notifiers(TrContext &ctx) {
     auto &bridge = ctx.impl->event_bridge;
     if (!bridge) return;
 
-    // Phase 2: wire trunk message callbacks — one per decoder for thread safety
+    // Phase 2: trunk messages. P25 control channels are decoded and parsed
+    // in the Rust channelizer, which only needs to know where to send them.
+    for (auto &source : ctx.impl->trunk_ctx.sources) {
+        if (auto c = source->get_channelizer()) {
+            if (auto *rust = dynamic_cast<RustChannelizerBackend *>(c->backend().get())) {
+                rust->set_event_notifier(bridge->make_notifier());
+            }
+        }
+    }
+    // Smartnet: a callback per decoder, for thread safety.
     for (auto &system : ctx.impl->trunk_ctx.systems) {
-        auto sys_type = system->get_system_type();
-        if (sys_type != SYS_SMARTNET && sys_type != SYS_P25) continue;
+        if (system->get_system_type() != SYS_SMARTNET) continue;
 
         for (auto &decoder : system->get_decoders()) {
             auto state = std::shared_ptr<TrunkDrainState>(
                 new TrunkDrainState(bridge->make_notifier()));
 
-            if (sys_type == SYS_SMARTNET) {
-                SmartnetParserConfig config;
-                config.sys_num = system->get_sys_num();
-                config.bandplan = system->get_bandplan();
-                config.bandfreq = system->get_bandfreq();
-                config.bandplan_base = system->get_bandplan_base();
-                config.bandplan_high = system->get_bandplan_high();
-                config.bandplan_spacing = system->get_bandplan_spacing();
-                config.bandplan_offset = system->get_bandplan_offset();
-                state->smartnet_parser = std::make_unique<SmartnetParser>(std::move(config));
-            } else {
-                state->p25_parser = p25_trunk_parser_new(system->get_sys_num(), system->get_short_name());
-            }
+            SmartnetParserConfig config;
+            config.sys_num = system->get_sys_num();
+            config.bandplan = system->get_bandplan();
+            config.bandfreq = system->get_bandfreq();
+            config.bandplan_base = system->get_bandplan_base();
+            config.bandplan_high = system->get_bandplan_high();
+            config.bandplan_spacing = system->get_bandplan_spacing();
+            config.bandplan_offset = system->get_bandplan_offset();
+            state->smartnet_parser = std::make_unique<SmartnetParser>(std::move(config));
 
             const std::string &tap_dir = ctx.impl->trunk_ctx.config.tap_dir;
             if (!tap_dir.empty()) {
@@ -790,13 +793,6 @@ void tr_context_wire_event_notifiers(TrContext &ctx) {
 
             decoder->set_msg_callback([state](gr::message::sptr msg) {
                 state->log_raw(msg);
-                if (state->p25_parser) {
-                    const std::string payload = msg->to_string();
-                    auto result = (*state->p25_parser)->parse(
-                        msg->type(), rust::Slice<const uint8_t>(reinterpret_cast<const uint8_t *>(payload.data()), payload.size()));
-                    if (!result.empty()) event_notifier_notify_trunk_messages(*state->notifier, std::move(result));
-                    return;
-                }
                 std::vector<TrunkMessage> parsed = state->smartnet_parser->parse_message(msg);
                 if (parsed.empty()) return;
 

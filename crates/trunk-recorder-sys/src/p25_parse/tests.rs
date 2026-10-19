@@ -322,3 +322,133 @@ fn matches_trunk_recorder_except_where_noted() {
         assert!(tally.diverged.contains_key(d), "{d}: {tally:?}");
     }
 }
+
+// ── trunk-p25's messages, typed and in op25's form ──
+
+/// The trunk-p25 message whose op25 form this is, if it has one.
+fn typed(ty: i64, payload: &[u8]) -> Option<Message> {
+    use trunk_p25::{Nac, Recovery};
+    if ty == 0xffff {
+        return payload.is_empty().then_some(Message::Timeout);
+    }
+    let (nac, body) = payload.split_first_chunk::<2>()?;
+    let nac = Nac::new(u16::from_be_bytes(*nac))?;
+    let m = match ty {
+        TSDU => Message::Tsbk {
+            nac,
+            tsbk: Tsbk::new(body.try_into().ok()?),
+            recovery: Recovery::Clean,
+        },
+        op25::PDU => {
+            let (header, data) = body.split_first_chunk::<12>()?;
+            Message::Mbt {
+                nac,
+                header: *header,
+                data: data.to_vec(),
+            }
+        }
+        3 | op25::TDULC if body.is_empty() => Message::Terminator {
+            nac,
+            link_control: ty == op25::TDULC,
+        },
+        _ => return None,
+    };
+    assert_eq!((m.op25_type(), m.op25_payload()), (ty, payload.to_vec()));
+    Some(m)
+}
+
+/// Parses `messages` both ways, each with a parser of its own system, and
+/// returns how many there were.
+fn typed_matches_op25(messages: impl IntoIterator<Item = Message>) -> usize {
+    let (mut wire, mut direct) = (parser(), parser());
+    let mut n = 0;
+    for m in messages {
+        let mut d = without_meta(direct.parse_message(&m));
+        for x in &mut d {
+            x.sys_num = wire.sys_num;
+        }
+        assert_eq!(
+            without_meta(wire.parse(m.op25_type(), &m.op25_payload())),
+            d,
+            "{m:?}"
+        );
+        n += 1;
+    }
+    n
+}
+
+#[test]
+fn typed_messages_parse_as_their_op25_form() {
+    let corpus: Vec<_> = CORPUS
+        .iter()
+        .filter_map(|&(ty, s)| typed(ty, &hex(s)))
+        .collect();
+    // All but the TDMA marker, which trunk-p25 never sends.
+    assert_eq!(corpus.len(), CORPUS.len() - 1);
+    let messages: Vec<_> = corpus
+        .into_iter()
+        .chain([
+            Message::Timeout,
+            Message::Voice {
+                nac: trunk_p25::Nac::new(0x5e1).unwrap(),
+                duid: trunk_p25::Duid::Ldu1,
+            },
+            // An MBT too short for its data.
+            typed(op25::PDU, &hex("05e1b0000000000000000000ffffffff")).unwrap(),
+        ])
+        .collect();
+    assert_eq!(typed_matches_op25(messages), CORPUS.len() + 2);
+}
+
+/// Every message trunk-p25 decodes from a capture's control channel taps
+/// (`*.out.cf32`): `TRUNK_P25_TAPS=<dir> cargo test -p trunk-recorder-sys
+/// --release --lib typed_capture -- --ignored --nocapture`.
+#[test]
+#[ignore = "needs TRUNK_P25_TAPS"]
+fn typed_capture_parses_as_its_op25_form() {
+    use num_complex::Complex32;
+    use trunk_p25::{ControlChannelDecoder, DecoderConfig, DemodConfig, Modulation};
+    let dir = std::env::var("TRUNK_P25_TAPS").expect("TRUNK_P25_TAPS");
+    let mut total = 0;
+    for e in std::fs::read_dir(&dir).unwrap() {
+        let path = e.unwrap().path();
+        if !path.to_string_lossy().ends_with(".json") {
+            continue;
+        }
+        let meta: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        if meta["kind"] != "control_channel" {
+            continue;
+        }
+        let base = path.with_extension("");
+        let Ok(raw) = std::fs::read(format!("{}.out.cf32", base.display())) else {
+            continue;
+        };
+        let iq: Vec<Complex32> = raw
+            .as_chunks::<8>()
+            .0
+            .iter()
+            .map(|c| {
+                Complex32::new(
+                    f32::from_le_bytes([c[0], c[1], c[2], c[3]]),
+                    f32::from_le_bytes([c[4], c[5], c[6], c[7]]),
+                )
+            })
+            .collect();
+        let modulation = if meta["modulation"] == "qpsk" {
+            Modulation::Cqpsk
+        } else {
+            Modulation::C4fm
+        };
+        let rate = meta["out_rate"].as_f64().unwrap();
+        let mut decoder =
+            ControlChannelDecoder::new(DecoderConfig::new(DemodConfig::new(rate, modulation)));
+        let mut out = Vec::new();
+        decoder.process(&iq, &mut out);
+        let n = typed_matches_op25(out.into_iter().map(|r| r.message));
+        println!("{}: {n} messages", base.display());
+        total += n;
+    }
+    println!("total {total}");
+    assert!(total > 0);
+}

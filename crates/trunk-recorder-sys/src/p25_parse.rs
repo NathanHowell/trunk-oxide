@@ -1,10 +1,12 @@
 //! P25 control channel messages to trunking messages, in place of
 //! trunk-recorder's (deleted) `P25Parser`.
 //!
-//! Takes op25's message form (a type and the NAC-prefixed payload) from the
-//! control channel decoder. Every control channel of a system shares
-//! one [`SystemPlans`], so a grant resolves as soon as any of them has heard
-//! the plan it names.
+//! Takes trunk-p25's decoded messages as they are
+//! ([`P25TrunkParser::parse_message`], on the channelizer's GR thread), or
+//! in op25's form, a type and the NAC-prefixed payload, as the `.msgs.jsonl`
+//! taps hold them ([`P25TrunkParser::parse`]); both give the same result.
+//! Every control channel of a system shares one [`SystemPlans`], so a grant
+//! resolves as soon as any of them has heard the plan it names.
 //!
 //! The output matches what `P25Parser` made of the same messages, field for
 //! field, except where that was wrong ([`Divergence`]; its output for the
@@ -32,11 +34,11 @@
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
-use trunk_p25::Tsbk;
 use trunk_p25::trunking::{
     ChannelId, ControlChannelPlans, GroupChannel, Osp, Resolution, Response, ServiceOptions,
     SystemPlans,
 };
+use trunk_p25::{Message, Tsbk};
 
 use crate::ffi::{TrMessageType, TrPatchData, TrTrunkMessage};
 
@@ -180,6 +182,22 @@ impl P25TrunkParser {
         }
     }
 
+    /// A message from trunk-p25's control channel decoder.
+    pub fn parse_message(&mut self, message: &Message) -> Vec<TrTrunkMessage> {
+        self.parse_message_noting(message, &mut |_| {})
+    }
+
+    /// [`Self::parse_message`], reporting each way the result departs from
+    /// trunk-recorder's.
+    pub fn parse_message_noting(
+        &mut self,
+        message: &Message,
+        note: &mut dyn FnMut(Divergence),
+    ) -> Vec<TrTrunkMessage> {
+        self.parse_packet(Packet::of_message(message), note)
+    }
+
+    /// A message in op25's form: its type (the DUID) and NAC-prefixed body.
     pub fn parse(&mut self, msg_type: i64, payload: &[u8]) -> Vec<TrTrunkMessage> {
         self.parse_noting(msg_type, payload, &mut |_| {})
     }
@@ -192,9 +210,29 @@ impl P25TrunkParser {
         payload: &[u8],
         note: &mut dyn FnMut(Divergence),
     ) -> Vec<TrTrunkMessage> {
+        self.parse_packet(Packet::of_op25(msg_type, payload), note)
+    }
+
+    fn parse_packet(
+        &mut self,
+        packet: Packet,
+        note: &mut dyn FnMut(Divergence),
+    ) -> Vec<TrTrunkMessage> {
         let system = Arc::clone(&self.system);
         let mut system = system.lock().unwrap_or_else(PoisonError::into_inner);
-        let out = self.parse_locked(&mut system, msg_type, payload, note);
+        let out = match packet {
+            Packet::Bare(t) => vec![message(self.sys_num, t, 0, op25::NO_OPCODE)],
+            Packet::Malformed => {
+                note(Divergence::Malformed);
+                vec![message(
+                    self.sys_num,
+                    TrMessageType::InvalidCcMessage,
+                    0,
+                    op25::NO_OPCODE,
+                )]
+            }
+            Packet::Osp { nac, osp, opcode } => self.parse_osp(&mut system, nac, osp, opcode, note),
+        };
         if out
             .iter()
             .any(|m| m.message_type == TrMessageType::InvalidCcMessage)
@@ -204,51 +242,17 @@ impl P25TrunkParser {
         out
     }
 
-    fn parse_locked(
+    fn parse_osp(
         &mut self,
         system: &mut System,
-        msg_type: i64,
-        payload: &[u8],
+        nac: u16,
+        osp: Osp,
+        opcode: u64,
         note: &mut dyn FnMut(Divergence),
     ) -> Vec<TrTrunkMessage> {
-        let bare = |t| vec![message(self.sys_num, t, 0, op25::NO_OPCODE)];
-        // trunk-recorder: -2 is a GUI command, -1 a timeout, other negative
-        // types are invalid, and a payload must at least hold the NAC.
-        match msg_type {
-            -2 | -1 => return bare(TrMessageType::Unknown),
-            t if t < 0 => return bare(TrMessageType::InvalidCcMessage),
-            _ => {}
-        }
-        let Some((nac, body)) = payload.split_first_chunk::<2>() else {
-            return bare(TrMessageType::InvalidCcMessage);
-        };
-        let nac = u16::from_be_bytes(*nac);
-        if nac == 0xffff {
-            // Phase 2 (op25's TDMA marker).
-            return bare(TrMessageType::Unknown);
-        }
-        let osp = match msg_type {
-            op25::TSDU => {
-                let Ok(b) = <[u8; 10]>::try_from(body) else {
-                    note(Divergence::Malformed);
-                    return bare(TrMessageType::InvalidCcMessage);
-                };
-                Osp::from_tsbk(&Tsbk::new(b))
-            }
-            op25::PDU => match body.split_first_chunk::<12>() {
-                Some((header, data)) if data.len() >= 8 => Osp::from_mbt(header, data),
-                _ => {
-                    note(Divergence::Malformed);
-                    return bare(TrMessageType::InvalidCcMessage);
-                }
-            },
-            op25::TDULC => return bare(TrMessageType::Tdulc),
-            _ => return bare(TrMessageType::Unknown),
-        };
         *system.stats.kinds.entry(osp.kind()).or_default() += 1;
         self.plans.learn(&osp, &mut system.plans);
         self.parsed += 1;
-        let opcode = opcode_of(&osp, msg_type, body);
         let mut out = if self.unplaced(&osp, system) && self.pending.len() < MAX_PENDING {
             // trunk-recorder sends it on with frequency 0, which records
             // nothing; it is sent again once the plan arrives.
@@ -309,11 +313,96 @@ impl P25TrunkParser {
     }
 }
 
-fn opcode_of(osp: &Osp, msg_type: i64, body: &[u8]) -> u64 {
-    match (osp, msg_type) {
-        (Osp::Other { opcode, .. } | Osp::Protected { opcode, .. }, _) => u64::from(*opcode),
-        (_, op25::PDU) => u64::from(body[7] & 0x3f),
-        _ => u64::from(body[0] & 0x3f),
+/// What a decoder message is to the parser.
+#[derive(Clone, Copy)]
+enum Packet {
+    /// A message that carries no packet: only its kind is sent on.
+    Bare(TrMessageType),
+    /// A packet too short for its kind.
+    Malformed,
+    Osp {
+        nac: u16,
+        osp: Osp,
+        opcode: u64,
+    },
+}
+
+impl Packet {
+    fn of_message(m: &Message) -> Self {
+        match m {
+            Message::Tsbk { nac, tsbk, .. } => {
+                let osp = Osp::from_tsbk(tsbk);
+                Self::Osp {
+                    nac: nac.get(),
+                    opcode: opcode_of(&osp, tsbk.bytes()[0]),
+                    osp,
+                }
+            }
+            Message::Mbt { nac, header, data } if data.len() >= 8 => {
+                let osp = Osp::from_mbt(header, data);
+                Self::Osp {
+                    nac: nac.get(),
+                    opcode: opcode_of(&osp, header[7]),
+                    osp,
+                }
+            }
+            Message::Mbt { .. } => Self::Malformed,
+            Message::Terminator {
+                link_control: true, ..
+            } => Self::Bare(TrMessageType::Tdulc),
+            Message::Terminator { .. } | Message::Voice { .. } => {
+                Self::Bare(TrMessageType::Unknown)
+            }
+            // op25 sends a timeout without a body, which trunk-recorder
+            // counts as invalid.
+            Message::Timeout => Self::Bare(TrMessageType::InvalidCcMessage),
+        }
+    }
+
+    fn of_op25(msg_type: i64, payload: &[u8]) -> Self {
+        // trunk-recorder: -2 is a GUI command, -1 a timeout, other negative
+        // types are invalid, and a payload must at least hold the NAC.
+        match msg_type {
+            -2 | -1 => return Self::Bare(TrMessageType::Unknown),
+            t if t < 0 => return Self::Bare(TrMessageType::InvalidCcMessage),
+            _ => {}
+        }
+        let Some((nac, body)) = payload.split_first_chunk::<2>() else {
+            return Self::Bare(TrMessageType::InvalidCcMessage);
+        };
+        let nac = u16::from_be_bytes(*nac);
+        if nac == 0xffff {
+            // Phase 2 (op25's TDMA marker).
+            return Self::Bare(TrMessageType::Unknown);
+        }
+        let (osp, raw_opcode) = match msg_type {
+            op25::TSDU => {
+                let Ok(b) = <[u8; 10]>::try_from(body) else {
+                    return Self::Malformed;
+                };
+                (Osp::from_tsbk(&Tsbk::new(b)), b[0])
+            }
+            op25::PDU => match body.split_first_chunk::<12>() {
+                Some((header, data)) if data.len() >= 8 => (Osp::from_mbt(header, data), header[7]),
+                _ => return Self::Malformed,
+            },
+            op25::TDULC => return Self::Bare(TrMessageType::Tdulc),
+            _ => return Self::Bare(TrMessageType::Unknown),
+        };
+        Self::Osp {
+            nac,
+            opcode: opcode_of(&osp, raw_opcode),
+            osp,
+        }
+    }
+}
+
+/// The opcode trunk-recorder reports: the packet's, from its first byte
+/// (a TSBK's, an MBT header's eighth) unless the packet names one itself.
+fn opcode_of(osp: &Osp, raw: u8) -> u64 {
+    match osp {
+        Osp::Other { opcode, .. } | Osp::Protected { opcode, .. } => u64::from(*opcode),
+        _ => u64::from(raw & 0x3f),
     }
 }
 

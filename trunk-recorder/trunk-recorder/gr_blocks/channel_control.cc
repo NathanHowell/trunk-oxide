@@ -85,17 +85,11 @@ void channel_control::set_conditioning_hooks(ConditioningHooks hooks) {
   send_conditioning();
   if (d_squelch_cb && d_cond.set_squelch_callback) d_cond.set_squelch_callback(d_squelch_cb);
   if (d_decoder.kind != ControlDecoder::None && d_cond.set_decoder) d_cond.set_decoder(d_decoder);
-  if (d_message_cb && d_cond.set_message_callback) d_cond.set_message_callback(d_message_cb);
 }
 
-void channel_control::set_decoder(ControlDecoder kind, const std::string &system, double freq_hz) {
-  d_decoder = {kind, d_channel_rate_out, system, freq_hz};
+void channel_control::set_decoder(ControlDecoder kind, const std::string &system, double freq_hz, int sys_num, const std::string &tap_base) {
+  d_decoder = {kind, d_channel_rate_out, system, freq_hz, sys_num, tap_base};
   if (d_cond.set_decoder) d_cond.set_decoder(d_decoder);
-}
-
-void channel_control::set_message_callback(std::function<void(const DecodedMessage &)> cb) {
-  d_message_cb = std::move(cb);
-  if (d_cond.set_message_callback) d_cond.set_message_callback(d_message_cb);
 }
 
 void channel_control::set_samples_per_symbol(int samples_per_symbol) {

@@ -19,7 +19,6 @@ struct ConditioningHooks {
   std::function<bool()> squelch_open;
   std::function<void(std::function<void(bool, double)>)> set_squelch_callback; // (muted, pwr_db)
   std::function<void(const ControlDecoderSpec &)> set_decoder;
-  std::function<void(std::function<void(const DecodedMessage &)>)> set_message_callback;
 };
 
 // One input (source IQ), N outputs (one per recorder). Each enabled output
@@ -55,8 +54,8 @@ public:
   void set_port_squelch_callback(unsigned port, std::function<void(bool, double)> cb);
   // Decoder on the port's conditioned output (see channelizer_backend::set_decoder).
   void set_port_decoder(unsigned port, const ControlDecoderSpec &spec);
-  // Called on the GR thread with each message the port's decoder produced.
-  void set_port_message_callback(unsigned port, std::function<void(const DecodedMessage &)> cb);
+  // The DSP engine, for the host to wire up what only it knows about.
+  const std::shared_ptr<channelizer_backend> &backend() const { return d_backend; }
   // The hooks a channel_control on `port` uses.
   ConditioningHooks conditioning_hooks(unsigned port);
   void set_port_enabled(unsigned port, bool enabled);
@@ -73,7 +72,6 @@ private:
     unsigned profile = CHANNEL_PROFILE_NARROW;
     bool enabled = false;
     std::function<void(bool, double)> squelch_cb;
-    std::function<void(const DecodedMessage &)> message_cb;
   };
   Port &port_locked(unsigned port);
 
@@ -91,11 +89,6 @@ private:
     double db;
   };
   std::vector<PendingEvent> d_pending_events;
-  struct PendingMessage {
-    std::function<void(const DecodedMessage &)> cb;
-    DecodedMessage msg;
-  };
-  std::vector<PendingMessage> d_pending_messages;
 };
 
 #endif

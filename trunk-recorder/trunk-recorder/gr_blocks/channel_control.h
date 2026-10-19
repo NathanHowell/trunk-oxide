@@ -64,11 +64,10 @@ public:
   void set_max_dev(double max_dev);
   bool uses_squelch() const { return d_use_squelch; }
 
-  // Decode the conditioned channel in the channelizer (P25 control channels).
-  // Messages arrive on the GR thread through set_message_callback(); both are
-  // kept until the hooks arrive if they are not set yet.
-  void set_decoder(ControlDecoder kind, const std::string &system, double freq_hz);
-  void set_message_callback(std::function<void(const DecodedMessage &)> cb);
+  // Decode the conditioned channel in the channelizer (P25 control channels);
+  // the channelizer parses the messages and sends them to trunking itself.
+  // Kept until the hooks arrive if they are not set yet.
+  void set_decoder(ControlDecoder kind, const std::string &system, double freq_hz, int sys_num, const std::string &tap_base);
 
   // Offline-baseline taps. enable_tap() returns a file sink for the caller to
   // connect to the conditioned channel; it discards samples until
@@ -87,8 +86,7 @@ private:
   ConditioningSquelch d_squelch_mode;
   ConditioningHooks d_cond;
   std::function<void(bool, double)> d_squelch_cb;
-  ControlDecoderSpec d_decoder{ControlDecoder::None, 0, "", 0};
-  std::function<void(const DecodedMessage &)> d_message_cb;
+  ControlDecoderSpec d_decoder{ControlDecoder::None, 0, "", 0, 0, ""};
   void send_conditioning();
   std::function<void(double)> tune_hook;
   std::function<void(double, double)> filter_hook;

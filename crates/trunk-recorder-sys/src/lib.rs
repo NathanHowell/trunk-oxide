@@ -22,6 +22,20 @@ pub mod ffi {
         P25C4fm = 2,
     }
 
+    /// A control-channel decoder for a shared-channelizer port.
+    struct TrControlDecoderSpec {
+        decoder: TrControlDecoder,
+        /// The port's conditioned output rate (S/s).
+        rate: f64,
+        /// System short name and control channel frequency, for metrics.
+        system: String,
+        freq_hz: f64,
+        /// The system its trunking messages are for.
+        sys_num: i32,
+        /// Non-empty: write every message to `<tap_base>.msgs.jsonl`.
+        tap_base: String,
+    }
+
     /// Which implementation decodes P25 control channels.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum TrP25Decoder {
@@ -62,13 +76,6 @@ pub mod ffi {
         freq: f64,
         phase2: bool,
         accounts: Vec<TrCallAccount>,
-    }
-
-    /// A decoded control-channel message in op25's wire form: the message
-    /// type (DUID, or 0xffff for a timeout) and the body (NAC, data).
-    struct TrDecodedMessage {
-        msg_type: i64,
-        payload: Vec<u8>,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -584,16 +591,6 @@ pub mod ffi {
         fn p25_observe_call(report: &TrCallReport);
     }
 
-    // ── trunk-p25 control channel parser (one per P25 control channel decoder) ──
-
-    extern "Rust" {
-        type P25TrunkParser;
-
-        fn p25_trunk_parser_new(sys_num: i32, system: &str) -> Box<P25TrunkParser>;
-        /// op25's message form: its type and the NAC-prefixed payload.
-        fn parse(self: &mut P25TrunkParser, msg_type: i64, payload: &[u8]) -> Vec<TrTrunkMessage>;
-    }
-
     // ── trunk-p25 voice regenerator, phase 1 and 2 (one per P25 recorder) ──
 
     extern "Rust" {
@@ -667,21 +664,15 @@ pub mod ffi {
         /// NaN until the port has carried signal.
         fn power_db(self: &SharedChannelizerHandle, port: u32) -> f64;
         /// Run (or with `None`, stop) a control-channel decoder on the port's
-        /// conditioned output, which is `rate` S/s.
+        /// conditioned output; it parses what it decodes too.
         fn set_control_decoder(
             self: &SharedChannelizerHandle,
             port: u32,
-            decoder: TrControlDecoder,
-            rate: f64,
-            system: &str,
-            freq_hz: f64,
+            spec: &TrControlDecoderSpec,
         );
-        /// Pop the port decoder's oldest message; false if none.
-        fn next_decoded_message(
-            self: &SharedChannelizerHandle,
-            port: u32,
-            msg: &mut TrDecodedMessage,
-        ) -> bool;
+        /// Where the control decoders' trunking messages go. Until it is
+        /// set they wait in the decoders' queues.
+        fn set_event_notifier(self: &SharedChannelizerHandle, notifier: Box<EventNotifier>);
         /// `input`: `hop` interleaved IQ samples. `output`: port-major,
         /// `max_out_per_block` IQ samples of stride per port. `produced[p]` =
         /// samples written for port p (0 = port inactive).
@@ -958,7 +949,6 @@ fn drop_event_handler_box(_handler: Box<EventHandlerBox>) {
 // ── Shared FFT channelizer ──
 
 use p25::P25RegeneratorHandle;
-use p25_parse::{P25TrunkParser, p25_trunk_parser_new};
 
 fn p25_observe_call(report: &ffi::TrCallReport) {
     shadow::observe_call(report);
@@ -1008,8 +998,9 @@ impl P25RegeneratorHandle {
 pub struct SharedChannelizerHandle {
     engine: Arc<trunk_channelizer::SharedChannelizer>,
     source: i32,
-    /// Drain side of each port's control-channel decoder.
-    decoders: Mutex<HashMap<u32, Arc<p25::Shared>>>,
+    /// Trunking side of each port's control-channel decoder.
+    decoders: Mutex<HashMap<u32, p25::ControlPort>>,
+    notifier: Mutex<Option<Box<EventNotifier>>>,
 }
 
 /// Live channelizers by source index, so the Rust side can read their
@@ -1034,6 +1025,7 @@ fn shared_channelizer_new(
         engine: inner,
         source,
         decoders: Mutex::new(HashMap::new()),
+        notifier: Mutex::new(None),
     }))
 }
 
@@ -1168,50 +1160,42 @@ impl SharedChannelizerHandle {
     fn process(&self, input: &[f32], output: &mut [f32], produced: &mut [u32]) {
         self.engine
             .process(as_complex(input), as_complex_mut(output), produced);
+        // The decoders ran on this block; parse and send what they decoded.
+        let notifier = self.notifier.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(n) = notifier.as_deref() {
+            let mut decoders = self.decoders.lock().unwrap_or_else(PoisonError::into_inner);
+            for port in decoders.values_mut() {
+                port.drain(&mut |m| event_notifier_notify_trunk_messages(n, m));
+            }
+        }
     }
 
-    fn set_control_decoder(
-        &self,
-        port: u32,
-        decoder: ffi::TrControlDecoder,
-        rate: f64,
-        system: &str,
-        freq_hz: f64,
-    ) {
+    fn set_event_notifier(&self, notifier: Box<EventNotifier>) {
+        *self.notifier.lock().unwrap_or_else(PoisonError::into_inner) = Some(notifier);
+    }
+
+    fn set_control_decoder(&self, port: u32, spec: &ffi::TrControlDecoderSpec) {
         let mut decoders = self.decoders.lock().unwrap_or_else(PoisonError::into_inner);
-        let installed = trunk_p25::Modulation::try_from(decoder)
+        let installed = trunk_p25::Modulation::try_from(spec.decoder)
             .ok()
             .map(|modulation| {
                 let channel = p25::ControlChannel {
-                    system: system.to_owned(),
-                    freq_hz,
+                    system: spec.system.clone(),
+                    freq_hz: spec.freq_hz,
                     source: self.source,
                     port,
                 };
-                let (dsp, shared) = p25::attach(channel, modulation, rate);
-                decoders.insert(port, shared);
+                let (dsp, shared) = p25::attach(channel, modulation, spec.rate);
+                decoders.insert(
+                    port,
+                    p25::ControlPort::new(shared, spec.sys_num, &spec.tap_base),
+                );
                 dsp
             });
         if installed.is_none() {
             decoders.remove(&port);
         }
         self.engine.set_slot_decoder(port as usize, installed);
-    }
-
-    fn next_decoded_message(&self, port: u32, msg: &mut ffi::TrDecodedMessage) -> bool {
-        let shared = self
-            .decoders
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .get(&port)
-            .cloned();
-        match shared.and_then(|s| s.pop()) {
-            Some(r) => {
-                *msg = ffi::TrDecodedMessage::from(&r.message);
-                true
-            }
-            None => false,
-        }
     }
 }
 

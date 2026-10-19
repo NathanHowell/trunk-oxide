@@ -70,7 +70,7 @@ for an analog channel), with a `<base>.json` sidecar describing it:
 | `.out.cf32` | the channelizer's conditioned output: after resample, squelch, RMS AGC and FLL (`out_rate`) | input of a Rust demod / P25 decoder; `condcheck` expected output |
 | `.dibits` | control channels, only in taps from before op25's control channel chain was deleted: its slicer output, one byte (0..3) per dibit. trunk-p25 decodes inside the channelizer and writes none | input of a frame assembler |
 | `.symbols.f32` | voice calls: demodulator output (soft symbols) | input of a Rust voice frame decoder |
-| `.msgs.jsonl` | control channels: every raw decoder message (`type`, `arg1`, `arg2`, `hex` payload, `ms` since start) | golden output of the decoder |
+| `.msgs.jsonl` | control channels: every raw decoder message in op25's form (`type`, `arg1`, `arg2` = a timeout's wall clock time, `hex` payload, `ms` since start) | golden output of the decoder |
 
 Voice taps cover the span the recorder was active. An analog channel gets one
 tap per *enabled window* (`a_<recorder>_w<n>_<system>_<tg>`): a conventional

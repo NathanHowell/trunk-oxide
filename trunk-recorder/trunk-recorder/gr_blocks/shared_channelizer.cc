@@ -61,11 +61,6 @@ void shared_channelizer::set_port_decoder(unsigned port, const ControlDecoderSpe
   d_backend->set_decoder(port, spec);
 }
 
-void shared_channelizer::set_port_message_callback(unsigned port, std::function<void(const DecodedMessage &)> cb) {
-  std::lock_guard<std::mutex> l(d_mutex);
-  port_locked(port).message_cb = std::move(cb);
-}
-
 ConditioningHooks shared_channelizer::conditioning_hooks(unsigned port) {
   // The block outlives every recorder and decoder holding these.
   shared_channelizer *self = this;
@@ -75,8 +70,7 @@ ConditioningHooks shared_channelizer::conditioning_hooks(unsigned port) {
           [self, port](double db) { self->set_port_squelch_db(port, db); },
           [self, port]() { return self->port_squelch_open(port); },
           [self, port](std::function<void(bool, double)> cb) { self->set_port_squelch_callback(port, std::move(cb)); },
-          [self, port](const ControlDecoderSpec &s) { self->set_port_decoder(port, s); },
-          [self, port](std::function<void(const DecodedMessage &)> cb) { self->set_port_message_callback(port, std::move(cb)); }};
+          [self, port](const ControlDecoderSpec &s) { self->set_port_decoder(port, s); }};
 }
 
 void shared_channelizer::set_port_offset(unsigned port, double offset_hz) {
@@ -145,20 +139,10 @@ int shared_channelizer::general_work(int /*noutput_items*/, gr_vector_int &ninpu
         d_pending_events.push_back({d_ports[p].squelch_cb, ev == 2, db});
       }
     }
-    // Decoded control-channel messages from this block.
-    for (size_t p = 0; p < d_ports.size(); p++) {
-      if (!d_ports[p].message_cb) continue;
-      DecodedMessage m;
-      while (d_backend->next_message(p, m)) {
-        d_pending_messages.push_back({d_ports[p].message_cb, std::move(m)});
-      }
-    }
   }
   // Outside the lock: the callbacks may call back into this block.
   for (auto &e : d_pending_events) e.cb(e.muted, e.db);
   d_pending_events.clear();
-  for (auto &m : d_pending_messages) m.cb(m.msg);
-  d_pending_messages.clear();
   consume_each(static_cast<int>(d_hop));
   return WORK_CALLED_PRODUCE;
 }

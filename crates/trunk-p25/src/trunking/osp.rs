@@ -9,6 +9,12 @@
 use super::iden::{Access, ChannelId, ChannelPlan, Iden};
 use crate::types::Tsbk;
 
+/// The extended `UU_V_CH_GRANT` MBT's first data block (TIA-102.AABC-B
+/// §4.2.5.2 Fig. 4.2.5-2): source WACN and system (0–3), source ID (4–6),
+/// then these.
+const UU_MBT_TARGET: std::ops::Range<usize> = 7..10;
+const UU_MBT_CHANNEL_T: std::ops::Range<usize> = 10..12;
+
 /// `width` bits, `shift` bits up from the end of `bytes` followed by `pad`
 /// zero bytes.
 const fn field(bytes: &[u8], pad: usize, shift: usize, width: usize) -> u64 {
@@ -243,7 +249,9 @@ pub enum Osp {
     /// target and source fill all eight octets. trunk-recorder reads options
     /// from octet 2 anyway, which is the channel's identifier and top bits,
     /// so its unit-to-unit grants carry made-up emergency and encryption
-    /// flags. The MBT form is read the way trunk-recorder reads it.
+    /// flags. The MBT form carries them in its header and the channel in its
+    /// data (AABC-B Fig. 4.2.5-2), where trunk-recorder read the header's
+    /// reserved octet and the CRC's padding.
     UnitVoiceGrant {
         options: ServiceOptions,
         channel: ChannelId,
@@ -590,12 +598,15 @@ impl Osp {
                 supergroup: d(48, 16) as u16,
                 source: None,
             },
-            opcode::UU_V_CH_GRANT => Self::UnitVoiceGrant {
-                options: ServiceOptions(h.u8(24, 8)),
-                channel: h.channel(16),
-                target: d(24, 24),
-                source: h.u32(48, 24),
-            },
+            opcode::UU_V_CH_GRANT if data.len() >= UU_MBT_CHANNEL_T.end => {
+                let (t, c) = (UU_MBT_TARGET.start, UU_MBT_CHANNEL_T.start);
+                Self::UnitVoiceGrant {
+                    options: ServiceOptions(h.u8(24, 8)),
+                    channel: ChannelId::new(u16::from_be_bytes([data[c], data[c + 1]])),
+                    target: u32::from_be_bytes([0, data[t], data[t + 1], data[t + 2]]),
+                    source: h.u32(48, 24),
+                }
+            }
             opcode::RFSS_STS_BCST => Self::RfssStatus {
                 site: Site {
                     system: h.u16(48, 12),
@@ -672,6 +683,31 @@ impl Osp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn an_extended_unit_to_unit_grant_reads_fig_4_2_5_2() {
+        // Header: source 0x123456 (octets 3-5), opcode 0x04, options: emergency.
+        let mut header = [0u8; 12];
+        header[3..6].copy_from_slice(&[0x12, 0x34, 0x56]);
+        header[7] = opcode::UU_V_CH_GRANT;
+        header[8] = service_options::EMERGENCY;
+        // Two data blocks less the CRC-32: source WACN/system/ID, target
+        // 0xabcdef, Channel (T) 0x1234; block 2 opens with Channel (R).
+        let mut data = [0u8; 20];
+        data[0..7].copy_from_slice(&[0xbe, 0xe0, 0x05, 0xe4, 0x12, 0x34, 0x56]);
+        data[7..10].copy_from_slice(&[0xab, 0xcd, 0xef]);
+        data[10..12].copy_from_slice(&0x1234u16.to_be_bytes());
+        data[12..14].copy_from_slice(&0x1234u16.to_be_bytes());
+        assert_eq!(
+            Osp::from_mbt(&header, &data),
+            Osp::UnitVoiceGrant {
+                options: ServiceOptions(service_options::EMERGENCY),
+                channel: ChannelId::new(0x1234),
+                target: 0xab_cdef,
+                source: 0x12_3456,
+            }
+        );
+    }
 
     fn tsbk(hex: &str) -> Tsbk {
         let b: Vec<u8> = (0..hex.len())

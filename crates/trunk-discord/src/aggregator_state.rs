@@ -62,37 +62,6 @@ impl FormatEmbed for proto::SetupConfigEvent {
     }
 }
 
-impl FormatEmbed for proto::SetupSystemsEvent {
-    fn format_embed(&self) -> String {
-        let mut text = String::new();
-        for sys in &self.systems {
-            let _ = writeln!(
-                text,
-                "{} (type={})",
-                sys.short_name,
-                format_system_type(sys.system_type)
-            );
-        }
-        text
-    }
-}
-
-impl FormatEmbed for proto::SetupSourcesEvent {
-    fn format_embed(&self) -> String {
-        let mut text = String::new();
-        for src in &self.sources {
-            let _ = writeln!(
-                text,
-                "Source {}: {} @ {:.3} MHz",
-                src.src_num,
-                src.driver,
-                src.center_freq / 1_000_000.0,
-            );
-        }
-        text
-    }
-}
-
 impl FormatEmbed for proto::SetupSystemEvent {
     fn format_embed(&self) -> String {
         self.system.as_ref().map_or_else(
@@ -173,8 +142,6 @@ fn setup_embed(title: &str, description: &str) -> EmbedData {
 pub struct AggregatorState {
     // Setup event dedup: only post when content changes
     last_setup_config: Option<String>,
-    last_setup_systems: Option<String>,
-    last_setup_sources: Option<String>,
     last_setup_system: HashMap<String, String>,
 
     // Recorder table: single embed edited in place
@@ -199,8 +166,6 @@ impl AggregatorState {
     pub fn new() -> Self {
         Self {
             last_setup_config: None,
-            last_setup_systems: None,
-            last_setup_sources: None,
             last_setup_system: HashMap::new(),
             recorder_state: HashMap::new(),
             has_recorder_embed: false,
@@ -225,24 +190,6 @@ impl AggregatorState {
                     self.last_setup_config = Some(text.clone());
                     effects.push(AggEffect::PostEmbed {
                         embed: setup_embed("Setup Config", &text),
-                    });
-                }
-            }
-            AggMessage::SetupSystems(e) => {
-                let text = e.format_embed();
-                if self.last_setup_systems.as_ref() != Some(&text) {
-                    self.last_setup_systems = Some(text.clone());
-                    effects.push(AggEffect::PostEmbed {
-                        embed: setup_embed("Systems", &text),
-                    });
-                }
-            }
-            AggMessage::SetupSources(e) => {
-                let text = e.format_embed();
-                if self.last_setup_sources.as_ref() != Some(&text) {
-                    self.last_setup_sources = Some(text.clone());
-                    effects.push(AggEffect::PostEmbed {
-                        embed: setup_embed("Sources", &text),
                     });
                 }
             }
@@ -449,8 +396,6 @@ pub enum AggMessage {
     CallsActive(proto::CallsActiveEvent),
     SetupRecorder(proto::SetupRecorderEvent),
     SetupSystem(proto::SetupSystemEvent),
-    SetupSystems(proto::SetupSystemsEvent),
-    SetupSources(proto::SetupSourcesEvent),
     SetupConfig(proto::SetupConfigEvent),
 }
 

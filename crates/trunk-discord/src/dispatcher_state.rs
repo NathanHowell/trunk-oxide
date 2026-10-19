@@ -140,18 +140,11 @@ impl DispatcherState {
             Event::TrunkMessage(e) => vec![DispatchEffect::ForwardToAggregator {
                 message: AggregatorMessage::TrunkMessage(e),
             }],
-            Event::SystemRates(_) => vec![],
             Event::SetupRecorder(e) => vec![DispatchEffect::ForwardToAggregator {
                 message: AggregatorMessage::SetupRecorder(e),
             }],
             Event::SetupSystem(e) => vec![DispatchEffect::ForwardToAggregator {
                 message: AggregatorMessage::SetupSystem(e),
-            }],
-            Event::SetupSystems(e) => vec![DispatchEffect::ForwardToAggregator {
-                message: AggregatorMessage::SetupSystems(e),
-            }],
-            Event::SetupSources(e) => vec![DispatchEffect::ForwardToAggregator {
-                message: AggregatorMessage::SetupSources(e),
             }],
             Event::SetupConfig(e) => vec![DispatchEffect::ForwardToAggregator {
                 message: AggregatorMessage::SetupConfig(e),
@@ -391,10 +384,7 @@ fn format_signal_event(event: &proto::SignalEvent) -> String {
         format!("{} ({})", event.unit_alias, event.unit_id)
     };
 
-    format!(
-        "**Signal**: {unit} - {signal_type} ({})",
-        event.signaling_type
-    )
+    format!("**Signal**: {unit} - {signal_type}")
 }
 
 fn format_unit_event(event: &proto::UnitEvent) -> String {

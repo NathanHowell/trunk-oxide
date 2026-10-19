@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use trunk_radio::{AudioSink, CallData, CallId, CallInfo, SystemInfo, TrunkMessage, UnitEventType};
+use trunk_radio::{AudioSink, CallId, ChannelNum, TrunkMessage, UnitEventType};
 
 pub use trunk_oxide_proto as proto;
 
@@ -17,105 +17,17 @@ pub struct TalkgroupMeta {
     pub alpha_tag: String,
     pub tag: String,
     pub group: String,
-    /// CSV/TOML-configured talkgroup priority. `None` for conventional
-    /// channels (no priority field), which fall back to the FFI value.
+    /// CSV/TOML-configured talkgroup priority, for Discord's transcription
+    /// order. `None` keeps the call's own.
     pub priority: Option<i32>,
 }
 
 // ── Conversion helpers ──
 
-fn system_info_from(info: &SystemInfo) -> proto::SystemInfo {
-    proto::SystemInfo {
-        sys_id: info.sys_id,
-        short_name: info.short_name.clone(),
-        system_type: info.system_type,
-        wacn: info.wacn,
-        nac: info.nac,
-        rfss: info.rfss,
-        site_id: info.site_id,
-        bandplan: info.bandplan.clone(),
-        analog_levels: info.analog_levels,
-        digital_levels: info.digital_levels,
-        squelch_db: info.squelch_db,
-        conversation_mode: info.conversation_mode,
-        message_count: info.message_count,
-        decode_rate: info.decode_rate,
-    }
-}
-
-fn recorder_info(channel: trunk_radio::ChannelNum) -> proto::RecorderInfo {
+fn recorder_info(channel: ChannelNum, freq_error: i32) -> proto::RecorderInfo {
     proto::RecorderInfo {
         id: i32::try_from(channel.0).unwrap_or(i32::MAX),
-        freq_error: 0,
-    }
-}
-
-fn convert_call_data(cd: &CallData) -> proto::CallData {
-    proto::CallData {
-        talkgroup: cd.talkgroup,
-        color_code: cd.color_code,
-        patched_talkgroups: cd.patched_talkgroups.clone(),
-        call_num: cd.call_num,
-        freq: cd.freq,
-        freq_error: cd.freq_error,
-        source_num: cd.source_num,
-        channel: cd.channel.map(|c| c.0),
-        signal: trunk_radio::signal_from_ffi(cd.signal),
-        noise: trunk_radio::signal_from_ffi(cd.noise),
-        start_time: cd.start_time,
-        stop_time: cd.stop_time,
-        error_count: cd.error_count,
-        spike_count: cd.spike_count,
-        encrypted: cd.encrypted,
-        emergency: cd.emergency,
-        priority: cd.priority,
-        mode: cd.mode,
-        duplex: cd.duplex,
-        short_name: cd.short_name.clone(),
-        kind: cd.kind.to_owned(),
-        tdma_slot: cd.tdma_slot,
-        length: cd.length,
-        phase2_tdma: cd.phase2_tdma,
-        sources: cd
-            .transmission_source_list
-            .iter()
-            .map(|s| proto::CallSource {
-                source: s.source,
-                position: s.position,
-                emergency: s.emergency,
-                signal_system: s.signal_system.clone(),
-                tag: s.tag.clone(),
-            })
-            .collect(),
-        errors: cd
-            .transmission_error_list
-            .iter()
-            .map(|e| proto::CallError {
-                position: e.position,
-                total_len: e.total_len,
-                error_count: e.error_count,
-                spike_count: e.spike_count,
-            })
-            .collect(),
-        transmissions: cd
-            .transmission_list
-            .iter()
-            .map(|t| proto::Transmission {
-                source: t.source,
-                talkgroup: t.talkgroup,
-                slot: t.slot,
-                color_code: t.color_code,
-                start_time: t.start_time,
-                stop_time: t.stop_time,
-                sample_count: t.sample_count,
-                spike_count: t.spike_count,
-                error_count: t.error_count,
-                freq: t.freq,
-            })
-            .collect(),
-        status: i32::from(cd.status.repr()),
-        segments: Vec::new(),   // populated by caller if applicable
-        is_conventional: false, // set by caller
+        freq_error,
     }
 }
 
@@ -331,48 +243,20 @@ impl EventBridge {
         4096
     }
 
-    fn call_info_from(&self, info: &CallInfo) -> proto::CallInfo {
-        let meta = self
+    /// Fill in what the configuration says about the call's talkgroup.
+    fn enrich(&self, mut info: proto::CallInfo) -> proto::CallInfo {
+        if let Some(meta) = self
             .talkgroups
-            .get(&(info.short_name.clone(), info.talkgroup));
-        proto::CallInfo {
-            talkgroup: info.talkgroup,
-            call_num: info.call_num,
-            freq: info.freq,
-            signal: trunk_radio::signal_from_ffi(info.signal),
-            noise: trunk_radio::signal_from_ffi(info.noise),
-            freq_error: info.freq_error,
-            encrypted: info.encrypted,
-            emergency: info.emergency,
-            kind: info.kind.to_owned(),
-            is_conventional: info.is_conventional,
-            phase2_tdma: info.phase2_tdma,
-            tdma_slot: info.tdma_slot,
-            priority: meta.and_then(|m| m.priority).unwrap_or(info.priority),
-            mode: info.mode,
-            duplex: info.duplex,
-            conversation_mode: info.conversation_mode,
-            current_source_id: info.current_source_id,
-            start_time: Some(prost_types::Timestamp {
-                seconds: info.start_time,
-                nanos: 0,
-            }),
-            elapsed: {
-                let d = std::time::Duration::from_secs_f64(info.elapsed);
-                Some(prost_types::Duration {
-                    seconds: d.as_secs().try_into().unwrap_or(i64::MAX),
-                    nanos: d.subsec_nanos().try_into().unwrap_or(0),
-                })
-            },
-            short_name: info.short_name.clone(),
-            talkgroup_alpha_tag: meta.map_or_else(String::new, |m| m.alpha_tag.clone()),
-            talkgroup_tag: meta.map_or_else(String::new, |m| m.tag.clone()),
-            talkgroup_group: meta.map_or_else(String::new, |m| m.group.clone()),
-            call_state: info.call_state,
-            // Populated only by `call_start` (the recorder-side call span's
-            // context); empty for CallsActive/Signal snapshots.
-            traceparent: String::new(),
+            .get(&(info.short_name.clone(), info.talkgroup))
+        {
+            info.talkgroup_alpha_tag.clone_from(&meta.alpha_tag);
+            info.talkgroup_tag.clone_from(&meta.tag);
+            info.talkgroup_group.clone_from(&meta.group);
+            if let Some(p) = meta.priority {
+                info.priority = p;
+            }
         }
+        info
     }
 
     fn unit_alias(&self, short_name: &str, unit_id: i64) -> String {
@@ -395,13 +279,13 @@ impl EventBridge {
         }
     }
 
-    pub fn signal(&self, unit_id: i64, info: &CallInfo) {
+    pub fn signal(&self, unit_id: i64, info: proto::CallInfo) {
+        let unit_alias = self.unit_alias(&info.short_name, unit_id);
         self.send_event(proto::plugin_event::Event::Signal(proto::SignalEvent {
             unit_id,
-            signaling_type: String::new(),
             signal_type: proto::SignalType::Normal as i32,
-            call: Some(self.call_info_from(info)),
-            unit_alias: self.unit_alias(&info.short_name, unit_id),
+            call: Some(self.enrich(info)),
+            unit_alias,
         }));
     }
 
@@ -446,74 +330,65 @@ impl EventBridge {
         }
     }
 
-    pub fn call_start(&self, info: &CallInfo, traceparent: String) {
-        let mut call = self.call_info_from(info);
-        call.traceparent = traceparent;
+    /// A call started; `traceparent` is its recorder-side span's.
+    pub fn call_start(&self, info: proto::CallInfo, traceparent: String) {
+        let call = proto::CallInfo {
+            traceparent,
+            ..self.enrich(info)
+        };
         self.send_event(proto::plugin_event::Event::CallStart(
             proto::CallStartEvent { call: Some(call) },
         ));
     }
 
-    pub fn call_end(
-        &self,
-        call_data: &CallData,
-        segments: &[proto::CallSegment],
-        is_conventional: bool,
-        reason: proto::CallEndReason,
-    ) {
-        let mut data = convert_call_data(call_data);
-        data.segments = segments.to_vec();
-        data.is_conventional = is_conventional;
+    pub fn call_end(&self, call_data: proto::CallData, reason: proto::CallEndReason) {
         self.send_event(proto::plugin_event::Event::CallEnd(proto::CallEndEvent {
-            call_data: Some(data),
+            call_data: Some(call_data),
             reason: reason as i32,
         }));
     }
 
-    pub fn calls_active(&self, infos: &[CallInfo]) {
+    pub fn calls_active(&self, infos: Vec<proto::CallInfo>) {
         self.send_event(proto::plugin_event::Event::CallsActive(
             proto::CallsActiveEvent {
-                calls: infos.iter().map(|i| self.call_info_from(i)).collect(),
+                calls: infos.into_iter().map(|i| self.enrich(i)).collect(),
             },
         ));
     }
 
-    pub fn setup_recorder(&self, channel: trunk_radio::ChannelNum) {
+    /// A channel opened or closed (with the FLL's error it closed on).
+    pub fn setup_recorder(&self, channel: ChannelNum, freq_error: i32) {
         self.send_event(proto::plugin_event::Event::SetupRecorder(
             proto::SetupRecorderEvent {
-                recorder: Some(recorder_info(channel)),
+                recorder: Some(recorder_info(channel, freq_error)),
             },
         ));
     }
 
-    pub fn setup_system(&self, info: &SystemInfo) {
+    pub fn setup_system(&self, info: proto::SystemInfo) {
         self.send_event(proto::plugin_event::Event::SetupSystem(
-            proto::SetupSystemEvent {
-                system: Some(system_info_from(info)),
-            },
+            proto::SetupSystemEvent { system: Some(info) },
         ));
     }
 
-    pub fn setup_config(&self, infos: &[SystemInfo]) {
+    pub fn setup_config(&self, systems: Vec<proto::SystemInfo>) {
         self.send_event(proto::plugin_event::Event::SetupConfig(
-            proto::SetupConfigEvent {
-                systems: infos.iter().map(system_info_from).collect(),
-            },
+            proto::SetupConfigEvent { systems },
         ));
     }
 
-    pub fn trunk_message(&self, messages: &[TrunkMessage], info: &SystemInfo) {
+    pub fn trunk_message(&self, messages: &[TrunkMessage], system: proto::SystemInfo) {
         self.send_event(proto::plugin_event::Event::TrunkMessage(
             proto::TrunkMessageEvent {
                 messages: messages.iter().map(proto_trunk_message).collect(),
-                system: Some(system_info_from(info)),
+                system: Some(system),
             },
         ));
     }
 
     pub fn unit_event(
         &self,
-        info: &SystemInfo,
+        info: proto::SystemInfo,
         event_type: UnitEventType,
         source_id: i64,
         talkgroup: i64,
@@ -527,12 +402,13 @@ impl EventBridge {
             UnitEventType::DataGrant => proto::UnitEventType::DataGrant,
             UnitEventType::AnswerRequest => proto::UnitEventType::AnswerRequest,
         };
+        let source_alias = self.unit_alias(&info.short_name, source_id);
         self.send_event(proto::plugin_event::Event::Unit(proto::UnitEvent {
             r#type: proto_type as i32,
-            system: Some(system_info_from(info)),
+            system: Some(info),
             source_id,
             talkgroup,
-            source_alias: self.unit_alias(&info.short_name, source_id),
+            source_alias,
         }));
     }
 

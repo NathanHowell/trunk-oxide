@@ -15,21 +15,6 @@ pub enum UnitEventType {
     AnswerRequest,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-pub enum CallDataStatus {
-    Initial = 0,
-    Success = 1,
-    Retry = 2,
-    Failed = 3,
-}
-
-impl CallDataStatus {
-    pub const fn repr(self) -> u8 {
-        self as u8
-    }
-}
-
 /// A trunking message, as the parser reads it off a control channel.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TrunkMessage {
@@ -158,10 +143,7 @@ pub struct Patch {
 /// One recording's audio accounting.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Transmission {
-    pub source: i64,
     pub talkgroup: i64,
-    pub slot: u32,
-    pub color_code: u32,
     pub start_time: i64,
     pub stop_time: i64,
     pub sample_count: i64,
@@ -170,88 +152,6 @@ pub struct Transmission {
     pub term_events: i64,
     pub after_term_samples: i64,
     pub freq: f64,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct CallSource {
-    pub source: i64,
-    pub position: f64,
-    pub emergency: bool,
-    pub signal_system: String,
-    pub tag: String,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct CallError {
-    pub position: f64,
-    pub total_len: f64,
-    pub error_count: f64,
-    pub spike_count: f64,
-}
-
-#[derive(Debug, Clone, PartialEq)]
-#[allow(clippy::struct_excessive_bools)]
-pub struct CallData {
-    pub talkgroup: i64,
-    pub color_code: u32,
-    pub patched_talkgroups: Vec<u64>,
-    pub call_num: i64,
-    pub freq: f64,
-    pub freq_error: i32,
-    pub source_num: i32,
-    /// The channel it ended on, if it had one.
-    pub channel: Option<ChannelNum>,
-    pub signal: f64,
-    pub noise: f64,
-    pub start_time: i64,
-    pub stop_time: i64,
-    pub error_count: i64,
-    pub spike_count: i64,
-    pub encrypted: bool,
-    pub emergency: bool,
-    pub priority: i32,
-    pub mode: bool,
-    pub duplex: bool,
-    pub sys_num: i32,
-    pub short_name: String,
-    /// The [`crate::Kind::NAME`] of its channel; empty if it had none.
-    pub kind: &'static str,
-    pub tdma_slot: i32,
-    pub length: f64,
-    pub phase2_tdma: bool,
-    pub transmission_source_list: Vec<CallSource>,
-    pub transmission_error_list: Vec<CallError>,
-    pub transmission_list: Vec<Transmission>,
-    pub status: CallDataStatus,
-}
-
-/// Live-call info for events (call start, calls active, signal).
-#[derive(Debug, Clone, PartialEq)]
-#[allow(clippy::struct_excessive_bools)]
-pub struct CallInfo {
-    pub talkgroup: i64,
-    pub call_num: i64,
-    pub sys_num: i32,
-    pub freq: f64,
-    pub signal: f64,
-    pub noise: f64,
-    pub freq_error: i32,
-    pub encrypted: bool,
-    pub emergency: bool,
-    /// The [`crate::Kind::NAME`] of its channel; empty if it has none.
-    pub kind: &'static str,
-    pub is_conventional: bool,
-    pub phase2_tdma: bool,
-    pub tdma_slot: i32,
-    pub priority: i32,
-    pub mode: bool,
-    pub duplex: bool,
-    pub conversation_mode: bool,
-    pub current_source_id: i64,
-    pub start_time: i64,
-    pub elapsed: f64,
-    pub short_name: String,
-    pub call_state: i32,
 }
 
 /// A call as the state machine numbers it: what audio and in-band events
@@ -348,26 +248,6 @@ pub struct DetectedSignal {
     pub threshold: i32,
 }
 
-/// Full system info built from config and identity.
-#[derive(Debug, Clone)]
-pub struct SystemInfo {
-    pub sys_num: i32,
-    pub system_type: i32,
-    pub short_name: String,
-    pub sys_id: u64,
-    pub wacn: u64,
-    pub nac: u64,
-    pub rfss: i32,
-    pub site_id: i32,
-    pub bandplan: String,
-    pub analog_levels: f64,
-    pub digital_levels: f64,
-    pub squelch_db: f64,
-    pub conversation_mode: bool,
-    pub message_count: i32,
-    pub decode_rate: i32,
-}
-
 /// An alias a radio sent over the air.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UnitAlias {
@@ -376,19 +256,6 @@ pub struct UnitAlias {
     /// Which decoder found it (`MotoP25_FDMA`, `HarrisP25_TDMA`, …).
     pub source: String,
     pub talkgroup_id: i64,
-}
-
-/// dB value meaning "no measurement" where a struct carries a plain `f64`.
-pub const NO_SIGNAL_DB: f64 = 998.0;
-
-#[must_use]
-pub fn signal_to_ffi(value: Option<f64>) -> f64 {
-    value.unwrap_or(NO_SIGNAL_DB)
-}
-
-#[must_use]
-pub fn signal_from_ffi(value: f64) -> Option<f64> {
-    (value < NO_SIGNAL_DB).then_some(value)
 }
 
 /// What a transmission detector decided.

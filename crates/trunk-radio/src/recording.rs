@@ -105,10 +105,7 @@ impl Accounting {
             i64::try_from(t.duration_since(UNIX_EPOCH).map_or(0, |d| d.as_secs())).unwrap_or(0)
         };
         Some(Transmission {
-            source: 0,
             talkgroup: self.talkgroup,
-            slot: 0,
-            color_code: 0,
             start_time: secs(self.start),
             stop_time: secs(SystemTime::now()),
             sample_count: self.sample_count,

@@ -717,41 +717,28 @@ impl TrunkRecorderBuilder {
 
         // Fire setup events now that systems are initialized
         {
-            let infos: Vec<trunk_radio::SystemInfo> = system_policies
-                .iter()
-                .map(|(&sys_idx, policy)| {
-                    use trunk_oxide_grpc::proto::SystemType as P;
-                    let system_type = match policy.system_type {
-                        trunk_config::SystemType::Conventional => P::Conventional as i32,
-                        trunk_config::SystemType::ConventionalP25 => P::ConventionalP25 as i32,
-                        trunk_config::SystemType::ConventionalDMR => P::ConventionalDmr as i32,
-                        trunk_config::SystemType::ConventionalSigmf => P::ConventionalSigmf as i32,
-                        trunk_config::SystemType::Smartnet => P::Smartnet as i32,
-                        trunk_config::SystemType::P25 => P::P25 as i32,
-                    };
-                    trunk_radio::SystemInfo {
-                        sys_num: sys_idx,
-                        system_type,
-                        short_name: policy.short_name.clone(),
-                        sys_id: policy.sys_id,
-                        wacn: policy.wacn,
-                        nac: policy.nac,
-                        rfss: 0,
-                        site_id: 0,
-                        bandplan: policy.bandplan.clone(),
-                        analog_levels: policy.analog_levels,
-                        digital_levels: policy.digital_levels,
-                        squelch_db: policy.squelch_db,
-                        conversation_mode: policy.conversation_mode,
-                        message_count: 0,
-                        decode_rate: 0,
-                    }
+            let mut systems: Vec<_> = system_policies.iter().collect();
+            systems.sort_by_key(|(sys_num, _)| **sys_num);
+            let infos: Vec<_> = systems
+                .into_iter()
+                .map(|(_, policy)| trunk_oxide_grpc::proto::SystemInfo {
+                    system_type: call_manager::proto_system_type(policy.system_type) as i32,
+                    short_name: policy.short_name.clone(),
+                    sys_id: policy.sys_id,
+                    wacn: policy.wacn,
+                    nac: policy.nac,
+                    bandplan: policy.bandplan.clone(),
+                    analog_levels: policy.analog_levels,
+                    digital_levels: policy.digital_levels,
+                    squelch_db: policy.squelch_db,
+                    conversation_mode: policy.conversation_mode,
+                    ..Default::default()
                 })
                 .collect();
-            bridge.setup_config(&infos);
             for info in &infos {
-                bridge.setup_system(info);
+                bridge.setup_system(info.clone());
             }
+            bridge.setup_config(infos);
         }
 
         let temp_dir = rec.map_or_else(
@@ -924,7 +911,7 @@ impl TrunkRecorder {
                                     let sys_msgs: Vec<TrunkMessage> =
                                         indices.iter().map(|&i| messages[i].clone()).collect();
                                     let info = call_mgr.get_system_info(sys_num);
-                                    self.bridge.trunk_message(&sys_msgs, &info);
+                                    self.bridge.trunk_message(&sys_msgs, info);
                                 }
                             }
                             for msg in &messages {

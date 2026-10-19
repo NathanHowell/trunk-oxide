@@ -168,7 +168,7 @@ fn message_type_name(t: i32) -> String {
 fn call_info_json(c: &proto::CallInfo) -> Value {
     json!({
         "system": c.short_name, "talkgroup": c.talkgroup, "call_num": c.call_num,
-        "freq": c.freq, "signal": c.signal, "noise": c.noise, "freq_error": c.freq_error,
+        "freq": c.freq, "signal": c.signal, "noise": c.noise,
         "encrypted": c.encrypted, "emergency": c.emergency, "kind": c.kind,
         "conventional": c.is_conventional, "tdma": c.phase2_tdma, "slot": c.tdma_slot,
         "source_id": c.current_source_id, "tag": c.talkgroup_alpha_tag,
@@ -292,6 +292,7 @@ impl Recorder {
                 );
             }
             Event::CallEnd(ce) => {
+                let reason = ce.reason().as_str_name();
                 let Some(d) = ce.call_data else { return };
                 let (secs, rate) = self
                     .open
@@ -330,7 +331,7 @@ impl Recorder {
                         "noise": d.noise, "length": round(d.length, 3), "audio_seconds": round(secs, 3),
                         "audio_rate": rate, "errors": d.error_count, "spikes": d.spike_count,
                         "encrypted": d.encrypted, "tdma": d.phase2_tdma, "slot": d.tdma_slot,
-                        "status": d.status, "sources": d.sources.iter().map(|s| s.source).collect::<Vec<_>>(),
+                        "reason": reason, "channel": d.channel, "kind": d.kind,
                         "transmissions": d.transmissions.len(),
                     }),
                 );

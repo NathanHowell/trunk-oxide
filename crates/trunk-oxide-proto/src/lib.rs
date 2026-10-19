@@ -133,8 +133,6 @@ mod tests {
                 digital_levels: 1.0,
                 squelch_db: -50.0,
                 conversation_mode: false,
-                message_count: 42,
-                decode_rate: 10,
             }),
         };
         check_encoded_len(&event, "TrunkMessageEvent");
@@ -154,7 +152,6 @@ mod tests {
                 PluginEvent {
                     event: Some(plugin_event::Event::Signal(SignalEvent {
                         unit_id: 12345,
-                        signaling_type: "normal".to_string(),
                         signal_type: SignalType::Normal as i32,
                         call: Some(CallInfo {
                             talkgroup: 1001,
@@ -181,15 +178,16 @@ mod tests {
                 },
             ),
             (
-                "SystemRates",
+                "CallEnd",
                 PluginEvent {
-                    event: Some(plugin_event::Event::SystemRates(SystemRatesEvent {
-                        systems: vec![SystemInfo {
-                            short_name: "smco".to_string(),
-                            decode_rate: 42,
+                    event: Some(plugin_event::Event::CallEnd(CallEndEvent {
+                        call_data: Some(CallData {
+                            talkgroup: 1001,
+                            channel: Some(3),
+                            kind: "p25".to_string(),
                             ..Default::default()
-                        }],
-                        time_diff: 1.5,
+                        }),
+                        reason: CallEndReason::Evicted as i32,
                     })),
                 },
             ),
@@ -360,8 +358,6 @@ mod tests {
                 nac: 0x5AB,
                 rfss: 1,
                 site_id: 1,
-                message_count: 500,
-                decode_rate: 15,
                 ..Default::default()
             }),
         };

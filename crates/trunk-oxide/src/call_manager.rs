@@ -7,13 +7,12 @@ use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Gauge, Histogram};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 use trunk_radio::{
-    CallData, CallDataStatus, ChannelNum, ChannelReport, DetectedSignal, Radio, TrunkMessage,
-    Trunking,
+    ChannelNum, ChannelReport, DetectedSignal, Radio, Squelch, TrunkMessage, Trunking,
 };
-use trunk_radio::{Squelch, SystemInfo};
 
 use trunk_config::SystemType;
 use trunk_oxide_grpc::EventBridge;
+use trunk_oxide_grpc::proto;
 use trunk_oxide_grpc::proto::SystemType as ProtoSystemType;
 
 use crate::ConventionalMetricsSnapshot;
@@ -40,14 +39,15 @@ fn traceparent_of(span: &tracing::Span) -> String {
 
 use trunk_oxide_grpc::AudioMeta;
 
-const fn system_type_to_proto(st: SystemType) -> i32 {
+/// A system's type as the wire says it.
+pub(crate) const fn proto_system_type(st: SystemType) -> ProtoSystemType {
     match st {
-        SystemType::Conventional => ProtoSystemType::Conventional as i32,
-        SystemType::ConventionalP25 => ProtoSystemType::ConventionalP25 as i32,
-        SystemType::ConventionalDMR => ProtoSystemType::ConventionalDmr as i32,
-        SystemType::ConventionalSigmf => ProtoSystemType::ConventionalSigmf as i32,
-        SystemType::Smartnet => ProtoSystemType::Smartnet as i32,
-        SystemType::P25 => ProtoSystemType::P25 as i32,
+        SystemType::Conventional => ProtoSystemType::Conventional,
+        SystemType::ConventionalP25 => ProtoSystemType::ConventionalP25,
+        SystemType::ConventionalDMR => ProtoSystemType::ConventionalDmr,
+        SystemType::ConventionalSigmf => ProtoSystemType::ConventionalSigmf,
+        SystemType::Smartnet => ProtoSystemType::Smartnet,
+        SystemType::P25 => ProtoSystemType::P25,
     }
 }
 
@@ -558,7 +558,7 @@ impl CallManager {
                 Effect::Open { call_id } => self.exec_open(call_id),
                 Effect::Close { call_id } => {
                     if let Some(report) = self.radio.close(call_id) {
-                        self.bridge.setup_recorder(report.num);
+                        self.bridge.setup_recorder(report.num, report.freq_error);
                         self.channel_ended(call_id, report);
                     }
                 }
@@ -632,7 +632,7 @@ impl CallManager {
                         (span, traceparent, info)
                     });
                     if let Some((span, traceparent, info)) = started {
-                        self.bridge.call_start(&info, traceparent);
+                        self.bridge.call_start(info, traceparent);
                         self.call_spans.insert(call_id, span);
                         self.record_channel(call_id);
                     }
@@ -672,17 +672,17 @@ impl CallManager {
                     }
                 }
                 Effect::EmitCallsActive => {
-                    let infos: Vec<trunk_radio::CallInfo> = self
+                    let infos = self
                         .state
                         .iter_calls()
                         .map(|v| self.build_call_info_from_view(&v))
                         .collect();
-                    self.bridge.calls_active(&infos);
+                    self.bridge.calls_active(infos);
                 }
                 Effect::EmitSignal { call_id, source_id } => {
                     if let Some(view) = self.state.get_call_view(call_id) {
                         let info = self.build_call_info_from_view(&view);
-                        self.bridge.signal(source_id, &info);
+                        self.bridge.signal(source_id, info);
                     }
                 }
                 Effect::EmitUnitEvent {
@@ -692,11 +692,11 @@ impl CallManager {
                     talkgroup,
                 } => {
                     let info = self.get_system_info(sys_num);
-                    self.bridge.unit_event(&info, type_, source_id, talkgroup);
+                    self.bridge.unit_event(info, type_, source_id, talkgroup);
                 }
                 Effect::EmitSetupSystem { sys_num } => {
                     let info = self.get_system_info(sys_num);
-                    self.bridge.setup_system(&info);
+                    self.bridge.setup_system(info);
                 }
                 Effect::RemoveCall { call_id } => {
                     self.tallies.remove(&call_id);
@@ -729,16 +729,15 @@ impl CallManager {
         };
         call.channel.freq_hz += self.correction_hz(call.channel.freq_hz);
         let opened = recipe.open(&self.radio, &call);
-        match &opened {
-            Ok(num) => self.bridge.setup_recorder(*num),
-            Err(e) => self.channel_open_failed.add(
+        if let Err(e) = &opened {
+            self.channel_open_failed.add(
                 1,
                 &[
                     KeyValue::new("short_name", self.short_name_of(call.sys_num)),
                     KeyValue::new("kind", recipe.kind()),
                     KeyValue::new("reason", crate::call_state::RejectReason::from(e).as_str()),
                 ],
-            ),
+            );
         }
         let followup = self.state.on_opened(id, opened);
         self.record_channel(id);
@@ -926,9 +925,8 @@ impl CallManager {
                     "concluding a recording call with no channel"
                 );
             }
-            let data = self.build_call_data(call_id);
-            self.bridge
-                .call_end(&data, &segments, is_conventional, reason.to_proto());
+            let data = self.call_data(&view, segments, is_conventional);
+            self.bridge.call_end(data, reason.to_proto());
             return;
         }
 
@@ -966,22 +964,16 @@ impl CallManager {
                 .record(delta.after_term_samples as f64 / 8.0, &voice_attrs);
         }
 
-        let mut data = self.build_call_data(call_id);
-        data.channel = channel;
+        let mut data = self.call_data(&view, segments, is_conventional && !boundary);
+        data.channel = channel.map(|c| c.0);
         data.length = recording_length;
-        if boundary {
-            data.error_count = delta.errors;
-            data.spike_count = delta.spikes;
-        } else {
+        data.error_count = delta.errors;
+        data.spike_count = delta.spikes;
+        if !boundary {
             data.freq_error = freq_error;
-            data.transmission_list = transmissions;
+            data.transmissions = transmissions.iter().map(proto_transmission).collect();
         }
-        self.bridge.call_end(
-            &data,
-            &segments,
-            is_conventional && !boundary,
-            reason.to_proto(),
-        );
+        self.bridge.call_end(data, reason.to_proto());
 
         if boundary {
             // The call goes on: its later boundaries report from here.
@@ -1423,7 +1415,7 @@ impl CallManager {
         self.process_effects(effects);
     }
 
-    pub(crate) fn get_system_info(&self, sys_num: i32) -> SystemInfo {
+    pub(crate) fn get_system_info(&self, sys_num: i32) -> proto::SystemInfo {
         let policy = self
             .state
             .config
@@ -1431,10 +1423,8 @@ impl CallManager {
             .get(&sys_num)
             .unwrap_or(&crate::call_state::DEFAULT_POLICY);
         let id = self.state.system_identities.get(&sys_num);
-
-        SystemInfo {
-            sys_num,
-            system_type: system_type_to_proto(policy.system_type),
+        proto::SystemInfo {
+            system_type: proto_system_type(policy.system_type) as i32,
             short_name: policy.short_name.clone(),
             sys_id: id.map_or(0, |id| id.sys_id),
             wacn: id.map_or(0, |id| id.wacn),
@@ -1446,8 +1436,6 @@ impl CallManager {
             digital_levels: policy.digital_levels,
             squelch_db: policy.squelch_db,
             conversation_mode: policy.conversation_mode,
-            message_count: 0,
-            decode_rate: 0,
         }
     }
 
@@ -1501,21 +1489,18 @@ impl CallManager {
         }
     }
 
-    // ── Helper: build CallInfo from CallView ──
+    // ── The wire ──
 
-    fn build_call_info_from_view(&self, view: &CallView<'_>) -> trunk_radio::CallInfo {
-        let elapsed = self.state.clock().since(view.start_time());
-        trunk_radio::CallInfo {
+    fn build_call_info_from_view(&self, view: &CallView<'_>) -> proto::CallInfo {
+        proto::CallInfo {
             talkgroup: view.talkgroup(),
             call_num: view.call_num(),
-            sys_num: view.sys_num(),
             freq: view.freq().as_hz(),
-            signal: trunk_radio::signal_to_ffi(view.signal()),
-            noise: trunk_radio::signal_to_ffi(view.noise()),
-            freq_error: 0,
+            signal: view.signal(),
+            noise: view.noise(),
             encrypted: view.encrypted(),
             emergency: view.emergency(),
-            kind: view.kind(),
+            kind: view.kind().to_owned(),
             is_conventional: view.is_conventional(),
             phase2_tdma: view.phase2_tdma(),
             tdma_slot: view.tdma_slot(),
@@ -1524,23 +1509,25 @@ impl CallManager {
             duplex: view.duplex(),
             conversation_mode: view.trunked_fields().is_some_and(|t| t.conversation_mode),
             current_source_id: view.current_source_id(),
-            start_time: crate::call_state::system_time_to_unix(
-                self.state.clock().wall(view.start_time()),
-            ),
-            elapsed: elapsed.as_secs_f64(),
+            start_time: Some(self.timestamp(view.start_time())),
+            elapsed: Some(prost_duration(self.state.clock().since(view.start_time()))),
             short_name: view.short_name().to_owned(),
             call_state: view.state().to_proto(),
+            ..Default::default()
         }
     }
 
-    fn build_call_data(&self, call_id: CallId) -> CallData {
-        let view = self.state.get_call_view(call_id).unwrap();
-
-        let now = crate::call_state::system_time_to_unix(self.state.clock().wall_now());
-
-        CallData {
+    /// The call's end as the wire says it; the caller fills in what it
+    /// recorded.
+    fn call_data(
+        &self,
+        view: &CallView<'_>,
+        segments: Vec<proto::CallSegment>,
+        is_conventional: bool,
+    ) -> proto::CallData {
+        let unix = |t| crate::call_state::system_time_to_unix(t);
+        proto::CallData {
             talkgroup: view.talkgroup(),
-            color_code: 0,
             patched_talkgroups: self
                 .state
                 .patch_tables
@@ -1548,38 +1535,43 @@ impl CallManager {
                 .map(|pt| {
                     pt.get_patch(Talkgroup(view.talkgroup()))
                         .into_iter()
-                        .map(|t| t.0 as u64)
+                        .filter_map(|t| u64::try_from(t.0).ok())
                         .collect()
                 })
                 .unwrap_or_default(),
             call_num: view.call_num(),
             freq: view.freq().as_hz(),
-            freq_error: 0,
-            source_num: 0,
-            channel: view.channel(),
-            signal: trunk_radio::signal_to_ffi(view.signal()),
-            noise: trunk_radio::signal_to_ffi(view.noise()),
-            start_time: crate::call_state::system_time_to_unix(
-                self.state.clock().wall(view.start_time()),
-            ),
-            stop_time: now,
-            error_count: 0,
-            spike_count: 0,
+            channel: view.channel().map(|c| c.0),
+            signal: view.signal(),
+            noise: view.noise(),
+            start_time: unix(self.state.clock().wall(view.start_time())),
+            stop_time: unix(self.state.clock().wall_now()),
             encrypted: view.encrypted(),
             emergency: view.emergency(),
             priority: view.priority(),
             mode: view.mode(),
             duplex: view.duplex(),
-            sys_num: view.sys_num(),
             short_name: view.short_name().to_owned(),
-            kind: view.kind(),
+            kind: view.kind().to_owned(),
             tdma_slot: view.tdma_slot(),
-            length: 0.0,
             phase2_tdma: view.phase2_tdma(),
-            transmission_source_list: Vec::new(),
-            transmission_error_list: Vec::new(),
-            transmission_list: Vec::new(),
-            status: CallDataStatus::Initial,
+            segments,
+            is_conventional,
+            ..Default::default()
+        }
+    }
+
+    /// `at` on the wall clock.
+    fn timestamp(&self, at: Instant) -> prost_types::Timestamp {
+        let since_epoch = self
+            .state
+            .clock()
+            .wall(at)
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        prost_types::Timestamp {
+            seconds: i64::try_from(since_epoch.as_secs()).unwrap_or(i64::MAX),
+            nanos: i32::try_from(since_epoch.subsec_nanos()).unwrap_or(0),
         }
     }
 
@@ -1588,7 +1580,7 @@ impl CallManager {
         call_id: CallId,
         final_freq: Freq,
         final_channel: Option<ChannelNum>,
-    ) -> Vec<trunk_oxide_grpc::proto::CallSegment> {
+    ) -> Vec<proto::CallSegment> {
         let view = match self.state.get_call_view(call_id) {
             Some(v) => v,
             None => return vec![],
@@ -1621,25 +1613,33 @@ impl CallManager {
         start: Instant,
         end: Instant,
         channel: Option<ChannelNum>,
-    ) -> trunk_oxide_grpc::proto::CallSegment {
-        use prost_types::{Duration as ProstDuration, Timestamp};
-        let elapsed = end.saturating_duration_since(start);
-        let wall_start = self.state.clock().wall(start);
-        let since_epoch = wall_start
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap_or_default();
-        trunk_oxide_grpc::proto::CallSegment {
+    ) -> proto::CallSegment {
+        proto::CallSegment {
             freq,
-            start_time: Some(Timestamp {
-                seconds: since_epoch.as_secs() as i64,
-                nanos: since_epoch.subsec_nanos() as i32,
-            }),
-            duration: Some(ProstDuration {
-                seconds: elapsed.as_secs() as i64,
-                nanos: elapsed.subsec_nanos() as i32,
-            }),
+            start_time: Some(self.timestamp(start)),
+            duration: Some(prost_duration(end.saturating_duration_since(start))),
             channel: channel.map(|c| c.0),
         }
+    }
+}
+
+fn prost_duration(d: std::time::Duration) -> prost_types::Duration {
+    prost_types::Duration {
+        seconds: i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
+        nanos: i32::try_from(d.subsec_nanos()).unwrap_or(0),
+    }
+}
+
+/// A recording's accounting as the wire lists it.
+fn proto_transmission(t: &trunk_radio::Transmission) -> proto::Transmission {
+    proto::Transmission {
+        talkgroup: t.talkgroup,
+        start_time: t.start_time,
+        stop_time: t.stop_time,
+        sample_count: t.sample_count,
+        spike_count: t.spike_count,
+        error_count: t.error_count,
+        freq: t.freq,
     }
 }
 
@@ -1649,10 +1649,7 @@ mod tests {
 
     fn tx(error_count: i64, spike_count: i64, sample_count: i64) -> trunk_radio::Transmission {
         trunk_radio::Transmission {
-            source: 0,
             talkgroup: 0,
-            slot: 0,
-            color_code: 0,
             start_time: 0,
             stop_time: 0,
             sample_count,

@@ -27,8 +27,6 @@ pub enum AggregatorMessage {
     CallsActive(proto::CallsActiveEvent),
     SetupRecorder(proto::SetupRecorderEvent),
     SetupSystem(proto::SetupSystemEvent),
-    SetupSystems(proto::SetupSystemsEvent),
-    SetupSources(proto::SetupSourcesEvent),
     SetupConfig(proto::SetupConfigEvent),
 }
 
@@ -237,8 +235,6 @@ fn convert_message(msg: AggregatorMessage) -> AggMessage {
         AggregatorMessage::CallsActive(e) => AggMessage::CallsActive(e),
         AggregatorMessage::SetupRecorder(e) => AggMessage::SetupRecorder(e),
         AggregatorMessage::SetupSystem(e) => AggMessage::SetupSystem(e),
-        AggregatorMessage::SetupSystems(e) => AggMessage::SetupSystems(e),
-        AggregatorMessage::SetupSources(e) => AggMessage::SetupSources(e),
         AggregatorMessage::SetupConfig(e) => AggMessage::SetupConfig(e),
     }
 }

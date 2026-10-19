@@ -31,8 +31,7 @@ message AudioSample {
   double freq = 3;
   bytes samples = 4; // int16 PCM, little-endian
   int32 sample_rate = 5;
-  // Stable system identity. sys_num is assigned at startup and is not stable
-  // across restarts, so consumers should key on this.
+  // Stable system identity: consumers key on this, not on a system number.
   string short_name = 6;
 }
 

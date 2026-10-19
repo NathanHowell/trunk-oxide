@@ -106,7 +106,7 @@ fn delayed_interval(period: Duration) -> tokio::time::Interval {
     tokio::time::interval_at(tokio::time::Instant::now() + period, period)
 }
 use call_manager::CallManager;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use trunk_config::{
     ConditionerReset, Config, DefaultMode, Modulation, SourceConfig, SourceDriver, SystemType,
@@ -580,8 +580,12 @@ impl TrunkRecorderBuilder {
         }
 
         // ── Systems ──
+        // Numbered in short-name order, so a system keeps its number across
+        // restarts and config edits that add or remove others after it.
+        let mut systems: Vec<_> = config.system.iter().collect();
+        systems.sort_by_key(|(name, _)| name.as_str());
         let mut system_policies = HashMap::new();
-        for (sys_idx, (short_name, sys)) in (0i32..).zip(&config.system) {
+        for (sys_idx, (short_name, sys)) in (0i32..).zip(systems) {
             let kind = match sys.system_type {
                 SystemType::P25 => SystemKind::P25,
                 SystemType::Conventional => SystemKind::Conventional,
@@ -754,7 +758,10 @@ impl TrunkRecorderBuilder {
     /// main loop.
     pub fn start(self) -> TrunkRecorder {
         let mut pending_conventional_calls = Vec::new();
-        for (&sys_num, policy) in &self.call_mgr_config.systems {
+        // In system order, so recorder numbers are the same run to run.
+        let mut systems: Vec<_> = self.call_mgr_config.systems.iter().collect();
+        systems.sort_by_key(|(sys_num, _)| **sys_num);
+        for (&sys_num, policy) in systems {
             for (ch_idx, channel) in policy.channels.iter().enumerate() {
                 let freq_hz = channel.freq.as_hz();
                 let Some(source_idx) = self
@@ -882,7 +889,7 @@ impl TrunkRecorder {
                                 })
                                 .collect();
                             if !messages.is_empty() {
-                                let mut by_system: HashMap<i32, Vec<usize>> = HashMap::new();
+                                let mut by_system: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
                                 for (i, msg) in messages.iter().enumerate() {
                                     by_system.entry(msg.sys_num).or_default().push(i);
                                 }

@@ -83,6 +83,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libgnuradio-runtime3.10.12 \
     libgnuradio-uhd3.10.12 \
     libgnuradio-osmosdr0.2.0t64 \
+    librtlsdr0 \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=health-probe /ko-app/grpc-health-probe /usr/local/bin/grpc_health_probe

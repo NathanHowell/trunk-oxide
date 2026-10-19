@@ -1,0 +1,15 @@
+[package]
+name = "trunk-rtlsdr-sys"
+description = "librtlsdr bindings: the RTL2832U dongle as a device handle, with a safe wrapper around every call trunk-oxide makes."
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+links = "rtlsdr"
+
+[dependencies]
+
+[build-dependencies]
+pkg-config.workspace = true
+
+[lints]
+workspace = true

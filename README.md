@@ -27,8 +27,8 @@ call_timeout = 3.0
 soft_vocoder = true
 
 [[source]]
-driver = "osmosdr"
-device = "rtl=0"
+driver = "rtlsdr"      # trunk-oxide opens the dongle itself (librtlsdr); "osmosdr" uses gr-osmosdr
+device = "rtl=00000001" # the dongle's USB serial
 center = 771496500.0
 rate = 2496000.0
 gain = 40.0

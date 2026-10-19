@@ -198,6 +198,13 @@ pub struct CallManager {
     chz_active: Gauge<u64>,
     /// Counters seen at the previous poll, by source, for delta computation.
     chz_prev: HashMap<i32, trunk_recorder_sys::ChannelizerCounters>,
+    /// Host-owned SDR streams (trunk-sdr), polled at the 1 Hz tick.
+    src_samples: Counter<u64>,
+    src_dropped: Counter<u64>,
+    src_drops: Counter<u64>,
+    src_streaming: Gauge<u64>,
+    /// Stream counters at the previous poll, by device serial.
+    src_prev: HashMap<String, trunk_sdr::StreamStats>,
     p25_metrics: crate::p25_metrics::P25Metrics,
     fm_metrics: crate::fm_metrics::FmMetrics,
     /// Cumulative overruns per source as of the last poll.
@@ -381,6 +388,23 @@ impl CallManager {
                 .with_description("Channels currently enabled on the shared channelizer")
                 .build(),
             chz_prev: HashMap::new(),
+            src_samples: meter
+                .u64_counter("trunk.oxide.source.samples")
+                .with_description("Samples a host-owned SDR stream delivered to the channelizer's queue")
+                .build(),
+            src_dropped: meter
+                .u64_counter("trunk.oxide.source.dropped_samples")
+                .with_description("Samples dropped at the SDR stream because the channelizer fell behind")
+                .build(),
+            src_drops: meter
+                .u64_counter("trunk.oxide.source.drops")
+                .with_description("Times an SDR stream dropped a block")
+                .build(),
+            src_streaming: meter
+                .u64_gauge("trunk.oxide.source.streaming")
+                .with_description("1 while the SDR stream's reader is delivering")
+                .build(),
+            src_prev: HashMap::new(),
             p25_metrics: crate::p25_metrics::P25Metrics::new(&meter),
             fm_metrics: crate::fm_metrics::FmMetrics::new(&meter),
             chz_overruns_total: HashMap::new(),
@@ -1465,6 +1489,24 @@ impl CallManager {
         }
     }
 
+    /// Export every host-owned SDR stream's counters since the last tick.
+    fn poll_sources(&mut self) {
+        let streams = trunk_sdr::streams();
+        self.src_prev
+            .retain(|k, _| streams.iter().any(|(l, _)| l == k));
+        for (label, now) in streams {
+            let attrs = [KeyValue::new("device", label.clone())];
+            let was = self.src_prev.insert(label, now).unwrap_or_default();
+            self.src_samples
+                .add(now.samples.saturating_sub(was.samples), &attrs);
+            self.src_dropped
+                .add(now.dropped.saturating_sub(was.dropped), &attrs);
+            self.src_drops
+                .add(now.drops.saturating_sub(was.drops), &attrs);
+            self.src_streaming.record(u64::from(now.running), &attrs);
+        }
+    }
+
     /// Read every shared channelizer's counters (called at the 1 Hz tick),
     /// export the deltas as metrics, and fold the interval's worst block into
     /// each in-flight call on that source.
@@ -1531,6 +1573,7 @@ impl CallManager {
     }
 
     pub fn tick(&mut self, mut ctx: Pin<&mut TrContext>) {
+        self.poll_sources();
         self.poll_channelizers();
         self.p25_metrics.poll();
         self.fm_metrics.poll();

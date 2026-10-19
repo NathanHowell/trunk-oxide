@@ -452,6 +452,9 @@ public:
         spec.talkgroup = s.talkgroup;
         h_->set_control_decoder(port, spec);
     }
+    void set_signal_detector(double center_hz, bool auto_threshold, float threshold_db) override {
+        h_->set_signal_detector(center_hz, auto_threshold, threshold_db);
+    }
     void set_event_notifier(rust::Box<EventNotifier> n) { h_->set_event_notifier(std::move(n)); }
     void process(const gr_complex *in, size_t nports, gr_complex *out, uint32_t *produced) override {
         h_->process(rust::Slice<const float>(reinterpret_cast<const float *>(in), 2 * hop_),
@@ -469,29 +472,25 @@ private:
 
 // ── Source builder implementations ──
 
-int32_t tr_add_source_from_config(TrContext &ctx, const TrSourceConfig &cfg) {
-    std::string drv(cfg.driver.data(), cfg.driver.size());
-    std::string dev(cfg.device.data(), cfg.device.size());
-    // "iqfile": `device` is the path to a raw IQ file (cf32 or cu8), paced at
-    // the source rate; looped unless `iq_repeat` is false. Used for
-    // hardware-free testing (tests/generate_test_iq.py) and offline replay.
-    auto source = (drv == "iqfile")
-        ? std::make_shared<Source>(dev, cfg.iq_repeat, cfg.center, cfg.rate, ctx.impl->trunk_ctx.config,
-                                   std::string(cfg.iq_format.data(), cfg.iq_format.size()))
-        : std::make_shared<Source>(cfg.center, cfg.rate, cfg.error, drv, dev,
-                                   ctx.impl->trunk_ctx.config);
-    source->init_shared();
+namespace {
+// The GNU Radio side of a trunk-sdr stream.
+class RustIqStream : public iq_stream {
+public:
+    explicit RustIqStream(rust::Box<IqStreamHandle> h) : h_(std::move(h)) {}
+    size_t read(gr_complex *out, size_t n) override {
+        return h_->read(rust::Slice<float>(reinterpret_cast<float *>(out), 2 * n));
+    }
+    bool ended() override { return h_->ended(); }
 
-    if (cfg.agc) source->set_gain_mode(true);
-    if (cfg.gain != 0.0) source->set_gain(cfg.gain);
-    if (cfg.ppm != 0.0) source->set_freq_corr(cfg.ppm);
-    if (!cfg.antenna.empty()) source->set_antenna(std::string(cfg.antenna.data(), cfg.antenna.size()));
+private:
+    rust::Box<IqStreamHandle> h_;
+};
+
+// What every source gets once its device (or file, or stream) exists:
+// detector settings, the channelizer, its recorder pool, and its index.
+int32_t add_source(TrContext &ctx, const TrSourceConfig &cfg, std::shared_ptr<Source> source) {
     if (cfg.silence_frames != 0) source->set_silence_frames(cfg.silence_frames);
     if (cfg.has_signal_detector_threshold) source->set_signal_detector_threshold(static_cast<float>(cfg.signal_detector_threshold));
-
-    for (const auto &gs : cfg.gain_stages) {
-        source->set_gain_by_name(std::string(gs.name.data(), gs.name.size()), gs.value);
-    }
 
     auto &tb = ctx.impl->trunk_ctx.tb;
     int32_t idx = static_cast<int32_t>(ctx.impl->trunk_ctx.sources.size());
@@ -504,6 +503,34 @@ int32_t tr_add_source_from_config(TrContext &ctx, const TrSourceConfig &cfg) {
 
     ctx.impl->trunk_ctx.sources.push_back(source);
     return idx;
+}
+} // namespace
+
+int32_t tr_add_stream_source(TrContext &ctx, const TrSourceConfig &cfg, rust::Box<IqStreamHandle> stream) {
+    std::string dev(cfg.device.data(), cfg.device.size());
+    auto source = std::make_shared<Source>(cfg.center, cfg.rate, cfg.error, dev,
+                                           std::make_shared<RustIqStream>(std::move(stream)),
+                                           ctx.impl->trunk_ctx.config);
+    source->init_shared();
+    return add_source(ctx, cfg, std::move(source));
+}
+
+int32_t tr_add_source_from_config(TrContext &ctx, const TrSourceConfig &cfg) {
+    std::string drv(cfg.driver.data(), cfg.driver.size());
+    std::string dev(cfg.device.data(), cfg.device.size());
+    auto source = std::make_shared<Source>(cfg.center, cfg.rate, cfg.error, drv, dev,
+                                           ctx.impl->trunk_ctx.config);
+    source->init_shared();
+
+    if (cfg.agc) source->set_gain_mode(true);
+    if (cfg.gain != 0.0) source->set_gain(cfg.gain);
+    if (cfg.ppm != 0.0) source->set_freq_corr(cfg.ppm);
+    if (!cfg.antenna.empty()) source->set_antenna(std::string(cfg.antenna.data(), cfg.antenna.size()));
+
+    for (const auto &gs : cfg.gain_stages) {
+        source->set_gain_by_name(std::string(gs.name.data(), gs.name.size()), gs.value);
+    }
+    return add_source(ctx, cfg, std::move(source));
 }
 
 rust::String tr_system_short_name(const TrSystem &sys) {
@@ -816,29 +843,8 @@ void tr_context_wire_event_notifiers(TrContext &ctx) {
         }
     }
 
-    // Phase 4: wire signal detection callbacks on sources
-    // The callback receives detected signals directly from the signal detector's
-    // work() method and passes them to Rust for frequency matching and routing.
-    for (auto &source : ctx.impl->trunk_ctx.sources) {
-        auto notifier = bridge->make_notifier();
-        int src_num = source->get_num();
-        double center = source->get_center();
-        source->set_detection_callback(
-            [notifier = std::make_shared<rust::Box<EventNotifier>>(std::move(notifier)),
-             src_num, center](std::vector<Detected_Signal> signals) {
-                rust::Vec<TrDetectedSignal> rust_signals;
-                for (const auto &s : signals) {
-                    TrDetectedSignal rs;
-                    rs.center_freq = s.center_freq;
-                    rs.max_rssi = s.max_rssi;
-                    rs.threshold = s.threshold;
-                    rust_signals.push_back(rs);
-                }
-                event_notifier_notify_signals_detected(
-                    **notifier, src_num, center, std::move(rust_signals));
-            });
-    }
-
+    // Signal detections come from the Rust channelizer, through the
+    // notifier each source's backend already has.
 }
 
 void tr_context_check_sources(TrContext &ctx) {

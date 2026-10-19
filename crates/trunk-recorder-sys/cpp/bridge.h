@@ -99,6 +99,8 @@ struct TrChannelConfig;
 struct TrDetectedSignal;
 struct TrUnitTagConfig;
 int32_t tr_add_source_from_config(TrContext &ctx, const TrSourceConfig &cfg);
+struct IqStreamHandle;
+int32_t tr_add_stream_source(TrContext &ctx, const TrSourceConfig &cfg, rust::Box<IqStreamHandle> stream);
 int32_t tr_add_system_from_config(TrContext &ctx, const TrSystemConfig &cfg);
 
 // ── Event channel wiring ──

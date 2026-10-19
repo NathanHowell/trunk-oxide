@@ -486,6 +486,13 @@ pub mod ffi {
         // ── Bulk source/system builder functions ──
         fn tr_add_source_from_config(ctx: Pin<&mut TrContext>, cfg: &TrSourceConfig)
         -> Result<i32>;
+        /// A source whose device the host owns (`cfg.driver` "rtlsdr"):
+        /// its samples arrive through `stream`, already tuned and gained.
+        fn tr_add_stream_source(
+            ctx: Pin<&mut TrContext>,
+            cfg: &TrSourceConfig,
+            stream: Box<IqStreamHandle>,
+        ) -> Result<i32>;
         fn tr_add_system_from_config(ctx: Pin<&mut TrContext>, cfg: &TrSystemConfig)
         -> Result<i32>;
 
@@ -682,6 +689,16 @@ pub mod ffi {
         /// Where the control decoders' trunking messages go. Until it is
         /// set they wait in the decoders' queues.
         fn set_event_notifier(self: &SharedChannelizerHandle, notifier: Box<EventNotifier>);
+        /// Look for signals across the source's whole input (the old
+        /// `signal_detector_cvf`) and report them, relative to
+        /// `center_hz`, through the event notifier. `threshold_db` is used
+        /// as given unless `auto_threshold`.
+        fn set_signal_detector(
+            self: &SharedChannelizerHandle,
+            center_hz: f64,
+            auto_threshold: bool,
+            threshold_db: f64,
+        );
         /// `input`: `hop` interleaved IQ samples. `output`: port-major,
         /// `max_out_per_block` IQ samples of stride per port. `produced[p]` =
         /// samples written for port p (0 = port inactive).
@@ -691,6 +708,17 @@ pub mod ffi {
             output: &mut [f32],
             produced: &mut [u32],
         );
+    }
+
+    // ── Host-owned IQ sources (trunk-sdr), read by the iq_stream_source block ──
+
+    extern "Rust" {
+        type IqStreamHandle;
+
+        /// Up to `out.len() / 2` interleaved IQ samples, waiting briefly for
+        /// the first; 0 when none came in time or the stream has ended.
+        fn read(self: &IqStreamHandle, out: &mut [f32]) -> usize;
+        fn ended(self: &IqStreamHandle) -> bool;
     }
 
     // ── Rust logging bridge (Boost.Log → tracing) ──
@@ -970,6 +998,9 @@ pub struct SharedChannelizerHandle {
     /// Trunking side of each port's control-channel decoder.
     decoders: Mutex<HashMap<u32, p25::ControlPort>>,
     notifier: Mutex<Option<Box<EventNotifier>>>,
+    /// The source centre the signal detector's findings are relative to,
+    /// while it runs.
+    detector_center_hz: Mutex<Option<f64>>,
 }
 
 /// Live channelizers by source index, so the Rust side can read their
@@ -995,6 +1026,7 @@ fn shared_channelizer_new(
         source,
         decoders: Mutex::new(HashMap::new()),
         notifier: Mutex::new(None),
+        detector_center_hz: Mutex::new(None),
     }))
 }
 
@@ -1131,16 +1163,49 @@ impl SharedChannelizerHandle {
             .process(as_complex(input), as_complex_mut(output), produced);
         // The decoders ran on this block; parse and send what they decoded.
         let notifier = self.notifier.lock().unwrap_or_else(PoisonError::into_inner);
-        if let Some(n) = notifier.as_deref() {
-            let mut decoders = self.decoders.lock().unwrap_or_else(PoisonError::into_inner);
-            for port in decoders.values_mut() {
-                port.drain(&mut |m| event_notifier_notify_trunk_messages(n, m));
-            }
+        let Some(n) = notifier.as_deref() else { return };
+        let mut decoders = self.decoders.lock().unwrap_or_else(PoisonError::into_inner);
+        for port in decoders.values_mut() {
+            port.drain(&mut |m| event_notifier_notify_trunk_messages(n, m));
+        }
+        drop(decoders);
+        let found = self.engine.take_detections();
+        if found.is_empty() {
+            return;
+        }
+        let center = *self
+            .detector_center_hz
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(center) = center {
+            #[allow(clippy::cast_possible_truncation)]
+            let signals = found
+                .into_iter()
+                .map(|d| ffi::TrDetectedSignal {
+                    center_freq: d.center_hz,
+                    max_rssi: d.max_rssi_db as i32,
+                    threshold: d.threshold_db as i32,
+                })
+                .collect();
+            event_notifier_notify_signals_detected(n, self.source, center, signals);
         }
     }
 
     fn set_event_notifier(&self, notifier: Box<EventNotifier>) {
         *self.notifier.lock().unwrap_or_else(PoisonError::into_inner) = Some(notifier);
+    }
+
+    #[allow(clippy::cast_possible_truncation)]
+    fn set_signal_detector(&self, center_hz: f64, auto_threshold: bool, threshold_db: f64) {
+        *self
+            .detector_center_hz
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(center_hz);
+        self.engine
+            .set_signal_detector(Some(trunk_channelizer::DetectorConfig {
+                threshold_db: (!auto_threshold).then_some(threshold_db as f32),
+                ..trunk_channelizer::DetectorConfig::default()
+            }));
     }
 
     fn set_control_decoder(&self, port: u32, spec: &ffi::TrControlDecoderSpec) {
@@ -1179,6 +1244,34 @@ impl SharedChannelizerHandle {
             decoders.remove(&port);
         }
         self.engine.set_slot_decoder(port as usize, installed);
+    }
+}
+
+// ── Host-owned IQ sources ──
+
+/// The consumer end of a [`trunk_sdr::Stream`], held by the C++
+/// `iq_stream_source` block.
+pub struct IqStreamHandle {
+    stream: trunk_sdr::Stream,
+}
+
+/// How long the block waits for samples before letting the scheduler
+/// look at its stop flag.
+const STREAM_READ_WAIT: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Wrap a stream for `tr_add_stream_source`.
+#[must_use]
+pub fn iq_stream_handle(stream: trunk_sdr::Stream) -> Box<IqStreamHandle> {
+    Box::new(IqStreamHandle { stream })
+}
+
+impl IqStreamHandle {
+    fn read(&self, out: &mut [f32]) -> usize {
+        self.stream.read(as_complex_mut(out), STREAM_READ_WAIT)
+    }
+
+    fn ended(&self) -> bool {
+        self.stream.is_ended()
     }
 }
 

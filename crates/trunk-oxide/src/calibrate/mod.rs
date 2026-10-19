@@ -22,6 +22,7 @@ pub mod measure;
 pub mod preflight;
 pub mod probe;
 pub mod report;
+pub mod rtl;
 pub mod select;
 
 use anyhow::Result;

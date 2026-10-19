@@ -237,7 +237,6 @@ list(APPEND trunk_recorder_sources
   trunk-recorder/recorders/dmr_recorder_impl.cc
   trunk-recorder/recorders/p25_recorder_impl.cc
   trunk-recorder/recorders/p25_recorder_decode.cc
-  trunk-recorder/sources/iq_file_source.cc
   trunk-recorder/csv_helper.cc
   trunk-recorder/monitor_systems.cc
   trunk-recorder/unit_tags_ota.cc
@@ -255,11 +254,11 @@ list(APPEND trunk_recorder_sources
   trunk-recorder/gr_blocks/plugin_wrapper_impl.cc
   trunk-recorder/gr_blocks/selector_impl.cc
   trunk-recorder/gr_blocks/shared_channelizer.cc
+  trunk-recorder/gr_blocks/iq_stream_source.cc
   trunk-recorder/gr_blocks/callback_ctcss_squelch_ff.cc
   trunk-recorder/gr_blocks/wavfile_gr3.8.cc
   trunk-recorder/gr_blocks/channel_control.cc
   trunk-recorder/gr_blocks/p25_voice_decoder.cc
-    trunk-recorder/gr_blocks/signal_detector_cvf_impl.cc
   )
 
 

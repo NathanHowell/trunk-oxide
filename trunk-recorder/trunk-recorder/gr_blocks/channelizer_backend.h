@@ -99,6 +99,11 @@ public:
   // backend parses what it decodes and sends the trunking messages on itself.
   virtual void set_decoder(unsigned port, const ControlDecoderSpec &spec) = 0;
 
+  // Look for signals across the whole source input every ~100 ms and report
+  // them (as frequencies relative to `center_hz`) the same way as the
+  // trunking messages. With auto_threshold false, threshold_db is used as is.
+  virtual void set_signal_detector(double center_hz, bool auto_threshold, float threshold_db) = 0;
+
   // Consume exactly hop() samples. For each active port p < nports, write
   // out_per_block(profile of p) samples to out[p * max_out_per_block()] and set
   // produced[p] to that count; all other produced[] entries are set to 0.

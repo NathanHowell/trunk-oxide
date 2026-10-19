@@ -23,6 +23,7 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use anyhow::Context as _;
 use trunk_recorder_sys::{EventNotifier, GrEvent};
 
 pub use call_manager::{CallManagerConfig, ConventionalChannel, SystemPolicy, TalkgroupPolicy};
@@ -139,8 +140,40 @@ impl Calibrated {
     }
 }
 
+/// How to open a source's device for its pre-flight sweep.
+enum ProbeSpec {
+    /// Through gr-osmosdr in C++.
+    Osmosdr(ffi::TrProbeConfig),
+    /// Through trunk-sdr.
+    Rtlsdr {
+        spec: trunk_sdr::DeviceSpec,
+        tuning: trunk_sdr::Tuning,
+    },
+}
+
+impl ProbeSpec {
+    fn open(
+        &self,
+        policy: &calibrate::CalibrationPolicy,
+    ) -> anyhow::Result<Box<dyn calibrate::probe::IqProbe>> {
+        Ok(match self {
+            Self::Osmosdr(cfg) => Box::new(calibrate::preflight::PreflightProbe::open(
+                cfg,
+                policy.capture_samples,
+                policy.settle_samples,
+            )?),
+            Self::Rtlsdr { spec, tuning } => Box::new(calibrate::rtl::RtlProbe::open(
+                spec,
+                tuning,
+                policy.capture_samples,
+                policy.settle_samples,
+            )?),
+        })
+    }
+}
+
 fn run_calibration(
-    probe_cfg: &ffi::TrProbeConfig,
+    probe_spec: &ProbeSpec,
     policy: &calibrate::CalibrationPolicy,
     fallback_gain: f64,
     device: &str,
@@ -148,11 +181,7 @@ fn run_calibration(
 ) -> Calibrated {
     // The probe holds the device open for the sweep and releases it on drop
     // (end of this function), before the real source is opened.
-    let mut probe = match calibrate::preflight::PreflightProbe::open(
-        probe_cfg,
-        policy.capture_samples,
-        policy.settle_samples,
-    ) {
+    let mut probe = match probe_spec.open(policy) {
         Ok(probe) => probe,
         Err(e) => {
             tracing::warn!(
@@ -165,7 +194,7 @@ fn run_calibration(
 
     // The last sweep's pick stands while the floor it was made at holds.
     if let Some(c) = cached {
-        match calibrate::recheck(&mut probe, policy, c) {
+        match calibrate::recheck(&mut *probe, policy, c) {
             Ok((true, moved)) => {
                 tracing::info!(
                     device = %device,
@@ -194,7 +223,7 @@ fn run_calibration(
     }
 
     tracing::info!(device = %device, "starting gain auto-calibration sweep");
-    match calibrate::calibrate(&mut probe, policy, fallback_gain) {
+    match calibrate::calibrate(&mut *probe, policy, fallback_gain) {
         Ok(sweep) => {
             let sel = sweep.selection;
             tracing::info!(
@@ -244,28 +273,33 @@ fn calibrate_sources_parallel(
         if src.enabled == Some(false) || !src.auto_gain {
             continue;
         }
-        if !matches!(src.driver, SourceDriver::Osmosdr) {
-            tracing::warn!(
-                device = %src.device,
-                "auto_gain is only supported for the osmosdr driver; using configured gain"
-            );
-            continue;
-        }
-
-        let probe_cfg = ffi::TrProbeConfig {
-            driver: "osmosdr".into(),
-            device: src.device.clone(),
-            center: src.center,
-            rate: src.rate,
-            error: src.error,
-            ppm: src.ppm,
-            antenna: src.antenna.clone(),
+        let probe_spec = match src.driver {
+            SourceDriver::Osmosdr => ProbeSpec::Osmosdr(ffi::TrProbeConfig {
+                driver: "osmosdr".into(),
+                device: src.device.clone(),
+                center: src.center,
+                rate: src.rate,
+                error: src.error,
+                ppm: src.ppm,
+                antenna: src.antenna.clone(),
+            }),
+            SourceDriver::Rtlsdr => ProbeSpec::Rtlsdr {
+                spec: trunk_sdr::DeviceSpec::parse(&src.device),
+                tuning: rtl_tuning(src, trunk_sdr::Gain::Manual(src.gain)),
+            },
+            SourceDriver::Usrp | SourceDriver::Iqfile => {
+                tracing::warn!(
+                    device = %src.device,
+                    "auto_gain is only supported for the osmosdr and rtlsdr drivers; using configured gain"
+                );
+                continue;
+            }
         };
         let device = src.device.clone();
         let fallback = src.gain;
         let cached = cache.get(&device).cloned();
         handles.push(std::thread::spawn(move || {
-            let c = run_calibration(&probe_cfg, &policy, fallback, &device, cached.as_ref());
+            let c = run_calibration(&probe_spec, &policy, fallback, &device, cached.as_ref());
             (idx, device, c)
         }));
     }
@@ -315,12 +349,34 @@ fn calibrate_sources_parallel(
     gains
 }
 
+/// An `rtlsdr` source's tuning: its centre with the software `error`
+/// folded in, and the whole-ppm hardware correction (the fraction is
+/// applied per recorder, see `CallManager::build_recorder_config_from_view`).
+#[allow(clippy::cast_possible_truncation)]
+fn rtl_tuning(src: &SourceConfig, gain: trunk_sdr::Gain) -> trunk_sdr::Tuning {
+    trunk_sdr::Tuning {
+        center_hz: src.center + src.error,
+        rate_hz: src.rate,
+        ppm: src.ppm.round() as i32,
+        gain,
+    }
+}
+
+/// Samples per block a host-owned stream queues (a quarter of a USB transfer).
+const RTL_STREAM_BLOCK: usize = 32_768;
+/// How much of a host-owned stream may wait for the channelizer: one second.
+/// A dongle drops blocks beyond that; a file player waits.
+const RTL_STREAM_QUEUE_SECS: f64 = 1.0;
+
 /// Configures and initializes a trunk-recorder instance without starting it.
 ///
 /// Call [`start()`](TrunkRecorderBuilder::start) to consume the builder and
 /// begin receiving radio traffic.
 pub struct TrunkRecorderBuilder {
     ctx: cxx::UniquePtr<ffi::TrContext>,
+    /// Devices and file players trunk-oxide streams itself (`rtlsdr` and
+    /// `iqfile` sources); dropping one ends its stream.
+    streams: Vec<Box<dyn trunk_sdr::Running>>,
     call_mgr_config: CallManagerConfig,
     bridge: Arc<EventBridge>,
     /// Per-source frequency coverage, indexed by source position.
@@ -388,6 +444,8 @@ impl Default for MonitorOptions {
 /// A running trunk-recorder instance. Stops automatically on drop.
 pub struct TrunkRecorder {
     ctx: cxx::UniquePtr<ffi::TrContext>,
+    /// See [`TrunkRecorderBuilder::streams`]; stopped after the flowgraph.
+    streams: Vec<Box<dyn trunk_sdr::Running>>,
     call_mgr_config: CallManagerConfig,
     bridge: Arc<EventBridge>,
     event_rx: tokio::sync::mpsc::Receiver<GrEvent>,
@@ -498,6 +556,7 @@ impl TrunkRecorderBuilder {
         let mut source_ranges = Vec::new();
         let mut source_ppms = Vec::new();
         let mut source_freq_corrections_hz = Vec::new();
+        let mut streams = Vec::new();
         for (idx, src) in config.source.iter().enumerate() {
             if src.enabled == Some(false) {
                 continue;
@@ -505,8 +564,8 @@ impl TrunkRecorderBuilder {
 
             let driver_str = match src.driver {
                 SourceDriver::Osmosdr => "osmosdr",
+                SourceDriver::Rtlsdr => "rtlsdr",
                 SourceDriver::Usrp => "usrp",
-                SourceDriver::Sigmf => "sigmf",
                 SourceDriver::Iqfile => "iqfile",
             };
 
@@ -544,13 +603,44 @@ impl TrunkRecorderBuilder {
             // otherwise the configured gain.
             let gain = calibrated_gains.get(&idx).map_or(src.gain, |c| c.gain_db);
 
-            ffi::tr_add_source_from_config(
-                ctx.pin_mut(),
-                &ffi::TrSourceConfig {
+            // An rtlsdr source is opened here, tuned and gained, and its
+            // stream handed to the flowgraph; the rate the dongle settled
+            // on is what the channelizer is built for. An iqfile source is
+            // played from here the same way.
+            let rtl = match src.driver {
+                SourceDriver::Rtlsdr => {
+                    let gain = if src.agc {
+                        trunk_sdr::Gain::Auto
+                    } else {
+                        trunk_sdr::Gain::Manual(gain)
+                    };
+                    let spec = trunk_sdr::DeviceSpec::parse(&src.device);
+                    let rtl = trunk_sdr::Rtl::open(&spec, &rtl_tuning(src, gain))
+                        .with_context(|| format!("opening RTL-SDR source '{}'", src.device))?;
+                    let info = rtl.info().clone();
+                    tracing::info!(
+                        device = %src.device,
+                        serial = %info.serial,
+                        product = %info.product,
+                        tuner = ?info.tuner,
+                        rate_hz = info.rate_hz,
+                        requested_rate_hz = src.rate,
+                        center_hz = src.center + src.error,
+                        gain_db = rtl.tuner_gain_db(),
+                        agc = src.agc,
+                        "opened RTL-SDR"
+                    );
+                    Some(rtl)
+                }
+                _ => None,
+            };
+            let rate = rtl.as_ref().map_or(src.rate, |r| r.info().rate_hz.round());
+
+            let source_cfg = ffi::TrSourceConfig {
                     driver: driver_str.into(),
                     device: src.device.clone(),
                     center: src.center,
-                    rate: src.rate,
+                    rate,
                     error: src.error,
                     gain,
                     agc: src.agc,
@@ -573,8 +663,39 @@ impl TrunkRecorderBuilder {
                     sigmf_recorders: src.sigmf_recorders,
                     iq_format: src.iq_format.clone(),
                     iq_repeat: src.iq_repeat,
-                },
-            )?;
+            };
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let capacity = ((rate * RTL_STREAM_QUEUE_SECS) as usize).max(4 * RTL_STREAM_BLOCK);
+            let stream = match (rtl, src.driver) {
+                (Some(rtl), _) => {
+                    let (stream, streaming) = rtl
+                        .stream(RTL_STREAM_BLOCK, capacity)
+                        .with_context(|| format!("streaming RTL-SDR source '{}'", src.device))?;
+                    streams.push(Box::new(streaming) as Box<dyn trunk_sdr::Running>);
+                    Some(stream)
+                }
+                (None, SourceDriver::Iqfile) => {
+                    let spec = trunk_sdr::FileSpec {
+                        path: src.device.clone().into(),
+                        format: trunk_sdr::Format::parse(&src.iq_format)?,
+                        rate_hz: src.rate,
+                        repeat: src.iq_repeat,
+                    };
+                    let (stream, playing) = trunk_sdr::file::play(&spec, RTL_STREAM_BLOCK, capacity)
+                        .with_context(|| format!("playing IQ file '{}'", src.device))?;
+                    streams.push(playing);
+                    Some(stream)
+                }
+                (None, _) => None,
+            };
+            match stream {
+                Some(stream) => ffi::tr_add_stream_source(
+                    ctx.pin_mut(),
+                    &source_cfg,
+                    trunk_recorder_sys::iq_stream_handle(stream),
+                )?,
+                None => ffi::tr_add_source_from_config(ctx.pin_mut(), &source_cfg)?,
+            };
             let half_rate = src.rate / 2.0;
             source_ranges.push((src.center - half_rate)..=(src.center + half_rate));
             source_ppms.push(src.ppm);
@@ -781,6 +902,7 @@ impl TrunkRecorderBuilder {
 
         Ok(Self {
             ctx,
+            streams,
             call_mgr_config,
             bridge,
             source_ranges,
@@ -864,6 +986,7 @@ impl TrunkRecorderBuilder {
         ffi::tr_start_gnuradio(self.ctx.pin_mut());
         TrunkRecorder {
             ctx: self.ctx,
+            streams: self.streams,
             call_mgr_config: self.call_mgr_config,
             bridge: self.bridge,
             event_rx,
@@ -1062,5 +1185,9 @@ impl TrunkRecorder {
 impl Drop for TrunkRecorder {
     fn drop(&mut self) {
         ffi::tr_stop_gnuradio(self.ctx.pin_mut());
+        // The flowgraph has stopped reading; now the dongles can stop.
+        for s in &mut self.streams {
+            s.stop();
+        }
     }
 }

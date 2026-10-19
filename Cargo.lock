@@ -3746,6 +3746,7 @@ dependencies = [
  "trunk-config",
  "trunk-oxide-grpc",
  "trunk-recorder-sys",
+ "trunk-sdr",
  "wild",
 ]
 
@@ -3826,6 +3827,24 @@ dependencies = [
  "trunk-channelizer",
  "trunk-fm",
  "trunk-p25",
+ "trunk-sdr",
+]
+
+[[package]]
+name = "trunk-rtlsdr-sys"
+version = "0.1.0"
+dependencies = [
+ "pkg-config",
+]
+
+[[package]]
+name = "trunk-sdr"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "num-complex",
+ "tracing",
+ "trunk-rtlsdr-sys",
 ]
 
 [[package]]

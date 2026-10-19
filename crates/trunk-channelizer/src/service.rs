@@ -19,6 +19,7 @@ use num_complex::Complex32;
 use crate::channelizer::{ChannelId, Channelizer};
 use crate::conditioner::{Conditioner, ConditionerParams, SquelchEvent, SquelchMode};
 use crate::config::{Config, ProfileId};
+use crate::detector::{Detection, DetectorConfig, SignalDetector};
 
 /// When a slot's conditioner (AGC, FLL) starts over.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -139,6 +140,8 @@ enum Cmd {
         slot: usize,
         decoder: Option<Box<dyn ChannelDecoder>>,
     },
+    /// Run (or stop) the wideband signal detector on the source input.
+    Detector(Option<DetectorConfig>),
 }
 
 /// Per-slot result of one [`SharedChannelizer::process`] call.
@@ -165,6 +168,8 @@ pub struct SharedChannelizer {
     stats: Mutex<Vec<Option<Arc<SlotStats>>>>,
     mailbox: Mutex<Vec<Cmd>>,
     dsp: Mutex<Dsp>,
+    /// What the signal detector found, until taken.
+    detections: Mutex<Vec<Detection>>,
 }
 
 struct Slot {
@@ -192,6 +197,8 @@ struct Dsp {
     ch: Channelizer,
     slots: Vec<Slot>,
     counters: Counters,
+    detector: Option<SignalDetector>,
+    found: Vec<Detection>,
 }
 
 impl SharedChannelizer {
@@ -210,8 +217,28 @@ impl SharedChannelizer {
                 ch,
                 slots: Vec::new(),
                 counters: Counters::default(),
+                detector: None,
+                found: Vec::new(),
             }),
+            detections: Mutex::new(Vec::new()),
         })
+    }
+
+    /// Look for signals across the whole source input (see
+    /// [`SignalDetector`]); `None` stops. Findings wait in
+    /// [`Self::take_detections`].
+    pub fn set_signal_detector(&self, cfg: Option<DetectorConfig>) {
+        self.post(Cmd::Detector(cfg));
+    }
+
+    /// Everything the signal detector has found since the last call.
+    pub fn take_detections(&self) -> Vec<Detection> {
+        std::mem::take(
+            &mut *self
+                .detections
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        )
     }
 
     pub const fn config(&self) -> &Config {
@@ -361,6 +388,8 @@ impl SharedChannelizer {
             ch,
             slots,
             counters,
+            detector,
+            found,
         } = &mut *dsp;
         let started = Instant::now();
 
@@ -475,9 +504,22 @@ impl SharedChannelizer {
                         ch.remove_channel(id);
                     }
                 }
+                Cmd::Detector(cfg) => {
+                    *detector = cfg.map(|c| SignalDetector::new(self.cfg.sample_rate, c));
+                }
             }
         }
 
+        if let Some(d) = detector.as_mut() {
+            found.clear();
+            d.push(input, found);
+            if !found.is_empty() {
+                self.detections
+                    .lock()
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .append(found);
+            }
+        }
         ch.process_block(input);
         counters.blocks += 1;
 
@@ -733,6 +775,29 @@ mod tests {
         assert!(!open.muted && close.muted);
         assert!(open.pwr_db > -40.0 && close.pwr_db < -40.0);
         assert!(sc.next_squelch_event(0).is_none());
+    }
+
+    #[test]
+    fn signal_detector_runs_on_the_source_input_and_reports_through_the_mailbox() {
+        let cfg = Config::standard(912_000.0).unwrap();
+        let (hop, stride) = (cfg.hop(), cfg.max_out_per_block());
+        let sc = SharedChannelizer::new(cfg.clone()).unwrap();
+        let mut out = vec![Complex32::ZERO; stride];
+        let mut produced = [0u32; 1];
+        sc.set_signal_detector(Some(DetectorConfig {
+            interval_s: 0.0,
+            ..DetectorConfig::default()
+        }));
+        let mut x = tone(&cfg, 150_000.0, 0, hop);
+        x.iter_mut().for_each(|v| *v *= 0.3);
+        sc.process(&x, &mut out, &mut produced);
+        let found = sc.take_detections();
+        assert_eq!(found.len(), 1, "{found:?}");
+        assert!((found[0].center_hz - 150_000.0).abs() < 1_000.0);
+        assert!(sc.take_detections().is_empty());
+        sc.set_signal_detector(None);
+        sc.process(&x, &mut out, &mut produced);
+        assert!(sc.take_detections().is_empty());
     }
 
     #[derive(Debug, Default)]

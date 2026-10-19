@@ -13,6 +13,7 @@ mod channelizer;
 mod conditioner;
 mod config;
 mod design;
+mod detector;
 mod fft;
 mod resampler;
 mod service;
@@ -25,6 +26,7 @@ pub use channelizer::{BlockStats, ChannelId, Channelizer};
 pub use conditioner::{Conditioner, ConditionerParams, SquelchEvent, SquelchMode};
 pub use config::{Config, NARROW, Profile, ProfileId, ProfileSpec, WIDE};
 pub use design::{lowpass_taps, tap_count};
+pub use detector::{Detection, DetectorConfig, SignalDetector};
 pub use service::{
     ChannelDecoder, ConditioningSettings, ConditioningSpec, Counters, DECODER_RETUNE_HZ,
     ResetPolicy, SharedChannelizer, SlotStats,

@@ -16,6 +16,8 @@ members = [
     "crates/trunk-channelizer",
     "crates/trunk-p25",
     "crates/trunk-fm",
+    "crates/trunk-rtlsdr-sys",
+    "crates/trunk-sdr",
 ]
 default-members = [
     "crates/trunk-recorder-sys",
@@ -55,6 +57,8 @@ trunk-recorder-sys = { path = "crates/trunk-recorder-sys" }
 trunk-oxide = { path = "crates/trunk-oxide" }
 trunk-oxide-proto = { path = "crates/trunk-oxide-proto" }
 trunk-fm = { path = "crates/trunk-fm" }
+trunk-rtlsdr-sys = { path = "crates/trunk-rtlsdr-sys" }
+trunk-sdr = { path = "crates/trunk-sdr" }
 trunk-oxide-grpc = { path = "crates/trunk-oxide-grpc" }
 trunk-transcriber-proto = { path = "crates/trunk-transcriber-proto" }
 trunk-channelizer = { path = "crates/trunk-channelizer" }

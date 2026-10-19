@@ -5,9 +5,15 @@ use serde::Deserialize;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SourceDriver {
+    /// gr-osmosdr inside GNU Radio (any device it supports).
     Osmosdr,
+    /// An RTL-SDR dongle opened and streamed by trunk-oxide itself (librtlsdr,
+    /// no GNU Radio source block). `device` is the serial, with or without
+    /// the `rtl=` prefix.
+    Rtlsdr,
     Usrp,
-    Sigmf,
+    /// A raw IQ file (`device` is its path, `iq_format` its sample
+    /// format) played at `rate` by trunk-oxide.
     Iqfile,
 }
 

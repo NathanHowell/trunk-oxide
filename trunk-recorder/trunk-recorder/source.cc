@@ -69,18 +69,6 @@ Source::Source(double c, double r, double e, std::string drv, std::string dev, c
   max_analog_recorders = 0;
   debug_recorder_port = 0;
   attached_detector = false;
-  // parameters for signal_detector_cvf
-  float threshold_sensitivity = 0.9;
-  bool auto_threshold = true;
-  float threshold = -45;
-  int fft_len = 1024;
-  float average = 0.8;
-  float quantization = 0.01;
-  float min_bw = 0.0;
-  float max_bw = 50000;
-
-  signal_detector = signal_detector_cvf::make(rate, fft_len, 0, threshold, threshold_sensitivity, auto_threshold, average, quantization, min_bw, max_bw, "");
-  BOOST_LOG_TRIVIAL(info) << "Made the Signal Detector";
 
 #ifdef HAVE_OSMOSDR
   if (driver == "osmosdr") {
@@ -149,14 +137,15 @@ Source::Source(double c, double r, double e, std::string drv, std::string dev, c
   }
 }
 
-void Source::set_iq_source(std::string iq_file, bool repeat, double center, double rate, std::string iq_format) {
-  this->rate = rate;
-  this->center = center;
-  error = 0;
-  min_hz = center - ((rate / 2));
-  max_hz = center + ((rate / 2));
-  driver = "iqfile";
-  device = "";
+Source::Source(double c, double r, double e, std::string dev, std::shared_ptr<iq_stream> stream, const Config &cfg)
+    : config(cfg) {
+  rate = r;
+  actual_rate = r;
+  center = c;
+  error = e;
+  set_min_max();
+  driver = "rtlsdr";
+  device = dev;
   gain = 0;
   lna_gain = 0;
   tia_gain = 0;
@@ -170,46 +159,8 @@ void Source::set_iq_source(std::string iq_file, bool repeat, double center, doub
   max_analog_recorders = 0;
   debug_recorder_port = 0;
   attached_detector = false;
-  // Same signal detector as the hardware ctor; conventional recorders attach it.
-  signal_detector = signal_detector_cvf::make(rate, 1024, 0, -45, 0.9, true, 0.8, 0.01, 0.0, 50000, "");
-
-  iq_file_source::sptr iq_file_src;
-  iq_file_src = iq_file_source::make(iq_file, this->rate, repeat, iq_format);
-
-  BOOST_LOG_TRIVIAL(info) << "SOURCE TYPE IQ FILE";
-  BOOST_LOG_TRIVIAL(info) << "Setting Center to: " << FormatSamplingRate(center);
-  BOOST_LOG_TRIVIAL(info) << "Setting sample rate to: " << FormatSamplingRate(rate);
-
-  source_block = iq_file_src;
-}
-
-Source::Source(std::string sigmf_meta, std::string sigmf_data, bool repeat, const Config &cfg)
-    : config(cfg) {
-  json data;
-  std::cout << sigmf_meta << std::endl;
-  try {
-    std::ifstream f(sigmf_meta);
-    data = json::parse(f);
-  } catch (const json::parse_error &e) {
-    // output exception information
-    BOOST_LOG_TRIVIAL(error) << "JSON parse error in source config: " << e.what()
-                            << " (id: " << e.id << ", byte: " << e.byte << ")";
-    throw;
-  }
-
-  std::cout << data.dump(4) << std::endl;
-  json global = data["global"];
-  this->rate = global["core:sample_rate"];
-
-  json capture = data["captures"][0];
-  this->center = capture["core:frequency"];
-  std::cout << "Rate: " << rate << "Center: " << center << std::endl;
-  set_iq_source(sigmf_data, repeat, center, rate);
-}
-
-Source::Source(std::string iq_file, bool repeat, double center, double rate, const Config &cfg, std::string iq_format)
-    : config(cfg) {
-  set_iq_source(iq_file, repeat, center, rate, iq_format);
+  BOOST_LOG_TRIVIAL(info) << "SOURCE TYPE STREAM (host-owned): " << device << " at " << FormatSamplingRate(rate) << ", " << format_freq(center + error);
+  source_block = iq_stream_source::make(std::move(stream));
 }
 
 void Source::attach_channelizer(gr::top_block_sptr tb) {
@@ -261,7 +212,8 @@ void Source::wire_voice_recorder(gr::top_block_sptr tb, const Rec &log, unsigned
 void Source::attach_detector(gr::top_block_sptr tb) {
   if (!attached_detector) {
     attached_detector = true;
-    tb->connect(source_block, 0, signal_detector, 0);
+    attach_channelizer(tb);
+    channelizer->backend()->set_signal_detector(center, !detector_threshold.has_value(), detector_threshold.value_or(-45.0f));
   }
 }
 
@@ -458,21 +410,9 @@ double Source::get_vga2_gain() {
 
 /* -- Recorders -- */
 
-void Source::set_detection_callback(std::function<void(std::vector<Detected_Signal>)> cb) {
-  if (signal_detector) {
-    signal_detector->set_detection_callback(std::move(cb));
-  }
-}
-
-void Source::set_power_callback(std::function<void(const float*, unsigned, double)> cb) {
-  if (signal_detector) {
-    signal_detector->set_power_callback(std::move(cb));
-  }
-}
-
 void Source::set_signal_detector_threshold(float threshold) {
-BOOST_LOG_TRIVIAL(info) << " - Setting Signal Detector Threshold to: " << threshold;
-  signal_detector->set_threshold(threshold);
+  BOOST_LOG_TRIVIAL(info) << " - Setting Signal Detector Threshold to: " << threshold;
+  detector_threshold = threshold;
 }
 
 void Source::create_analog_recorders(gr::top_block_sptr tb, int r) {

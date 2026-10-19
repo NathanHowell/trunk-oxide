@@ -7,15 +7,15 @@
 #include <mutex>
 #include <thread>
 #include "./global_structs.h"
+#include "./gr_blocks/iq_stream_source.h"
 #include "./gr_blocks/selector.h"
 #include "./gr_blocks/shared_channelizer.h"
-#include "./gr_blocks/signal_detector_cvf.h"
 #include "recorders/analog_recorder.h"
 #include "recorders/debug_recorder.h"
 #include "recorders/dmr_recorder.h"
 #include "recorders/p25_recorder.h"
 #include "recorders/sigmf_recorder.h"
-#include "sources/iq_file_source.h"
+#include <optional>
 #include <gnuradio/basic_block.h>
 #include <gnuradio/top_block.h>
 #include <gnuradio/uhd/usrp_source.h>
@@ -79,7 +79,8 @@ class Source : public std::enable_shared_from_this<Source> {
   shared_channelizer::sptr channelizer;
   std::function<std::shared_ptr<channelizer_backend>(double)> channelizer_factory;
   unsigned int next_channelizer_port = 0;
-  signal_detector_cvf::sptr signal_detector;
+  // A fixed signal detector threshold (dB); unset means auto.
+  std::optional<float> detector_threshold;
 
   template <typename Rec> void wire_voice_recorder(gr::top_block_sptr tb, const Rec &log, unsigned profile);
 
@@ -89,11 +90,12 @@ public:
   int get_num();
   const Config &get_config();
   Source(double c, double r, double e, std::string driver, std::string device, const Config &cfg);
-  Source(std::string sigmf_meta, std::string sigmf_data, bool repeat, const Config &cfg);
-  Source(std::string iq_file, bool repeat, double center, double rate, const Config &cfg, std::string iq_format = "cf32");
+  // A device the host owns and streams in through `stream` (driver "rtlsdr"):
+  // it is already tuned and gained, so the gain/ppm/antenna setters do nothing.
+  Source(double c, double r, double e, std::string device, std::shared_ptr<iq_stream> stream, const Config &cfg);
   void init_shared();
-  void set_iq_source(std::string iq_file, bool repeat, double center, double rate, std::string iq_format = "cf32");
   gr::basic_block_sptr get_src_block();
+  // Run the wideband signal detector on this source (in the channelizer).
   void attach_detector(gr::top_block_sptr tb);
   double get_min_hz();
   double get_max_hz();
@@ -137,8 +139,6 @@ public:
   int get_num_available_analog_recorders();
   int get_num_available_digital_recorders();
   void set_signal_detector_threshold(float t);
-  void set_detection_callback(std::function<void(std::vector<Detected_Signal>)> cb);
-  void set_power_callback(std::function<void(const float*, unsigned, double)> cb);
   // Shared channelizer: set before create_*_recorders(). Every voice recorder
   // takes its channel from it.
   void set_channelizer_factory(std::function<std::shared_ptr<channelizer_backend>(double)> f) { channelizer_factory = std::move(f); }

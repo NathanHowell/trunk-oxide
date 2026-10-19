@@ -1,0 +1,15 @@
+[package]
+name = "trunk-sdr"
+description = "SDR sources for the channelizer: an RTL-SDR dongle opened by serial, tuned and streamed as complex baseband, with the same sample scale as gr-osmosdr."
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+num-complex.workspace = true
+tracing.workspace = true
+trunk-rtlsdr-sys.workspace = true
+
+[lints]
+workspace = true

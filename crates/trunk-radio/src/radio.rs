@@ -543,13 +543,6 @@ impl Radio {
         }
     }
 
-    pub fn set_squelch_db(&self, call_id: u64, db: f64) {
-        let i = self.lock();
-        if let Some(r) = Self::bound(&i, call_id) {
-            i.recorders[r].set_squelch_db(db);
-        }
-    }
-
     /// The recorder's channel power (dB; [`DB_UNSET`] without one).
     pub fn pwr_db(&self, call_id: u64) -> f64 {
         let i = self.lock();

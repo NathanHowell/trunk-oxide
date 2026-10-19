@@ -4,7 +4,6 @@
 //! Events flow: SDR → trunk-radio (channelizer, decoders) → `RadioEvent` →
 //! call state machine → EventBridge (gRPC)
 
-mod adaptive_squelch;
 pub mod calibrate;
 mod call_manager;
 mod call_state;
@@ -48,10 +47,6 @@ pub struct ConventionalChannelMetrics {
     pub recordings_completed: u64,
     /// Configured (static) squelch threshold in dB.
     pub squelch_db: f64,
-    /// Current adaptive squelch threshold, if active.
-    pub adaptive_squelch_db: Option<f64>,
-    /// Latest FFT power reading fed to the adaptive squelch tracker (dB).
-    pub last_power_reading_db: Option<f64>,
 }
 
 /// Snapshot of conventional-channel metrics, updated on the monitor thread
@@ -894,10 +889,10 @@ impl TrunkRecorder {
                         }
                         RadioEvent::Squelch {
                             recorder_num,
-                            muted,
+                            squelch,
                             pwr_db,
                         } => {
-                            call_mgr.handle_squelch_event(recorder_num, muted, pwr_db);
+                            call_mgr.handle_squelch_event(recorder_num, squelch, pwr_db);
                         }
                         RadioEvent::SourceChange {
                             rust_call_id,

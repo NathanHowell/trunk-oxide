@@ -21,11 +21,12 @@ use trunk_fm::{Audio, Decimation, Detector, FmDemod, Measurement, TAU_US, Tone};
 
 use crate::alias;
 use crate::audible::Hold;
+use crate::carrier::Carrier;
 use crate::fm;
 use crate::p25_calls;
 use crate::p25_voice::P25VoiceHandle;
 use crate::types::{
-    CallCounts, Decoded, RadioEvent, RecorderState, TrCallReport, TrRecorderConfig,
+    CallCounts, Decoded, RadioEvent, RecorderState, Squelch, TrCallReport, TrRecorderConfig,
     TrStopRecordingResult, TrTransmission, VoiceTagKind,
 };
 
@@ -278,9 +279,8 @@ struct P25Slot {
     levels: f64,
     /// The unit talking, as last heard in band or told by the state machine.
     source_id: i64,
-    /// The conditioner's power squelch, as of the last block (digital
-    /// conventional channels; always open on the others).
-    squelch_open: bool,
+    /// The transmission detector of a conventional channel.
+    carrier: Option<Carrier>,
 }
 
 impl std::fmt::Debug for P25Slot {
@@ -311,11 +311,14 @@ impl ChannelDecoder for P25Slot {
     }
 
     fn process(&mut self, iq: &[Complex32], reading: &Reading, out: &mut Decoded) {
-        if reading.squelch_open != self.squelch_open {
-            self.squelch_open = reading.squelch_open;
+        if let Some(squelch) = self
+            .carrier
+            .as_mut()
+            .and_then(|c| c.push(reading.squelch_open, iq.len()))
+        {
             out.events.push(RadioEvent::Squelch {
                 recorder_num: self.num,
-                muted: !reading.squelch_open,
+                squelch,
                 pwr_db: pwr_or_unset(reading.power_db),
             });
         }
@@ -471,9 +474,13 @@ impl ChannelDecoder for AnalogSlot {
             self.gate.config(),
         );
         for e in &self.gate_events {
+            let squelch = match e {
+                GateEvent::Open { .. } => Squelch::Open,
+                GateEvent::Close { reason, .. } => Squelch::Close((*reason).into()),
+            };
             out.events.push(RadioEvent::Squelch {
                 recorder_num: self.num,
-                muted: matches!(e, GateEvent::Close { .. }),
+                squelch,
                 pwr_db: pwr_or_unset(reading.power_db),
             });
         }
@@ -574,7 +581,7 @@ impl Recorder {
                     call: None,
                     levels: 1.0,
                     source_id: -1,
-                    squelch_open: true,
+                    carrier: conventional.then(|| Carrier::new(NARROW_RATE)),
                 }),
             ),
             Kind::Analog => (
@@ -796,14 +803,6 @@ impl Recorder {
         self.chz.send(self.port, Cmd::Source(src));
     }
 
-    /// Power squelch threshold of a digital conventional slot (analog slots
-    /// gate on trunk-fm's own detectors).
-    pub fn set_squelch_db(&self, db: f64) {
-        if self.kind == Kind::P25 {
-            self.chz.set_slot_squelch_db(self.port, db);
-        }
-    }
-
     /// The slot's smoothed power in dB, [`DB_UNSET`] without a reading.
     pub fn pwr_db(&self) -> f64 {
         pwr_or_unset(self.chz.slot_power_db(self.port))
@@ -817,6 +816,7 @@ impl Recorder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::CloseReason;
 
     fn start() -> Start {
         Start {
@@ -935,12 +935,18 @@ mod tests {
             for e in out.events.drain(..) {
                 if let RadioEvent::Squelch {
                     recorder_num,
-                    muted,
+                    squelch,
                     ..
                 } = e
                 {
                     assert_eq!(recorder_num, 7);
-                    if muted { closed += 1 } else { opened += 1 }
+                    match squelch {
+                        Squelch::Open => opened += 1,
+                        Squelch::Close(r) => {
+                            assert_eq!(r, CloseReason::Quieting);
+                            closed += 1;
+                        }
+                    }
                 }
             }
             for (id, pcm) in out.audio.drain(..) {

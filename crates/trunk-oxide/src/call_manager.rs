@@ -6,11 +6,11 @@ use std::time::Instant;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Gauge, Histogram};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
-use trunk_radio::SystemInfo;
 use trunk_radio::{
     DetectedSignal, Radio, TrCallData, TrCallDataStatus, TrMessageType, TrRecorderConfig,
     TrTrunkMessage, TrUnitEventType,
 };
+use trunk_radio::{Squelch, SystemInfo};
 
 use trunk_config::SystemType;
 use trunk_oxide_grpc::EventBridge;
@@ -269,8 +269,6 @@ impl CallManager {
                         idle_timeout_count: 0,
                         recordings_completed: 0,
                         squelch_db: ch.squelch_db,
-                        adaptive_squelch_db: None,
-                        last_power_reading_db: None,
                     });
                 }
             }
@@ -780,23 +778,6 @@ impl CallManager {
                         });
                     }
                     self.radio.set_recorder_enabled(call_id.as_u64(), false);
-                }
-                Effect::UpdateSquelch {
-                    call_id,
-                    threshold_db,
-                } => {
-                    if let Some(view) = self.state.get_call_view(call_id) {
-                        tracing::info!(
-                            freq = %view.freq(),
-                            talkgroup = view.talkgroup(),
-                            threshold_db,
-                            "adaptive squelch update"
-                        );
-                        self.update_conv_metric(view.talkgroup(), view.freq(), |m| {
-                            m.adaptive_squelch_db = Some(threshold_db);
-                        });
-                    }
-                    self.radio.set_squelch_db(call_id.as_u64(), threshold_db);
                 }
                 Effect::RemoveCall { call_id } => {
                     self.radio.remove_call(call_id.as_u64());
@@ -1578,27 +1559,6 @@ impl CallManager {
             self.process_effects(effects);
         }
 
-        // Poll instantaneous power from the squelch block for each conventional
-        // analog call and feed it to the adaptive squelch tracker.
-        let conv_analog: Vec<_> = self
-            .state
-            .iter_calls()
-            .filter(|v| v.is_conventional() && v.is_analog())
-            .map(|v| (v.id(), v.talkgroup(), v.freq()))
-            .collect();
-
-        for (call_id, tg, freq) in conv_analog {
-            if self.radio.has_recorder(call_id.as_u64()) {
-                let pwr_db = self.radio.pwr_db(call_id.as_u64());
-                self.update_conv_metric(tg, freq, |m| {
-                    m.last_power_reading_db = Some(pwr_db);
-                });
-                #[allow(clippy::cast_possible_truncation)]
-                let effects = self.state.feed_power_sample(call_id, pwr_db as f32);
-                self.process_effects(effects);
-            }
-        }
-
         // Now run the state machine tick (handles update timeouts + conventional)
         let effects = self.state.tick();
         self.process_effects(effects);
@@ -1655,7 +1615,8 @@ impl CallManager {
         self.process_effects(effects);
     }
 
-    pub fn handle_squelch_event(&mut self, recorder_num: i32, muted: bool, pwr_db: f64) {
+    /// A conventional channel's transmission detector opened or closed.
+    pub fn handle_squelch_event(&mut self, recorder_num: i32, squelch: Squelch, pwr_db: f64) {
         // Record signal quality metrics before mutating state
         if let Some(view) = self
             .state
@@ -1664,25 +1625,24 @@ impl CallManager {
         {
             let tg = view.talkgroup();
             let freq = view.freq();
-            self.update_conv_metric(tg, freq, |m| {
-                m.last_power_reading_db = Some(pwr_db);
-            });
-            if muted {
-                self.update_conv_metric(tg, freq, |m| {
-                    m.noise_floor_db = pwr_db;
-                    m.squelch_close_count += 1;
-                });
-            } else {
-                self.update_conv_metric(tg, freq, |m| {
+            match squelch {
+                Squelch::Open => self.update_conv_metric(tg, freq, |m| {
                     m.signal_power_db = pwr_db;
                     m.squelch_open_count += 1;
-                });
+                }),
+                Squelch::Close(reason) => {
+                    tracing::debug!(talkgroup = tg, freq = %freq, ?reason, pwr_db, "squelch closed");
+                    self.update_conv_metric(tg, freq, |m| {
+                        m.noise_floor_db = pwr_db;
+                        m.squelch_close_count += 1;
+                    });
+                }
             }
         }
 
         let effects = self
             .state
-            .on_squelch(RecorderNum(recorder_num), muted, pwr_db);
+            .on_squelch(RecorderNum(recorder_num), squelch, pwr_db);
         self.process_effects(effects);
     }
 

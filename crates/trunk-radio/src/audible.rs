@@ -95,7 +95,7 @@ impl Hold {
     /// The transmission never proved audible: the number of samples dropped.
     #[allow(clippy::cast_precision_loss)]
     pub fn finish(&mut self) -> Result<Vec<i16>, usize> {
-        let out = match std::mem::replace(&mut self.state, State::Done) {
+        match std::mem::replace(&mut self.state, State::Done) {
             State::Holding { audio, sq, n } => {
                 let rms = if n > 0 { (sq / n as f64).sqrt() } else { 0.0 };
                 if rms >= AUDIBLE_RMS {
@@ -105,8 +105,7 @@ impl Hold {
                 }
             }
             State::Audible | State::Done => Ok(Vec::new()),
-        };
-        out
+        }
     }
 }
 

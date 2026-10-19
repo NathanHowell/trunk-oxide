@@ -7,6 +7,7 @@
 
 pub mod alias;
 pub mod audible;
+pub mod carrier;
 pub mod fm;
 pub mod p25;
 pub mod p25_calls;

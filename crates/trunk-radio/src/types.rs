@@ -355,14 +355,57 @@ pub fn signal_from_ffi(value: f64) -> Option<f64> {
     (value < NO_SIGNAL_DB).then_some(value)
 }
 
+/// What a transmission detector decided.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Squelch {
+    /// Someone keyed up.
+    Open,
+    /// The transmission is over.
+    Close(CloseReason),
+}
+
+impl Squelch {
+    #[must_use]
+    pub const fn is_open(self) -> bool {
+        matches!(self, Self::Open)
+    }
+}
+
+/// Why a transmission detector closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseReason {
+    /// The power fell below the squelch threshold (digital channels).
+    Power,
+    /// The carrier went: the noise came back.
+    Quieting,
+    /// Carrier still there, the configured tone not.
+    ToneLost,
+    /// The audio went to zeros: something upstream muted the slot.
+    Silence,
+}
+
+impl From<trunk_fm::gate::CloseReason> for CloseReason {
+    fn from(r: trunk_fm::gate::CloseReason) -> Self {
+        use trunk_fm::gate::CloseReason as G;
+        match r {
+            G::Quieting => Self::Quieting,
+            G::ToneLost => Self::ToneLost,
+            G::Silence => Self::Silence,
+        }
+    }
+}
+
 /// Events from the DSP threads to the monitor loop.
 pub enum RadioEvent {
     /// Parsed trunk messages from a control channel.
     TrunkMessages(Vec<TrTrunkMessage>),
-    /// A recorder's squelch (carrier or tone gate) changed.
+    /// A recorder's transmission detector (the power squelch of a digital
+    /// channel, trunk-fm's gate on an analog one) opened or closed.
     Squelch {
         recorder_num: i32,
-        muted: bool,
+        squelch: Squelch,
+        /// The slot's power at the transition ([`crate::recorder::DB_UNSET`]
+        /// without a reading).
         pwr_db: f64,
     },
     /// An in-band P25 source change on a voice channel.

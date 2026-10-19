@@ -378,7 +378,7 @@ mod tests {
     ) -> f64 {
         let mut rng = Rng::new(21);
         let dibits = random_dibits(&mut rng, 6000);
-        let iq = channel.apply(&modulate(&dibits, 5), 5);
+        let iq = channel.apply(&modulate(&dibits, 5), 5, crate::symbols::SYMBOL_RATE);
         let mut d = Demodulator::new(cfg);
         let mut soft = Vec::new();
         for chunk in iq.chunks(997) {
@@ -471,6 +471,7 @@ mod tests {
         let iq = impaired(30.0).apply(
             &testgen::modulate_cqpsk(&random_dibits(&mut rng, 3000), 5),
             5,
+            crate::symbols::SYMBOL_RATE,
         );
         let mut d = Demodulator::new(cfg);
         d.process(&iq, &mut Vec::new());

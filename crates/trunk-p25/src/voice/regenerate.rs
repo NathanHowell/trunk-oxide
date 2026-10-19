@@ -341,7 +341,11 @@ mod tests {
             clock_ppm: 10.0,
             seed: 6,
         }
-        .apply(&testgen::modulate_cqpsk(&dibits, 5), 5);
+        .apply(
+            &testgen::modulate_cqpsk(&dibits, 5),
+            5,
+            crate::symbols::SYMBOL_RATE,
+        );
         let cfg = DemodConfig::new(24000.0, Modulation::Cqpsk);
         let mut r = Regenerator::new(cfg);
         let (mut out, mut events) = (Vec::new(), Vec::new());

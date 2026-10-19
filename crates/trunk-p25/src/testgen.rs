@@ -343,8 +343,11 @@ impl Channel {
         clippy::cast_sign_loss,
         clippy::many_single_char_names
     )]
-    pub fn apply(&self, x: &[Complex32], sps: usize) -> Vec<Complex32> {
-        let fs = crate::symbols::SYMBOL_RATE * sps as f64;
+    /// Impair `x`, sampled at `sps` samples per symbol of `symbol_rate`
+    /// ([`crate::symbols::SYMBOL_RATE`] for phase 1,
+    /// [`crate::symbols::PHASE2_SYMBOL_RATE`] for phase 2).
+    pub fn apply(&self, x: &[Complex32], sps: usize, symbol_rate: f64) -> Vec<Complex32> {
+        let fs = symbol_rate * sps as f64;
         let mut rng = Rng::new(self.seed);
         // Noise per complex sample: Es/N0 with Es = sps × unit sample power.
         let n0 = sps as f64 / 10f64.powf(self.es_n0_db / 10.0);

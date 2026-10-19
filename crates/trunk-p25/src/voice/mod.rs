@@ -354,7 +354,11 @@ mod tests {
             clock_ppm: 30.0,
             seed: 4,
         }
-        .apply(&testgen::modulate_cqpsk(&dibits, 5), 5);
+        .apply(
+            &testgen::modulate_cqpsk(&dibits, 5),
+            5,
+            crate::symbols::SYMBOL_RATE,
+        );
         let cfg = DemodConfig::new(24000.0, Modulation::Cqpsk);
         let mut dec = VoiceDecoder::new(cfg);
         let mut out = Vec::new();

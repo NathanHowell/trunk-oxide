@@ -494,7 +494,7 @@ mod tests {
             clock_ppm: -60.0,
             seed: 8,
         };
-        let iq = ch.apply(&iq, 5);
+        let iq = ch.apply(&iq, 5, crate::symbols::SYMBOL_RATE);
         // White noise over the full band: CQPSK gets its matched filter, as
         // the channelizer's band-limiting would (C4FM's receiver integrates).
         let matched_filter = modulation == Modulation::Cqpsk;

@@ -66,7 +66,11 @@ fn noisy_call_over_the_air() {
         clock_ppm: 20.0,
         seed: 5,
     }
-    .apply(&modulate_cqpsk(&d, 4), 4);
+    .apply(
+        &modulate_cqpsk(&d, 4),
+        4,
+        crate::symbols::PHASE2_SYMBOL_RATE,
+    );
     let cfg = DemodConfig::phase2(24000.0);
     let mut dec = TdmaDecoder::new(cfg, Some(scrambler()));
     let mut out = Vec::new();

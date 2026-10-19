@@ -75,13 +75,18 @@ P25 control channel (qii), P25 phase 1 voice (nih), P25 phase 2 TDMA (has).
   replays run: they are real time.
 - Compare `summary.json`, `events.jsonl` and tap logs; call-level numbers
   vary ±1 call run to run, decoder outputs must be deterministic.
-- Shadow mode: `recorder.p25_shadow.{control,voice,tdma}` runs both
-  implementations on the same IQ (one replay, exact comparison); replay
-  `summary.json` has the tallies under `decoders`. New stages should plug
-  into it (report every output to `trunk_recorder_sys::shadow`).
+- Shadow mode (live A/B): run both implementations on the same IQ, the old
+  one only reported, and compare per item (`Both` / `Only(impl)`). The P25
+  ports used `recorder.p25_shadow` and `trunk.oxide.shadow.*`; it was
+  deleted with the C++ it compared against (git history: 3c56d61..c4086cf),
+  so a new port brings its own for as long as both implementations exist.
+- An oracle: drive the C++ stage directly from a test (`op25_voice_reference`,
+  the old `tr_p25_reference_parse`) and diff outputs on golden taps, every
+  difference a named divergence; freeze the oracle's output as a fixture
+  before deleting the C++ (`p25_parse/tests/reference.rs`).
 - Metrics under `trunk.oxide.<stage>.*` in trunk-oxide (counters by outcome,
-  quality gauges), polled at the 1 Hz tick, always labelled `impl` (rust |
-  op25) and `role` (primary | shadow).
+  quality gauges), polled at the 1 Hz tick; while two implementations run,
+  labelled `impl` and `role` (primary | shadow).
 
 ## 6. Land it
 

@@ -86,21 +86,15 @@ slightly run to run — ±1 call, ~1 s of audio — because the state machine is
 wall-clock driven, so compare those with a tolerance. Taps are big (~4 GB per
 10 minutes); `recorder.tap_dir` enables them outside replay.
 
-## P25 decoder A/B
+## P25 decoders
 
-Control channels are always decoded by trunk-p25 (op25's chain was deleted
-once shadow mode showed trunk-p25 decoding everything op25 did, and ~40%
-more). `recorder.p25_voice_decoder` picks who decodes phase 1 voice and
-`recorder.p25_tdma_decoder` who decodes phase 2 (TDMA) voice:
-- `rust`: trunk-p25 all the way to audio — demodulator, decoders, the call
-  assembler (`trunk_p25::assemble`) — with only op25's vocoders, one frame
-  at a time (`p25_voice_synth`);
-- `regen` (the default): trunk-p25's decoding, regenerated as an error-free
-  symbol stream for op25's frame assembler;
-- `op25`: the GNU Radio chains.
-
-Run them with `--tap` and compare `summary.json`. `rust` is checked against
-`regen` frame by frame (`voice_capture_sounds_as_op25_makes_it` below).
+trunk-p25 decodes all P25: control channels, and voice all the way to audio
+— demodulator, decoders, the call assembler (`trunk_p25::assemble`) — with
+only op25's vocoders left in C++, one frame at a time (`p25_voice_synth`).
+op25's chains were deleted once shadow mode had compared them live: control
+channels (trunk-p25 decoding everything op25 did and ~40% more), then the
+regenerator into op25's frame assembler against trunk-p25's assembler
+(c4086cf).
 
 Offline, without a replay:
 - `cargo run --release -p trunk-p25 --example golden -- RUN/taps` decodes the
@@ -114,54 +108,25 @@ Offline, without a replay:
   [wacn=0xbee00 sysid=0x5e4 nac=0x5e1]` does the same for phase 2 calls:
   an emulation of op25's TDMA chain on its own symbols, trunk-p25 on those
   symbols and on the IQ, and op25 again on trunk-p25's regenerated stream
-  (the defaults are svrcs's scrambling parameters).
-
+  (the defaults are svrcs's scrambling parameters);
 - `TRUNK_P25_TAPS=RUN/taps cargo test -p trunk-recorder-sys --release --lib
-  voice_capture -- --ignored --nocapture` runs every voice tap through both
-  `regen` (op25's frame assembler driven directly, `op25_voice_reference`)
-  and `rust`, and aligns the frames each vocoded: phase 1 must be op25's
-  sample for sample; phase 2 may differ only at the edges of lock
-  (`LockEdges`: op25 frames from its first S-ISCH to ten bursts past its
-  last, trunk-p25 while its flywheel holds).
+  voice_capture -- --ignored --nocapture` runs every voice tap's IQ through
+  op25's frame assembler (driven directly, `op25_voice_reference`) after
+  trunk-p25's regenerator, and through trunk-p25's own path, and aligns the
+  frames each vocoded: phase 1 must be op25's sample for sample; phase 2 may
+  differ only at the edges of lock (`LockEdges`: op25 frames from its first
+  S-ISCH to ten bursts past its last, trunk-p25 while its flywheel holds).
 
-With `regen` a call's `.symbols.f32` holds the regenerated symbols (what the
-op25 frame assembler received), not raw demodulator output; with `rust`
-there is none. The sidecar's `"decoder"` says which. The offline scorers
-need op25's symbols, so take their taps from a run with both voice decoders
-on `op25`.
+Voice taps hold the conditioned IQ (`.out.cf32`) only; `.symbols.f32` is in
+taps from before the op25 chains were deleted (op25's demodulator output, or
+with the regenerator its symbols — the sidecar's `"decoder"` says which).
+The `voice_golden` and `tdma_golden` scorers need op25's own symbols, from
+such older taps.
 
-## Shadow mode
-
-`recorder.p25_shadow` runs a second voice implementation beside the
-primary, on the same IQ, so the two can be compared live or in a replay:
-`regen` beside `rust` (the same decoding through op25's frame assembler) or
-beside `op25` (trunk-p25's decoding against op25's), and `op25` beside
-`regen`.
-
-```toml
-[recorder.p25_shadow]
-voice = true     # phase 1 voice
-tdma = true      # phase 2 voice
-```
-
-The primary drives the call's audio and signalling; the shadow's go nowhere
-(no plugins, source-change, encryption or alias notices). It costs
-about twice the decode CPU of what it covers. In a replay:
-`--set recorder.p25_shadow.tdma=true`.
-
-Every decoder's output is labelled `impl = rust | regen | op25` and
-`role = primary | shadow`, shadow mode or not:
-- `trunk.oxide.p25call.{calls,audio,transmissions,bit_errors,spikes}{impl,role,phase}`
-  — per-call accounts;
-- `trunk.oxide.shadow.voice{phase,item,outcome,impl,primary_impl,shadow_impl}`
-  — per call, source units (`item=source`), whether there was audio
-  (`item=audio`, ≥ 0.5 s) and the encryption found (`item=encrypted`, the
-  same ALGID) in both or only one.
-
-The trunk-p25 voice stage metrics (`p25voice`, `p25tdma`) carry `impl=rust`
-or `regen` (whose decoders they count) and the role too; the control
-channel ones (`p25cc`) only `impl=rust`. A replay writes the same tallies to
-`summary.json` under `decoders`.
+Calls are counted in `trunk.oxide.p25call.{calls,audio,transmissions,
+bit_errors,spikes,encrypted}{system,phase}`; the decoder stage metrics are
+`p25cc`, `p25voice` and `p25tdma`. A replay writes the call tallies and the
+control channel parser's counts to `summary.json` under `decoders`.
 
 ## Control channel parser
 

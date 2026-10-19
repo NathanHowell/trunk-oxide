@@ -26,7 +26,6 @@ public:
   virtual void set_tdma(bool phase2) = 0;
   virtual void switch_tdma(bool phase2) = 0;
   virtual std::shared_ptr<Source> get_source() = 0;
-  virtual void autotune() = 0;
 };
 
 #endif // ifndef P25_RECORDER_H

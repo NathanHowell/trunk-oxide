@@ -17,8 +17,7 @@ use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use num_complex::Complex32;
 use trunk_channelizer::ChannelDecoder;
-use trunk_p25::tdma::{BurstContent, Scrambler, TdmaEvent, TdmaRegenerator};
-use trunk_p25::voice::{Encryption, EncryptionTracker, Regenerator, VoiceEvent};
+use trunk_p25::voice::{Encryption, EncryptionTracker};
 use trunk_p25::{
     ControlChannelDecoder, DecoderConfig, DemodConfig, Message, Modulation, Nac, Received,
 };
@@ -41,45 +40,6 @@ pub struct ControlChannel {
     pub freq_hz: f64,
     pub source: i32,
     pub port: u32,
-}
-
-/// Which implementation produced a result.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Impl {
-    /// trunk-p25 to audio.
-    Rust,
-    Op25,
-    /// trunk-p25's decoding through op25's frame assembler.
-    Regen,
-}
-
-impl Impl {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Rust => "rust",
-            Self::Op25 => "op25",
-            Self::Regen => "regen",
-        }
-    }
-}
-
-/// What a decoder's output was used for.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
-pub enum Role {
-    /// It drives trunking or the call's audio.
-    #[default]
-    Primary,
-    /// It runs alongside the primary only to be compared.
-    Shadow,
-}
-
-impl Role {
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Primary => "primary",
-            Self::Shadow => "shadow",
-        }
-    }
 }
 
 /// A decoder's counters at one instant.
@@ -298,23 +258,18 @@ impl RawLog {
     }
 }
 
-// ── Voice: a regenerator per recorder, phase 1 or phase 2 per call ──
+// ── Voice: a decoder per recorder, phase 1 or phase 2 per call ──
 
-/// A voice regenerator's counters at one instant.
+/// A recorder's voice decoder counters at one instant.
 #[derive(Clone, Debug, PartialEq)]
 pub struct VoiceChannelReport {
     pub recorder: i32,
-    /// Which of the recorder's decoders: trunk-p25 to audio, or its
-    /// regenerator.
-    pub implementation: Impl,
     /// The system of the call in progress (or last call).
     pub system: String,
     /// Phase 1 calls.
     pub stats: VoiceStats,
     /// Phase 2 (TDMA) calls.
     pub tdma: TdmaStats,
-    /// The role of the call in progress (or last call).
-    pub role: Role,
 }
 
 #[derive(Clone, Default)]
@@ -322,21 +277,18 @@ struct Snapshot {
     phase1: VoiceStats,
     phase2: TdmaStats,
     system: String,
-    role: Role,
 }
 
 pub(crate) struct VoiceShared {
     recorder: i32,
-    implementation: Impl,
     snapshot: Mutex<Snapshot>,
 }
 
 impl VoiceShared {
     /// A recorder's voice decoder, registered for [`voice_channels`].
-    pub(crate) fn register(recorder: i32, implementation: Impl) -> Arc<Self> {
+    pub(crate) fn register(recorder: i32) -> Arc<Self> {
         let shared = Arc::new(Self {
             recorder,
-            implementation,
             snapshot: Mutex::new(Snapshot::default()),
         });
         VOICE_REGISTRY
@@ -358,12 +310,9 @@ impl VoiceShared {
         self.snapshot().phase2 = stats;
     }
 
-    /// The call in progress: its system, and whether this decoder is its
-    /// primary.
-    pub(crate) fn call(&self, system: &str, primary: bool) {
-        let mut snap = self.snapshot();
-        system.clone_into(&mut snap.system);
-        snap.role = Role::of(primary);
+    /// The call in progress: its system.
+    pub(crate) fn call(&self, system: &str) {
+        system.clone_into(&mut self.snapshot().system);
     }
 }
 
@@ -409,138 +358,12 @@ pub fn voice_channels() -> Vec<VoiceChannelReport> {
                 .clone();
             VoiceChannelReport {
                 recorder: s.recorder,
-                implementation: s.implementation,
                 system: snap.system,
                 stats: snap.phase1,
                 tdma: snap.phase2,
-                role: snap.role,
             }
         })
         .collect()
-}
-
-/// Rust half of the C++ `symbol_regenerator_backend` (see bridge.cpp). The
-/// GR block serialises every call.
-pub struct P25RegeneratorHandle {
-    regen: Regenerator,
-    tdma: TdmaRegenerator,
-    /// The call in progress is phase 2.
-    phase2: bool,
-    /// Its TDMA slot (the logical channel this recorder follows).
-    slot: u8,
-    /// Its encryption, from the ESS on its own slot.
-    crypto: EncryptionTracker,
-    /// Encryption confirmed but not yet taken by the recorder.
-    crypto_pending: Option<Encryption>,
-    rate: f64,
-    shared: Arc<VoiceShared>,
-    events: Vec<Received<trunk_p25::voice::VoiceEvent>>,
-    tdma_events: Vec<Received<TdmaEvent>>,
-}
-
-pub(crate) fn regenerator_new(rate: f64, recorder: i32) -> Box<P25RegeneratorHandle> {
-    let shared = VoiceShared::register(recorder, Impl::Regen);
-    Box::new(P25RegeneratorHandle {
-        regen: Regenerator::new(DemodConfig::new(rate, Modulation::Cqpsk)),
-        tdma: TdmaRegenerator::new(DemodConfig::phase2(rate), None),
-        phase2: false,
-        slot: 0,
-        crypto: EncryptionTracker::default(),
-        crypto_pending: None,
-        rate,
-        shared,
-        events: Vec::new(),
-        tdma_events: Vec::new(),
-    })
-}
-
-impl P25RegeneratorHandle {
-    pub(crate) fn process(&mut self, iq: &[Complex32], out: &mut Vec<f32>) {
-        out.clear();
-        if self.phase2 {
-            self.tdma_events.clear();
-            self.tdma.process(iq, out, &mut self.tdma_events);
-            self.shared.phase2(self.tdma.stats());
-            for e in &self.tdma_events {
-                if e.message.channel != self.slot {
-                    continue;
-                }
-                if let BurstContent::Voice2 { encryption, .. } = &e.message.content {
-                    track_encryption(
-                        &mut self.crypto,
-                        &mut self.crypto_pending,
-                        encryption.as_ref().map(|c| &c.value),
-                    );
-                }
-            }
-        } else {
-            self.events.clear();
-            self.regen.process(iq, out, &mut self.events);
-            self.shared.phase1(self.regen.stats());
-            for e in &self.events {
-                if let VoiceEvent::Ldu2 { encryption, .. } = &e.message {
-                    track_encryption(
-                        &mut self.crypto,
-                        &mut self.crypto_pending,
-                        encryption.as_ref().map(|c| &c.value),
-                    );
-                }
-            }
-        }
-    }
-
-    /// Encryption confirmed on this call's slot since the last take.
-    pub(crate) const fn take_crypto(&mut self) -> Option<Encryption> {
-        self.crypto_pending.take()
-    }
-
-    /// A new call. A phase 2 call needs the system's 2160-dibit scrambling
-    /// mask; without one, only its unscrambled bursts are regenerated.
-    pub(crate) fn start_call(
-        &mut self,
-        qpsk: bool,
-        tdma: bool,
-        xor_mask: &[u8],
-        system: &str,
-        primary: bool,
-        slot: u8,
-    ) {
-        self.phase2 = tdma;
-        self.slot = slot;
-        self.crypto.reset();
-        self.crypto_pending = None;
-        if tdma {
-            self.tdma.start_call(
-                DemodConfig::phase2(self.rate),
-                Scrambler::from_dibits(xor_mask),
-            );
-        } else {
-            let modulation = if qpsk {
-                Modulation::Cqpsk
-            } else {
-                Modulation::C4fm
-            };
-            self.regen
-                .start_call(DemodConfig::new(self.rate, modulation));
-        }
-        self.shared.call(system, primary);
-    }
-
-    pub(crate) fn take_call_counts(&mut self) -> ffi::TrCallCounts {
-        let c = if self.phase2 {
-            self.tdma.take_call_counts()
-        } else {
-            self.regen.take_call_counts()
-        };
-        ffi::TrCallCounts {
-            errors: c.errors,
-            spikes: c.spikes,
-            algid: self
-                .crypto
-                .confirmed()
-                .map_or(trunk_p25::voice::signalling::ALGID_CLEAR, |e| e.algid),
-        }
-    }
 }
 
 impl TryFrom<ffi::TrControlDecoder> for Modulation {

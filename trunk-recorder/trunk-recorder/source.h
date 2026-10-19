@@ -58,7 +58,7 @@ class Source : public std::enable_shared_from_this<Source> {
   int max_sigmf_recorders;
   int max_analog_recorders;
   int debug_recorder_port;
-  int silence_frames;
+  int silence_frames = 0; // was never initialised unless configured
   const Config &config;
 
   std::vector<p25_recorder_sptr> digital_recorders;

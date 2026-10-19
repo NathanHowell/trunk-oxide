@@ -236,8 +236,6 @@ list(APPEND trunk_recorder_sources
   trunk-recorder/recorders/analog_recorder.cc
   trunk-recorder/recorders/dmr_recorder_impl.cc
   trunk-recorder/recorders/p25_recorder_impl.cc
-  trunk-recorder/recorders/p25_recorder_fsk4_demod.cc
-  trunk-recorder/recorders/p25_recorder_qpsk_demod.cc
   trunk-recorder/recorders/p25_recorder_decode.cc
   trunk-recorder/sources/iq_file_source.cc
   trunk-recorder/csv_helper.cc
@@ -260,7 +258,6 @@ list(APPEND trunk_recorder_sources
   trunk-recorder/gr_blocks/callback_ctcss_squelch_ff.cc
   trunk-recorder/gr_blocks/wavfile_gr3.8.cc
   trunk-recorder/gr_blocks/channel_control.cc
-  trunk-recorder/gr_blocks/symbol_regenerator.cc
   trunk-recorder/gr_blocks/p25_voice_synth.cc
   trunk-recorder/gr_blocks/p25_voice_decoder.cc
   trunk-recorder/gr_blocks/op25_voice_reference.cc

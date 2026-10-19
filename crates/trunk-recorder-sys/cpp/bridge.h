@@ -19,7 +19,6 @@ namespace trunk_oxide {
 enum class TrSignalType : uint8_t;
 enum class TrMessageType : uint8_t;
 enum class TrCallDataStatus : uint8_t;
-enum class TrP25Decoder : uint8_t;
 struct TrPatchData;
 struct TrTrunkMessage;
 struct TrTransmission;
@@ -89,8 +88,6 @@ rust::Vec<float> tr_probe_capture(TrProbe &probe, double gain_db, size_t n_sampl
 // ── Config builder functions ──
 void tr_config_set_temp_dir(TrContext &ctx, rust::Str dir);
 void tr_config_set_tap_dir(TrContext &ctx, rust::Str dir);
-void tr_config_set_p25_voice_decoder(TrContext &ctx, TrP25Decoder phase1, TrP25Decoder phase2);
-void tr_config_set_p25_shadow(TrContext &ctx, bool phase1, bool phase2);
 void tr_config_set_soft_vocoder(TrContext &ctx, bool enabled);
 void tr_config_set_debug_recorder(TrContext &ctx, bool enabled, rust::Str address, int32_t port);
 

@@ -72,7 +72,7 @@ impl VoicePipeline {
             counter: CallCounter::default(),
             crypto: EncryptionTracker::default(),
             crypto_pending: None,
-            shared: VoiceShared::register(recorder, crate::p25::Impl::Rust),
+            shared: VoiceShared::register(recorder),
             muted: 0,
         }
     }
@@ -255,15 +255,7 @@ pub fn p25_voice_new(rate: f64, recorder: i32, soft_vocoder: bool) -> Box<P25Voi
 impl P25VoiceHandle {
     /// A new call: CQPSK (else C4FM), phase 2 on `slot` with the system's
     /// 2160-dibit scrambling mask.
-    pub fn start_call(
-        &mut self,
-        qpsk: bool,
-        tdma: bool,
-        xor_mask: &[u8],
-        system: &str,
-        primary: bool,
-        slot: i32,
-    ) {
+    pub fn start_call(&mut self, qpsk: bool, tdma: bool, xor_mask: &[u8], system: &str, slot: i32) {
         let modulation = if qpsk {
             Modulation::Cqpsk
         } else {
@@ -275,7 +267,7 @@ impl P25VoiceHandle {
             Scrambler::from_dibits(xor_mask),
             u8::try_from(slot).unwrap_or(0),
         );
-        self.pipeline.shared.call(system, primary);
+        self.pipeline.shared.call(system);
         self.terminated = false;
     }
 

@@ -339,18 +339,6 @@ impl TrunkRecorderBuilder {
         if let Some(rec) = &config.recorder {
             ffi::tr_config_set_temp_dir(ctx.pin_mut(), &rec.temp_dir);
             ffi::tr_config_set_soft_vocoder(ctx.pin_mut(), rec.soft_vocoder);
-            let decoder = |d: trunk_config::P25Decoder| match d {
-                trunk_config::P25Decoder::Rust => ffi::TrP25Decoder::Rust,
-                trunk_config::P25Decoder::Regen => ffi::TrP25Decoder::Regen,
-                trunk_config::P25Decoder::Op25 => ffi::TrP25Decoder::Op25,
-            };
-            ffi::tr_config_set_p25_voice_decoder(
-                ctx.pin_mut(),
-                decoder(rec.p25_voice_decoder),
-                decoder(rec.p25_tdma_decoder),
-            );
-            let shadow = &rec.p25_shadow;
-            ffi::tr_config_set_p25_shadow(ctx.pin_mut(), shadow.voice, shadow.tdma);
             let c = &rec.conditioner;
             trunk_recorder_sys::set_conditioning_settings(trunk_recorder_sys::ConditioningSettings {
                 params: trunk_recorder_sys::ConditionerParams {

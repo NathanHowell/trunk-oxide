@@ -18,9 +18,9 @@ p25_voice_decoder::p25_voice_decoder(std::shared_ptr<p25_voice_backend> backend,
   set_relative_rate(1.0 / d_ratio);
 }
 
-void p25_voice_decoder::start_call(bool qpsk, bool tdma, const std::string &xor_mask, const std::string &system, bool primary, int slot) {
+void p25_voice_decoder::start_call(bool qpsk, bool tdma, const std::string &xor_mask, const std::string &system, int slot) {
   std::lock_guard<std::mutex> l(d_mutex);
-  d_backend->start_call(qpsk, tdma, xor_mask, system, primary, slot);
+  d_backend->start_call(qpsk, tdma, xor_mask, system, slot);
   d_new_call = true;
 }
 

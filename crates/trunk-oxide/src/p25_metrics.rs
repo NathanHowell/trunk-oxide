@@ -4,15 +4,15 @@
 //! the previous one, labelled by system and control-channel frequency, plus
 //! gauges for the demodulator's state.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Gauge, Meter};
 use trunk_recorder_sys::p25::{
-    ControlChannelReport, DecoderStats, Impl, TdmaStats, VoiceChannelReport, VoiceStats,
+    ControlChannelReport, DecoderStats, TdmaStats, VoiceChannelReport, VoiceStats,
 };
 use trunk_recorder_sys::p25_parse::{self, ParseStats};
-use trunk_recorder_sys::shadow::{self, CallTally, Outcome, VoiceTally};
+use trunk_recorder_sys::p25_calls::{self, CallTally, Phase};
 
 /// A decoder's identity across polls: (source, channelizer port).
 type Key = (i32, u32);
@@ -31,7 +31,7 @@ pub struct P25Metrics {
     clock_ppm: Gauge<f64>,
     prev: HashMap<Key, (DecoderStats, u64)>,
     voice: VoiceMetrics,
-    shadow: ShadowMetrics,
+    calls: CallMetrics,
     parser: ParserMetrics,
 }
 
@@ -125,7 +125,7 @@ struct VoiceMetrics {
     words: Counter<u64>,
     symbol_snr_db: Gauge<f64>,
     /// By recorder and implementation (a recorder can run two).
-    prev: HashMap<(i32, Impl), VoiceStats>,
+    prev: HashMap<i32, VoiceStats>,
     tdma: TdmaMetrics,
 }
 
@@ -138,7 +138,7 @@ struct TdmaMetrics {
     encryption_sync: Counter<u64>,
     sync: Counter<u64>,
     symbol_snr_db: Gauge<f64>,
-    prev: HashMap<(i32, Impl), TdmaStats>,
+    prev: HashMap<i32, TdmaStats>,
 }
 
 impl TdmaMetrics {
@@ -177,7 +177,7 @@ impl TdmaMetrics {
         }
     }
 
-    fn export(&mut self, key: (i32, Impl), base: &[KeyValue], now: &TdmaStats) {
+    fn export(&mut self, key: i32, base: &[KeyValue], now: &TdmaStats) {
         let was = self.prev.insert(key, *now).unwrap_or_default();
         let d = |a: u64, b: u64| a.saturating_sub(b);
         let mac_total = d(now.mac + now.mac_failed, was.mac + was.mac_failed);
@@ -269,10 +269,8 @@ impl VoiceMetrics {
         let base = [
             KeyValue::new("recorder", i64::from(r.recorder)),
             KeyValue::new("system", r.system.clone()),
-            KeyValue::new("impl", r.implementation.label()),
-            KeyValue::new("role", r.role.label()),
         ];
-        let key = (r.recorder, r.implementation);
+        let key = r.recorder;
         let was = self.prev.insert(key, r.stats).unwrap_or_default();
         let now = &r.stats;
         let d = |a: u64, b: u64| a.saturating_sub(b);
@@ -321,74 +319,60 @@ impl VoiceMetrics {
     }
 }
 
-/// Every voice decoder's calls by implementation and role (`impl` = rust |
-/// op25, `role` = primary | shadow), and in shadow mode how they agree.
-struct ShadowMetrics {
+/// Every P25 voice call's outcome, by system and phase.
+struct CallMetrics {
     calls: Counter<u64>,
     call_audio: Counter<f64>,
     call_transmissions: Counter<u64>,
     call_bit_errors: Counter<u64>,
     call_spikes: Counter<u64>,
-    voice_agreement: Counter<u64>,
-    prev_voice: VoiceTally,
+    call_encrypted: Counter<u64>,
+    prev: BTreeMap<(String, Phase), CallTally>,
 }
 
-fn outcome(attrs: &mut Vec<KeyValue>, o: Outcome) {
-    attrs.push(KeyValue::new("outcome", o.label()));
-    if let Some(i) = o.implementation() {
-        attrs.push(KeyValue::new("impl", i.label()));
-    }
-}
-
-impl ShadowMetrics {
+impl CallMetrics {
     fn new(meter: &Meter) -> Self {
         Self {
             calls: meter
                 .u64_counter("trunk.oxide.p25call.calls")
-                .with_description("P25 voice calls each decoder handled, by impl, role and phase")
+                .with_description("P25 voice calls recorded, by system and phase")
                 .build(),
             call_audio: meter
                 .f64_counter("trunk.oxide.p25call.audio")
-                .with_description("Audio each decoder produced")
+                .with_description("Audio the calls produced")
                 .with_unit("s")
                 .build(),
             call_transmissions: meter
                 .u64_counter("trunk.oxide.p25call.transmissions")
-                .with_description("Transmissions (per source unit) each decoder produced")
+                .with_description("Transmissions (per source unit) the calls produced")
                 .build(),
             call_bit_errors: meter
                 .u64_counter("trunk.oxide.p25call.bit_errors")
-                .with_description("Voice-frame bits each decoder corrected")
+                .with_description("Voice-frame bits corrected")
                 .build(),
             call_spikes: meter
                 .u64_counter("trunk.oxide.p25call.spikes")
-                .with_description("Error spikes (op25) or untrusted frames (trunk-p25 TDMA)")
+                .with_description("Error spikes (phase 1) or untrusted frames (phase 2)")
                 .build(),
-            voice_agreement: meter
-                .u64_counter("trunk.oxide.shadow.voice")
-                .with_description(
-                    "Shadow mode, voice calls: source units and audio (≥ 0.5 s) both \
-                     implementations produced, or only one (impl)",
-                )
+            call_encrypted: meter
+                .u64_counter("trunk.oxide.p25call.encrypted")
+                .with_description("Calls whose encryption sync confirmed encryption")
                 .build(),
-            prev_voice: VoiceTally::default(),
+            prev: BTreeMap::new(),
         }
     }
 
     fn poll(&mut self) {
-        let now = shadow::voice_tally();
-        for ((system, phase, i, role), t) in &now.calls {
-            let was: CallTally = self
-                .prev_voice
-                .calls
-                .get(&(system.clone(), *phase, *i, *role))
+        let now = p25_calls::call_tally();
+        for ((system, phase), t) in &now {
+            let was = self
+                .prev
+                .get(&(system.clone(), *phase))
                 .copied()
                 .unwrap_or_default();
             let a = [
                 KeyValue::new("system", system.clone()),
                 KeyValue::new("phase", phase.label()),
-                KeyValue::new("impl", i.label()),
-                KeyValue::new("role", role.label()),
             ];
             let d = |x: u64, y: u64| x.saturating_sub(y);
             self.calls.add(d(t.calls, was.calls), &a);
@@ -398,23 +382,9 @@ impl ShadowMetrics {
                 .add(d(t.transmissions, was.transmissions), &a);
             self.call_bit_errors.add(d(t.errors, was.errors), &a);
             self.call_spikes.add(d(t.spikes, was.spikes), &a);
+            self.call_encrypted.add(d(t.encrypted, was.encrypted), &a);
         }
-        for (k, &n) in &now.agreement {
-            let d = n.saturating_sub(self.prev_voice.agreement.get(k).copied().unwrap_or(0));
-            if d > 0 {
-                let (system, phase, primary, shadow_impl, item, o) = k;
-                let mut a = vec![
-                    KeyValue::new("system", system.clone()),
-                    KeyValue::new("phase", phase.label()),
-                    KeyValue::new("item", item.label()),
-                    KeyValue::new("primary_impl", primary.label()),
-                    KeyValue::new("shadow_impl", shadow_impl.label()),
-                ];
-                outcome(&mut a, *o);
-                self.voice_agreement.add(d, &a);
-            }
-        }
-        self.prev_voice = now;
+        self.prev = now;
     }
 }
 
@@ -512,14 +482,14 @@ impl P25Metrics {
                 .build(),
             prev: HashMap::new(),
             voice: VoiceMetrics::new(meter),
-            shadow: ShadowMetrics::new(meter),
+            calls: CallMetrics::new(meter),
             parser: ParserMetrics::new(meter),
         }
     }
 
     pub fn poll(&mut self) {
         self.voice.poll();
-        self.shadow.poll();
+        self.calls.poll();
         self.parser.poll();
         let reports = trunk_recorder_sys::p25::control_channels();
         self.prev.retain(|k, _| {
@@ -537,7 +507,6 @@ impl P25Metrics {
         let base = [
             KeyValue::new("system", r.channel.system.clone()),
             KeyValue::new("freq_hz", r.channel.freq_hz as i64),
-            KeyValue::new("impl", Impl::Rust.label()),
         ];
         let key = (r.channel.source, r.channel.port);
         let (prev, prev_dropped) = self

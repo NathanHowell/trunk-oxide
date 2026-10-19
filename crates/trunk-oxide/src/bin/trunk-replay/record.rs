@@ -85,47 +85,24 @@ pub struct Summary {
     pub mean_noise_db: Option<f64>,
     pub channelizer: Vec<Value>,
     systems: BTreeMap<String, SystemStats>,
-    /// Every P25 voice decoder's calls by implementation and role, and with
-    /// `recorder.p25_shadow` on, how the implementations agreed; and the
-    /// control channel parser's counts.
+    /// P25 voice calls by system and phase, and the control channel
+    /// parser's counts.
     pub decoders: Value,
 }
 
-/// The P25 observers' tallies (`trunk_recorder_sys::shadow`) as JSON.
+/// The P25 voice calls' tallies (`trunk_recorder_sys::p25_calls`) and the
+/// control channel parser's counts, as JSON.
 pub fn decoder_tallies() -> Value {
-    use trunk_recorder_sys::shadow::{self, Outcome};
-    let outcome = |o: Outcome| match o {
-        Outcome::Both => "both".to_string(),
-        Outcome::Only(i) => format!("only_{}", i.label()),
-    };
-    let v = shadow::voice_tally();
-    let calls: BTreeMap<String, Value> = v
-        .calls
+    let calls: BTreeMap<String, Value> = trunk_recorder_sys::p25_calls::call_tally()
         .iter()
-        .map(|((s, p, i, r), t)| {
+        .map(|((s, p), t)| {
             (
-                format!("{s}/phase{}/{}/{}", p.label(), i.label(), r.label()),
+                format!("{s}/phase{}", p.label()),
                 json!({
                     "calls": t.calls, "audio_seconds": round(t.audio_seconds, 3),
                     "transmissions": t.transmissions, "bit_errors": t.errors, "spikes": t.spikes,
+                    "encrypted": t.encrypted,
                 }),
-            )
-        })
-        .collect();
-    let agreement: BTreeMap<String, u64> = v
-        .agreement
-        .iter()
-        .map(|((s, p, pi, si, item, o), &n)| {
-            (
-                format!(
-                    "{s}/phase{}/{}+{}-shadow/{}/{}",
-                    p.label(),
-                    pi.label(),
-                    si.label(),
-                    item.label(),
-                    outcome(*o)
-                ),
-                n,
             )
         })
         .collect();
@@ -143,7 +120,7 @@ pub fn decoder_tallies() -> Value {
         })
         .collect();
     json!({
-        "voice": { "calls": calls, "agreement": agreement },
+        "voice": { "calls": calls },
         "parser": parser,
     })
 }

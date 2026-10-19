@@ -34,8 +34,10 @@ public:
 
   // Decode `n` samples; append audio (8 kHz) and its tags.
   virtual void process(const gr_complex *in, size_t n, std::vector<int16_t> &audio, std::vector<Tag> &tags) = 0;
-  // A new call (see symbol_regenerator_backend::start_call).
-  virtual void start_call(bool qpsk, bool tdma, const std::string &xor_mask, const std::string &system, bool primary, int slot) = 0;
+  // A new call: loops and NAC start over (qpsk = CQPSK, else C4FM; tdma =
+  // phase 2 at 6000 baud on logical channel `slot`, descrambled with the
+  // 2160-dibit `xor_mask`).
+  virtual void start_call(bool qpsk, bool tdma, const std::string &xor_mask, const std::string &system, int slot) = 0;
   // Encryption confirmed on the call's own slot since the last take.
   virtual bool take_crypto(unsigned &algid, unsigned &keyid) = 0;
 
@@ -62,7 +64,7 @@ public:
 
   p25_voice_decoder(std::shared_ptr<p25_voice_backend> backend, double rate);
 
-  void start_call(bool qpsk, bool tdma, const std::string &xor_mask, const std::string &system, bool primary, int slot);
+  void start_call(bool qpsk, bool tdma, const std::string &xor_mask, const std::string &system, int slot);
   p25_voice_backend::CallCounts take_call_counts();
   // Called on the GR thread with encryption the backend confirms.
   void set_crypto_callback(std::function<void(unsigned algid, unsigned keyid)> cb) { d_crypto_cb = std::move(cb); }

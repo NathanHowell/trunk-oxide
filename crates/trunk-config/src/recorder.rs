@@ -25,37 +25,6 @@ impl DefaultMode {
     }
 }
 
-/// Who decodes P25 voice.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum P25Decoder {
-    /// trunk-p25 all the way to audio (op25's vocoders only).
-    Rust,
-    /// trunk-p25's decoding, regenerated for op25's frame assembler.
-    #[default]
-    Regen,
-    /// op25's GNU Radio chain, kept for A/B replays.
-    Op25,
-}
-
-/// Shadow mode: run another P25 implementation too, for comparison.
-///
-/// Beside `rust` or `op25` (`p25_voice_decoder` / `p25_tdma_decoder`) the
-/// regenerator runs (`regen`: against `rust`, the same decoding through
-/// op25's frame assembler); beside `regen`, op25. Its output is only
-/// counted and compared. Costs about twice the decode CPU of whatever it
-/// covers.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct P25Shadow {
-    /// Phase 1 voice.
-    #[serde(default)]
-    pub voice: bool,
-    /// Phase 2 (TDMA) voice.
-    #[serde(default)]
-    pub tdma: bool,
-}
-
 /// When the Rust conditioner restarts a channel's AGC and FLL.
 #[derive(Clone, Copy, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -122,16 +91,6 @@ pub struct RecorderConfig {
     pub tap_dir: Option<String>,
     #[serde(default)]
     pub conditioner: ConditionerConfig,
-    /// Who decodes P25 phase 1 voice.
-    #[serde(default)]
-    pub p25_voice_decoder: P25Decoder,
-    /// Who decodes P25 phase 2 (TDMA) voice.
-    #[serde(default)]
-    pub p25_tdma_decoder: P25Decoder,
-    /// Run the other P25 implementation beside each primary, on the same IQ,
-    /// to compare them live (`trunk.oxide.shadow.*` metrics).
-    #[serde(default)]
-    pub p25_shadow: P25Shadow,
     #[serde(default = "default_true")]
     pub record_uu_v_calls: bool,
     #[serde(default = "default_true")]

@@ -4,19 +4,10 @@
 #include <json.hpp>
 #include <gnuradio/block.h>
 #include <gnuradio/block_detail.h>
-#include <gnuradio/blocks/short_to_float.h>
 #include <gnuradio/hier_block2.h>
 #include <gnuradio/io_signature.h>
 #include <atomic>
 #include <mutex>
-
-#include <op25_repeater/fsk4_slicer_fb.h>
-#include <op25_repeater/costas_loop_cc.h>
-#include <op25_repeater/gardner_cc.h>
-#include <op25_repeater/include/op25_repeater/fsk4_demod_ff.h>
-#include <op25_repeater/include/op25_repeater/p25_frame_assembler.h>
-#include <op25_repeater/include/op25_repeater/rx_status.h>
-#include <op25_repeater/vocoder.h>
 
 #include <gnuradio/blocks/multiply_const.h>
 
@@ -28,15 +19,15 @@ class p25_recorder_decode;
 
 typedef std::shared_ptr<p25_recorder_decode> p25_recorder_decode_sptr;
 
-// audio_in: the input is decoded audio (int16, 8 kHz, tagged as op25's
-// frame assembler tags it), not symbols for op25 to frame and vocode.
-p25_recorder_decode_sptr make_p25_recorder_decode(const std::shared_ptr<Recorder> &recorder, const Config &config, int silence_frames, bool d_soft_vocoder, bool audio_in = false);
+// Records a P25 call's audio (int16, 8 kHz, tagged with "src_id" where the
+// unit talking is heard) and reports its in-band sources and aliases.
+p25_recorder_decode_sptr make_p25_recorder_decode(const std::shared_ptr<Recorder> &recorder, const Config &config);
 
 class p25_recorder_decode : public gr::hier_block2 {
-  friend p25_recorder_decode_sptr make_p25_recorder_decode(const std::shared_ptr<Recorder> &recorder, const Config &config, int silence_frames, bool d_soft_vocoder, bool audio_in);
+  friend p25_recorder_decode_sptr make_p25_recorder_decode(const std::shared_ptr<Recorder> &recorder, const Config &config);
 
 protected:
-  virtual void initialize(int silence_frames, bool d_soft_vocoder);
+  void initialize();
   std::shared_ptr<Recorder> d_recorder;
   const Config &d_config;
   std::shared_ptr<System> d_system;
@@ -44,61 +35,34 @@ protected:
   // Last in-band src reported up to the state machine, to dedup the per-superframe
   // tag re-fires (only a *change* cuts a transmission boundary).
   long d_last_notified_src = -1;
-  // Last (algid << 16 | keyid) reported, to dedup the per-superframe ESS
-  // re-fires; ~0 = none yet. Reset per call in start().
-  std::atomic<uint32_t> d_last_notified_crypto{~0u};
-  gr::op25_repeater::p25_frame_assembler::sptr op25_frame_assembler;
-  gr::op25_repeater::fsk4_slicer_fb::sptr slicer;
-  gr::blocks::short_to_float::sptr converter;
   gr::blocks::multiply_const_ss::sptr levels;
   gr::blocks::headless_sink::sptr wav_sink;
   gr::blocks::plugin_wrapper::sptr plugin_sink;
 
 public:
-  p25_recorder_decode(const std::shared_ptr<Recorder> &recorder, const Config &config, bool audio_in);
-  void set_tdma_slot(int slot);
+  p25_recorder_decode(const std::shared_ptr<Recorder> &recorder, const Config &config);
   std::vector<Transmission> get_transmission_list();
   void set_source(long src);
-  void set_xor_mask(const std::string &mask);
-  void switch_tdma(bool phase2_tdma);
   void set_system(const std::shared_ptr<System> &sys);
   void start(const RecorderConfig &config);
   std::chrono::duration<double> since_last_write();
   std::chrono::duration<double> since_last_voice();
   void stop();
   void flush_plugin();
-  // A shadow decodes only to be compared: its audio, source changes, aliases
-  // and crypto notices go nowhere.
-  void set_shadow(bool shadow) { d_shadow = shadow; }
-  // Whether op25's ESS marks the call encrypted (it is primary), or is only
-  // recorded for comparison (trunk-p25 is).
-  void set_forward_crypto(bool forward) { d_forward_crypto = forward; }
-  // The ALGID op25 reported on this call (0x80: none).
-  int call_algid() const { return d_call_algid; }
   // Source units the call in progress (or last call) named in band, in
   // order of first appearance.
   std::vector<long> call_sources() const;
-  void reset();
-  void reset_block(gr::basic_block_sptr block); 
-  int tdma_slot;
-  bool delay_open;
   virtual ~p25_recorder_decode();
   void plugin_callback_handler(int16_t *samples, int sampleCount);
-  // An op25 JSON message (M_P25_JSON_DATA): encryption parameters or a
-  // talker alias.
+  // An op25-style JSON message: a talker alias.
   void handle_json(const std::string &json);
   void source_id_handler(long src_id);
   double get_output_sample_rate();
   RecorderState get_state();
-  gr::op25_repeater::p25_frame_assembler::sptr get_transmission_sink();
 
 private:
-  bool d_audio_in;
   void handle_alias_message(const nlohmann::json& j);
   mutable std::mutex d_state_mutex;
-  std::atomic<bool> d_shadow{false};
-  std::atomic<bool> d_forward_crypto{true};
-  std::atomic<int> d_call_algid{0x80};
   std::vector<long> d_call_sources; // guarded by d_state_mutex
 };
 #endif

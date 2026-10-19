@@ -8,7 +8,6 @@
 const int DB_UNSET = 999;
 
 class EventSink;
-class symbol_regenerator_backend;
 class p25_voice_backend;
 
 struct Transmission {
@@ -29,45 +28,19 @@ struct Transmission {
   char filename[255];
 };
 
-// Who decodes P25 voice: trunk-p25 all the way to audio (op25's vocoders
-// only), op25's GNU Radio chain, or trunk-p25 regenerating the stream for
-// op25's frame assembler.
-enum class P25DecoderImpl { Rust, Op25, Regen };
-
-// What shadows `primary` in shadow mode: the regenerator for both others
-// (against trunk-p25's assembler, the same decoding through op25's; against
-// op25, trunk-p25's decoding), and op25 for the regenerator.
-inline P25DecoderImpl p25_shadow_of(P25DecoderImpl primary) {
-  return primary == P25DecoderImpl::Regen ? P25DecoderImpl::Op25 : P25DecoderImpl::Regen;
-}
-
-// Shadow mode: the other implementation runs alongside the primary on the
-// same IQ, and its output is only reported (to the observer), never used.
-struct P25Shadow {
-  bool phase1 = false;
-  bool phase2 = false;
-};
-
-// One decoder's account of a voice call.
-struct P25CallAccount {
-  P25DecoderImpl impl;
-  bool primary;
-  double audio_seconds;
-  long transmissions;
-  long errors;
-  long spikes;
-  std::vector<long> sources; // source units named in band, first appearance order
-  int algid;                 // encryption it found on the call; 0x80 = clear
-};
-
-// Every voice call's outcome, by decoder: one account, or two in shadow mode.
+// A P25 voice call's outcome, when it ends.
 struct P25CallReport {
   std::string system;
   int recorder;
   long talkgroup;
   double freq;
   bool phase2;
-  std::vector<P25CallAccount> accounts;
+  double audio_seconds;
+  long transmissions;
+  long errors;
+  long spikes;
+  std::vector<long> sources; // source units named in band, first appearance order
+  int algid;                 // encryption found on the call; 0x80 = clear
 };
 
 struct Config {
@@ -79,15 +52,9 @@ struct Config {
   // When non-empty, channel conditioners and decoders write raw taps here for
   // offline baselines (see channel_control::enable_tap).
   std::string tap_dir;
-  // Set by the host when trunk-p25 decodes P25 voice: make the backend of a
-  // recorder's voice decoder or regenerator (conditioned rate, recorder
-  // number). Empty = not used by any phase, as primary or shadow.
+  // Set by the host: makes the backend of a P25 recorder's voice decoder
+  // (trunk-p25; conditioned rate, recorder number).
   std::function<std::shared_ptr<p25_voice_backend>(double, int)> p25_voice_decoder;
-  std::function<std::shared_ptr<symbol_regenerator_backend>(double, int)> p25_voice_regenerator;
-  // Who decodes each phase.
-  P25DecoderImpl p25_phase1 = P25DecoderImpl::Op25;
-  P25DecoderImpl p25_phase2 = P25DecoderImpl::Op25;
-  P25Shadow p25_shadow;
   // Every P25 voice call, when it ends.
   std::function<void(const P25CallReport &)> p25_call_observer;
   std::shared_ptr<EventSink> event_sink;

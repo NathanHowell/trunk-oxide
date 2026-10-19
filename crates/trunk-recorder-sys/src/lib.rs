@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 pub mod p25;
 pub mod p25_parse;
 pub mod p25_voice;
-pub mod shadow;
+pub mod p25_calls;
 
 // cxx derives `Clone` field by field for shared structs.
 #[allow(clippy::clone_on_copy)]
@@ -35,17 +35,6 @@ pub mod ffi {
         sys_num: i32,
         /// Non-empty: write every message to `<tap_base>.msgs.jsonl`.
         tap_base: String,
-    }
-
-    /// Which implementation decodes P25 control channels.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    enum TrP25Decoder {
-        /// trunk-p25 all the way to audio (op25's vocoders only).
-        Rust = 0,
-        /// op25's GNU Radio chain.
-        Op25 = 1,
-        /// trunk-p25's decoding, regenerated for op25's frame assembler.
-        Regen = 2,
     }
 
     /// What a voice tag says (`TrVoiceTag::kind`).
@@ -78,29 +67,21 @@ pub mod ffi {
         algid: u8,
     }
 
-    /// One P25 voice decoder's account of a call (see `P25CallAccount`).
-    struct TrCallAccount {
-        decoder: TrP25Decoder,
-        primary: bool,
-        audio_seconds: f64,
-        transmissions: i64,
-        errors: i64,
-        spikes: i64,
-        /// Source units named in band, in order of first appearance.
-        sources: Vec<i64>,
-        /// The ALGID this decoder found on the call (0x80: clear).
-        algid: u8,
-    }
-
-    /// A P25 voice call's outcome: the primary decoder's account and, in
-    /// shadow mode, the shadow's.
+    /// A P25 voice call's outcome, when it ends.
     struct TrCallReport {
         system: String,
         recorder: i32,
         talkgroup: i64,
         freq: f64,
         phase2: bool,
-        accounts: Vec<TrCallAccount>,
+        audio_seconds: f64,
+        transmissions: i64,
+        errors: i64,
+        spikes: i64,
+        /// Source units named in band, in order of first appearance.
+        sources: Vec<i64>,
+        /// The ALGID confirmed on the call (0x80: clear).
+        algid: u8,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -482,15 +463,6 @@ pub mod ffi {
         // ── Config builder functions ──
         fn tr_config_set_temp_dir(ctx: Pin<&mut TrContext>, dir: &str);
         fn tr_config_set_tap_dir(ctx: Pin<&mut TrContext>, dir: &str);
-        fn tr_config_set_p25_voice_decoder(
-            ctx: Pin<&mut TrContext>,
-            phase1: TrP25Decoder,
-            phase2: TrP25Decoder,
-        );
-        /// Shadow mode: run the other P25 implementation beside the primary
-        /// on phase 1 and/or phase 2 voice. Also installs the observer that
-        /// reports every decoder's account of a call to Rust.
-        fn tr_config_set_p25_shadow(ctx: Pin<&mut TrContext>, phase1: bool, phase2: bool);
         fn tr_config_set_soft_vocoder(ctx: Pin<&mut TrContext>, enabled: bool);
 
         /// op25's P25 vocoders, one 20 ms frame (160 samples) at a time.
@@ -666,7 +638,6 @@ pub mod ffi {
             tdma: bool,
             xor_mask: &[u8],
             system: &str,
-            primary: bool,
             slot: i32,
         );
         /// `iq`: interleaved IQ. Appends the decoded audio (8 kHz) and the
@@ -681,34 +652,6 @@ pub mod ffi {
         /// (0: none; else `1 << 24 | algid << 16 | keyid`).
         fn take_crypto(self: &mut P25VoiceHandle) -> u32;
         fn take_call_counts(self: &mut P25VoiceHandle) -> TrCallCounts;
-    }
-
-    // ── trunk-p25 voice regenerator, phase 1 and 2 (one per P25 recorder) ──
-
-    extern "Rust" {
-        type P25RegeneratorHandle;
-
-        fn p25_regenerator_new(rate: f64, recorder: i32) -> Box<P25RegeneratorHandle>;
-        /// `input`: interleaved IQ. `out` is replaced by the regenerated
-        /// symbols (ideal levels).
-        #[cxx_name = "process"]
-        fn regenerator_process(self: &mut P25RegeneratorHandle, input: &[f32], out: &mut Vec<f32>);
-        #[cxx_name = "start_call"]
-        fn regenerator_start_call(
-            self: &mut P25RegeneratorHandle,
-            qpsk: bool,
-            tdma: bool,
-            xor_mask: &[u8],
-            system: &str,
-            primary: bool,
-            slot: i32,
-        );
-        /// Encryption confirmed on the call's own slot since the last call
-        /// (0: none; else `1 << 24 | algid << 16 | keyid`).
-        #[cxx_name = "take_crypto"]
-        fn regenerator_take_crypto(self: &mut P25RegeneratorHandle) -> u32;
-        #[cxx_name = "take_call_counts"]
-        fn regenerator_take_call_counts(self: &mut P25RegeneratorHandle) -> TrCallCounts;
     }
 
     extern "Rust" {
@@ -1040,48 +983,10 @@ fn drop_event_handler_box(_handler: Box<EventHandlerBox>) {
 
 // ── Shared FFT channelizer ──
 
-use p25::P25RegeneratorHandle;
 use p25_voice::{P25VoiceHandle, p25_voice_new};
 
 fn p25_observe_call(report: &ffi::TrCallReport) {
-    shadow::observe_call(report);
-}
-
-fn p25_regenerator_new(rate: f64, recorder: i32) -> Box<P25RegeneratorHandle> {
-    p25::regenerator_new(rate, recorder)
-}
-
-impl P25RegeneratorHandle {
-    fn regenerator_process(&mut self, input: &[f32], out: &mut Vec<f32>) {
-        self.process(as_complex(input), out);
-    }
-
-    fn regenerator_start_call(
-        &mut self,
-        qpsk: bool,
-        tdma: bool,
-        xor_mask: &[u8],
-        system: &str,
-        primary: bool,
-        slot: i32,
-    ) {
-        self.start_call(
-            qpsk,
-            tdma,
-            xor_mask,
-            system,
-            primary,
-            u8::try_from(slot).unwrap_or(0),
-        );
-    }
-
-    const fn regenerator_take_crypto(&mut self) -> u32 {
-        p25::packed_encryption(self.take_crypto())
-    }
-
-    fn regenerator_take_call_counts(&mut self) -> ffi::TrCallCounts {
-        self.take_call_counts()
-    }
+    p25_calls::observe_call(report);
 }
 
 /// Rust half of the C++ `channelizer_backend` (see bridge.cpp).

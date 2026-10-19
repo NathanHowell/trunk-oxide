@@ -44,6 +44,18 @@ pub enum SelectReason {
     Fallback,
 }
 
+impl SelectReason {
+    /// The `reason` label of `trunk.oxide.source.gain_db`.
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Knee => "knee",
+            Self::SaturationLimited => "saturation_limited",
+            Self::AdcLimited => "adc_limited",
+            Self::Fallback => "fallback",
+        }
+    }
+}
+
 /// The outcome of [`select_gain`].
 #[derive(Debug, Clone, Copy)]
 pub struct GainSelection {

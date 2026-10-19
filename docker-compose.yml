@@ -14,6 +14,7 @@ services:
       - /dev/rtlsdr3
     volumes:
       - oxide-socket:/run/service
+      - oxide-state:/var/lib/trunk-oxide
       - ./config.toml:/app/config.toml:ro
       - ./smco-talkgroups.csv:/app/smco-talkgroups.csv:ro
       - ./svrcs-talkgroups.csv:/app/svrcs-talkgroups.csv:ro
@@ -251,6 +252,8 @@ secrets:
     file: ./secrets/discord_token
 
 volumes:
+  # trunk-oxide's state across restarts (each dongle's last gain calibration).
+  oxide-state:
   oxide-socket:
   whisperer-socket:
   discord-socket:

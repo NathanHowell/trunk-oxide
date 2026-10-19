@@ -228,6 +228,54 @@ fn main() -> Result<()> {
     if meter_provider.is_some() {
         let depth = recorder.event_channel_depth();
         let meter = opentelemetry::global::meter(env!("CARGO_PKG_NAME"));
+        // ── The process and its sources, for the chart to explain steps ──
+        let started = i64::try_from(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_secs()),
+        )
+        .unwrap_or(0);
+        let _start_time = meter
+            .i64_observable_gauge("trunk.oxide.process.start_time")
+            .with_description("When this process started (Unix seconds); a change is a restart")
+            .with_unit("s")
+            .with_callback(move |observer| observer.observe(started, &[]))
+            .build();
+        let _source_gain = meter
+            .f64_observable_gauge("trunk.oxide.source.gain_db")
+            .with_description("Each SDR source's tuner gain as opened, with how it was chosen")
+            .with_unit("dB")
+            .with_callback(|observer| {
+                for g in trunk_oxide::calibrate::report::gains() {
+                    observer.observe(
+                        g.gain_db,
+                        &[
+                            KeyValue::new("device", g.device.clone()),
+                            KeyValue::new("source", i64::try_from(g.source).unwrap_or(-1)),
+                            KeyValue::new("reason", g.reason),
+                        ],
+                    );
+                }
+            })
+            .build();
+        let _source_floor = meter
+            .f64_observable_gauge("trunk.oxide.source.noise_floor_db")
+            .with_description("The noise floor the gain calibration measured at the chosen gain (relative dB)")
+            .with_unit("dB")
+            .with_callback(|observer| {
+                for g in trunk_oxide::calibrate::report::gains() {
+                    if let Some(floor) = g.noise_floor_db {
+                        observer.observe(
+                            floor,
+                            &[
+                                KeyValue::new("device", g.device.clone()),
+                                KeyValue::new("source", i64::try_from(g.source).unwrap_or(-1)),
+                            ],
+                        );
+                    }
+                }
+            })
+            .build();
         let _depth_gauge = meter
             .u64_observable_gauge("trunk.oxide.event_channel.depth")
             .with_description("Number of GR events queued but not yet consumed")

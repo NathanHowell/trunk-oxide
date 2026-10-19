@@ -1,5 +1,9 @@
 use serde::Deserialize;
 
+fn default_state_dir() -> String {
+    "/var/lib/trunk-oxide".to_owned()
+}
+
 fn default_temp_dir() -> String {
     if std::path::Path::new("/dev/shm").exists() {
         "/dev/shm".to_string()
@@ -91,6 +95,10 @@ pub struct RecorderConfig {
     /// `trunk-replay --tap`; leave unset in production.
     #[serde(default)]
     pub tap_dir: Option<String>,
+    /// Where state that should survive a restart lives: each device's last
+    /// gain calibration. Unwritable, that state is simply not kept.
+    #[serde(default = "default_state_dir")]
+    pub state_dir: String,
     #[serde(default)]
     pub conditioner: ConditionerConfig,
     #[serde(default = "default_true")]

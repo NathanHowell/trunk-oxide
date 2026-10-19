@@ -7,7 +7,7 @@
 //! Events flow: SDR → C++ gnuradio graph → cxx callbacks → EventBridge
 
 mod adaptive_squelch;
-mod calibrate;
+pub mod calibrate;
 mod call_manager;
 mod call_state;
 pub mod clock;
@@ -116,12 +116,35 @@ use trunk_recorder_sys::ffi;
 /// Run one pre-flight gain-calibration sweep and return the chosen gain.
 /// Falls back to `fallback_gain` on any failure so calibration can't block
 /// startup. Runs on its own thread via [`calibrate_sources_parallel`].
+/// What a source's gain calibration came to.
+#[derive(Clone, Debug)]
+struct Calibrated {
+    gain_db: f64,
+    noise_floor_db: Option<f64>,
+    /// As `trunk.oxide.source.gain_db` labels it.
+    reason: &'static str,
+    /// A fresh sweep, to cache.
+    swept: Option<calibrate::GainSelection>,
+}
+
+impl Calibrated {
+    const fn configured(gain_db: f64) -> Self {
+        Self {
+            gain_db,
+            noise_floor_db: None,
+            reason: "configured",
+            swept: None,
+        }
+    }
+}
+
 fn run_calibration(
     probe_cfg: &ffi::TrProbeConfig,
     policy: &calibrate::CalibrationPolicy,
     fallback_gain: f64,
     device: &str,
-) -> f64 {
+    cached: Option<&calibrate::cache::Cached>,
+) -> Calibrated {
     // The probe holds the device open for the sweep and releases it on drop
     // (end of this function), before the real source is opened.
     let mut probe = match calibrate::preflight::PreflightProbe::open(
@@ -135,9 +158,39 @@ fn run_calibration(
                 device = %device, error = %e,
                 "gain calibration: could not open device; using configured gain"
             );
-            return fallback_gain;
+            return Calibrated::configured(fallback_gain);
         }
     };
+
+    // The last sweep's pick stands while the floor it was made at holds.
+    if let Some(c) = cached {
+        match calibrate::recheck(&mut probe, policy, c) {
+            Ok((true, moved)) => {
+                tracing::info!(
+                    device = %device,
+                    gain_db = c.gain_db,
+                    noise_floor_moved_db = moved,
+                    "gain calibration: keeping the last sweep's gain"
+                );
+                return Calibrated {
+                    gain_db: c.gain_db,
+                    noise_floor_db: Some(c.noise_floor_db),
+                    reason: "cached",
+                    swept: None,
+                };
+            }
+            Ok((false, moved)) => tracing::info!(
+                device = %device,
+                cached_gain_db = c.gain_db,
+                noise_floor_moved_db = moved,
+                "gain calibration: the noise floor moved since the last sweep; sweeping again"
+            ),
+            Err(e) => tracing::warn!(
+                device = %device, error = %e,
+                "gain calibration: could not re-check the last sweep; sweeping again"
+            ),
+        }
+    }
 
     tracing::info!(device = %device, "starting gain auto-calibration sweep");
     match calibrate::calibrate(&mut probe, policy, fallback_gain) {
@@ -150,28 +203,38 @@ fn run_calibration(
                 configured_gain = fallback_gain,
                 "gain auto-calibration complete"
             );
-            sel.gain_db
+            Calibrated {
+                gain_db: sel.gain_db,
+                noise_floor_db: sel.noise_floor_db.is_finite().then_some(sel.noise_floor_db),
+                reason: sel.reason.label(),
+                swept: Some(sel),
+            }
         }
         Err(e) => {
             tracing::warn!(
                 device = %device, error = %e,
                 "gain calibration failed; using configured gain"
             );
-            fallback_gain
+            Calibrated::configured(fallback_gain)
         }
     }
 }
 
 /// Calibrate every `auto_gain` source concurrently — one thread per device —
-/// and return a map from source index to the chosen gain. Sources absent from
+/// and return a map from source index to the outcome. Sources absent from
 /// the map keep their configured gain.
 ///
 /// Each thread opens and releases its own device, and all threads are joined
 /// before any source is opened for real, so the devices are free again by the
 /// time the main flowgraph is built. Non-osmosdr drivers are skipped with a
-/// warning.
-fn calibrate_sources_parallel(sources: &[SourceConfig]) -> HashMap<usize, f64> {
+/// warning. Each device's last sweep is read from, and a fresh one written
+/// to, the cache in `state_dir`.
+fn calibrate_sources_parallel(
+    sources: &[SourceConfig],
+    state_dir: &std::path::Path,
+) -> HashMap<usize, Calibrated> {
     let policy = calibrate::CalibrationPolicy::default();
+    let mut cache = calibrate::cache::Cache::load(state_dir);
     let mut handles = Vec::new();
 
     for (idx, src) in sources.iter().enumerate() {
@@ -197,21 +260,43 @@ fn calibrate_sources_parallel(sources: &[SourceConfig]) -> HashMap<usize, f64> {
         };
         let device = src.device.clone();
         let fallback = src.gain;
+        let cached = cache.get(&device).cloned();
         handles.push(std::thread::spawn(move || {
-            (idx, run_calibration(&probe_cfg, &policy, fallback, &device))
+            let c = run_calibration(&probe_cfg, &policy, fallback, &device, cached.as_ref());
+            (idx, device, c)
         }));
     }
 
     let mut gains = HashMap::new();
+    let mut swept = false;
     for handle in handles {
         match handle.join() {
-            Ok((idx, gain)) => {
-                gains.insert(idx, gain);
+            Ok((idx, device, c)) => {
+                if let Some(sel) = &c.swept
+                    && sel.reason != calibrate::SelectReason::Fallback
+                {
+                    cache.put(
+                        &device,
+                        calibrate::cache::Cached {
+                            gain_db: sel.gain_db,
+                            noise_floor_db: sel.noise_floor_db,
+                            reason: sel.reason.label().to_owned(),
+                            at: std::time::SystemTime::now()
+                                .duration_since(std::time::UNIX_EPOCH)
+                                .map_or(0, |d| d.as_secs()),
+                        },
+                    );
+                    swept = true;
+                }
+                gains.insert(idx, c);
             }
             Err(_) => tracing::error!(
                 "a gain calibration thread panicked; that source will use its configured gain"
             ),
         }
+    }
+    if swept && let Err(e) = cache.save() {
+        tracing::warn!(error = %e, "gain calibration: could not save the cache; the next start sweeps again");
     }
     gains
 }
@@ -368,7 +453,33 @@ impl TrunkRecorderBuilder {
         // Pre-flight gain calibration for all auto_gain sources runs first, in
         // parallel (one thread per device), so the devices are free before any
         // source is opened below. Maps source index → calibrated gain.
-        let calibrated_gains = calibrate_sources_parallel(&config.source);
+        let state_dir = config
+            .recorder
+            .as_ref()
+            .map_or("/var/lib/trunk-oxide", |r| r.state_dir.as_str());
+        let calibrated_gains =
+            calibrate_sources_parallel(&config.source, std::path::Path::new(state_dir));
+        calibrate::report::record(
+            config
+                .source
+                .iter()
+                .enumerate()
+                .filter(|(_, src)| src.enabled != Some(false))
+                .map(|(idx, src)| {
+                    let c = calibrated_gains
+                        .get(&idx)
+                        .cloned()
+                        .unwrap_or(Calibrated::configured(src.gain));
+                    calibrate::report::SourceGain {
+                        device: src.device.clone(),
+                        source: idx,
+                        gain_db: c.gain_db,
+                        noise_floor_db: c.noise_floor_db,
+                        reason: c.reason,
+                    }
+                })
+                .collect(),
+        );
 
         let mut source_ranges = Vec::new();
         let mut source_ppms = Vec::new();
@@ -417,7 +528,7 @@ impl TrunkRecorderBuilder {
 
             // Use the pre-flight calibrated gain if this source was swept,
             // otherwise the configured gain.
-            let gain = calibrated_gains.get(&idx).copied().unwrap_or(src.gain);
+            let gain = calibrated_gains.get(&idx).map_or(src.gain, |c| c.gain_db);
 
             ffi::tr_add_source_from_config(
                 ctx.pin_mut(),

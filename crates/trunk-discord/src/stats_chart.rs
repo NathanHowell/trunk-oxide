@@ -412,13 +412,43 @@ impl StatsClient {
         for spec in PANELS {
             panels.push(self.fetch_panel(spec, start, end).await);
         }
-        render(&panels, start, end)
+        let restarts = match self.query_range(RESTART_QUERY, start, end).await {
+            Ok(results) => restarts(&results),
+            Err(e) => {
+                tracing::warn!(error = %e, "restart query failed");
+                Vec::new()
+            }
+        };
+        render(&panels, &restarts, start, end)
     }
+}
+
+/// trunk-oxide's start time; where it changes, the recorder restarted.
+const RESTART_QUERY: &str = "trunk.oxide.process.start_time";
+
+/// When trunk-oxide (re)started within the window: each new start time the
+/// gauge reports, at the first sample that reports it.
+fn restarts(results: &[VmResult]) -> Vec<i64> {
+    let mut out = Vec::new();
+    for r in results {
+        let mut last = None;
+        for (t, v) in parse_points(&r.values) {
+            #[allow(clippy::cast_possible_truncation)]
+            let started = v as i64;
+            if last.is_some_and(|l| l != started) {
+                out.push(t);
+            }
+            last = Some(started);
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 // ── Rendering ─────────────────────────────────────────────────────────────────
 
-fn render(panels: &[Panel], start: i64, end: i64) -> Result<Vec<u8>> {
+fn render(panels: &[Panel], restarts: &[i64], start: i64, end: i64) -> Result<Vec<u8>> {
     let rows = panels.len().div_ceil(COLUMNS).max(1);
     let height = ROW_HEIGHT * u32::try_from(rows).unwrap_or(1);
     let mut buf = vec![0u8; (WIDTH * height * 3) as usize];
@@ -428,7 +458,7 @@ fn render(panels: &[Panel], start: i64, end: i64) -> Result<Vec<u8>> {
             .map_err(|e| anyhow::anyhow!("chart fill: {e}"))?;
         let areas = root.split_evenly((rows, COLUMNS));
         for (area, panel) in areas.iter().zip(panels) {
-            draw_panel(area, panel, start, end)?;
+            draw_panel(area, panel, restarts, start, end)?;
         }
         root.present()
             .map_err(|e| anyhow::anyhow!("chart present: {e}"))?;
@@ -454,14 +484,24 @@ fn series_color(label: &str, idx: usize) -> RGBAColor {
         "svrcs" => RGBColor(255, 127, 14),
         _ => return Palette99::pick(idx + 3).to_rgba(),
     };
-    let alpha = if label.starts_with("noise ") { 0.45 } else { 1.0 };
+    let alpha = if label.starts_with("noise ") {
+        0.45
+    } else {
+        1.0
+    };
     base.mix(alpha)
 }
 
 // Unix-second timestamps fit f64 exactly for any realistic epoch; the x-axis
 // formatter's cast back to i64 is likewise exact.
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
-fn draw_panel<DB>(area: &DrawingArea<DB, Shift>, panel: &Panel, start: i64, end: i64) -> Result<()>
+fn draw_panel<DB>(
+    area: &DrawingArea<DB, Shift>,
+    panel: &Panel,
+    restarts: &[i64],
+    start: i64,
+    end: i64,
+) -> Result<()>
 where
     DB: DrawingBackend,
     DB::ErrorType: 'static,
@@ -509,6 +549,16 @@ where
         })
         .draw()
         .map_err(|e| anyhow::anyhow!("chart mesh: {e}"))?;
+
+    // A restart explains a step in anything: a thin grey line at each.
+    for &t in restarts {
+        chart
+            .draw_series(LineSeries::new(
+                [(t as f64, ymin), (t as f64, ymax)],
+                BLACK.mix(0.35).stroke_width(1),
+            ))
+            .map_err(|e| anyhow::anyhow!("chart restart marker: {e}"))?;
+    }
 
     for (idx, s) in panel.series.iter().enumerate() {
         let color = series_color(&s.label, idx);
@@ -572,6 +622,28 @@ mod tests {
         assert_eq!(points, vec![(1781110920, 0.024), (1781110980, -3.5)]);
     }
 
+    /// A restart is where the start-time gauge changes, not where it
+    /// begins.
+    #[test]
+    fn restarts_are_changes_of_start_time() {
+        let series = |values: &[(f64, &str)]| VmResult {
+            metric: BTreeMap::new(),
+            values: values.iter().map(|&(t, v)| (t, v.to_owned())).collect(),
+        };
+        let results = [
+            series(&[
+                (0.0, "100"),
+                (60.0, "100"),
+                (120.0, "130"),
+                (180.0, "130"),
+                (240.0, "200"),
+            ]),
+            series(&[(0.0, "100"), (120.0, "130")]),
+        ];
+        assert_eq!(restarts(&results), [120, 240]);
+        assert!(restarts(&[series(&[(0.0, "100"), (60.0, "100")])]).is_empty());
+    }
+
     #[test]
     fn parse_response_rejects_garbage() {
         assert!(parse_response("not json").is_err());
@@ -602,7 +674,7 @@ mod tests {
             },
         ];
 
-        let png = render(&panels, 0, 180).expect("render");
+        let png = render(&panels, &[60], 0, 180).expect("render");
         // PNG magic number — proves we produced a real image, font path included.
         assert_eq!(&png[..8], b"\x89PNG\r\n\x1a\n");
         assert!(

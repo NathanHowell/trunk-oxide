@@ -13,11 +13,15 @@
 //!
 //! Pre-flight acquisition lives in [`preflight`]; it opens each device
 //! standalone before trunk-recorder builds its flowgraph, so nothing is
-//! perturbed.
+//! perturbed. [`cache`] keeps each device's last sweep across restarts and
+//! [`recheck`] decides whether it still stands; [`report`] hands the
+//! outcome to the metrics.
 
+pub mod cache;
 pub mod measure;
 pub mod preflight;
 pub mod probe;
+pub mod report;
 pub mod select;
 
 use anyhow::Result;
@@ -44,6 +48,9 @@ pub struct CalibrationPolicy {
     /// Complex samples to capture per gain step. Must comfortably exceed
     /// `fft_size` so Welch averaging has several segments.
     pub capture_samples: usize,
+    /// How far (dB) the noise floor at a cached gain may have moved before
+    /// the device is swept again rather than keeping the cached pick.
+    pub recheck_tolerance_db: f64,
     /// Samples to discard after each gain change, letting the tuner settle.
     pub settle_samples: usize,
 }
@@ -63,6 +70,9 @@ impl Default for CalibrationPolicy {
             knee_slope: 0.6,
             // ~0.1 s at 2.4 Msps; ~64 Welch segments at fft_size 4096.
             capture_samples: 1 << 18,
+            // A gain step is ~1–3 dB on an RTL tuner; floor drift within
+            // that is noise, beyond it the band changed.
+            recheck_tolerance_db: 2.0,
             // ~5 ms of settle at typical rates; the probe also re-runs the
             // flowgraph per step which adds its own warm-up.
             settle_samples: 1 << 14,
@@ -85,6 +95,28 @@ impl CalibrationPolicy {
             knee_slope: self.knee_slope,
         }
     }
+}
+
+/// Whether a device's last pick still stands.
+///
+/// One capture at that gain: its noise floor must be within
+/// [`CalibrationPolicy::recheck_tolerance_db`] of the floor measured then,
+/// and not saturating. How far the floor moved is returned with the verdict
+/// for the log.
+pub fn recheck(
+    probe: &mut dyn IqProbe,
+    policy: &CalibrationPolicy,
+    cached: &cache::Cached,
+) -> Result<(bool, f64)> {
+    if !probe.supported_gains()?.contains(&cached.gain_db) {
+        return Ok((false, f64::NAN));
+    }
+    let m = measure(&probe.capture(cached.gain_db)?, &policy.measure_params());
+    let moved = m.noise_floor_db - cached.noise_floor_db;
+    Ok((
+        moved.abs() <= policy.recheck_tolerance_db && m.sat_frac <= policy.sat_limit,
+        moved,
+    ))
 }
 
 /// Sweep every supported gain on `probe`, measure each, and select the best.

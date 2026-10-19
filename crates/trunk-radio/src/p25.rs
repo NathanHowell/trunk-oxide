@@ -259,6 +259,8 @@ pub struct VoiceChannelReport {
     pub channel: Option<ChannelNum>,
     /// The system of the call in progress (or last call).
     pub system: String,
+    /// Where the call is (0 before one starts).
+    pub freq_hz: f64,
     /// Phase 1 calls.
     pub stats: VoiceStats,
     /// Phase 2 (TDMA) calls.
@@ -270,6 +272,7 @@ struct Snapshot {
     phase1: VoiceStats,
     phase2: TdmaStats,
     system: String,
+    freq_hz: f64,
 }
 
 pub(crate) struct VoiceShared {
@@ -298,9 +301,11 @@ impl VoiceShared {
         self.snapshot().phase2 = stats;
     }
 
-    /// The call in progress: its system.
-    pub(crate) fn call(&self, system: &str) {
-        system.clone_into(&mut self.snapshot().system);
+    /// The call in progress: its system and frequency.
+    pub(crate) fn call(&self, system: &str, freq_hz: f64) {
+        let mut snap = self.snapshot();
+        system.clone_into(&mut snap.system);
+        snap.freq_hz = freq_hz;
     }
 }
 
@@ -329,6 +334,7 @@ pub fn voice_channels() -> Vec<Entry<VoiceChannelReport>> {
         VoiceChannelReport {
             channel: s.channel,
             system: snap.system,
+            freq_hz: snap.freq_hz,
             stats: snap.phase1,
             tdma: snap.phase2,
         }

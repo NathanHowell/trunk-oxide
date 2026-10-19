@@ -270,10 +270,11 @@ impl VoiceMetrics {
             .retain(|k, _| reports.iter().any(|e| e.id == *k && e.live));
     }
 
+    #[allow(clippy::cast_possible_truncation)]
     fn export(&mut self, key: Key, r: &VoiceChannelReport) {
         let base = [
-            KeyValue::new("channel", r.channel.map_or(-1, |c| i64::from(c.0))),
             KeyValue::new("system", r.system.clone()),
+            KeyValue::new("freq_hz", r.freq_hz as i64),
         ];
         let was = self.prev.insert(key, r.stats).unwrap_or_default();
         let now = &r.stats;

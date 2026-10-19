@@ -307,7 +307,15 @@ impl P25VoiceHandle {
 
     /// A new call: CQPSK (else C4FM), phase 2 on `slot` with the system's
     /// 2160-dibit scrambling mask.
-    pub fn start_call(&mut self, qpsk: bool, tdma: bool, xor_mask: &[u8], system: &str, slot: i32) {
+    pub fn start_call(
+        &mut self,
+        qpsk: bool,
+        tdma: bool,
+        xor_mask: &[u8],
+        system: &str,
+        freq_hz: f64,
+        slot: i32,
+    ) {
         let modulation = if qpsk {
             Modulation::Cqpsk
         } else {
@@ -319,7 +327,7 @@ impl P25VoiceHandle {
             Scrambler::from_dibits(xor_mask),
             u8::try_from(slot).unwrap_or(0),
         );
-        self.pipeline.shared.call(system);
+        self.pipeline.shared.call(system, freq_hz);
         self.terminated = false;
     }
 
@@ -434,6 +442,7 @@ impl Kind for P25Voice {
             slot.is_some(),
             at.xor_mask,
             &at.system.short_name,
+            at.call.channel.freq_hz,
             slot.map_or(0, i32::from),
         );
         Ok(P25VoiceChannel {

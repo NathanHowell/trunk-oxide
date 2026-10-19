@@ -895,6 +895,7 @@ impl CallManager {
             KeyValue::new("short_name", view.short_name().to_string()),
             KeyValue::new("tdma", view.phase2_tdma()),
             KeyValue::new("source", source),
+            KeyValue::new("freq_hz", i64::try_from(view.freq().0).unwrap_or(-1)),
         ];
         self.voice_frame_errors
             .add(u64::try_from(delta.errors).unwrap_or(0), &voice_attrs);

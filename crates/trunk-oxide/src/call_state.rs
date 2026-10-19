@@ -35,7 +35,7 @@ impl<'a> CallView<'a> {
     pub(crate) const fn call_num(&self) -> i64 {
         self.0.call_num
     }
-    pub(crate) const fn talkgroup(&self) -> i64 {
+    pub(crate) const fn talkgroup(&self) -> Talkgroup {
         self.0.talkgroup
     }
     pub(crate) const fn sys_num(&self) -> i32 {
@@ -85,8 +85,9 @@ impl<'a> CallView<'a> {
     pub(crate) fn audio_rate(&self) -> Option<f64> {
         self.0.recipe.as_ref().and_then(|r| r.audio_rate())
     }
-    pub(crate) const fn current_source_id(&self) -> i64 {
-        self.0.current_source_id
+    /// The unit talking, if known.
+    pub(crate) const fn current_source(&self) -> Option<u32> {
+        self.0.current_source
     }
     pub(crate) const fn signal(&self) -> Option<f64> {
         self.0.signal
@@ -94,8 +95,8 @@ impl<'a> CallView<'a> {
     pub(crate) const fn noise(&self) -> Option<f64> {
         self.0.noise
     }
-    pub(crate) const fn priority(&self) -> i32 {
-        self.0.priority
+    pub(crate) const fn service_priority(&self) -> u8 {
+        self.0.service_priority
     }
     /// The channel it has, or last had.
     pub(crate) const fn channel(&self) -> Option<ChannelNum> {
@@ -159,8 +160,22 @@ pub(crate) fn system_time_to_unix(t: SystemTime) -> i64 {
     crate::clock::unix_seconds(t)
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
-pub struct Talkgroup(pub(crate) i64);
+/// A talkgroup (or, on a unit-to-unit call, the called unit), as the air
+/// names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, PartialOrd, Ord)]
+pub struct Talkgroup(pub u32);
+
+impl std::fmt::Display for Talkgroup {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+
+impl From<Talkgroup> for i64 {
+    fn from(tg: Talkgroup) -> Self {
+        Self::from(tg.0)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Freq(pub(crate) u64);
@@ -429,8 +444,10 @@ pub(crate) struct ControlChannel {
 
 // ── Patch Table ──
 
+/// Talkgroups patched into supergroups, each member with when the control
+/// channel last said so.
 pub(crate) struct PatchTable {
-    patches: HashMap<u64, HashMap<u64, Instant>>,
+    patches: HashMap<Talkgroup, HashMap<Talkgroup, Instant>>,
 }
 
 impl PatchTable {
@@ -440,21 +457,29 @@ impl PatchTable {
         }
     }
 
-    pub(crate) fn update(&mut self, sg: u64, ga1: u64, ga2: u64, ga3: u64, now: Instant) {
-        let patch = self.patches.entry(sg).or_default();
-        for &tg in &[sg, ga1, ga2, ga3] {
-            if tg != 0 {
-                patch.insert(tg, now);
-            }
+    /// The supergroup's members (the supergroup itself among them).
+    fn members(p: &trunk_radio::Patch) -> impl Iterator<Item = Talkgroup> {
+        std::iter::once(p.supergroup)
+            .chain(p.groups)
+            .filter(|&g| g != 0)
+            .map(|g| Talkgroup(u32::from(g)))
+    }
+
+    pub(crate) fn update(&mut self, p: &trunk_radio::Patch, now: Instant) {
+        let patch = self
+            .patches
+            .entry(Talkgroup(u32::from(p.supergroup)))
+            .or_default();
+        for tg in Self::members(p) {
+            patch.insert(tg, now);
         }
     }
 
-    pub(crate) fn delete(&mut self, sg: u64, ga1: u64, ga2: u64, ga3: u64) {
+    pub(crate) fn delete(&mut self, p: &trunk_radio::Patch) {
+        let sg = Talkgroup(u32::from(p.supergroup));
         if let Some(patch) = self.patches.get_mut(&sg) {
-            for &tg in &[ga1, ga2, ga3] {
-                if tg != 0 {
-                    patch.remove(&tg);
-                }
+            for tg in Self::members(p).filter(|&tg| tg != sg) {
+                patch.remove(&tg);
             }
         }
     }
@@ -475,19 +500,18 @@ impl PatchTable {
             "active talkgroup patches"
         );
         for (sg, members) in &self.patches {
-            let tgids: Vec<u64> = members.keys().copied().collect();
-            tracing::info!(supergroup = sg, ?tgids, "active patch");
+            let tgids: Vec<u32> = members.keys().map(|t| t.0).collect();
+            tracing::info!(supergroup = sg.0, ?tgids, "active patch");
         }
     }
 
+    /// Every talkgroup patched with `talkgroup` (it among them), or none.
     pub(crate) fn get_patch(&self, talkgroup: Talkgroup) -> Vec<Talkgroup> {
-        let tg = talkgroup.0 as u64;
-        for patch in self.patches.values() {
-            if patch.contains_key(&tg) {
-                return patch.keys().map(|&k| Talkgroup(k as i64)).collect();
-            }
-        }
-        Vec::new()
+        self.patches
+            .values()
+            .find(|patch| patch.contains_key(&talkgroup))
+            .map(|patch| patch.keys().copied().collect())
+            .unwrap_or_default()
     }
 }
 
@@ -496,7 +520,7 @@ impl PatchTable {
 pub(crate) struct CallEntry {
     pub(crate) id: CallId,
     pub(crate) call_num: i64,
-    pub(crate) talkgroup: i64,
+    pub(crate) talkgroup: Talkgroup,
     pub(crate) sys_num: i32,
     pub(crate) short_name: String,
     pub(crate) tdma_slot: i32,
@@ -514,12 +538,13 @@ pub(crate) struct CallEntry {
     pub(crate) encryption: Option<Encryption>,
     /// How its channel is opened, once it is accepted for recording.
     pub(crate) recipe: Option<Arc<dyn Opener>>,
-    pub(crate) current_source_id: i64,
+    /// The unit talking, if known.
+    pub(crate) current_source: Option<u32>,
     pub(crate) signal: Option<f64>,
     pub(crate) noise: Option<f64>,
-    /// The grant's service-option priority (for the wire), not its claim on
-    /// a channel.
-    pub(crate) priority: i32,
+    /// The grant's service-option priority (0–7, for the wire): not its
+    /// claim on a channel, which is its talkgroup's.
+    pub(crate) service_priority: u8,
     /// The channel it has, or last had.
     pub(crate) channel: Option<ChannelNum>,
     pub(crate) last_update: Instant,
@@ -541,7 +566,7 @@ impl Default for CallEntry {
         Self {
             id: next_call_id(),
             call_num: next_call_num(),
-            talkgroup: 0,
+            talkgroup: Talkgroup(0),
             sys_num: 0,
             short_name: String::new(),
             tdma_slot: 0,
@@ -555,10 +580,10 @@ impl Default for CallEntry {
             encrypted: false,
             encryption: None,
             recipe: None,
-            current_source_id: 0,
+            current_source: None,
             signal: None,
             noise: None,
-            priority: 0,
+            service_priority: 0,
             channel: None,
             last_update: Instant::now(),
             refreshes: 0,
@@ -652,7 +677,7 @@ impl CallEntry {
         trunk_radio::Call {
             id: self.id,
             sys_num: self.sys_num,
-            talkgroup: self.talkgroup,
+            talkgroup: self.talkgroup.0,
             channel: Channel {
                 freq_hz: self.freq.as_hz(),
                 slot: self
@@ -780,9 +805,9 @@ pub(crate) enum Cut {
     /// In band, another unit is talking (trunked). Logical: the recording
     /// runs on, the source is re-routed, the next transmission opens at
     /// once.
-    Speaker { source_id: i64 },
+    Speaker { source: u32 },
     /// As [`Self::Speaker`], at a new key-up the control channel granted.
-    KeyUp { source_id: i64 },
+    KeyUp { source: Option<u32> },
     /// A conventional channel's carrier dropped: its recording ends with
     /// the transmission and the next starts; the next squelch open begins
     /// the next transmission as its own CallStart.
@@ -821,7 +846,7 @@ pub(crate) enum Effect {
     },
     SetSource {
         call_id: CallId,
-        source_id: i64,
+        source_id: u32,
     },
     // ── Calls ──
     CreateCall {
@@ -846,18 +871,19 @@ pub(crate) enum Effect {
     /// before any opening `EmitCallStart` (which reads the new one).
     NextTransmission {
         call_id: CallId,
-        source_id: Option<i64>,
+        source: Option<u32>,
     },
     EmitCallsActive,
     EmitSignal {
         call_id: CallId,
-        source_id: i64,
+        source_id: u32,
     },
     EmitUnitEvent {
         sys_num: i32,
         type_: UnitEventType,
-        source_id: i64,
-        talkgroup: i64,
+        source_id: u32,
+        /// For an affiliation, an answer request or a location.
+        talkgroup: Option<Talkgroup>,
     },
     EmitSetupSystem {
         sys_num: i32,
@@ -932,9 +958,9 @@ trait VoiceExt {
     fn freq(&self) -> Freq;
     fn tdma_slot(&self) -> i32;
     fn phase2_tdma(&self) -> bool;
-    fn tg(&self) -> i64;
-    /// The unit talking: -1 when the message does not say.
-    fn source_id(&self) -> i64;
+    fn tg(&self) -> Talkgroup;
+    /// The unit talking, when the message names one.
+    fn unit(&self) -> Option<u32>;
 }
 
 impl VoiceExt for Voice {
@@ -947,11 +973,11 @@ impl VoiceExt for Voice {
     fn phase2_tdma(&self) -> bool {
         self.channel.slot.is_some()
     }
-    fn tg(&self) -> i64 {
-        i64::from(self.talkgroup)
+    fn tg(&self) -> Talkgroup {
+        Talkgroup(self.talkgroup)
     }
-    fn source_id(&self) -> i64 {
-        self.source.map_or(-1, i64::from)
+    fn unit(&self) -> Option<u32> {
+        self.source.filter(|&u| u != 0)
     }
 }
 
@@ -968,7 +994,7 @@ pub(crate) struct TrunkStateMachine {
     /// a fixed algorithm, so a call we never recorded (rejected from the grant)
     /// can still be labelled with what an earlier recorded call on the same
     /// talkgroup revealed.
-    known_alg_ids: HashMap<(i32, i64), u8>,
+    known_alg_ids: HashMap<(i32, Talkgroup), u8>,
     /// The control channels, by the id their claims are made under.
     controls: BTreeMap<CallId, ControlChannel>,
     /// Who wants a channel (calls and control channels).
@@ -1115,7 +1141,7 @@ impl TrunkStateMachine {
         };
         tracing::info!(
             short_name = %entry.short_name,
-            talkgroup = entry.talkgroup,
+            talkgroup = entry.talkgroup.0,
             freq = %entry.freq,
             "evicted by a call that outranks it"
         );
@@ -1135,7 +1161,7 @@ impl TrunkStateMachine {
             });
             effects.push(Effect::NextTransmission {
                 call_id: id,
-                source_id: None,
+                source: None,
             });
         } else {
             entry.state = CallState::Waiting;
@@ -1201,7 +1227,7 @@ impl TrunkStateMachine {
                     tracing::info!(
                         short_name = %entry.short_name,
                         channel = %num,
-                        talkgroup = entry.talkgroup,
+                        talkgroup = entry.talkgroup.0,
                         freq = %entry.freq,
                         tdma = entry.phase2_tdma,
                         slot = entry.tdma_slot,
@@ -1220,7 +1246,7 @@ impl TrunkStateMachine {
             tracing::warn!(sys_num = cc.sys_num, freq = %cc.freq, %error, "cannot open the control channel; skipping");
         } else if let Some(entry) = self.calls.iter_mut().find(|e| e.id == id) {
             tracing::error!(
-                talkgroup = entry.talkgroup,
+                talkgroup = entry.talkgroup.0,
                 sys_num = entry.sys_num,
                 freq = %entry.freq,
                 %error,
@@ -1247,15 +1273,16 @@ impl TrunkStateMachine {
     pub(crate) fn on_message(&mut self, msg: &TrunkMessage) -> Effects {
         let now = self.clock.now();
         let sys_num = msg.sys_num;
-        let unit_event = |type_, source_id: u32, talkgroup: i64| -> Effects {
+        let unit_event = |type_, source_id: u32, talkgroup: Option<Talkgroup>| -> Effects {
             Effect::EmitUnitEvent {
                 sys_num,
                 type_,
-                source_id: i64::from(source_id),
+                source_id,
                 talkgroup,
             }
             .into()
         };
+        let group = |g: u16| Some(Talkgroup(u32::from(g)));
         let effects = match msg.kind {
             // Another control channel of the site: decoded only if
             // configured; the wire hears of it with the message itself.
@@ -1266,24 +1293,13 @@ impl TrunkStateMachine {
 
             Trunking::PatchAdd(p) => {
                 if let Some(pt) = self.patch_tables.get_mut(&sys_num) {
-                    pt.update(
-                        u64::from(p.supergroup),
-                        u64::from(p.groups[0]),
-                        u64::from(p.groups[1]),
-                        u64::from(p.groups[2]),
-                        now,
-                    );
+                    pt.update(&p, now);
                 }
                 Effects::new()
             }
             Trunking::PatchDelete(p) => {
                 if let Some(pt) = self.patch_tables.get_mut(&sys_num) {
-                    pt.delete(
-                        u64::from(p.supergroup),
-                        u64::from(p.groups[0]),
-                        u64::from(p.groups[1]),
-                        u64::from(p.groups[2]),
-                    );
+                    pt.delete(&p);
                 }
                 Effects::new()
             }
@@ -1305,19 +1321,25 @@ impl TrunkStateMachine {
             }
 
             // Unit events (stateless)
-            Trunking::Registration { unit } => unit_event(UnitEventType::Registration, unit, 0),
-            Trunking::Deregistration { unit } => unit_event(UnitEventType::Deregistration, unit, 0),
-            Trunking::Affiliation { group, unit } => {
-                unit_event(UnitEventType::Affiliation, unit, i64::from(group))
+            Trunking::Registration { unit } => unit_event(UnitEventType::Registration, unit, None),
+            Trunking::Deregistration { unit } => {
+                unit_event(UnitEventType::Deregistration, unit, None)
             }
-            Trunking::Acknowledge { unit, .. } => unit_event(UnitEventType::Acknowledge, unit, 0),
-            Trunking::Location { group, unit } => {
-                unit_event(UnitEventType::Location, unit, i64::from(group))
+            Trunking::Affiliation { group: g, unit } => {
+                unit_event(UnitEventType::Affiliation, unit, group(g))
             }
-            Trunking::DataGrant { unit, .. } => unit_event(UnitEventType::DataGrant, unit, 0),
-            Trunking::AnswerRequest(v) => {
-                unit_event(UnitEventType::AnswerRequest, v.source.unwrap_or(0), v.tg())
+            Trunking::Acknowledge { unit, .. } => {
+                unit_event(UnitEventType::Acknowledge, unit, None)
             }
+            Trunking::Location { group: g, unit } => {
+                unit_event(UnitEventType::Location, unit, group(g))
+            }
+            Trunking::DataGrant { unit, .. } => unit_event(UnitEventType::DataGrant, unit, None),
+            Trunking::AnswerRequest(v) => unit_event(
+                UnitEventType::AnswerRequest,
+                v.source.unwrap_or(0),
+                Some(v.tg()),
+            ),
 
             // Call lifecycle
             Trunking::Grant(v) => self.on_grant(sys_num, msg.nac, &v, true),
@@ -1358,7 +1380,7 @@ impl TrunkStateMachine {
         let patched = self
             .patch_tables
             .get(&sys_num)
-            .map(|pt| pt.get_patch(Talkgroup(v.tg())))
+            .map(|pt| pt.get_patch(v.tg()))
             .unwrap_or_default();
         let ended: Vec<CallId> = self
             .calls
@@ -1368,13 +1390,13 @@ impl TrunkStateMachine {
                     && entry.sys_num == sys_num
                     && entry.talkgroup != v.tg()
                     && entry.shares_channel(v)
-                    && !patched.contains(&Talkgroup(entry.talkgroup))
+                    && !patched.contains(&entry.talkgroup)
             })
             .inspect(|entry| {
                 tracing::info!(
                     short_name = %entry.short_name,
-                    talkgroup = entry.talkgroup,
-                    to_talkgroup = v.tg(),
+                    talkgroup = entry.talkgroup.0,
+                    to_talkgroup = v.tg().0,
                     freq = %entry.freq,
                     slot = entry.tdma_slot,
                     since_update_s = now.saturating_duration_since(entry.last_update).as_secs_f64(),
@@ -1399,7 +1421,7 @@ impl TrunkStateMachine {
         if is_grant_message {
             self.end_reassigned_calls(sys_num, v, &mut effects);
         }
-        let source = v.source_id();
+        let source = v.unit();
 
         // A talkgroup has one call per system. A grant on another channel or
         // TDMA slot moves it there (the retune below), rather than starting a
@@ -1419,7 +1441,7 @@ impl TrunkStateMachine {
                 // after the voice channel ended its transmission. Each is its
                 // own transmission. The grant usually beats the in-band source
                 // change, which then matches and is ignored, so cut here.
-                let other_handset = source > 0 && source != entry.current_source_id;
+                let other_handset = source.is_some() && source != entry.current_source;
                 if is_grant_message
                     && entry.is_trunked()
                     && entry.state == CallState::Recording
@@ -1427,20 +1449,16 @@ impl TrunkStateMachine {
                     && now.saturating_duration_since(entry.segment_start) >= MIN_TRANSMISSION
                 {
                     let call_id = entry.id;
-                    let source_id = if source > 0 {
-                        source
-                    } else {
-                        entry.current_source_id
-                    };
-                    entry.current_source_id = source_id;
+                    let unit = source.or(entry.current_source);
+                    entry.current_source = unit;
                     tracing::info!(
                         short_name = %entry.short_name,
-                        talkgroup = entry.talkgroup,
-                        source = source_id,
+                        talkgroup = entry.talkgroup.0,
+                        source = ?unit,
                         other_handset,
                         "new key-up on a recording call: cutting per-PTT transmission boundary"
                     );
-                    effects.extend(self.cut_transmission(call_id, Cut::KeyUp { source_id }));
+                    effects.extend(self.cut_transmission(call_id, Cut::KeyUp { source: unit }));
                     return effects;
                 }
 
@@ -1476,8 +1494,8 @@ impl TrunkStateMachine {
             emergency: v.options.emergency,
             freq: v.freq(),
             encrypted: v.options.encrypted,
-            current_source_id: source,
-            priority: i32::from(v.options.priority),
+            current_source: source,
+            service_priority: v.options.priority,
             max_duration: policy.max_duration,
             call_mode: CallMode::Trunked(TrunkedFields {
                 multi_site: policy.multi_site,
@@ -1501,7 +1519,7 @@ impl TrunkStateMachine {
         } else {
             let assessed = self.assess(new_idx, sys_num, v);
             if assessed.is_ok() && !is_grant_message {
-                tracing::info!(talkgroup = v.tg(), sys_num, "this was an UPDATE");
+                tracing::info!(talkgroup = v.tg().0, sys_num, "this was an UPDATE");
             }
             self.claim(new_idx, assessed, &mut effects);
             // Settle now, so the call is on its channel (or waiting) when
@@ -1542,7 +1560,7 @@ impl TrunkStateMachine {
         // Refresh the tracked source for the new freq so the next grant
         // on it isn't misread as a source change (which would emit a
         // spurious SetSource/EmitSignal).
-        entry.current_source_id = v.source_id();
+        entry.current_source = v.unit();
         entry.last_update = now;
         let was_held = self.held.contains(&id);
         if was_held {
@@ -1585,7 +1603,7 @@ impl TrunkStateMachine {
 
                 // Source changed: re-route only (SetSource + EmitSignal). No
                 // EmitCallStart for an already-started call — see on_grant.
-                Self::update_call_source_entry(entry, v.source_id(), &mut effects, now);
+                Self::update_call_source_entry(entry, v.unit(), &mut effects, now);
             }
         }
 
@@ -1594,7 +1612,12 @@ impl TrunkStateMachine {
 
     // ── Source tracking ──
 
-    fn update_call_source(&mut self, idx: usize, source: i64, effects: &mut Effects) -> bool {
+    fn update_call_source(
+        &mut self,
+        idx: usize,
+        source: Option<u32>,
+        effects: &mut Effects,
+    ) -> bool {
         let now = self.clock.now();
         let entry = &mut self.calls[idx];
         Self::update_call_source_entry(entry, source, effects, now)
@@ -1602,18 +1625,18 @@ impl TrunkStateMachine {
 
     fn update_call_source_entry(
         entry: &mut CallEntry,
-        source: i64,
+        source: Option<u32>,
         effects: &mut Effects,
         now: Instant,
     ) -> bool {
         entry.last_update = now;
         entry.refreshes += 1;
 
-        if source == -1 || source == entry.current_source_id {
+        let Some(source) = source.filter(|&u| Some(u) != entry.current_source) else {
             return false;
-        }
+        };
 
-        entry.current_source_id = source;
+        entry.current_source = Some(source);
         effects.push(Effect::SetSource {
             call_id: entry.id,
             source_id: source,
@@ -1671,22 +1694,21 @@ impl TrunkStateMachine {
     /// **transmission boundary** so each unit's audio becomes its own
     /// CallStart/CallEnd pair, on a channel that runs on (the [`CallId`] is
     /// unchanged so audio routing and Discord coalescing carry across).
-    pub(crate) fn on_source_change(&mut self, call_id: CallId, source: i64) -> Effects {
+    pub(crate) fn on_source_change(&mut self, call_id: CallId, source: u32) -> Effects {
         let now = self.clock.now();
         let mut effects = Effects::new();
         let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) else {
             return effects;
         };
 
-        // Only trunked, only while actively recording. Ignore unknown sources
-        // (encrypted / no-LC frames decode to -1) and no-op repeats: the tag
-        // re-fires every superframe, and the control channel may have already
-        // moved `current_source_id` — dedup against it so we never emit a
-        // double boundary.
+        // Only trunked, only while actively recording. Ignore no-op repeats:
+        // the tag re-fires every superframe, and the control channel may have
+        // already moved `current_source` — dedup against it so we never emit
+        // a double boundary.
         if !entry.is_trunked()
             || entry.state != CallState::Recording
-            || source <= 0
-            || source == entry.current_source_id
+            || source == 0
+            || entry.current_source == Some(source)
         {
             return effects;
         }
@@ -1695,21 +1717,21 @@ impl TrunkStateMachine {
         // (SetSource + EmitSignal) rather than fragmenting rapid A↔B↔A hand-offs
         // into sub-second transmissions.
         if now.saturating_duration_since(entry.segment_start) < MIN_TRANSMISSION {
-            Self::update_call_source_entry(entry, source, &mut effects, now);
+            Self::update_call_source_entry(entry, Some(source), &mut effects, now);
             return effects;
         }
 
         // Real per-speaker boundary: close the current transmission and open
-        // the next on the same channel. Set `current_source_id` now so a
+        // the next on the same channel. Set `current_source` now so a
         // following control-channel update for the same unit dedups.
-        entry.current_source_id = source;
+        entry.current_source = Some(source);
         tracing::info!(
             short_name = %entry.short_name,
-            talkgroup = entry.talkgroup,
+            talkgroup = entry.talkgroup.0,
             source,
             "in-band source change: cutting per-speaker transmission boundary"
         );
-        self.cut_transmission(call_id, Cut::Speaker { source_id: source })
+        self.cut_transmission(call_id, Cut::Speaker { source })
     }
 
     /// Cut a transmission boundary: end the current transmission on the wire
@@ -1730,14 +1752,28 @@ impl TrunkStateMachine {
             reason: cut.end_reason(),
         };
         match cut {
-            Cut::Speaker { source_id } | Cut::KeyUp { source_id } => {
+            Cut::Speaker { source: unit } | Cut::KeyUp { source: Some(unit) } => {
                 effects.push(end);
                 effects.push(Effect::NextTransmission {
                     call_id,
-                    source_id: Some(source_id),
+                    source: Some(unit),
                 });
-                effects.push(Effect::SetSource { call_id, source_id });
-                effects.push(Effect::EmitSignal { call_id, source_id });
+                effects.push(Effect::SetSource {
+                    call_id,
+                    source_id: unit,
+                });
+                effects.push(Effect::EmitSignal {
+                    call_id,
+                    source_id: unit,
+                });
+                effects.push(Effect::EmitCallStart { call_id });
+            }
+            Cut::KeyUp { source: None } => {
+                effects.push(end);
+                effects.push(Effect::NextTransmission {
+                    call_id,
+                    source: None,
+                });
                 effects.push(Effect::EmitCallStart { call_id });
             }
             Cut::Carrier => {
@@ -1745,7 +1781,7 @@ impl TrunkStateMachine {
                 effects.push(end);
                 effects.push(Effect::NextTransmission {
                     call_id,
-                    source_id: None,
+                    source: None,
                 });
             }
         }
@@ -1753,10 +1789,10 @@ impl TrunkStateMachine {
     }
 
     /// Apply an [`Effect::NextTransmission`]: a fresh `call_num`, no
-    /// segments. A trunked call stays on the air under the new speaker; a
-    /// conventional one waits for its next transmission: on its channel if
-    /// it has one, for one if it wants one, else disabled.
-    pub(crate) fn on_next_transmission(&mut self, call_id: CallId, source_id: Option<i64>) {
+    /// segments. A trunked call stays on the air under the new speaker (if
+    /// known); a conventional one waits for its next transmission: on its
+    /// channel if it has one, for one if it wants one, else disabled.
+    pub(crate) fn on_next_transmission(&mut self, call_id: CallId, source: Option<u32>) {
         let now = self.clock.now();
         let (wants, holds) = (
             self.wants.contains_key(&call_id),
@@ -1766,9 +1802,9 @@ impl TrunkStateMachine {
             return;
         };
         entry.rotate_bookkeeping(now);
-        match source_id {
-            Some(source_id) => entry.current_source_id = source_id,
-            None => {
+        match &entry.call_mode {
+            CallMode::Trunked(_) => entry.current_source = source.or(entry.current_source),
+            CallMode::Conventional => {
                 entry.last_update = now;
                 entry.idle_since = None;
                 entry.state = match (wants, holds) {
@@ -1790,7 +1826,7 @@ impl TrunkStateMachine {
         sys_num: i32,
         v: &Voice,
     ) -> Result<Admission, RejectReason> {
-        let tg = Talkgroup(v.tg());
+        let tg = v.tg();
 
         let Some(sys_policy) = self.config.systems.get(&sys_num) else {
             return Err(RejectReason::UnknownTg);
@@ -1913,7 +1949,7 @@ impl TrunkStateMachine {
     #[allow(clippy::cast_sign_loss)]
     fn check_multisite(
         &self,
-        talkgroup: i64,
+        talkgroup: Talkgroup,
         sys_num: i32,
         nac: u16,
         wacn: u64,
@@ -1961,8 +1997,7 @@ impl TrunkStateMachine {
                 result.is_duplicate = true;
                 result.original_idx = Some(idx);
 
-                let call_preferred_nac =
-                    self.get_preferred_nac(entry.sys_num, Talkgroup(talkgroup));
+                let call_preferred_nac = self.get_preferred_nac(entry.sys_num, talkgroup);
                 if call_preferred_nac != call_rfss_site && u64::from(nac) == msg_rfss_site {
                     result.is_superseding = true;
                 }
@@ -2081,7 +2116,7 @@ impl TrunkStateMachine {
         }
         effects.push(Effect::NextTransmission {
             call_id,
-            source_id: None,
+            source: None,
         });
         effects
     }
@@ -2177,7 +2212,7 @@ impl TrunkStateMachine {
                     .get(&e.sys_num)?
                     .channels
                     .iter()
-                    .find(|c| c.talkgroup.0 == e.talkgroup && c.freq == e.freq)
+                    .find(|c| c.talkgroup == e.talkgroup && c.freq == e.freq)
             })
             .map_or(Priority::UNSET, |c| c.priority)
     }
@@ -2197,7 +2232,7 @@ impl TrunkStateMachine {
             start_time: now,
             last_update: now,
             segment_start: now,
-            talkgroup: channel.talkgroup.0,
+            talkgroup: channel.talkgroup,
             sys_num,
             short_name: policy.short_name.clone(),
             freq: channel.freq,
@@ -2404,26 +2439,26 @@ mod tests {
     }
 
     /// A grant of `freq_hz` (phase 1) to `talkgroup` for unit 100.
-    fn grant_msg(talkgroup: i64, freq_hz: f64) -> TrunkMessage {
+    fn grant_msg(talkgroup: u32, freq_hz: f64) -> TrunkMessage {
         message(Trunking::Grant(voice(talkgroup, freq_hz, None, Some(100))))
     }
 
-    fn voice(talkgroup: i64, freq_hz: f64, slot: Option<u8>, source: Option<u32>) -> Voice {
+    fn voice(talkgroup: u32, freq_hz: f64, slot: Option<u8>, source: Option<u32>) -> Voice {
         Voice {
             channel: Channel { freq_hz, slot },
-            talkgroup: u32::try_from(talkgroup).unwrap(),
+            talkgroup,
             source,
             options: Options::default(),
         }
     }
 
     /// `m` as a grant from `source` instead.
-    fn from_source(m: &TrunkMessage, source: i64) -> TrunkMessage {
+    fn from_source(m: &TrunkMessage, source: u32) -> TrunkMessage {
         let Trunking::Grant(v) = m.kind else {
             panic!("not a grant")
         };
         message(Trunking::Grant(Voice {
-            source: Some(u32::try_from(source).unwrap()),
+            source: Some(source),
             ..v
         }))
     }
@@ -2526,8 +2561,8 @@ mod tests {
                     done.extend(exec(sm, followup));
                     continue;
                 }
-                Effect::NextTransmission { call_id, source_id } => {
-                    sm.on_next_transmission(call_id, source_id);
+                Effect::NextTransmission { call_id, source } => {
+                    sm.on_next_transmission(call_id, source);
                 }
                 Effect::RemoveCall { call_id } => sm.remove_call(call_id),
                 _ => {}
@@ -2619,7 +2654,7 @@ mod tests {
 
     // ── A channel granted to another talkgroup ends the call on it ──
 
-    fn tdma_grant(talkgroup: i64, freq_hz: f64, slot: i32) -> TrunkMessage {
+    fn tdma_grant(talkgroup: u32, freq_hz: f64, slot: i32) -> TrunkMessage {
         message(Trunking::Grant(voice(
             talkgroup,
             freq_hz,
@@ -2672,10 +2707,13 @@ mod tests {
         let mut sm = TrunkStateMachine::new(test_config());
         sm.patch_tables.insert(1, PatchTable::new());
         let now = sm.clock().now();
-        sm.patch_tables
-            .get_mut(&1)
-            .unwrap()
-            .update(900, 100, 200, 0, now);
+        sm.patch_tables.get_mut(&1).unwrap().update(
+            &trunk_radio::Patch {
+                supergroup: 900,
+                groups: [100, 200, 0],
+            },
+            now,
+        );
         let _ = start(&mut sm, &grant_msg(100, 851_000_000.0));
 
         let effects = sm.on_message(&grant_msg(200, 851_000_000.0));
@@ -2966,21 +3004,21 @@ mod tests {
                 "EmitCallStart",
             ]
         );
-        assert_eq!(sm.calls[0].current_source_id, 2002);
+        assert_eq!(sm.calls[0].current_source, Some(2002));
 
         // The same source re-firing every superframe must not cut another boundary.
         assert!(sm.on_source_change(call_id, 2002).is_empty());
-        // Unknown source (encrypted / no-LC) must not cut a boundary.
-        assert!(sm.on_source_change(call_id, -1).is_empty());
+        // No unit (encrypted / no-LC frames) must not cut a boundary.
+        assert!(sm.on_source_change(call_id, 0).is_empty());
     }
 
     // ── Control channel grant on a recording call → per-PTT boundary ──
 
-    fn key_up(sm: &mut TrunkStateMachine, source: i64) -> Effects {
+    fn key_up(sm: &mut TrunkStateMachine, source: u32) -> Effects {
         sm.on_message(&from_source(&grant_msg(100, 851_000_000.0), source))
     }
 
-    fn cut_at_key_up(effects: &Effects, source: i64) -> bool {
+    fn cut_at_key_up(effects: &Effects, source: u32) -> bool {
         matches!(
             effects.as_ref(),
             [
@@ -2988,7 +3026,7 @@ mod tests {
                     reason: CallEndReason::KeyUp,
                     ..
                 },
-                Effect::NextTransmission { source_id: Some(s), .. },
+                Effect::NextTransmission { source: Some(s), .. },
                 Effect::SetSource { .. },
                 Effect::EmitSignal { .. },
                 Effect::EmitCallStart { .. },
@@ -3002,7 +3040,7 @@ mod tests {
         let call_id = recording_trunked_call(&mut sm);
         sm.calls[0].segment_start = Instant::now() - Duration::from_secs(2);
         assert!(cut_at_key_up(&key_up(&mut sm, 2002), 2002));
-        assert_eq!(sm.calls[0].current_source_id, 2002);
+        assert_eq!(sm.calls[0].current_source, Some(2002));
         // The in-band source change that follows matches and adds nothing.
         assert!(sm.on_source_change(call_id, 2002).is_empty());
     }
@@ -3029,7 +3067,7 @@ mod tests {
         let _ = recording_trunked_call(&mut sm);
         let effects = key_up(&mut sm, 2002);
         assert!(!has(&effects, "EmitCallEnd"));
-        assert_eq!(sm.calls[0].current_source_id, 2002);
+        assert_eq!(sm.calls[0].current_source, Some(2002));
     }
 
     #[test]
@@ -3038,7 +3076,7 @@ mod tests {
         let call_id = recording_trunked_call(&mut sm);
 
         // A speaker change: a logical boundary on a channel that runs on.
-        let speaker = sm.cut_transmission(call_id, Cut::Speaker { source_id: 42 });
+        let speaker = sm.cut_transmission(call_id, Cut::Speaker { source: 42 });
         assert!(matches!(
             speaker.as_ref(),
             [
@@ -3047,7 +3085,7 @@ mod tests {
                     ..
                 },
                 Effect::NextTransmission {
-                    source_id: Some(42),
+                    source: Some(42),
                     ..
                 },
                 Effect::SetSource { source_id: 42, .. },
@@ -3067,10 +3105,7 @@ mod tests {
                     reason: CallEndReason::Conventional,
                     ..
                 },
-                Effect::NextTransmission {
-                    source_id: None,
-                    ..
-                },
+                Effect::NextTransmission { source: None, .. },
             ]
         ));
     }
@@ -3083,7 +3118,7 @@ mod tests {
         // only re-route the source, not fragment into a sub-second transmission.
         let effects = sm.on_source_change(call_id, 2002);
         assert_eq!(names(&effects), ["SetSource", "EmitSignal"]);
-        assert_eq!(sm.calls[0].current_source_id, 2002);
+        assert_eq!(sm.calls[0].current_source, Some(2002));
     }
 
     #[test]
@@ -3712,7 +3747,7 @@ mod tests {
             [Effect::EmitUnitEvent {
                 type_: UnitEventType::Affiliation,
                 source_id: 10,
-                talkgroup: 200,
+                talkgroup: Some(Talkgroup(200)),
                 ..
             }]
         ));

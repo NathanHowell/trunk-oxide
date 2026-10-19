@@ -13,7 +13,7 @@ use crate::types::UnitAlias;
 /// Harris aliases name no radio themselves: they are taken for
 /// `current_source` (the unit talking on the call), and only when the
 /// decoder's cached ids agree and are fresh.
-pub fn decode(alias: &Alias, current_source: i64) -> Option<UnitAlias> {
+pub fn decode(alias: &Alias, current_source: Option<u32>) -> Option<UnitAlias> {
     match alias {
         Alias::Motorola {
             phase2,
@@ -46,9 +46,12 @@ fn harris(
     source: i64,
     group: i64,
     cache_age_ms: u64,
-    current_source: i64,
+    current_source: Option<u32>,
 ) -> Option<UnitAlias> {
-    if cache_age_ms > HARRIS_CACHE_MAX_MS || source != current_source || source <= 0 || group <= 0 {
+    if cache_age_ms > HARRIS_CACHE_MAX_MS
+        || current_source.map(i64::from) != Some(source)
+        || group <= 0
+    {
         return None;
     }
     // Phase 1: exactly 14 characters (part A + part B). Phase 2: one message,
@@ -291,13 +294,13 @@ mod tests {
             group: 100,
             cache_age_ms: 50,
         };
-        let u = decode(&a, 1234).unwrap();
+        let u = decode(&a, Some(1234)).unwrap();
         assert_eq!(
             (u.radio_id, u.alias.as_str(), u.talkgroup_id),
             (1234, "ENGINE 7", 100)
         );
         assert_eq!(u.source, "HarrisP25_FDMA");
-        assert!(decode(&a, 999).is_none(), "another unit is talking");
+        assert!(decode(&a, Some(999)).is_none(), "another unit is talking");
         let stale = Alias::Harris {
             phase2: false,
             data: b"ENGINE 7      ".to_vec(),
@@ -305,7 +308,7 @@ mod tests {
             group: 100,
             cache_age_ms: 400,
         };
-        assert!(decode(&stale, 1234).is_none());
+        assert!(decode(&stale, Some(1234)).is_none());
         let p2 = Alias::Harris {
             phase2: true,
             data: vec![0x81, 0xa4, 0x05, b'M', b'E', b'D', b'1', 0x00, 0xff],
@@ -313,7 +316,7 @@ mod tests {
             group: 9,
             cache_age_ms: 0,
         };
-        let u = decode(&p2, 7).unwrap();
+        let u = decode(&p2, Some(7)).unwrap();
         assert_eq!(
             (u.alias.as_str(), u.source.as_str()),
             ("MED1", "HarrisP25_TDMA")
@@ -384,7 +387,7 @@ mod tests {
             messages,
             blocks,
         };
-        let u = decode(&a, 0).unwrap();
+        let u = decode(&a, None).unwrap();
         assert_eq!(
             (
                 u.radio_id,
@@ -404,7 +407,7 @@ mod tests {
                     messages,
                     blocks
                 },
-                0
+                None
             )
             .is_none()
         );

@@ -13,7 +13,7 @@ use crate::registry::{Entry, Registry};
 #[derive(Clone, Debug, PartialEq)]
 pub struct AnalogChannel {
     pub system: String,
-    pub talkgroup: i64,
+    pub talkgroup: u32,
     pub freq_hz: f64,
     pub source: i32,
     pub port: u32,

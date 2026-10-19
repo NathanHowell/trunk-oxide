@@ -99,7 +99,7 @@ message CallInfo {
   bool mode = 15;
   bool duplex = 16;
   bool conversation_mode = 17;
-  int64 current_source_id = 18;
+  optional int64 current_source_id = 18; // the unit talking, if known
   reserved 19; // was current_length, replaced by elapsed
   google.protobuf.Timestamp start_time = 20;
   google.protobuf.Duration elapsed = 21;

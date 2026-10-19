@@ -19,7 +19,7 @@ const VOICE_THRESHOLD: i16 = 16;
 #[derive(Clone, Debug, PartialEq)]
 pub struct Accounting {
     pub system: String,
-    pub talkgroup: i64,
+    pub talkgroup: u32,
     /// Where the channel was tuned.
     pub freq: f64,
     pub phase2: bool,
@@ -36,13 +36,13 @@ pub struct Accounting {
     /// The decoder's counts so far (P25).
     pub counts: CallCounts,
     /// Units heard in band, in order of first appearance (P25).
-    pub sources: Vec<i64>,
+    pub sources: Vec<u32>,
 }
 
 impl Accounting {
     /// A recording starting now.
     #[must_use]
-    pub fn new(system: &str, talkgroup: i64, freq: f64, phase2: bool, rate: f64) -> Self {
+    pub fn new(system: &str, talkgroup: u32, freq: f64, phase2: bool, rate: f64) -> Self {
         let now = Instant::now();
         Self {
             system: system.to_owned(),

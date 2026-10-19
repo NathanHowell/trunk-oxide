@@ -424,13 +424,13 @@ impl Radio {
     }
 
     /// The unit the state machine says is talking on the call.
-    pub fn set_source(&self, id: CallId, src: i64) {
+    pub fn set_source(&self, id: CallId, unit: u32) {
         let i = self.lock();
         if let Some(open) = i.open.get(&id) {
             let slot = i.slot(open.num);
             i.sources[slot.source]
                 .channelizer
-                .send(slot.port, Cmd::Source(src));
+                .send(slot.port, Cmd::Source(unit));
         }
     }
 

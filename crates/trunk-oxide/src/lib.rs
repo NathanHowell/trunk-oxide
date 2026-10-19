@@ -101,6 +101,13 @@ impl From<&TrunkMessage> for TrunkMsgKey {
     }
 }
 
+/// A configured talkgroup (or conventional channel) id, as the air names it.
+fn talkgroup_id(system: &str, id: i64) -> anyhow::Result<Talkgroup> {
+    u32::try_from(id)
+        .map(Talkgroup)
+        .with_context(|| format!("system '{system}': talkgroup {id} is not a valid id"))
+}
+
 /// Create an interval whose first tick fires after `period` (not immediately).
 fn delayed_interval(period: Duration) -> tokio::time::Interval {
     tokio::time::interval_at(tokio::time::Instant::now() + period, period)
@@ -623,8 +630,8 @@ impl TrunkRecorderBuilder {
                 .talkgroup
                 .iter()
                 .map(|tg| {
-                    (
-                        Talkgroup(tg.id),
+                    Ok((
+                        talkgroup_id(short_name, tg.id)?,
                         TalkgroupPolicy {
                             mode: tg.mode,
                             priority: tg.priority.map_or(default_priority, Priority).0,
@@ -635,9 +642,9 @@ impl TrunkRecorderBuilder {
                                 &p25
                             }),
                         },
-                    )
+                    ))
                 })
-                .collect();
+                .collect::<anyhow::Result<_>>()?;
 
             let channels = sys
                 .channel
@@ -657,8 +664,8 @@ impl TrunkRecorderBuilder {
                         Recipe::<P25Voice>::opener(Keying::Carrier { squelch_db })
                     };
                     let row = sys.talkgroup.iter().find(|tg| tg.id == ch.id);
-                    ConventionalChannel {
-                        talkgroup: Talkgroup(ch.id),
+                    Ok(ConventionalChannel {
+                        talkgroup: talkgroup_id(short_name, ch.id)?,
                         freq: Freq::from_hz(ch.freq),
                         priority: ch
                             .priority
@@ -667,9 +674,9 @@ impl TrunkRecorderBuilder {
                         signal_detection: ch.signal_detection,
                         squelch_db,
                         recipe,
-                    }
+                    })
                 })
-                .collect();
+                .collect::<anyhow::Result<_>>()?;
 
             let trunked = sys.system_type == SystemType::P25;
             let default_mode = rec.map_or(DefaultMode::default(), |r| r.default_mode);
@@ -925,8 +932,8 @@ impl TrunkRecorder {
                         } => {
                             call_mgr.handle_squelch_event(call_id, squelch, power_db);
                         }
-                        RadioEvent::SourceChange { call_id, src_id } => {
-                            call_mgr.handle_source_change(call_id, src_id);
+                        RadioEvent::SourceChange { call_id, unit } => {
+                            call_mgr.handle_source_change(call_id, unit);
                         }
                         RadioEvent::Crypto {
                             call_id,

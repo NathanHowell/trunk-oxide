@@ -145,7 +145,7 @@ pub struct Patch {
 /// One recording's audio accounting.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Transmission {
-    pub talkgroup: i64,
+    pub talkgroup: u32,
     pub start_time: i64,
     pub stop_time: i64,
     pub sample_count: i64,
@@ -195,14 +195,14 @@ pub struct ChannelStatus {
 #[derive(Debug, Clone, PartialEq)]
 pub struct CallReport {
     pub system: String,
-    pub talkgroup: i64,
+    pub talkgroup: u32,
     pub freq: f64,
     pub phase2: bool,
     pub audio_seconds: f64,
     pub transmissions: i64,
     pub errors: i64,
     pub spikes: i64,
-    pub sources: Vec<i64>,
+    pub sources: Vec<u32>,
     pub algid: u8,
     pub repeated: i64,
     pub muted: i64,
@@ -225,20 +225,18 @@ pub struct VoiceTag {
     /// Into the audio the same `process` call appended.
     pub offset: u32,
     pub kind: VoiceTagKind,
-    pub value: i64,
-    pub alias: Option<trunk_p25::assemble::Alias>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum VoiceTagKind {
-    /// The unit talking (`value`).
-    Source,
-    /// The talkgroup (`value`).
-    Group,
+    /// The unit talking.
+    Source(u32),
+    /// The talkgroup.
+    Group(u16),
     /// The transmission ended.
     Terminate,
-    /// An over-the-air alias (`alias`).
-    Alias,
+    /// An over-the-air alias.
+    Alias(trunk_p25::assemble::Alias),
 }
 
 /// A signal the wideband detector found.
@@ -313,8 +311,8 @@ pub enum RadioEvent {
         /// The slot's power at the transition, if it has a reading.
         power_db: Option<f64>,
     },
-    /// An in-band P25 source change on a voice channel.
-    SourceChange { call_id: CallId, src_id: i64 },
+    /// An in-band P25 source change on a voice channel: `unit` is talking.
+    SourceChange { call_id: CallId, unit: u32 },
     /// In-band encryption parameters of a call we hold no key for.
     Crypto {
         call_id: CallId,

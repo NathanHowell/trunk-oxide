@@ -72,7 +72,7 @@ impl FmMetrics {
     fn export(&mut self, key: Key, r: &AnalogReport) {
         let base = [
             KeyValue::new("system", r.channel.system.clone()),
-            KeyValue::new("talkgroup", r.channel.talkgroup),
+            KeyValue::new("talkgroup", i64::from(r.channel.talkgroup)),
             KeyValue::new("freq_hz", r.channel.freq_hz as i64),
         ];
         let with = |k: &'static str, v: &'static str| {

@@ -25,7 +25,7 @@ pub type Chz = SharedChannelizer<Decoded, Cmd>;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cmd {
     /// The unit the state machine says is talking (P25: for Harris aliases).
-    Source(i64),
+    Source(u32),
 }
 
 /// A call (or a control channel's standing claim) as the radio opens a
@@ -35,7 +35,7 @@ pub struct Call {
     pub id: CallId,
     pub sys_num: i32,
     /// 0 for a control channel.
-    pub talkgroup: i64,
+    pub talkgroup: u32,
     /// Where to tune (any clock correction applied) and, on a phase 2
     /// channel, the TDMA slot.
     pub channel: Channel,

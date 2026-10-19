@@ -100,7 +100,7 @@ const CUT_VOICE_AGE_S: f64 = 0.5;
 /// What a channel last carried, and when it closed.
 #[derive(Clone, Copy, Debug)]
 struct ChannelUse {
-    talkgroup: i64,
+    talkgroup: Talkgroup,
     freq: Freq,
     slot: i32,
     closed: Instant,
@@ -265,7 +265,7 @@ impl CallManager {
                 for ch in &policy.channels {
                     snap.channels.push(crate::ConventionalChannelMetrics {
                         system: policy.short_name.clone(),
-                        talkgroup: ch.talkgroup.0,
+                        talkgroup: i64::from(ch.talkgroup.0),
                         freq_hz: ch.freq.as_hz(),
                         state: "Disabled",
                         signal_power_db: 0.0,
@@ -501,15 +501,14 @@ impl CallManager {
     /// Update a conventional channel's metrics entry by talkgroup + freq.
     fn update_conv_metric(
         &self,
-        talkgroup: i64,
+        talkgroup: Talkgroup,
         freq: Freq,
         f: impl FnOnce(&mut crate::ConventionalChannelMetrics),
     ) {
         if let Ok(mut snap) = self.conv_metrics.lock()
-            && let Some(ch) = snap
-                .channels
-                .iter_mut()
-                .find(|c| c.talkgroup == talkgroup && (c.freq_hz - freq.as_hz()).abs() < 1.0)
+            && let Some(ch) = snap.channels.iter_mut().find(|c| {
+                c.talkgroup == i64::from(talkgroup) && (c.freq_hz - freq.as_hz()).abs() < 1.0
+            })
         {
             f(ch);
         }
@@ -523,7 +522,8 @@ impl CallManager {
                     continue;
                 }
                 if let Some(ch) = snap.channels.iter_mut().find(|c| {
-                    c.talkgroup == view.talkgroup() && (c.freq_hz - view.freq().as_hz()).abs() < 1.0
+                    c.talkgroup == i64::from(view.talkgroup())
+                        && (c.freq_hz - view.freq().as_hz()).abs() < 1.0
                 }) {
                     ch.state = view.state().as_str();
                 }
@@ -540,7 +540,7 @@ impl CallManager {
             self.bridge.register_audio_meta(
                 call_id,
                 AudioMeta {
-                    talkgroup: view.talkgroup(),
+                    talkgroup: view.talkgroup().into(),
                     short_name: Arc::from(view.short_name()),
                     freq: view.freq().as_hz(),
                     sample_rate,
@@ -586,7 +586,7 @@ impl CallManager {
                         let span = tracing::info_span!(
                             "call",
                             short_name = %view.short_name(),
-                            talkgroup = view.talkgroup(),
+                            talkgroup = view.talkgroup().0,
                             sys_num = view.sys_num(),
                             freq = %view.freq(),
                             tdma = view.phase2_tdma(),
@@ -663,9 +663,13 @@ impl CallManager {
                     }
                     self.exec_conclude_call(call_id, reason);
                 }
-                Effect::NextTransmission { call_id, source_id } => {
-                    self.state.on_next_transmission(call_id, source_id);
-                    if source_id.is_none() {
+                Effect::NextTransmission { call_id, source } => {
+                    let conventional = self
+                        .state
+                        .get_call_view(call_id)
+                        .is_some_and(|v| v.is_conventional());
+                    self.state.on_next_transmission(call_id, source);
+                    if conventional {
                         // A conventional transmission's recordings were
                         // reported with its end; the next starts afresh.
                         self.tallies.remove(&call_id);
@@ -682,7 +686,7 @@ impl CallManager {
                 Effect::EmitSignal { call_id, source_id } => {
                     if let Some(view) = self.state.get_call_view(call_id) {
                         let info = self.build_call_info_from_view(&view);
-                        self.bridge.signal(source_id, info);
+                        self.bridge.signal(i64::from(source_id), info);
                     }
                 }
                 Effect::EmitUnitEvent {
@@ -692,7 +696,12 @@ impl CallManager {
                     talkgroup,
                 } => {
                     let info = self.get_system_info(sys_num);
-                    self.bridge.unit_event(info, type_, source_id, talkgroup);
+                    self.bridge.unit_event(
+                        info,
+                        type_,
+                        i64::from(source_id),
+                        talkgroup.map_or(0, i64::from),
+                    );
                 }
                 Effect::EmitSetupSystem { sys_num } => {
                     let info = self.get_system_info(sys_num);
@@ -714,7 +723,7 @@ impl CallManager {
     fn talkgroup_labels(view: &CallView<'_>) -> [KeyValue; 2] {
         [
             KeyValue::new("short_name", view.short_name().to_string()),
-            KeyValue::new("talkgroup", view.talkgroup()),
+            KeyValue::new("talkgroup", i64::from(view.talkgroup())),
         ]
     }
 
@@ -769,7 +778,7 @@ impl CallManager {
         };
         span.record("channel", num.0);
         if let Some(last) = self.channel_last.get(&num) {
-            span.record("channel_prev_talkgroup", last.talkgroup);
+            span.record("channel_prev_talkgroup", last.talkgroup.0);
             span.record("channel_prev_freq", tracing::field::display(last.freq));
             span.record("channel_prev_slot", last.slot);
             span.record(
@@ -802,7 +811,7 @@ impl CallManager {
         tracing::info!(
             short_name = %view.short_name(),
             channel = %report.num,
-            talkgroup = view.talkgroup(),
+            talkgroup = view.talkgroup().0,
             freq = %view.freq(),
             tdma = view.phase2_tdma(),
             slot = view.tdma_slot(),
@@ -921,7 +930,7 @@ impl CallManager {
             // the same, so the wire can finalize it.
             if view.state() == CallState::Recording {
                 tracing::warn!(
-                    talkgroup = view.talkgroup(),
+                    talkgroup = view.talkgroup().0,
                     "concluding a recording call with no channel"
                 );
             }
@@ -934,7 +943,7 @@ impl CallManager {
             tracing::info!(
                 short_name = %view.short_name(),
                 call_num = view.call_num(),
-                talkgroup = view.talkgroup(),
+                talkgroup = view.talkgroup().0,
                 elapsed,
                 recording_length,
                 segments = segments.len(),
@@ -1080,7 +1089,7 @@ impl CallManager {
         }
 
         if let Trunking::Grant(v) | Trunking::UnitGrant(v) = msg.kind {
-            self.note_ptt_ends(msg.sys_num, i64::from(v.talkgroup));
+            self.note_ptt_ends(msg.sys_num, Talkgroup(v.talkgroup));
         }
         let effects = self.state.on_message(msg);
         self.process_effects(effects);
@@ -1090,7 +1099,7 @@ impl CallManager {
     /// granted talkgroup's recording calls had their voice channel end a
     /// transmission (a terminator since the current transmission began), so
     /// the grant can be read as a new key-up even from the same handset.
-    fn note_ptt_ends(&mut self, sys_num: i32, talkgroup: i64) {
+    fn note_ptt_ends(&mut self, sys_num: i32, talkgroup: Talkgroup) {
         let ended: Vec<CallId> = self
             .state
             .iter_calls()
@@ -1321,7 +1330,7 @@ impl CallManager {
                     m.squelch_open_count += 1;
                 }),
                 Squelch::Close(reason) => {
-                    tracing::debug!(talkgroup = tg, freq = %freq, ?reason, ?power_db, "squelch closed");
+                    tracing::debug!(talkgroup = tg.0, freq = %freq, ?reason, ?power_db, "squelch closed");
                     self.update_conv_metric(tg, freq, |m| {
                         m.noise_floor_db = db;
                         m.squelch_close_count += 1;
@@ -1337,8 +1346,8 @@ impl CallManager {
     /// An in-band P25 source (unit) change decoded by op25 on the voice channel,
     /// keyed by the recorder's `call_id`. Cuts a per-speaker transmission
     /// boundary (see [`TrunkStateMachine::on_source_change`]).
-    pub fn handle_source_change(&mut self, call_id: CallId, src_id: i64) {
-        let effects = self.state.on_source_change(call_id, src_id);
+    pub fn handle_source_change(&mut self, call_id: CallId, unit: u32) {
+        let effects = self.state.on_source_change(call_id, unit);
         self.process_effects(effects);
     }
 
@@ -1448,7 +1457,7 @@ impl CallManager {
             tracing::info!(
                 system = %view.short_name(),
                 call_num = view.call_num(),
-                talkgroup = view.talkgroup(),
+                talkgroup = view.talkgroup().0,
                 freq = %view.freq(),
                 elapsed,
                 state,
@@ -1492,7 +1501,7 @@ impl CallManager {
 
     fn build_call_info_from_view(&self, view: &CallView<'_>) -> proto::CallInfo {
         proto::CallInfo {
-            talkgroup: view.talkgroup(),
+            talkgroup: view.talkgroup().into(),
             call_num: view.call_num(),
             freq: view.freq().as_hz(),
             signal: view.signal(),
@@ -1503,11 +1512,11 @@ impl CallManager {
             is_conventional: view.is_conventional(),
             phase2_tdma: view.phase2_tdma(),
             tdma_slot: view.tdma_slot(),
-            priority: view.priority(),
+            priority: i32::from(view.service_priority()),
             mode: view.mode(),
             duplex: view.duplex(),
             conversation_mode: view.trunked_fields().is_some_and(|t| t.conversation_mode),
-            current_source_id: view.current_source_id(),
+            current_source_id: view.current_source().map(i64::from),
             start_time: Some(self.timestamp(view.start_time())),
             elapsed: Some(prost_duration(self.state.clock().since(view.start_time()))),
             short_name: view.short_name().to_owned(),
@@ -1526,15 +1535,15 @@ impl CallManager {
     ) -> proto::CallData {
         let unix = |t| crate::call_state::system_time_to_unix(t);
         proto::CallData {
-            talkgroup: view.talkgroup(),
+            talkgroup: view.talkgroup().into(),
             patched_talkgroups: self
                 .state
                 .patch_tables
                 .get(&view.sys_num())
                 .map(|pt| {
-                    pt.get_patch(Talkgroup(view.talkgroup()))
+                    pt.get_patch(view.talkgroup())
                         .into_iter()
-                        .filter_map(|t| u64::try_from(t.0).ok())
+                        .map(|t| u64::from(t.0))
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -1547,7 +1556,7 @@ impl CallManager {
             stop_time: unix(self.state.clock().wall_now()),
             encrypted: view.encrypted(),
             emergency: view.emergency(),
-            priority: view.priority(),
+            priority: i32::from(view.service_priority()),
             mode: view.mode(),
             duplex: view.duplex(),
             short_name: view.short_name().to_owned(),
@@ -1632,7 +1641,7 @@ fn prost_duration(d: std::time::Duration) -> prost_types::Duration {
 /// A recording's accounting as the wire lists it.
 fn proto_transmission(t: &trunk_radio::Transmission) -> proto::Transmission {
     proto::Transmission {
-        talkgroup: t.talkgroup,
+        talkgroup: i64::from(t.talkgroup),
         start_time: t.start_time,
         stop_time: t.stop_time,
         sample_count: t.sample_count,

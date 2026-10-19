@@ -332,33 +332,26 @@ impl P25VoiceHandle {
         for o in self.out.drain(..) {
             #[allow(clippy::cast_possible_truncation)]
             let offset = (audio.len() - start) as u32;
-            let mut tag = |kind, value: i64, alias| {
-                tags.push(VoiceTag {
-                    offset,
-                    kind,
-                    value,
-                    alias,
-                });
-            };
+            let mut tag = |kind| tags.push(VoiceTag { offset, kind });
             match o {
                 CallOutput::Audio { pcm, .. } => {
                     audio.extend(pcm);
                     self.terminated = false;
                 }
                 CallOutput::Event(CallEvent::Source(s)) => {
-                    tag(VoiceTagKind::Source, i64::from(s), None);
+                    tag(VoiceTagKind::Source(s));
                 }
                 CallOutput::Event(CallEvent::Group(g)) => {
-                    tag(VoiceTagKind::Group, i64::from(g), None);
+                    tag(VoiceTagKind::Group(g));
                 }
                 CallOutput::Event(CallEvent::Terminator) => {
                     if !self.terminated {
                         self.terminated = true;
-                        tag(VoiceTagKind::Terminate, 1, None);
+                        tag(VoiceTagKind::Terminate);
                     }
                 }
                 CallOutput::Event(CallEvent::Alias(a)) => {
-                    tag(VoiceTagKind::Alias, 0, Some(a));
+                    tag(VoiceTagKind::Alias(a));
                 }
                 CallOutput::Event(CallEvent::Frame(_) | CallEvent::Encryption { .. }) => {}
             }
@@ -452,7 +445,7 @@ impl Kind for P25Voice {
             audio: Vec::new(),
             tags: Vec::new(),
             levels: at.system.digital_levels,
-            source_id: -1,
+            source: None,
             carrier: matches!(at.params, Keying::Carrier { .. }).then(|| Carrier::new(NARROW_RATE)),
         })
     }
@@ -479,7 +472,7 @@ pub struct P25VoiceChannel {
     tags: Vec<VoiceTag>,
     levels: f64,
     /// The unit talking, as last heard in band or told by the state machine.
-    source_id: i64,
+    source: Option<u32>,
     /// The transmission detector of a conventional channel.
     carrier: Option<Carrier>,
 }
@@ -499,7 +492,7 @@ impl ChannelDecoder for P25VoiceChannel {
 
     fn command(&mut self, cmd: Cmd) {
         match cmd {
-            Cmd::Source(src) => self.source_id = src,
+            Cmd::Source(unit) => self.source = Some(unit),
         }
     }
 
@@ -532,7 +525,7 @@ impl ChannelDecoder for P25VoiceChannel {
             audio,
             tags,
             levels,
-            source_id,
+            source,
             ..
         } = self;
         let pcm = tape.with(|rec| {
@@ -543,17 +536,17 @@ impl ChannelDecoder for P25VoiceChannel {
             acct.counts.muted += counts.muted;
             acct.counts.algid = counts.algid;
             for t in tags.iter() {
-                match t.kind {
-                    VoiceTagKind::Source => {
-                        if t.value > 0 {
-                            if !acct.sources.contains(&t.value) {
-                                acct.sources.push(t.value);
+                match &t.kind {
+                    &VoiceTagKind::Source(unit) => {
+                        if unit != 0 {
+                            if !acct.sources.contains(&unit) {
+                                acct.sources.push(unit);
                             }
-                            if t.value != *source_id {
-                                *source_id = t.value;
+                            if *source != Some(unit) {
+                                *source = Some(unit);
                                 out.events.push(RadioEvent::SourceChange {
                                     call_id: *call,
-                                    src_id: t.value,
+                                    unit,
                                 });
                             }
                         }
@@ -563,10 +556,8 @@ impl ChannelDecoder for P25VoiceChannel {
                         acct.after_term_samples +=
                             i64::try_from(audio.len()).unwrap_or(0) - i64::from(t.offset);
                     }
-                    VoiceTagKind::Alias => {
-                        if let Some(a) = &t.alias
-                            && let Some(alias) = alias::decode(a, *source_id)
-                        {
+                    VoiceTagKind::Alias(a) => {
+                        if let Some(alias) = alias::decode(a, *source) {
                             tracing::info!(
                                 radio_id = alias.radio_id,
                                 alias = %alias.alias,
@@ -579,7 +570,7 @@ impl ChannelDecoder for P25VoiceChannel {
                             });
                         }
                     }
-                    VoiceTagKind::Group => {}
+                    VoiceTagKind::Group(_) => {}
                 }
             }
             if audio.is_empty() {

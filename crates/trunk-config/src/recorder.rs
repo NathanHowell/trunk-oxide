@@ -90,10 +90,6 @@ pub struct RecorderConfig {
     /// trunk-oxide (trunk-solver sizes it).
     #[serde(default)]
     pub max_channels: Option<usize>,
-    /// DMR vocodes with op25's software IMBE decoder rather than its
-    /// full-rate one. P25 always uses trunk-p25's port of the software one.
-    #[serde(default)]
-    pub soft_vocoder: bool,
     /// Debug/baseline capture: when set, every channel conditioner and control
     /// decoder writes raw taps (conditioner in/out IQ, demodulated symbols or
     /// dibits, raw decoder messages) into this directory. Used by
@@ -119,18 +115,6 @@ pub struct RecorderConfig {
     /// default; the loop is slow and disruption-free (software offset only).
     #[serde(default)]
     pub adaptive_freq_correction: bool,
-    #[serde(default)]
-    pub debug: DebugRecorderConfig,
-}
-
-#[derive(Debug, Default, Deserialize)]
-pub struct DebugRecorderConfig {
-    #[serde(default)]
-    pub enabled: bool,
-    #[serde(default = "default_debug_address")]
-    pub address: String,
-    #[serde(default = "default_debug_port")]
-    pub port: i32,
 }
 
 const fn default_call_timeout() -> f64 {
@@ -138,10 +122,4 @@ const fn default_call_timeout() -> f64 {
 }
 const fn default_true() -> bool {
     true
-}
-fn default_debug_address() -> String {
-    "127.0.0.1".to_string()
-}
-const fn default_debug_port() -> i32 {
-    1234
 }

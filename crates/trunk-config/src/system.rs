@@ -64,20 +64,14 @@ pub struct SystemConfig {
     pub analog_levels: f64,
     #[serde(default = "default_squelch")]
     pub squelch: f64,
-    #[serde(default = "default_deemphasis_tau")]
-    pub deemphasis_tau: f32,
     #[serde(default = "default_max_dev")]
     pub max_dev: i32,
-    #[serde(default = "default_filter_width")]
-    pub filter_width: f64,
     #[serde(default = "default_true")]
     pub conversation_mode: bool,
     #[serde(default = "default_true")]
     pub record_unknown: bool,
 
     // Talkgroup display (for C++ console logging)
-    #[serde(default)]
-    pub talkgroup_display_format: TalkgroupDisplayFormat,
 
     // Talkgroups — CSV file (RadioReference export) with optional TOML overrides
     #[serde(default)]
@@ -88,10 +82,6 @@ pub struct SystemConfig {
     pub talkgroup: Vec<TalkgroupConfig>,
 
     // Unit tags
-    #[serde(default)]
-    pub unit_tag: Vec<UnitTagEntry>,
-    #[serde(default)]
-    pub unit_tags: Option<UnitTagsSettings>,
 
     // P25 identity
     #[serde(default)]
@@ -104,14 +94,6 @@ pub struct SystemConfig {
     // Smartnet bandplan
     #[serde(default)]
     pub bandplan: Option<String>,
-    #[serde(default)]
-    pub bandplan_base: f64,
-    #[serde(default)]
-    pub bandplan_high: f64,
-    #[serde(default)]
-    pub bandplan_spacing: f64,
-    #[serde(default)]
-    pub bandplan_offset: i32,
 
     // Channel claims (lower wins)
     /// Its control channels' claim on a channel.
@@ -142,27 +124,7 @@ pub struct SystemConfig {
     pub multi_site: bool,
     #[serde(default)]
     pub multi_site_system_name: String,
-    #[serde(default)]
-    pub multi_site_system_number: i32,
-
     // Decoder options
-    #[serde(default)]
-    pub decode_mdc: bool,
-    #[serde(default)]
-    pub decode_fsync: bool,
-    #[serde(default)]
-    pub decode_star: bool,
-    #[serde(default)]
-    pub decode_tps: bool,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum TalkgroupDisplayFormat {
-    #[default]
-    Id,
-    IdTag,
-    TagId,
 }
 
 /// Recording mode for a talkgroup.
@@ -299,22 +261,6 @@ pub struct ChannelConfig {
     pub priority: Option<i32>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
-pub struct UnitTagEntry {
-    pub pattern: String,
-    pub tag: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct UnitTagsSettings {
-    #[serde(default = "default_unit_tags_mode")]
-    pub mode: String,
-}
-
-fn default_unit_tags_mode() -> String {
-    "user".to_string()
-}
-
 const fn default_digital_levels() -> f64 {
     1.0
 }
@@ -324,14 +270,8 @@ const fn default_analog_levels() -> f64 {
 const fn default_squelch() -> f64 {
     -160.0
 }
-const fn default_deemphasis_tau() -> f32 {
-    0.000_750
-}
 const fn default_max_dev() -> i32 {
     5000
-}
-const fn default_filter_width() -> f64 {
-    1.0
 }
 const fn default_true() -> bool {
     true

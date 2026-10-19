@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use serde::Deserialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -55,26 +53,6 @@ pub struct SourceConfig {
     #[serde(default)]
     pub gain: f64,
     #[serde(default)]
-    pub if_gain: f64,
-    #[serde(default)]
-    pub bb_gain: f64,
-    #[serde(default)]
-    pub mix_gain: f64,
-    #[serde(default)]
-    pub lna_gain: f64,
-    #[serde(default)]
-    pub tia_gain: f64,
-    #[serde(default)]
-    pub pga_gain: f64,
-    #[serde(default)]
-    pub amp_gain: f64,
-    #[serde(default)]
-    pub vga_gain: f64,
-    #[serde(default)]
-    pub vga1_gain: f64,
-    #[serde(default)]
-    pub vga2_gain: f64,
-    #[serde(default)]
     pub agc: bool,
     /// When true, sweep the device's gain steps at startup and pick the gain
     /// with the best noise figure that stays clear of overload, ignoring the
@@ -83,19 +61,7 @@ pub struct SourceConfig {
     #[serde(default)]
     pub auto_gain: bool,
     #[serde(default)]
-    pub antenna: String,
-    #[serde(default)]
-    pub silence_frames: i32,
-    #[serde(default)]
     pub signal_detector_threshold: Option<f32>,
-    /// Gone: channels are shared by every source, up to `[recorder]
-    /// max_channels`. trunk-oxide refuses a config that still sets these.
-    #[serde(default)]
-    pub digital_recorders: Option<i32>,
-    #[serde(default)]
-    pub analog_recorders: Option<i32>,
-    #[serde(default)]
-    pub sigmf_recorders: i32,
     #[serde(default)]
     pub enabled: Option<bool>,
     /// `iqfile` driver only: sample format of the file, `cf32` (interleaved
@@ -106,7 +72,4 @@ pub struct SourceConfig {
     /// `iqfile` driver only: loop the file forever (default) or play it once.
     #[serde(default = "default_true")]
     pub iq_repeat: bool,
-    /// Named gain stages, e.g. `{ "IF" = 20.0, "LNA" = 15.0 }`.
-    #[serde(default)]
-    pub gain_settings: HashMap<String, f64>,
 }

@@ -426,18 +426,6 @@ impl TrunkRecorderBuilder {
     /// Returns an error if an SDR source fails to open or system setup fails.
     pub fn from_config(config: &Config, bridge: Arc<EventBridge>) -> anyhow::Result<Self> {
         let rec = config.recorder.as_ref();
-        if let Some(src) = config
-            .source
-            .iter()
-            .find(|s| s.digital_recorders.is_some() || s.analog_recorders.is_some())
-        {
-            anyhow::bail!(
-                "source '{}': digital_recorders and analog_recorders are gone: channels are \
-                 shared by every source; set [recorder] max_channels instead (trunk-solver \
-                 sizes it)",
-                src.device
-            );
-        }
         let max_channels = rec
             .and_then(|r| r.max_channels)
             .context("set [recorder] max_channels: how many channels may be open at once")?;
@@ -470,11 +458,6 @@ impl TrunkRecorderBuilder {
             sink,
             events,
         ));
-        if rec.is_some_and(|r| r.debug.enabled) {
-            tracing::warn!(
-                "recorder.debug (the UDP debug recorder) is no longer supported; ignored"
-            );
-        }
 
         // ── Sources ──
         // Pre-flight gain calibration for all auto_gain sources runs first, in

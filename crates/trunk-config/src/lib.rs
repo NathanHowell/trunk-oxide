@@ -1,5 +1,6 @@
 pub mod discord;
 pub mod recorder;
+pub mod removed;
 pub mod service;
 pub mod source;
 pub mod system;
@@ -11,14 +12,11 @@ use anyhow::Result;
 use serde::Deserialize;
 
 pub use discord::{ChannelGroup, ChannelMapping, DiscordConfig, NonZeroU64, TalkgroupSelector};
-pub use recorder::{
-    ConditionerConfig, ConditionerReset, DebugRecorderConfig, DefaultMode, RecorderConfig,
-};
+pub use recorder::{ConditionerConfig, ConditionerReset, DefaultMode, RecorderConfig};
 pub use service::{AudioConfig, GrpcConfig, OxideConfig, WhispererConfig};
 pub use source::{SourceConfig, SourceDriver};
 pub use system::{
-    ChannelConfig, Modulation, SystemConfig, SystemType, TalkgroupConfig, TalkgroupDisplayFormat,
-    TalkgroupMode, UnitTagEntry, UnitTagsSettings,
+    ChannelConfig, Modulation, SystemConfig, SystemType, TalkgroupConfig, TalkgroupMode,
 };
 
 #[derive(Debug, Deserialize)]
@@ -51,6 +49,13 @@ impl Config {
     /// only explicitly-set TOML fields override CSV values.
     pub fn load(path: &str) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
+        let removed = removed::find(&toml::from_str(&content)?);
+        if !removed.is_empty() {
+            anyhow::bail!(
+                "{path} sets options that no longer exist:\n  {}",
+                removed.join("\n  ")
+            );
+        }
         let mut config: Self = toml::from_str(&content)?;
 
         // Check if any system uses CSV files
@@ -199,19 +204,36 @@ channel_id = 0
 [recorder]
 temp_dir = "/tmp/test"
 call_timeout = 5.0
-soft_vocoder = true
-
-[recorder.debug]
-enabled = true
-port = 5678
+max_channels = 12
 "#;
         let config: Config = toml::from_str(toml).unwrap();
         let rec = config.recorder.unwrap();
         assert_eq!(rec.temp_dir, "/tmp/test");
         assert!((rec.call_timeout - 5.0).abs() < f64::EPSILON);
-        assert!(rec.soft_vocoder);
-        assert!(rec.debug.enabled);
-        assert_eq!(rec.debug.port, 5678);
+        assert_eq!(rec.max_channels, Some(12));
+    }
+
+    #[test]
+    fn a_config_setting_a_removed_option_is_refused_with_why() {
+        let dir = std::env::temp_dir().join(format!("trunk-config-removed-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+        std::fs::write(
+            &path,
+            "[recorder]\nsoft_vocoder = true\n\n[[source]]\ndigital_recorders = 6\n",
+        )
+        .unwrap();
+        let err = Config::load(path.to_str().unwrap())
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("recorder.soft_vocoder: "), "{err}");
+        assert!(
+            err.contains("source.0.digital_recorders: channels are shared"),
+            "{err}"
+        );
+        std::fs::write(&path, "[recorder]\nmax_channels = 4\n").unwrap();
+        assert!(Config::load(path.to_str().unwrap()).is_ok());
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
@@ -231,7 +253,6 @@ gain = 36.0
         assert_eq!(src.driver, SourceDriver::Osmosdr);
         assert_eq!(src.device, "rtl=0");
         assert!((src.gain - 36.0).abs() < f64::EPSILON);
-        assert_eq!(src.digital_recorders, None);
     }
 
     #[test]

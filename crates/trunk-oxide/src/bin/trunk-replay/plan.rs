@@ -219,6 +219,9 @@ pub fn build(
     let capture_dir = capture_dir.canonicalize()?;
 
     migrate_recorder_counts(&mut root, &capture_dir)?;
+    for gone in trunk_config::removed::strip(&mut root) {
+        eprintln!("capture config: dropping {gone}");
+    }
 
     let mut duration_s = 0.0_f64;
     let mut skipped = Vec::new();

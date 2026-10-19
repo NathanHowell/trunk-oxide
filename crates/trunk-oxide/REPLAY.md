@@ -131,6 +131,9 @@ cuts blind A/B clips from the calls where they diverge most, and
 `trunk-discord ab post <out>` / `ab tally <out>` puts them to a vote in the
 hourly thread. Verdict (2026-10-19, one listener): op25's policy 5, soft 1;
 phase 1 unanimous. Nothing shipped; the apparatus stays for the next idea.
+Also tried and dropped (bead q7f.7): taking AMBE+2's unprotected quantiser
+values as expectations under the bits' posteriors; by log-spectral distance
+never better than playing the soft decode as received.
 
 The vocoders were checked frame by frame against op25's on random streams
 that reach every pitch, repeat, mute, tone and erasure, 16k frames a phase,
@@ -149,7 +152,9 @@ The `voice_golden` and `tdma_golden` scorers need op25's own symbols, from
 such older taps.
 
 Calls are counted in `trunk.oxide.p25call.{calls,audio,transmissions,
-bit_errors,spikes,encrypted}{system,phase}`; the decoder stage metrics are
+bit_errors,spikes,encrypted,repeated,muted}{system,phase}` (`repeated` and
+`muted` are the voice frames the vocoder would not play as received: what
+the listener heard of a bad channel); the decoder stage metrics are
 `p25cc`, `p25voice` and `p25tdma`. A replay writes the call tallies and the
 control channel parser's counts to `summary.json` under `decoders`.
 

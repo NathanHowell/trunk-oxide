@@ -6,6 +6,7 @@
 //! [`AudioSink`], and everything it decides goes in through [`Radio`].
 
 pub mod alias;
+pub mod audible;
 pub mod fm;
 pub mod p25;
 pub mod p25_calls;

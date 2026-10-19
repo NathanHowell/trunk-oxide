@@ -20,6 +20,7 @@ use trunk_fm::gate::{Config as GateConfig, Event as GateEvent, Gate};
 use trunk_fm::{Audio, Decimation, Detector, FmDemod, Measurement, TAU_US, Tone};
 
 use crate::alias;
+use crate::audible::Hold;
 use crate::fm;
 use crate::p25_calls;
 use crate::p25_voice::P25VoiceHandle;
@@ -45,15 +46,6 @@ pub(crate) const EXCESS_BW_PUB: f32 = EXCESS_BW;
 const ANALOG_BANDWIDTH_HZ: f64 = 12_000.0;
 /// A sample at or above this is voice, not digital silence (~-66 dBFS).
 const VOICE_THRESHOLD: i16 = 16;
-/// A transmission is audible once some half-second window of its audio
-/// reaches this RMS (about -46 dBFS).
-///
-/// Until then its audio is held back; a transmission that ends without
-/// reaching it is dropped, so a tone-only key-up or an empty channel never
-/// reaches anyone downstream.
-pub const AUDIBLE_RMS: f64 = 0.005;
-/// The window over which [`AUDIBLE_RMS`] is measured.
-const AUDIBLE_WINDOW_S: f64 = 0.5;
 /// What `get_pwr()` returned with no reading: trunk-recorder's `DB_UNSET`.
 pub const DB_UNSET: f64 = 999.0;
 
@@ -104,77 +96,46 @@ pub enum Cmd {
     Source(i64),
 }
 
-/// One recording's accounting (what `headless_sink` kept), written by the
-/// decoder as it goes and read by the control side.
-#[derive(Clone, Debug)]
-struct Recording {
-    /// The call being recorded (0: none); audio for any other is ignored.
-    call_id: u64,
-    state: RecorderState,
-    system: String,
-    start: SystemTime,
-    last_write: Instant,
-    last_voice: Instant,
-    sample_count: i64,
-    term_events: i64,
-    after_term_samples: i64,
-    talkgroup: i64,
-    freq: f64,
+/// What `headless_sink` kept of one call: when it started, what was
+/// written, what the decoder counted.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Accounting {
+    pub state: RecorderState,
+    pub system: String,
+    pub start: SystemTime,
+    pub last_write: Instant,
+    pub last_voice: Instant,
+    pub sample_count: i64,
+    pub term_events: i64,
+    pub after_term_samples: i64,
+    pub talkgroup: i64,
+    pub freq: f64,
     /// The decoder's counts so far this call (P25).
-    counts: CallCounts,
+    pub counts: CallCounts,
     /// Units heard in band, in order of first appearance (P25).
-    sources: Vec<i64>,
-    phase2: bool,
-    /// Some window reached [`AUDIBLE_RMS`]: the audio flows.
-    audible: bool,
-    /// Audio held back until the transmission proves audible.
-    held: Vec<i16>,
-    /// The window in progress: sum of squares and samples.
-    win_sq: f64,
-    win_n: usize,
+    pub sources: Vec<i64>,
+    pub phase2: bool,
 }
 
-impl Default for Recording {
-    fn default() -> Self {
+impl Accounting {
+    /// A call starting now.
+    fn new(system: &str, talkgroup: i64, freq: f64, phase2: bool) -> Self {
         let now = Instant::now();
         Self {
-            call_id: 0,
-            state: RecorderState::Available,
-            system: String::new(),
+            state: RecorderState::Idle,
+            system: system.to_owned(),
             start: SystemTime::now(),
             last_write: now,
             last_voice: now,
             sample_count: 0,
             term_events: 0,
             after_term_samples: 0,
-            talkgroup: 0,
-            freq: 0.0,
+            talkgroup,
+            freq,
             counts: CallCounts::default(),
             sources: Vec::new(),
-            phase2: false,
-            audible: false,
-            held: Vec::new(),
-            win_sq: 0.0,
-            win_n: 0,
+            phase2,
         }
-    }
-}
-
-impl Recording {
-    fn start(&mut self, s: &Start) {
-        let now = Instant::now();
-        *self = Self {
-            call_id: s.rust_call_id,
-            state: RecorderState::Idle,
-            system: s.system.clone(),
-            start: SystemTime::now(),
-            last_write: now,
-            last_voice: now,
-            talkgroup: s.talkgroup,
-            freq: s.freq,
-            phase2: s.phase2,
-            ..Self::default()
-        };
     }
 
     /// Audio was written: `n` samples, voice among them or not.
@@ -187,74 +148,6 @@ impl Recording {
         self.last_write = now;
         if voice {
             self.last_voice = now;
-        }
-    }
-
-    /// Account for `audio` (at `rate` samples per second) of call `call_id`
-    /// and decide what of it goes out: nothing until a half-second window
-    /// clears [`AUDIBLE_RMS`], then everything held plus this. Returns the
-    /// samples to send. Audio of a call that is not this one (over, or not
-    /// yet started) is dropped.
-    #[allow(
-        clippy::cast_precision_loss,
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::suboptimal_flops
-    )]
-    fn deliver(&mut self, call_id: u64, audio: &[i16], rate: f64) -> Vec<i16> {
-        if call_id != self.call_id || self.state == RecorderState::Available {
-            return Vec::new();
-        }
-        let voice = audio.iter().any(|&s| s.abs() >= VOICE_THRESHOLD);
-        self.wrote(audio.len(), voice);
-        if self.audible {
-            return audio.to_vec();
-        }
-        let win_len = (rate * AUDIBLE_WINDOW_S) as usize;
-        self.held.extend_from_slice(audio);
-        for &s in audio {
-            let v = f64::from(s) / 32768.0;
-            self.win_sq += v * v;
-            self.win_n += 1;
-            if self.win_n >= win_len {
-                let rms = (self.win_sq / self.win_n as f64).sqrt();
-                self.win_sq = 0.0;
-                self.win_n = 0;
-                if rms >= AUDIBLE_RMS {
-                    self.audible = true;
-                    return std::mem::take(&mut self.held);
-                }
-            }
-        }
-        Vec::new()
-    }
-
-    /// The transmission is over: whatever a final partial window makes
-    /// audible is returned to send, else the held audio is dropped. The
-    /// recording takes no more audio.
-    #[allow(clippy::cast_precision_loss)]
-    fn finish(&mut self) -> Vec<i16> {
-        self.state = RecorderState::Available;
-        if !self.audible && self.win_n > 0 {
-            let rms = (self.win_sq / self.win_n as f64).sqrt();
-            if rms >= AUDIBLE_RMS {
-                self.audible = true;
-            }
-        }
-        self.win_sq = 0.0;
-        self.win_n = 0;
-        if self.audible {
-            std::mem::take(&mut self.held)
-        } else {
-            if !self.held.is_empty() {
-                tracing::info!(
-                    talkgroup = self.talkgroup,
-                    samples = self.held.len(),
-                    "dropping a transmission with no audible audio"
-                );
-            }
-            self.held.clear();
-            Vec::new()
         }
     }
 
@@ -305,10 +198,60 @@ impl Recording {
     }
 }
 
-/// The accounting, shared by the decoder and the control side.
-type Shared = Arc<Mutex<Recording>>;
+/// One call's recording: the decoder writes its audio through here (the
+/// accounting and the audibility hold see it), the control side reads the
+/// accounting and finishes it. `None` between calls.
+#[derive(Clone, Debug, PartialEq)]
+struct Recording {
+    call_id: u64,
+    acct: Accounting,
+    hold: Hold,
+}
 
-fn lock(rec: &Shared) -> std::sync::MutexGuard<'_, Recording> {
+impl Recording {
+    fn new(s: &Start, rate: f64) -> Self {
+        Self {
+            call_id: s.rust_call_id,
+            acct: Accounting::new(&s.system, s.talkgroup, s.freq, s.phase2),
+            hold: Hold::new(rate),
+        }
+    }
+
+    /// Account for `audio` of call `call_id` and return what of it goes
+    /// out (see [`Hold::push`]). Audio of any other call (over, or not yet
+    /// started) is dropped.
+    fn deliver(&mut self, call_id: u64, audio: &[i16]) -> Vec<i16> {
+        if call_id != self.call_id || self.acct.state == RecorderState::Available {
+            return Vec::new();
+        }
+        let voice = audio.iter().any(|&s| s.abs() >= VOICE_THRESHOLD);
+        self.acct.wrote(audio.len(), voice);
+        self.hold.push(audio)
+    }
+
+    /// The call is over: the audio still to send (see [`Hold::finish`]).
+    /// The recording takes no more.
+    fn finish(&mut self) -> Vec<i16> {
+        self.acct.state = RecorderState::Available;
+        match self.hold.finish() {
+            Ok(tail) => tail,
+            Err(0) => Vec::new(),
+            Err(samples) => {
+                tracing::info!(
+                    talkgroup = self.acct.talkgroup,
+                    samples,
+                    "dropping a transmission with no audible audio"
+                );
+                Vec::new()
+            }
+        }
+    }
+}
+
+/// The recording, shared by the decoder and the control side.
+type Shared = Arc<Mutex<Option<Recording>>>;
+
+fn lock(rec: &Shared) -> std::sync::MutexGuard<'_, Option<Recording>> {
     rec.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
@@ -389,18 +332,19 @@ impl ChannelDecoder for P25Slot {
             });
         }
         let counts = self.voice.take_call_counts();
-        let mut rec = lock(&self.rec);
-        rec.counts.errors += counts.errors;
-        rec.counts.spikes += counts.spikes;
-        rec.counts.repeated += counts.repeated;
-        rec.counts.muted += counts.muted;
-        rec.counts.algid = counts.algid;
+        let mut guard = lock(&self.rec);
+        let Some(rec) = guard.as_mut() else { return };
+        rec.acct.counts.errors += counts.errors;
+        rec.acct.counts.spikes += counts.spikes;
+        rec.acct.counts.repeated += counts.repeated;
+        rec.acct.counts.muted += counts.muted;
+        rec.acct.counts.algid = counts.algid;
         for t in &self.tags {
             match t.kind {
                 VoiceTagKind::Source => {
                     if t.value > 0 {
-                        if !rec.sources.contains(&t.value) {
-                            rec.sources.push(t.value);
+                        if !rec.acct.sources.contains(&t.value) {
+                            rec.acct.sources.push(t.value);
                         }
                         if t.value != self.source_id {
                             self.source_id = t.value;
@@ -412,8 +356,8 @@ impl ChannelDecoder for P25Slot {
                     }
                 }
                 VoiceTagKind::Terminate => {
-                    rec.term_events += 1;
-                    rec.after_term_samples +=
+                    rec.acct.term_events += 1;
+                    rec.acct.after_term_samples +=
                         i64::try_from(self.audio.len()).unwrap_or(0) - i64::from(t.offset);
                 }
                 VoiceTagKind::Alias => {
@@ -441,8 +385,8 @@ impl ChannelDecoder for P25Slot {
                     *s = level_i16(*s, self.levels);
                 }
             }
-            let pcm = rec.deliver(call.rust_call_id, &self.audio, P25_AUDIO_RATE);
-            drop(rec);
+            let pcm = rec.deliver(call.rust_call_id, &self.audio);
+            drop(guard);
             out.audio(call.rust_call_id, &pcm);
         }
     }
@@ -537,7 +481,9 @@ impl ChannelDecoder for AnalogSlot {
             self.pcm.clear();
             self.pcm
                 .extend(self.gated.iter().map(|&v| level_f32(v, self.levels)));
-            let pcm = lock(&self.rec).deliver(call.rust_call_id, &self.pcm, trunk_fm::AUDIO_RATE);
+            let pcm = lock(&self.rec)
+                .as_mut()
+                .map_or_else(Vec::new, |r| r.deliver(call.rust_call_id, &self.pcm));
             out.audio(call.rust_call_id, &pcm);
         }
     }
@@ -603,7 +549,7 @@ impl Recorder {
     /// Install a `kind` recorder on `slot`. Conventional ones stay disabled
     /// until [`Self::set_enabled`]; the others enable themselves on start.
     pub fn new(num: i32, slot: &Slot<'_>, kind: Kind, conventional: bool, tone_hz: f64) -> Self {
-        let rec: Shared = Arc::new(Mutex::new(Recording::default()));
+        let rec: Shared = Arc::new(Mutex::new(None));
         let cfg = slot.channelizer.config();
         let (profile, spec, decoder): (
             ProfileId,
@@ -683,6 +629,14 @@ impl Recorder {
         }
     }
 
+    /// The rate of the audio this recorder's decoder produces.
+    const fn audio_rate(&self) -> f64 {
+        match self.kind {
+            Kind::P25 => P25_AUDIO_RATE,
+            Kind::Analog => trunk_fm::AUDIO_RATE,
+        }
+    }
+
     /// Free for a call: created, or stopped since the last one.
     pub const fn available(&self) -> bool {
         self.call.is_none()
@@ -756,7 +710,7 @@ impl Recorder {
         };
         // The accounting shows the call from now; the decoder starts it on
         // its next block.
-        lock(&self.rec).start(&start);
+        *lock(&self.rec) = Some(Recording::new(&start, self.audio_rate()));
         self.chz.send(self.port, Cmd::Start(start));
         self.call = Some(cfg.rust_call_id);
         if self.conventional {
@@ -785,12 +739,14 @@ impl Recorder {
         };
         self.chz.clear_slot(self.port);
         self.chz.send(self.port, Cmd::Stop);
-        let mut rec = lock(&self.rec);
-        let tail = rec.finish();
-        if self.kind == Kind::P25 {
-            p25_calls::observe_call(&rec.report(self.num));
+        let mut guard = lock(&self.rec);
+        let tail = guard.as_mut().map_or_else(Vec::new, Recording::finish);
+        if self.kind == Kind::P25
+            && let Some(rec) = guard.as_ref()
+        {
+            p25_calls::observe_call(&rec.acct.report(self.num));
         }
-        drop(rec);
+        drop(guard);
         Stopped { result, call, tail }
     }
 
@@ -808,19 +764,31 @@ impl Recorder {
         if self.call.is_none() {
             return RecorderState::Available;
         }
-        lock(&self.rec).state
+        lock(&self.rec)
+            .as_ref()
+            .map_or(RecorderState::Available, |r| r.acct.state)
+    }
+
+    /// The call's accounting so far, while one is (or was last) recorded.
+    pub fn accounting(&self) -> Option<Accounting> {
+        lock(&self.rec).as_ref().map(|r| r.acct.clone())
     }
 
     pub fn transmission_list(&self) -> Vec<TrTransmission> {
-        lock(&self.rec).transmission().into_iter().collect()
+        self.accounting()
+            .and_then(|a| a.transmission())
+            .into_iter()
+            .collect()
     }
 
     pub fn since_last_write_secs(&self) -> f64 {
-        lock(&self.rec).last_write.elapsed().as_secs_f64()
+        self.accounting()
+            .map_or(f64::INFINITY, |a| a.last_write.elapsed().as_secs_f64())
     }
 
     pub fn since_last_voice_secs(&self) -> f64 {
-        lock(&self.rec).last_voice.elapsed().as_secs_f64()
+        self.accounting()
+            .map_or(f64::INFINITY, |a| a.last_voice.elapsed().as_secs_f64())
     }
 
     /// The unit the state machine says is talking.
@@ -867,53 +835,33 @@ mod tests {
     }
 
     #[test]
-    fn a_transmission_is_held_until_audible_and_dropped_otherwise() {
-        // Quiet audio is held, then dropped at the end.
-        let mut r = Recording::default();
-        r.start(&start());
+    fn a_recording_takes_only_its_own_calls_audio_and_finishes_once() {
         let quiet = vec![40i16; 4000];
-        assert_eq!(r.deliver(1, &quiet, 8_000.0), Vec::<i16>::new());
-        assert_eq!(r.deliver(1, &quiet, 8_000.0), Vec::<i16>::new());
-        assert_eq!(r.sample_count, 8000, "accounting sees every sample");
-        assert_eq!(r.finish(), Vec::<i16>::new());
-        assert!(!r.audible);
-
-        // Loud audio releases everything held before it, then flows live.
-        let mut r = Recording::default();
-        r.start(&start());
-        assert_eq!(r.deliver(1, &quiet, 8_000.0), Vec::<i16>::new());
         let loud = vec![3000i16; 4000];
-        let out = r.deliver(1, &loud, 8_000.0);
-        assert_eq!(out.len(), 8000);
-        assert_eq!(&out[..4000], &quiet[..]);
-        assert_eq!(r.deliver(1, &quiet, 8_000.0), quiet);
+        let mut r = Recording::new(&start(), 8_000.0);
+        assert_eq!(r.deliver(2, &loud), Vec::<i16>::new(), "another call");
+        assert_eq!(r.acct.sample_count, 0);
+        assert_eq!(r.deliver(1, &quiet), Vec::<i16>::new(), "held");
+        assert_eq!(r.acct.sample_count, 4000, "accounting sees every sample");
+        assert_eq!(r.deliver(1, &loud).len(), 8000, "released");
         assert_eq!(r.finish(), Vec::<i16>::new());
-        // Nothing after the finish, nor for another call.
-        assert_eq!(r.deliver(1, &loud, 8_000.0), Vec::<i16>::new());
-        r.start(&start());
-        assert_eq!(r.deliver(2, &loud, 8_000.0), Vec::<i16>::new());
-        assert_eq!(r.sample_count, 0);
-
-        // A loud partial last window is released at the end.
-        let mut r = Recording::default();
-        r.start(&start());
-        assert_eq!(r.deliver(1, &loud[..1000], 8_000.0), Vec::<i16>::new());
-        assert_eq!(r.finish().len(), 1000);
+        assert_eq!(r.acct.state, RecorderState::Available);
+        assert_eq!(r.deliver(1, &loud), Vec::<i16>::new(), "over");
+        assert_eq!(r.acct.sample_count, 8000);
     }
 
     #[test]
-    fn recording_accounts_for_audio_and_voice() {
-        let mut r = Recording::default();
-        assert!(r.transmission().is_none());
-        r.start(&start());
-        assert_eq!(r.state, RecorderState::Idle);
-        r.wrote(160, false);
-        assert_eq!(r.state, RecorderState::Recording);
-        r.wrote(160, true);
-        let t = r.transmission().unwrap();
+    fn accounting_follows_audio_and_voice() {
+        let mut a = Accounting::new("s", 5, 851e6, false);
+        assert!(a.transmission().is_none());
+        assert_eq!(a.state, RecorderState::Idle);
+        a.wrote(160, false);
+        assert_eq!(a.state, RecorderState::Recording);
+        a.wrote(160, true);
+        let t = a.transmission().unwrap();
         assert_eq!((t.talkgroup, t.sample_count), (5, 320));
-        assert!(r.last_voice >= r.last_write - std::time::Duration::from_millis(1));
-        let report = r.report(3);
+        assert!(a.last_voice >= a.last_write - std::time::Duration::from_millis(1));
+        let report = a.report(3);
         assert_eq!((report.recorder, report.transmissions), (3, 1));
         assert!((report.audio_seconds - 0.04).abs() < 1e-9);
     }

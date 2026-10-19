@@ -223,8 +223,17 @@ impl Source {
         profile < self.channelizer.config().profiles.len()
     }
 
+    /// Whether a channel at `freq_hz` can be placed on this source at all
+    /// (see [`Self::depth`] for how well).
     pub fn covers(&self, freq_hz: f64) -> bool {
-        (freq_hz - self.center_hz).abs() <= self.rate_hz / 2.0
+        self.depth(freq_hz) <= 1.0
+    }
+
+    /// How deep in this source's band `freq_hz` sits
+    /// ([`trunk_channelizer::passband::depth`]): past
+    /// [`trunk_channelizer::passband::USABLE`] it is in the roll-off.
+    pub fn depth(&self, freq_hz: f64) -> f64 {
+        trunk_channelizer::passband::depth(freq_hz - self.center_hz, self.rate_hz)
     }
 
     /// A fixed signal-detector threshold (dB); otherwise it finds its own.

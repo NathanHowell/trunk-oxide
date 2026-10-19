@@ -1,40 +1,16 @@
 use anyhow::{Result, bail};
+use trunk_channelizer::passband;
 use z3::ast::{Bool, Int};
 
 use crate::device::{Device, SampleRate};
 use crate::{CHANNEL_HALFWIDTH, Channel, Source};
 
-/// Replicate trunk-recorder's `Source::set_min_max()` decimation logic.
-///
-/// Given a sample rate, returns the per-side guard band (`if1 / 2`) that
-/// trunk-recorder subtracts from each edge to get the usable bandwidth.
-/// The usable range is `center ± (rate/2 - guard)`.
-///
-/// **Important:** This only produces a meaningful guard when `rate / if_freq`
-/// is even for at least one IF frequency (24000, 25000, 32000). Rates where
-/// all quotients are odd fall through to a degenerate ~50 Hz guard. The solver
-/// must filter such rates out via `valid_rates()`.
-fn decimation_guard(rate: i64) -> i64 {
-    let if_freqs: [i64; 3] = [24000, 25000, 32000];
-    let mut decim: i64 = 24000; // trunk-recorder default
-
-    for &if_freq in &if_freqs {
-        if rate % if_freq != 0 {
-            continue;
-        }
-        let q = rate / if_freq;
-        if q.trailing_zeros() == 0 {
-            continue;
-        }
-        if q >= 40 && q.trailing_zeros() >= 2 {
-            decim = q / 4;
-        } else {
-            decim = q / 2;
-        }
-    }
-
-    let if1 = rate / decim;
-    if1 / 2
+/// The guard each side of a band sampled at `rate`: what lies past
+/// [`passband::USABLE`] of Nyquist, where the RTL's filter rolls off. A
+/// channel's centre must sit `guard + CHANNEL_HALFWIDTH` inside the edge.
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn roll_off_guard(rate: i64) -> i64 {
+    rate / 2 - (passband::USABLE * rate as f64 / 2.0).floor() as i64
 }
 
 struct Problem {
@@ -92,10 +68,10 @@ fn build_problem(opt: &z3::Optimize, channels: &[Channel], devices: &[Device]) -
 
     // Frequency coverage constraints.
     //
-    // trunk-recorder shrinks each SDR's usable bandwidth by a decimation-
-    // dependent guard band (see Source::set_min_max in source.cc).  The guard
-    // depends on the sample rate, which is a Z3 variable.  We enumerate every
-    // valid rate for each device and encode the correct guard for each.
+    // A channel must sit inside the usable band, clear of the roll-off
+    // (trunk_channelizer::passband). The guard depends on the sample rate,
+    // a Z3 variable, so every valid rate of each device is enumerated with
+    // its own guard.
     for channel in channels {
         let freq = Int::from_i64(channel.frequency);
         let hw = Int::from_i64(CHANNEL_HALFWIDTH);
@@ -106,10 +82,10 @@ fn build_problem(opt: &z3::Optimize, channels: &[Channel], devices: &[Device]) -
             .zip(ranges.iter())
             .zip(devices.iter())
             .map(|(((l, u), r), device)| {
-                // Build per-rate disjuncts that apply the correct decimation guard.
+                // Per-rate disjuncts, each with its rate's guard.
                 let rate_disjuncts: Vec<Bool> = valid_rates(device)
                     .map(|rate| {
-                        let guard = Int::from_i64(decimation_guard(rate));
+                        let guard = Int::from_i64(roll_off_guard(rate));
                         let rate_z3 = Int::from_i64(rate);
 
                         // rate == this candidate
@@ -160,40 +136,30 @@ fn build_problem(opt: &z3::Optimize, channels: &[Channel], devices: &[Device]) -
     }
 }
 
-/// Minimum acceptable guard band (per side).  Rates where `decimation_guard`
-/// returns less than this are excluded — they would place channels at the
-/// extreme edge of the SDR bandwidth where RF rolloff kills the signal.
-const MIN_GUARD: i64 = 12_000;
-
-/// Enumerate all valid sample rates for a device, excluding rates that produce
-/// degenerate decimation guard bands.
+/// Every sample rate a device supports.
 fn valid_rates(device: &Device) -> impl Iterator<Item = i64> + '_ {
-    device
-        .sample_rates
-        .iter()
-        .flat_map(move |sr| {
-            let mul = device.rate_multiple;
-            match *sr {
-                SampleRate::Exact(v) => {
-                    let lo_mult = v / mul;
-                    let hi_mult = lo_mult;
-                    (lo_mult..=hi_mult)
-                        .map(move |m| m * mul)
-                        .filter(move |&r| r == v)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                }
-                SampleRate::Range(lo, hi) => {
-                    let lo_mult = (lo + mul - 1) / mul; // ceil division
-                    let hi_mult = hi / mul;
-                    (lo_mult..=hi_mult)
-                        .map(move |m| m * mul)
-                        .collect::<Vec<_>>()
-                        .into_iter()
-                }
+    device.sample_rates.iter().flat_map(move |sr| {
+        let mul = device.rate_multiple;
+        match *sr {
+            SampleRate::Exact(v) => {
+                let lo_mult = v / mul;
+                let hi_mult = lo_mult;
+                (lo_mult..=hi_mult)
+                    .map(move |m| m * mul)
+                    .filter(move |&r| r == v)
+                    .collect::<Vec<_>>()
+                    .into_iter()
             }
-        })
-        .filter(|&rate| decimation_guard(rate) >= MIN_GUARD)
+            SampleRate::Range(lo, hi) => {
+                let lo_mult = (lo + mul - 1) / mul; // ceil division
+                let hi_mult = hi / mul;
+                (lo_mult..=hi_mult)
+                    .map(move |m| m * mul)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+            }
+        }
+    })
 }
 
 /// The `[recorder] max_channels` that lets every channel `sources` cover be
@@ -205,7 +171,7 @@ pub fn max_channels(channels: &[Channel], sources: &[Source]) -> usize {
         .iter()
         .filter(|c| {
             sources.iter().any(|s| {
-                let guard = decimation_guard(s.rate);
+                let guard = roll_off_guard(s.rate);
                 let lower = s.center - s.rate / 2 + guard;
                 let upper = s.center + s.rate / 2 - guard;
                 (lower..=upper).contains(&c.frequency)
@@ -304,12 +270,11 @@ mod tests {
     use crate::device::Device;
     use crate::{Channel, Signal, Tag};
 
-    /// Helper: assert every channel is within the usable range of some source,
-    /// applying trunk-recorder's actual decimation guard.
+    /// Helper: assert every channel is within the usable range of some source.
     fn assert_all_covered(channels: &[Channel], sources: &[Source]) {
         for ch in channels {
             let covered = sources.iter().any(|s| {
-                let guard = decimation_guard(s.rate);
+                let guard = roll_off_guard(s.rate);
                 let min = s.center - s.rate / 2 + guard;
                 let max = s.center + s.rate / 2 - guard;
                 ch.frequency >= min + CHANNEL_HALFWIDTH && ch.frequency <= max - CHANNEL_HALFWIDTH
@@ -353,40 +318,21 @@ mod tests {
     }
 
     #[test]
-    fn test_decimation_guard() {
-        // Rate 912,000: 912000/24000=38 (even, <40) → decim=19, if1=48000
-        assert_eq!(decimation_guard(912_000), 24_000);
-
-        // Rate 2,448,000: 2448000/24000=102 (even, >=40, %4==2) → decim=51, if1=48000
-        assert_eq!(decimation_guard(2_448_000), 24_000);
-
-        // Rate 2,500,000: 2500000/25000=100 (even, >=40, %4==0) → decim=25, if1=100000
-        assert_eq!(decimation_guard(2_500_000), 50_000);
-
-        // Rates with odd quotients produce degenerate guards (valid_rates filters these out)
-        assert!(decimation_guard(2_088_000) < MIN_GUARD); // q=87, odd
-        assert!(decimation_guard(2_472_000) < MIN_GUARD); // q=103, odd
-    }
-
-    #[test]
-    fn test_no_degenerate_rates() {
-        // Every rate produced by valid_rates() must have a meaningful guard band
-        for device in [Device::rtlsdr(), Device::airspy()] {
-            for rate in valid_rates(&device) {
-                let guard = decimation_guard(rate);
-                assert!(
-                    guard >= MIN_GUARD,
-                    "device {:?} rate {rate} has degenerate guard {guard}",
-                    device.driver,
-                );
-            }
-        }
+    fn the_guard_keeps_channels_out_of_the_roll_off() {
+        // 2.4 MS/s: usable to 85% of 1.2 MHz = 1.02 MHz from the centre
+        assert_eq!(roll_off_guard(2_400_000), 180_000);
+        assert_eq!(roll_off_guard(1_872_000), 140_400);
+        // the channel at 97% of source 2's Nyquist on 2026-10-19 is refused
+        let (centre, rate) = (773_775_500, 1_872_000);
+        let upper = centre + rate / 2 - roll_off_guard(rate) - CHANNEL_HALFWIDTH;
+        assert!(774_681_250 > upper);
+        assert!(774_406_250 <= upper);
     }
 
     #[test]
     fn test_two_conventional_channels() {
         // The exact bug case: two analog channels 750 kHz apart.
-        // Old solver picked rate=912k which couldn't cover both after decimation.
+        // Old solver picked rate=912k which couldn't cover both inside its guard.
         let channels = vec![
             Channel {
                 frequency: 488_337_500,
@@ -539,7 +485,7 @@ mod tests {
         for ch in &channels {
             if ch.tag == Some(Tag::Primary) {
                 let covered = sources.iter().any(|s| {
-                    let guard = decimation_guard(s.rate);
+                    let guard = roll_off_guard(s.rate);
                     let min = s.center - s.rate / 2 + guard;
                     let max = s.center + s.rate / 2 - guard;
                     ch.frequency >= min + CHANNEL_HALFWIDTH

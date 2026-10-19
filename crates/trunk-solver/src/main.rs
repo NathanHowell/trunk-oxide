@@ -28,12 +28,7 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     let config = SolverConfig::load(&cli.config)?;
-    let config_dir = cli
-        .config
-        .parent()
-        .unwrap_or_else(|| std::path::Path::new("."));
-
-    let channels = config.channels(config_dir)?;
+    let channels = config.channels();
     if channels.is_empty() {
         bail!("No channels found in config");
     }

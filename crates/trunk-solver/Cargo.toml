@@ -5,6 +5,8 @@ version.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+trunk-channelizer.workspace = true
+trunk-config.workspace = true
 z3 = { workspace = true }
 csv = { workspace = true }
 serde = { workspace = true }

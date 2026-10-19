@@ -32,6 +32,7 @@ pub use p25_voice::{Keying, P25Voice};
 pub use radio::{ChannelReport, Radio, RadioConfig, SourceSetup, SystemSetup};
 pub use recording::Accounting;
 pub use registry::Entry;
+pub use trunk_channelizer::passband;
 pub use types::*;
 
 pub use trunk_channelizer::Counters as ChannelizerCounters;

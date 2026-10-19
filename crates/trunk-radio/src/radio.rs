@@ -137,6 +137,17 @@ impl Inner {
             .and_then(|n| self.systems.get_mut(n))
     }
 
+    /// Of the sources that cover `freq_hz` and pass `fit`, the one it sits
+    /// deepest in (furthest from the roll-off at the band's edges).
+    fn deepest(&self, freq_hz: f64, fit: impl Fn(&Source) -> bool) -> Option<usize> {
+        self.sources
+            .iter()
+            .enumerate()
+            .filter(|(_, s)| s.covers(freq_hz) && fit(s))
+            .min_by(|(_, a), (_, b)| a.depth(freq_hz).total_cmp(&b.depth(freq_hz)))
+            .map(|(n, _)| n)
+    }
+
     /// A free slot of source `src` for a `kind` channel.
     fn take_slot(&mut self, src: usize, kind: &'static str) -> ChannelNum {
         let free = |s: &Slot| s.source == src && s.holder.is_none();
@@ -297,16 +308,26 @@ impl Radio {
         Ok(sys_num)
     }
 
+    /// The source a channel at `freq_hz` would open on and how deep in its
+    /// band it sits ([`Source::depth`]); `None` if no source covers it.
+    pub fn placement(&self, freq_hz: f64) -> Option<(i32, f64)> {
+        let i = self.lock();
+        i.deepest(freq_hz, |_| true).map(|n| {
+            let src = &i.sources[n];
+            (src.idx, src.depth(freq_hz))
+        })
+    }
+
     /// Run the wideband signal detector on the source covering `freq_hz`.
     ///
     /// # Errors
     /// If no source covers it.
     pub fn detect_signals(&self, freq_hz: f64) -> Result<()> {
         let mut i = self.lock();
-        let Some(source) = i.sources.iter_mut().find(|s| s.covers(freq_hz)) else {
+        let Some(src) = i.deepest(freq_hz, |_| true) else {
             bail!("no source covers {freq_hz} Hz");
         };
-        source.attach_detector();
+        i.sources[src].attach_detector();
         Ok(())
     }
 
@@ -371,9 +392,7 @@ impl Radio {
             .ok_or(OpenError::NoSystem(call.sys_num))?;
         let freq_hz = call.channel.freq_hz;
         let src = i
-            .sources
-            .iter()
-            .position(|s| s.covers(freq_hz) && s.offers(K::PROFILE))
+            .deepest(freq_hz, |s| s.offers(K::PROFILE))
             .ok_or(OpenError::NoSource {
                 freq_hz,
                 kind: K::NAME,

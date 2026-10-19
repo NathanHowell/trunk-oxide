@@ -15,6 +15,7 @@ mod config;
 mod design;
 mod detector;
 mod fft;
+pub mod passband;
 mod resampler;
 mod service;
 
@@ -28,6 +29,6 @@ pub use config::{Config, NARROW, Profile, ProfileId, ProfileSpec, WIDE};
 pub use design::{lowpass_taps, tap_count};
 pub use detector::{Detection, DetectorConfig, SignalDetector};
 pub use service::{
-    ChannelDecoder, ConditioningSettings, ConditioningSpec, Counters, DECODER_RETUNE_HZ,
-    Reading, ResetPolicy, SharedChannelizer, SlotStats,
+    ChannelDecoder, ConditioningSettings, ConditioningSpec, Counters, DECODER_RETUNE_HZ, Reading,
+    ResetPolicy, SharedChannelizer, SlotStats,
 };

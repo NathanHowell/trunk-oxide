@@ -318,6 +318,37 @@ fn calibrate_sources_parallel(
 /// folded in, and the whole-ppm hardware correction (the fraction is the
 /// radio's per-source software correction, see `trunk_radio::correction`).
 #[allow(clippy::cast_possible_truncation)]
+/// Warn about every configured channel no source carries cleanly: one no
+/// source covers, or one that only lands in a band's roll-off
+/// ([`trunk_radio::passband`]).
+fn warn_on_placement(radio: &Radio, config: &Config) {
+    for (short_name, sys) in &config.system {
+        let freqs = sys
+            .control_channels
+            .iter()
+            .chain(&sys.voice_channels)
+            .copied()
+            .chain(sys.channel.iter().map(|c| c.freq));
+        for freq_hz in freqs {
+            match radio.placement(freq_hz) {
+                None => {
+                    tracing::warn!(system = %short_name, freq_hz, "no source covers this channel");
+                }
+                Some((source, depth)) if depth > trunk_radio::passband::USABLE => {
+                    tracing::warn!(
+                        system = %short_name,
+                        freq_hz,
+                        source,
+                        nyquist_pct = (depth * 100.0).round(),
+                        "channel sits in its source's roll-off: raise the rate or move the centre"
+                    );
+                }
+                Some(_) => {}
+            }
+        }
+    }
+}
+
 fn rtl_tuning(src: &SourceConfig, gain: trunk_sdr::Gain) -> trunk_sdr::Tuning {
     trunk_sdr::Tuning {
         center_hz: src.center + src.error,
@@ -559,6 +590,8 @@ impl ScannerBuilder {
                 })
                 .with_context(|| format!("starting source '{}'", src.device))?;
         }
+
+        warn_on_placement(&radio, config);
 
         // ── Systems ──
         // Numbered in short-name order, so a system keeps its number across

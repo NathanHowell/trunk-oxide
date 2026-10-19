@@ -58,13 +58,51 @@ impl AmbeCodeword {
     pub const fn bit(&self, j: usize) -> bool {
         self.stream_bit(stream_index(j))
     }
+
+    /// From a frame's 36 dibits as sent.
+    pub fn from_dibits(dibits: &[u8; 36]) -> Self {
+        let mut c = [0u32; 4];
+        for j in 0..CODEWORD_BITS {
+            let i = stream_index(j);
+            let v = (0..4).rposition(|v| OFFSET[v] <= i).unwrap_or(0);
+            let bit = u32::from((dibits[j / 2] >> (1 - j % 2)) & 1);
+            c[v] |= bit << (WIDTH[v] - 1 - (i - OFFSET[v]));
+        }
+        Self(c)
+    }
+
+    /// op25's decision (`p25p2_vf::process_vcw`): hard, u0 first, c0 as
+    /// Golay(23) without its parity bit. The parameters and op25's error
+    /// counts for c0 and c1 ([`op25_golay_23`]).
+    pub const fn decode_op25(self) -> (AmbeParams, [u32; 2]) {
+        let c = self.0;
+        let (u0, e0) = op25_golay_23(c[0] >> 1);
+        #[allow(clippy::cast_possible_truncation)]
+        let (u1, e1) = op25_golay_23(c[1] ^ pn_masks(u0 as u16)[1]);
+        #[allow(clippy::cast_possible_truncation)]
+        (
+            AmbeParams([u0 as u16, u1 as u16, c[2] as u16, c[3] as u16]),
+            [e0, e1],
+        )
+    }
+}
+
+/// op25's Golay(23) decoder (`gly23127Dec`): the information bits and what
+/// it counts as corrected. Its correction table holds each error pattern's
+/// information bits and, where the parity bits would be, the pattern's
+/// weight; it counts the set bits of that. So two errors among the parity
+/// bits count as one, and one among the information bits as two.
+const fn op25_golay_23(word: u32) -> (u32, u32) {
+    let d = GOLAY_23.decode_hard(word);
+    let e = word ^ d.codeword;
+    (d.info, (e >> 11).count_ones() + d.flips.count_ones())
 }
 
 /// A decoded frame.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct AmbeFrame {
     pub params: AmbeParams,
-    /// Bits corrected in c0 and c1 (op25's per-frame error count).
+    /// Bits corrected in c0 and c1.
     pub errors: u32,
     /// The weaker of the two decisions' margins.
     pub reliability: f32,
@@ -145,23 +183,13 @@ pub fn decode(llr: &[f32; CODEWORD_BITS]) -> AmbeFrame {
     }
 }
 
-/// op25's decoder (`p25p2_vf::process_vcw`): hard Golay decisions, u0 first.
+/// op25's decoder ([`AmbeCodeword::decode_op25`]) on the LLRs' signs: the
+/// parameters and its error count.
 pub fn decode_hard(llr: &[f32; CODEWORD_BITS]) -> (AmbeParams, u32) {
     let s = vectors(llr);
-    let c0 = GOLAY_24.decode_hard(hard(vector(&s, 0)));
-    #[allow(clippy::cast_possible_truncation)]
-    let mask = pn_masks(c0.info as u16)[1];
-    let c1 = GOLAY_23.decode_hard(hard(vector(&s, 1)) ^ mask);
-    #[allow(clippy::cast_possible_truncation)]
-    (
-        AmbeParams([
-            c0.info as u16,
-            c1.info as u16,
-            hard(vector(&s, 2)) as u16,
-            hard(vector(&s, 3)) as u16,
-        ]),
-        c0.flips + c1.flips,
-    )
+    let (params, [e0, e1]) =
+        AmbeCodeword(std::array::from_fn(|v| hard(vector(&s, v)))).decode_op25();
+    (params, e0 + e1)
 }
 
 #[cfg(test)]
@@ -224,6 +252,34 @@ mod tests {
             assert_eq!((f.params, f.errors), (p, 0));
             assert_eq!(decode_hard(&llr), (p, 0));
         }
+    }
+
+    #[test]
+    fn dibits_are_the_sent_bits() {
+        let mut rng = Rng::new(73);
+        for _ in 0..300 {
+            let cw = random_params(&mut rng).encode();
+            let dibits: [u8; 36] =
+                std::array::from_fn(|d| u8::from(cw.bit(2 * d)) * 2 + u8::from(cw.bit(2 * d + 1)));
+            assert_eq!(AmbeCodeword::from_dibits(&dibits), cw);
+        }
+    }
+
+    /// op25 counts no error in c0's parity bit, decoding c0 as Golay(23),
+    /// and counts the rest its own way ([`op25_golay_23`]).
+    #[test]
+    fn op25_counts_errors_its_own_way() {
+        let p = AmbeParams([2748, 291, 1445, 12047]);
+        let mut cw = p.encode();
+        cw.0[0] ^= 1;
+        assert_eq!(cw.decode_op25(), (p, [0, 0]));
+        // Two parity bit errors in c0, one information bit error in c1.
+        cw.0[0] ^= 0b110;
+        cw.0[1] ^= 1 << 22;
+        assert_eq!(cw.decode_op25(), (p, [1, 2]));
+        // Three information bit errors: 3 + popcount(3).
+        cw.0[1] ^= 0b11 << 20;
+        assert_eq!(cw.decode_op25(), (p, [1, 5]));
     }
 
     #[test]

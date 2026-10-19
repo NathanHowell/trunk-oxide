@@ -1,21 +1,22 @@
-#ifndef P25_VOICE_SYNTH_H
-#define P25_VOICE_SYNTH_H
+#ifndef OP25_VOCODER_REFERENCE_H
+#define OP25_VOCODER_REFERENCE_H
 
 #include <cstdint>
 #include <memory>
 
 // op25's P25 vocoders, one 20 ms frame at a time: what its frame assembler
-// does with each voice codeword once it has framed and decoded it.
+// does with each voice codeword once it has framed and decoded it. The
+// reference trunk-p25's vocoders (crates/trunk-p25 src/vocoder) are checked
+// against.
 //
-// One per recorder, kept across calls as op25 keeps its own (the phase 2
-// synthesiser carries pitch and repeat state from frame to frame).
-class p25_voice_synth {
+// Kept across frames as op25 keeps its own (the synthesisers carry pitch,
+// phase and error rate from frame to frame).
+class op25_vocoder_reference {
 public:
   static constexpr int samples_per_frame = 160; // 8 kHz
 
-  // soft_vocoder: op25's software IMBE decoder (else its full-rate one).
-  explicit p25_voice_synth(bool soft_vocoder);
-  ~p25_voice_synth();
+  op25_vocoder_reference();
+  ~op25_vocoder_reference();
 
   // Phase 1: one IMBE frame's eight parameter vectors as op25 holds them
   // (u7 shifted left one bit), and the bits corrected in c0 (e0) and in all

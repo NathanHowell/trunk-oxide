@@ -26,10 +26,10 @@ struct op25_voice_reference::impl {
   std::vector<std::string> json;
   std::vector<uint32_t> inputs;
 
-  impl(bool phase2, int slot, bool soft)
+  impl(bool phase2, int slot)
       : phase2(phase2),
-        p1(audio, logts, 0, true, true, true, queue, output_queue, true, soft),
-        p2(audio, logts, slot, 0, true, queue, output_queue, true, soft) {
+        p1(audio, logts, 0, true, true, true, queue, output_queue, true, true),
+        p2(audio, logts, slot, 0, true, queue, output_queue, true, true) {
     auto cb = [this](gr::message::sptr msg) {
       if (msg->type() == -3) json.push_back(msg->to_string());
     };
@@ -48,8 +48,8 @@ struct op25_voice_reference::impl {
   }
 };
 
-op25_voice_reference::op25_voice_reference(bool phase2, int slot, const std::string &xor_mask, bool soft_vocoder)
-    : d(new impl(phase2, slot, soft_vocoder)) {
+op25_voice_reference::op25_voice_reference(bool phase2, int slot, const std::string &xor_mask)
+    : d(new impl(phase2, slot)) {
   if (phase2) {
     if (xor_mask.size() >= 2160) d->p2.set_xormask(xor_mask.data());
     d->p2.call_start();

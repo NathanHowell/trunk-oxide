@@ -25,7 +25,6 @@ void p25_recorder_impl::initialize(const std::shared_ptr<Source> &src) {
   source = src;
   chan_freq = source->get_center();
   center_freq = source->get_center();
-  d_soft_vocoder = config.soft_vocoder;
   qpsk_mod = true;
   squelch_db = 0;
   talkgroup = 0;

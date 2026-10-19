@@ -7,7 +7,7 @@
 //!
 //! The vocoder itself stays out: each voice frame comes out as a [`Vocode`],
 //! the input op25 would give its vocoder after regeneration, so the same
-//! vocoder makes the same audio. Phase 1 frames are regenerated whole (op25
+//! vocoder ([`crate::vocoder`]) makes the same audio. Phase 1 frames are regenerated whole (op25
 //! then corrects nothing), so they carry no error counts; phase 2 frames are
 //! the 36 dibits op25 would receive ([`crate::tdma::op25_view`]), which its
 //! vocoder decodes and mutes on its own running error rate. Which bursts are
@@ -24,9 +24,6 @@ use crate::tdma::{BurstContent, BurstType, MacOpcode, Op25View, TdmaEvent};
 use crate::voice::regenerate::SpikeDetector;
 use crate::voice::signalling::ALGID_CLEAR;
 use crate::voice::{CallCounts, LinkControl, Terminator, VoiceEvent};
-
-/// Samples a vocoder makes of one 20 ms frame (8 kHz).
-pub const SAMPLES_PER_FRAME: usize = 160;
 
 /// One voice frame for the vocoder.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

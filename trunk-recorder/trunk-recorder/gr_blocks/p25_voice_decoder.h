@@ -17,7 +17,7 @@
 // A P25 voice receiver implemented outside this tree (trunk-p25 in
 // trunk-oxide), phase 1 or phase 2 TDMA, all the way to audio: it
 // demodulates a conditioned channel, decodes and assembles the call, and
-// vocodes each frame with op25's vocoders.
+// vocodes each frame.
 class p25_voice_backend {
 public:
   virtual ~p25_voice_backend() = default;

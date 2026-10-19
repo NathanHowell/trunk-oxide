@@ -79,7 +79,6 @@ protected:
 
 private:
   bool d_phase2_tdma;
-  bool d_soft_vocoder;
   const int phase1_samples_per_symbol = 5;
   const int phase2_samples_per_symbol = 4;
 };

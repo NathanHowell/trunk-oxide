@@ -88,13 +88,15 @@ wall-clock driven, so compare those with a tolerance. Taps are big (~4 GB per
 
 ## P25 decoders
 
-trunk-p25 decodes all P25: control channels, and voice all the way to audio
-— demodulator, decoders, the call assembler (`trunk_p25::assemble`) — with
-only op25's vocoders left in C++, one frame at a time (`p25_voice_synth`).
-op25's chains were deleted once shadow mode had compared them live: control
-channels (trunk-p25 decoding everything op25 did and ~40% more), then the
-regenerator into op25's frame assembler against trunk-p25's assembler
-(c4086cf).
+trunk-p25 decodes all P25 in Rust: control channels, and voice all the way
+to audio — demodulator, decoders, the call assembler (`trunk_p25::assemble`)
+and the vocoders (`trunk_p25::vocoder`: op25's software IMBE decoder and
+mbelib's AMBE+2 dequantiser, ported sample for sample). op25's chains were
+deleted once shadow mode had compared them live: control channels
+(trunk-p25 decoding everything op25 did and ~40% more), then the regenerator
+into op25's frame assembler against trunk-p25's assembler (c4086cf). The
+vocoders replaced op25's once they matched it exactly. `recorder.soft_vocoder`
+now only chooses DMR's vocoder.
 
 Offline, without a replay:
 - `cargo run --release -p trunk-p25 --example golden -- RUN/taps` decodes the
@@ -116,6 +118,16 @@ Offline, without a replay:
   frames each vocoded: phase 1 must be op25's sample for sample; phase 2 may
   differ only at the edges of lock (`LockEdges`: op25 frames from its first
   S-ISCH to ten bursts past its last, trunk-p25 while its flywheel holds).
+  Every call's vocoder inputs as op25 framed them must make op25's audio
+  through trunk-p25's vocoders, sample for sample.
+
+The vocoders are also checked frame by frame against op25's
+(`op25_vocoder_reference`) on random streams that reach every pitch, repeat,
+mute, tone and erasure (`the_imbe_vocoder_is_op25s`,
+`the_ambe_vocoder_is_op25s`). That holds only while op25's
+`software_imbe_decoder.cc` and `ambe.c` are built with `-ffp-contract=off`
+(op25's CMakeLists): GCC fuses multiply-adds under `-march=znver2`, Rust
+never does.
 
 Voice taps hold the conditioned IQ (`.out.cf32`) only; `.symbols.f32` is in
 taps from before the op25 chains were deleted (op25's demodulator output, or

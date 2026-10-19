@@ -2,7 +2,8 @@ use std::collections::BTreeMap;
 
 use trunk_p25::framer::{Duid, ideal};
 use trunk_p25::symbols::slice;
-use trunk_p25::tdma::TdmaRegenerator;
+use trunk_p25::tdma::ambe::AmbeCodeword;
+use trunk_p25::tdma::{AmbeParams, TdmaRegenerator};
 use trunk_p25::testgen::{self, Rng};
 use trunk_p25::types::Nac;
 use trunk_p25::voice::signalling::{ALGID_CLEAR, encode};
@@ -71,7 +72,7 @@ struct Reference {
 
 fn reference(dibits: &[u8], phase2: bool, slot: i32) -> Reference {
     let mask: Vec<u8> = scrambler().dibits().to_vec();
-    let mut r = ffi::tr_op25_voice_reference_new(phase2, slot, &mask, true);
+    let mut r = ffi::tr_op25_voice_reference_new(phase2, slot, &mask);
     for chunk in dibits.chunks(864) {
         ffi::tr_op25_voice_reference_push(r.pin_mut(), chunk);
     }
@@ -168,7 +169,7 @@ fn a_clean_phase1_call_sounds_as_op25_makes_it() {
     d.extend(phase1_call(&mut rng, 0x84, 1));
     d.extend(phase1_call(&mut rng, ALGID_CLEAR, 2));
     let op25 = reference(&d, false, 0);
-    let mut p = VoicePipeline::new(24_000.0, true);
+    let mut p = VoicePipeline::new(24_000.0);
     p.start_call(Modulation::Cqpsk, false, None, 0);
     let mut out = Vec::new();
     p.process_symbols(&ideal(&d), &mut out);
@@ -197,7 +198,7 @@ fn a_clean_phase2_call_sounds_as_op25_makes_it() {
     };
     let d = testgen::tdma::call(&mut rng, &scrambler(), &es, 0, 6, &mut sent);
     let op25 = reference(&d, true, 0);
-    let mut p = VoicePipeline::new(24_000.0, true);
+    let mut p = VoicePipeline::new(24_000.0);
     p.start_call(Modulation::Cqpsk, true, Some(scrambler()), 0);
     let mut out = Vec::new();
     p.process_symbols(&ideal(&d), &mut out);
@@ -217,7 +218,7 @@ fn a_clean_phase2_call_sounds_as_op25_makes_it() {
 
 /// `inputs` through a new synthesiser.
 fn vocode_fresh(inputs: &[Input]) -> Vec<i16> {
-    let mut p = VoicePipeline::new(24_000.0, true);
+    let mut p = VoicePipeline::new(24_000.0);
     inputs.iter().flat_map(|i| p.vocode(i.vocode())).collect()
 }
 
@@ -228,6 +229,9 @@ struct Tally {
     calls: usize,
     /// Calls whose audio is op25's sample for sample.
     same_audio: usize,
+    /// Calls whose vocoder inputs, as op25 framed them, our vocoders make
+    /// into op25's audio sample for sample.
+    same_vocoding: usize,
     /// Frames both vocoded from the same input.
     same: usize,
     /// Aligned frames whose inputs differ.
@@ -377,7 +381,7 @@ fn voice_capture_sounds_as_op25_makes_it() {
                 }
             });
         }
-        let mut p = VoicePipeline::new(rate, true);
+        let mut p = VoicePipeline::new(rate);
         p.start_call(Modulation::Cqpsk, phase2, Some(scrambler()), slot);
         let mut out = Vec::new();
         for chunk in iq.chunks(4096) {
@@ -390,6 +394,7 @@ fn voice_capture_sounds_as_op25_makes_it() {
             .or_default();
         t.calls += 1;
         t.same_audio += usize::from(us.pcm == op25.pcm);
+        t.same_vocoding += usize::from(vocode_fresh(&op25.inputs) == op25.pcm);
         let steps = align(&us.inputs, &op25.inputs);
         let first = steps.iter().position(|s| s.1.is_some() && s.2.is_some());
         let last = steps.iter().rposition(|s| s.1.is_some() && s.2.is_some());
@@ -494,6 +499,10 @@ fn voice_capture_sounds_as_op25_makes_it() {
     }
     println!("{tally:#?}");
     assert!(tally.values().map(|t| t.calls).sum::<usize>() > 0);
+    // Whatever the framing, the vocoders are op25's.
+    for t in tally.values() {
+        assert_eq!(t.same_vocoding, t.calls, "{t:?}");
+    }
     // Phase 1 is op25's frame for frame: every codeword is regenerated, so
     // both framers see the same frames.
     if let Some(t) = tally.get("phase1") {
@@ -519,4 +528,199 @@ fn voice_capture_sounds_as_op25_makes_it() {
         let op25 = t.same_audio_frames[0] + t.same_audio_frames[2] + t.op25_extra_audio[0];
         assert!(ours >= op25, "audible frames: ours {ours} op25 {op25}");
     }
+}
+
+// ── The vocoders against op25's ──
+
+/// How a run of frames is damaged.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Channel {
+    Clean,
+    Noisy,
+    /// Enough errors to repeat frames and, held, to mute them.
+    Bad,
+}
+
+impl Channel {
+    fn pick(rng: &mut Rng) -> Self {
+        [Self::Clean, Self::Noisy, Self::Bad][rng.below(3)]
+    }
+}
+
+const RUN: usize = 40;
+
+/// The first sample where two frames differ.
+fn first_difference(ours: &Pcm, op25: &Pcm) -> String {
+    let i = ours.iter().zip(op25).position(|(a, b)| a != b).unwrap_or(0);
+    format!("sample {i}: ours {} op25 {}", ours[i], op25[i])
+}
+
+/// Phase 1 frames (op25's `u`, e0, et) in runs of clean, noisy or bad;
+/// only bad runs send b̂0 > 207, which is no pitch.
+fn imbe_frames(rng: &mut Rng, n: usize) -> Vec<([u32; 8], u32, u32)> {
+    let mut out = Vec::new();
+    while out.len() < n {
+        let channel = Channel::pick(rng);
+        for _ in 0..RUN {
+            let u = loop {
+                let u = testgen::random_imbe(rng).to_op25();
+                let b0 = ((u[0] >> 4) & 0xfc) | ((u[7] >> 1) & 3);
+                if b0 <= 207 || channel == Channel::Bad {
+                    break u;
+                }
+            };
+            let (e0, more) = match channel {
+                Channel::Clean => (0, rng.below(2)),
+                Channel::Noisy => (rng.below(2), rng.below(8)),
+                Channel::Bad => (rng.below(5), 4 + rng.below(24)),
+            };
+            #[allow(clippy::cast_possible_truncation)]
+            out.push((u, e0 as u32, (e0 + more) as u32));
+        }
+    }
+    out
+}
+
+#[test]
+fn the_imbe_vocoder_is_op25s() {
+    let (mut audible, mut muted) = (0, 0);
+    for seed in 0..8 {
+        let mut rng = Rng::new(100 + seed);
+        let mut ours = ImbeVocoder::new();
+        let mut op25 = ffi::tr_op25_vocoder_reference_new();
+        for (i, (u, e0, et)) in imbe_frames(&mut rng, 2000).into_iter().enumerate() {
+            let mut want = [0i16; SAMPLES_PER_FRAME];
+            ffi::tr_op25_vocoder_reference_phase1(op25.pin_mut(), &u, e0, et, &mut want);
+            let got = ours.decode(&u, e0, et);
+            audible += usize::from(got.is_some());
+            muted += usize::from(got.is_none());
+            let got = got.unwrap_or([0; SAMPLES_PER_FRAME]);
+            assert!(
+                got == want,
+                "seed {seed} frame {i}: {}",
+                first_difference(&got, &want)
+            );
+        }
+    }
+    assert!(audible > 0 && muted > 0, "audible {audible} muted {muted}");
+}
+
+/// Tone indices, valid (single, DTMF, KNOX, call progress, silence) and
+/// not.
+const TONES: [u16; 16] = [
+    5, 64, 122, 128, 135, 143, 144, 159, 160, 163, 255, 0, 4, 123, 164, 254,
+];
+
+/// A tone frame's parameters: the index sent four times, the amplitude.
+fn tone_params(id: [u16; 4], amplitude: u16) -> AmbeParams {
+    AmbeParams([
+        0xfc0 | (amplitude >> 1),
+        (id[0] << 4) | (id[1] >> 4),
+        ((id[1] & 0xf) << 7) | (id[2] >> 1),
+        ((id[2] & 1) << 13) | (id[3] << 5) | ((amplitude & 1) << 4),
+    ])
+}
+
+/// `p` with quantiser index b0 set to `b0`.
+fn with_b0(AmbeParams(mut u): AmbeParams, b0: u16) -> AmbeParams {
+    u[0] = (u[0] & !(0xf << 8)) | ((b0 >> 3) << 8);
+    u[3] = (u[3] & !(0x7 << 9)) | ((b0 & 7) << 9);
+    AmbeParams(u)
+}
+
+/// Phase 2 frames (36 dibits, encrypted): voice, silence, erasures and tone
+/// frames (runs of one tone as sent, some with an index sent wrong), in runs
+/// clean, noisy or bad (bits flipped in the 72), some encrypted.
+fn ambe_frames(rng: &mut Rng, n: usize) -> Vec<([u8; 36], bool)> {
+    let mut out = Vec::new();
+    while out.len() < n {
+        let channel = Channel::pick(rng);
+        let encrypted = rng.below(8) == 0;
+        let tone = (rng.below(4) == 0).then(|| TONES[rng.below(TONES.len())]);
+        for _ in 0..RUN {
+            #[allow(clippy::cast_possible_truncation)]
+            let amplitude = rng.below(128) as u16;
+            let random = testgen::tdma::random_ambe(rng);
+            #[allow(clippy::cast_possible_truncation)]
+            let p = match (tone, rng.below(10)) {
+                (Some(id), 0) => {
+                    let mut ids = [id; 4];
+                    ids[rng.below(4)] = TONES[rng.below(TONES.len())];
+                    tone_params(ids, amplitude)
+                }
+                (Some(id), _) => tone_params([id; 4], amplitude),
+                (None, 0) => with_b0(random, 124 + rng.below(2) as u16),
+                (None, 1) => with_b0(random, 120 + rng.below(8) as u16),
+                (None, 2) => tone_params([TONES[rng.below(TONES.len())]; 4], amplitude),
+                (None, _) => with_b0(random, rng.below(120) as u16),
+            };
+            let cw = p.encode();
+            let mut bits: [bool; 72] = std::array::from_fn(|j| cw.bit(j));
+            let flips = match channel {
+                Channel::Clean => 0,
+                Channel::Noisy => rng.below(3),
+                Channel::Bad => rng.below(9),
+            };
+            for _ in 0..flips {
+                bits[rng.below(72)] ^= true;
+            }
+            let dibits =
+                std::array::from_fn(|d| u8::from(bits[2 * d]) * 2 + u8::from(bits[2 * d + 1]));
+            out.push((dibits, encrypted && rng.below(4) != 0));
+        }
+    }
+    out
+}
+
+#[test]
+fn the_ambe_vocoder_is_op25s() {
+    // Frames heard (audible, muted) by what op25 decodes them as: voice,
+    // silence, erasure (b0 120–123, 126, 127) and tone.
+    let mut heard: BTreeMap<&str, [usize; 2]> = BTreeMap::new();
+    for seed in 0..8 {
+        let mut rng = Rng::new(200 + seed);
+        let mut ours = AmbeVocoder::new();
+        let mut op25 = ffi::tr_op25_vocoder_reference_new();
+        for (i, (dibits, encrypted)) in ambe_frames(&mut rng, 2000).into_iter().enumerate() {
+            let mut want = [0i16; SAMPLES_PER_FRAME];
+            let op25_audible = ffi::tr_op25_vocoder_reference_phase2(
+                op25.pin_mut(),
+                &dibits,
+                encrypted,
+                &mut want,
+            );
+            let got = if encrypted {
+                ours.encrypted(&dibits);
+                None
+            } else {
+                ours.decode(&dibits)
+            };
+            // op25 counts an encrypted frame as not muted.
+            assert_eq!(
+                got.is_some(),
+                op25_audible && !encrypted,
+                "seed {seed} frame {i}"
+            );
+            if !encrypted {
+                let (AmbeParams(u), _) = AmbeCodeword::from_dibits(&dibits).decode_op25();
+                let b0 = ((u[0] >> 5) & 0x78) + ((u[3] >> 9) & 0x7);
+                let kind = match b0 {
+                    _ if (u[0] >> 6) & 0x3f == 63 && u[3] % 16 == 0 => "tone",
+                    124 | 125 => "silence",
+                    120.. => "erasure",
+                    _ => "voice",
+                };
+                heard.entry(kind).or_default()[usize::from(got.is_none())] += 1;
+            }
+            let got = got.unwrap_or([0; SAMPLES_PER_FRAME]);
+            assert!(
+                got == want,
+                "seed {seed} frame {i}: {}",
+                first_difference(&got, &want)
+            );
+        }
+    }
+    // Each kind both heard and muted (an erasure is heard as a repeat).
+    assert_eq!(heard.len(), 4, "{heard:?}");
+    assert!(heard.values().all(|&[a, m]| a > 0 && m > 0), "{heard:?}");
 }

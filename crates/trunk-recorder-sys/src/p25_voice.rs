@@ -1,17 +1,17 @@
 //! P25 voice end to end in trunk-p25: demodulate, decode, assemble the call
-//! ([`trunk_p25::assemble`]), and vocode each frame with op25's vocoders
-//! (C++, one frame per call).
+//! ([`trunk_p25::assemble`]), and vocode each frame
+//! ([`trunk_p25::vocoder`]).
 
 use std::fmt::Write as _;
 use std::sync::Arc;
 
-use cxx::UniquePtr;
 use num_complex::Complex32;
 use trunk_p25::assemble::{
-    Alias, CallCounter, CallEvent, Phase1Assembler, Phase2Assembler, SAMPLES_PER_FRAME, Vocode,
+    Alias, CallCounter, CallEvent, Phase1Assembler, Phase2Assembler, Vocode,
 };
 use trunk_p25::control::Received;
 use trunk_p25::tdma::{BurstContent, Scrambler, TdmaDecoder, op25_view};
+use trunk_p25::vocoder::{AmbeVocoder, ImbeVocoder, Pcm, SAMPLES_PER_FRAME};
 use trunk_p25::voice::signalling::ALGID_CLEAR;
 use trunk_p25::voice::{Encryption, EncryptionTracker, VoiceDecoder, VoiceEvent};
 use trunk_p25::{DemodConfig, Modulation};
@@ -21,10 +21,14 @@ use crate::p25::{VoiceShared, packed_encryption, track_encryption};
 
 /// What a call produced, in order.
 #[derive(Clone, Debug, PartialEq, Eq)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "nearly every output is audio, into a buffer that is reused"
+)]
 pub enum CallOutput {
-    /// One frame's audio (160 samples at 8 kHz) and what it was made from.
+    /// One frame's audio and what it was made from.
     Audio {
-        pcm: Vec<i16>,
+        pcm: Pcm,
         frame: Vocode,
     },
     Event(CallEvent),
@@ -38,7 +42,8 @@ pub struct VoicePipeline {
     a1: Phase1Assembler,
     p2: TdmaDecoder,
     a2: Phase2Assembler,
-    synth: UniquePtr<ffi::P25VoiceSynth>,
+    imbe: ImbeVocoder,
+    ambe: AmbeVocoder,
     events: Vec<Received<VoiceEvent>>,
     calls: Vec<CallEvent>,
     counter: CallCounter,
@@ -46,19 +51,17 @@ pub struct VoicePipeline {
     crypto: EncryptionTracker,
     crypto_pending: Option<Encryption>,
     shared: Arc<VoiceShared>,
-    /// Frames the phase 2 vocoder muted.
-    pub muted: u64,
 }
 
 impl VoicePipeline {
-    /// `rate`: the conditioned channel rate; `soft_vocoder` as op25's.
-    pub fn new(rate: f64, soft_vocoder: bool) -> Self {
-        Self::for_recorder(rate, -1, soft_vocoder)
+    /// `rate`: the conditioned channel rate.
+    pub fn new(rate: f64) -> Self {
+        Self::for_recorder(rate, -1)
     }
 
     /// For recorder `recorder`, whose decoder counters it reports
     /// ([`crate::p25::voice_channels`]).
-    pub fn for_recorder(rate: f64, recorder: i32, soft_vocoder: bool) -> Self {
+    pub fn for_recorder(rate: f64, recorder: i32) -> Self {
         Self {
             rate,
             phase2: false,
@@ -66,14 +69,14 @@ impl VoicePipeline {
             a1: Phase1Assembler::new(),
             p2: TdmaDecoder::new(DemodConfig::phase2(rate), None),
             a2: Phase2Assembler::new(0),
-            synth: ffi::tr_p25_voice_synth_new(soft_vocoder),
+            imbe: ImbeVocoder::new(),
+            ambe: AmbeVocoder::new(),
             events: Vec::new(),
             calls: Vec::new(),
             counter: CallCounter::default(),
             crypto: EncryptionTracker::default(),
             crypto_pending: None,
             shared: VoiceShared::register(recorder),
-            muted: 0,
         }
     }
 
@@ -172,25 +175,24 @@ impl VoicePipeline {
         }
     }
 
-    fn vocode(&mut self, v: Vocode) -> Vec<i16> {
-        let mut pcm = vec![0i16; SAMPLES_PER_FRAME];
-        match v {
-            Vocode::Imbe { u, e0, et } => {
-                ffi::tr_p25_voice_synth_phase1(self.synth.pin_mut(), &u, e0, et, &mut pcm);
+    /// A frame's audio; silence where the frame is muted or encrypted.
+    fn vocode(&mut self, v: Vocode) -> Pcm {
+        let pcm = match v {
+            Vocode::Imbe { u, e0, et } => self.imbe.decode(&u, e0, et),
+            Vocode::Ambe {
+                dibits,
+                encrypted: false,
+            } => self.ambe.decode(&dibits),
+            Vocode::Ambe {
+                dibits,
+                encrypted: true,
+            } => {
+                self.ambe.encrypted(&dibits);
+                None
             }
-            Vocode::Ambe { dibits, encrypted } => {
-                if !ffi::tr_p25_voice_synth_phase2(
-                    self.synth.pin_mut(),
-                    &dibits,
-                    encrypted,
-                    &mut pcm,
-                ) {
-                    self.muted += 1;
-                }
-            }
-            Vocode::Silence => {}
-        }
-        pcm
+            Vocode::Silence => None,
+        };
+        pcm.unwrap_or([0; SAMPLES_PER_FRAME])
     }
 }
 
@@ -244,9 +246,9 @@ pub struct P25VoiceHandle {
     terminated: bool,
 }
 
-pub fn p25_voice_new(rate: f64, recorder: i32, soft_vocoder: bool) -> Box<P25VoiceHandle> {
+pub fn p25_voice_new(rate: f64, recorder: i32) -> Box<P25VoiceHandle> {
     Box::new(P25VoiceHandle {
-        pipeline: VoicePipeline::for_recorder(rate, recorder, soft_vocoder),
+        pipeline: VoicePipeline::for_recorder(rate, recorder),
         out: Vec::new(),
         terminated: false,
     })

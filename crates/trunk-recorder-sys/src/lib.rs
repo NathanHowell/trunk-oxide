@@ -465,21 +465,22 @@ pub mod ffi {
         fn tr_config_set_tap_dir(ctx: Pin<&mut TrContext>, dir: &str);
         fn tr_config_set_soft_vocoder(ctx: Pin<&mut TrContext>, enabled: bool);
 
-        /// op25's P25 vocoders, one 20 ms frame (160 samples) at a time.
-        type P25VoiceSynth;
-        fn tr_p25_voice_synth_new(soft_vocoder: bool) -> UniquePtr<P25VoiceSynth>;
+        /// op25's P25 vocoders, one 20 ms frame (160 samples) at a time, as
+        /// the reference trunk-p25's are checked against.
+        type Op25VocoderReference;
+        fn tr_op25_vocoder_reference_new() -> UniquePtr<Op25VocoderReference>;
         /// One IMBE frame: op25's `u[0..8]` and the bits corrected in c0 and
         /// in all.
-        fn tr_p25_voice_synth_phase1(
-            synth: Pin<&mut P25VoiceSynth>,
+        fn tr_op25_vocoder_reference_phase1(
+            vocoder: Pin<&mut Op25VocoderReference>,
             u: &[u32],
             e0: u32,
             et: u32,
             out: &mut [i16],
         );
         /// One AMBE+2 frame: its 36 descrambled dibits. False if muted.
-        fn tr_p25_voice_synth_phase2(
-            synth: Pin<&mut P25VoiceSynth>,
+        fn tr_op25_vocoder_reference_phase2(
+            vocoder: Pin<&mut Op25VocoderReference>,
             dibits: &[u8],
             encrypted: bool,
             out: &mut [i16],
@@ -492,7 +493,6 @@ pub mod ffi {
             phase2: bool,
             slot: i32,
             xor_mask: &[u8],
-            soft_vocoder: bool,
         ) -> UniquePtr<Op25VoiceReference>;
         fn tr_op25_voice_reference_push(reference: Pin<&mut Op25VoiceReference>, dibits: &[u8]);
         fn tr_op25_voice_reference_pcm(reference: &Op25VoiceReference) -> Vec<i16>;
@@ -631,7 +631,7 @@ pub mod ffi {
     extern "Rust" {
         type P25VoiceHandle;
 
-        fn p25_voice_new(rate: f64, recorder: i32, soft_vocoder: bool) -> Box<P25VoiceHandle>;
+        fn p25_voice_new(rate: f64, recorder: i32) -> Box<P25VoiceHandle>;
         fn start_call(
             self: &mut P25VoiceHandle,
             qpsk: bool,

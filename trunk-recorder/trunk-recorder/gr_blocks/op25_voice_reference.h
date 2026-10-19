@@ -13,7 +13,8 @@ class op25_voice_reference {
 public:
   // phase2: TDMA on logical channel `slot`, descrambled with the
   // 2160-dibit `xor_mask`.
-  op25_voice_reference(bool phase2, int slot, const std::string &xor_mask, bool soft_vocoder);
+  // Vocodes with op25's software IMBE decoder (soft_vocoder).
+  op25_voice_reference(bool phase2, int slot, const std::string &xor_mask);
   ~op25_voice_reference();
 
   // One call of p25_frame_assembler::general_work with these dibits.

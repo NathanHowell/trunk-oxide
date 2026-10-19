@@ -119,6 +119,10 @@ list(APPEND op25_repeater_sources
 )
 
 add_library(gnuradio-op25_repeater STATIC ${op25_repeater_sources})
+# The vocoders' arithmetic as written: trunk-p25's port (crates/trunk-p25
+# src/vocoder) reproduces it sample for sample, and Rust never fuses a
+# multiply-add where GCC may.
+set_source_files_properties(software_imbe_decoder.cc ambe.c PROPERTIES COMPILE_OPTIONS -ffp-contract=off)
 if(CMAKE_SYSTEM_NAME STREQUAL "Darwin")
     find_library(GR_FILTER_LIBRARY libgnuradio-filter.dylib )
     find_library(GR_PMT_LIBRARY libgnuradio-pmt.dylib )

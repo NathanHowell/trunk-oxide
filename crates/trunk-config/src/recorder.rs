@@ -81,6 +81,8 @@ pub struct RecorderConfig {
     pub temp_dir: String,
     #[serde(default = "default_call_timeout")]
     pub call_timeout: f64,
+    /// DMR vocodes with op25's software IMBE decoder rather than its
+    /// full-rate one. P25 always uses trunk-p25's port of the software one.
     #[serde(default)]
     pub soft_vocoder: bool,
     /// Debug/baseline capture: when set, every channel conditioner and control

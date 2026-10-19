@@ -333,7 +333,7 @@ namespace {
 // (p25_voice_decoder.h).
 class RustVoiceDecoder : public p25_voice_backend {
 public:
-    RustVoiceDecoder(double rate, int recorder, bool soft_vocoder) : h_(p25_voice_new(rate, recorder, soft_vocoder)) {}
+    RustVoiceDecoder(double rate, int recorder) : h_(p25_voice_new(rate, recorder)) {}
 
     void process(const gr_complex *in, size_t n, std::vector<int16_t> &audio, std::vector<Tag> &tags) override {
         audio_.clear();
@@ -368,11 +368,10 @@ private:
 };
 } // namespace
 
-// P25 recorders decode with trunk-p25, vocoding as `config.soft_vocoder`
-// says when they are built, and report each call to Rust.
+// P25 recorders decode with trunk-p25 and report each call to Rust.
 static void install_p25_voice(Config &config) {
-    config.p25_voice_decoder = [&config](double rate, int recorder) -> std::shared_ptr<p25_voice_backend> {
-        return std::make_shared<RustVoiceDecoder>(rate, recorder, config.soft_vocoder);
+    config.p25_voice_decoder = [](double rate, int recorder) -> std::shared_ptr<p25_voice_backend> {
+        return std::make_shared<RustVoiceDecoder>(rate, recorder);
     };
     config.p25_call_observer = [](const P25CallReport &r) {
         TrCallReport out;
@@ -405,25 +404,25 @@ void tr_config_set_debug_recorder(TrContext &ctx, bool enabled, rust::Str addres
     ctx.impl->trunk_ctx.config.debug_recorder_port = port;
 }
 
-// ── P25 vocoders and op25's voice frame assembler ──
+// ── op25's P25 vocoders and voice frame assembler (references) ──
 
-std::unique_ptr<P25VoiceSynth> tr_p25_voice_synth_new(bool soft_vocoder) {
-    return std::make_unique<P25VoiceSynth>(soft_vocoder);
+std::unique_ptr<Op25VocoderReference> tr_op25_vocoder_reference_new() {
+    return std::make_unique<Op25VocoderReference>();
 }
 
-void tr_p25_voice_synth_phase1(P25VoiceSynth &s, rust::Slice<const uint32_t> u, uint32_t e0, uint32_t et, rust::Slice<int16_t> out) {
-    if (u.size() < 8 || out.size() < static_cast<size_t>(p25_voice_synth::samples_per_frame)) return;
-    s.synth.phase1(u.data(), e0, et, out.data());
+void tr_op25_vocoder_reference_phase1(Op25VocoderReference &v, rust::Slice<const uint32_t> u, uint32_t e0, uint32_t et, rust::Slice<int16_t> out) {
+    if (u.size() < 8 || out.size() < static_cast<size_t>(op25_vocoder_reference::samples_per_frame)) return;
+    v.r.phase1(u.data(), e0, et, out.data());
 }
 
-bool tr_p25_voice_synth_phase2(P25VoiceSynth &s, rust::Slice<const uint8_t> dibits, bool encrypted, rust::Slice<int16_t> out) {
-    if (dibits.size() < 36 || out.size() < static_cast<size_t>(p25_voice_synth::samples_per_frame)) return false;
-    return s.synth.phase2(dibits.data(), encrypted, out.data());
+bool tr_op25_vocoder_reference_phase2(Op25VocoderReference &v, rust::Slice<const uint8_t> dibits, bool encrypted, rust::Slice<int16_t> out) {
+    if (dibits.size() < 36 || out.size() < static_cast<size_t>(op25_vocoder_reference::samples_per_frame)) return false;
+    return v.r.phase2(dibits.data(), encrypted, out.data());
 }
 
-std::unique_ptr<Op25VoiceReference> tr_op25_voice_reference_new(bool phase2, int32_t slot, rust::Slice<const uint8_t> xor_mask, bool soft_vocoder) {
+std::unique_ptr<Op25VoiceReference> tr_op25_voice_reference_new(bool phase2, int32_t slot, rust::Slice<const uint8_t> xor_mask) {
     std::string mask(reinterpret_cast<const char *>(xor_mask.data()), xor_mask.size());
-    return std::make_unique<Op25VoiceReference>(phase2, slot, mask, soft_vocoder);
+    return std::make_unique<Op25VoiceReference>(phase2, slot, mask);
 }
 
 void tr_op25_voice_reference_push(Op25VoiceReference &r, rust::Slice<const uint8_t> dibits) {

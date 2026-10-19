@@ -22,6 +22,9 @@
 //!   assembler.
 //! - [`tdma`]: phase 2 (ISCH, DUID, AMBE+2, FACCH/SACCH, encryption sync)
 //!   and its regenerator.
+//! - [`assemble`]: calls from either: the frames to vocode, who is talking,
+//!   encryption, talker aliases.
+//! - [`vocoder`]: IMBE and AMBE+2 frames to audio.
 //!
 //! [`testgen`] builds modulated test signals for the unit tests and benches.
 
@@ -39,6 +42,7 @@ pub mod testgen;
 pub mod trellis;
 pub mod trunking;
 pub mod types;
+pub mod vocoder;
 pub mod voice;
 
 pub use control::{ControlChannelDecoder, DecoderConfig, DecoderStats, Message, Received};

@@ -45,6 +45,10 @@ pub struct CalibrationPolicy {
     pub sat_limit: f64,
     /// Floor-vs-gain slope marking the front-end-limited regime (dB/dB).
     pub knee_slope: f64,
+    /// The least gain (dB) that slope is measured across.
+    pub knee_span_db: f64,
+    /// How far (dB) above the knee the pick sits.
+    pub margin_db: f64,
     /// Complex samples to capture per gain step. Must comfortably exceed
     /// `fft_size` so Welch averaging has several segments.
     pub capture_samples: usize,
@@ -68,6 +72,13 @@ impl Default for CalibrationPolicy {
             sat_limit: 1e-3,
             // Allow margin below the ideal 1.0 dB/dB asymptote.
             knee_slope: 0.6,
+            // RTL steps run 0.5–4 dB apart and a 0.1 s floor estimate
+            // scatters a few tenths of a dB, so a slope over one small step
+            // is noise; 2.5 dB spans at least two of the fine steps.
+            knee_span_db: 2.5,
+            // At the knee the front end's noise only equals the ADC's (a
+            // ~3 dB noise-figure penalty); 6 dB above it the penalty is ~1.
+            margin_db: 6.0,
             // ~0.1 s at 2.4 Msps; ~64 Welch segments at fft_size 4096.
             capture_samples: 1 << 18,
             // A gain step is ~1–3 dB on an RTL tuner; floor drift within
@@ -93,7 +104,33 @@ impl CalibrationPolicy {
         SelectParams {
             sat_limit: self.sat_limit,
             knee_slope: self.knee_slope,
+            knee_span_db: self.knee_span_db,
+            margin_db: self.margin_db,
         }
+    }
+}
+
+/// A full sweep: the pick and the curve it was picked from.
+#[derive(Debug, Clone)]
+pub struct Sweep {
+    pub selection: GainSelection,
+    /// Every step that produced a measurement, in gain order.
+    pub points: Vec<GainPoint>,
+}
+
+impl Sweep {
+    /// The curve as one log field: `gain:floor` per step, `!` after a step
+    /// that saturated. E.g. `0.0:-60.1 0.9:-60.0 … 49.6:-31.2!`.
+    pub fn curve(&self, sat_limit: f64) -> String {
+        self.points
+            .iter()
+            .map(|p| {
+                let m = p.measurement;
+                let sat = if m.sat_frac > sat_limit { "!" } else { "" };
+                format!("{:.1}:{:.1}{sat}", p.gain_db, m.noise_floor_db)
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
     }
 }
 
@@ -128,14 +165,17 @@ pub fn calibrate(
     probe: &mut dyn IqProbe,
     policy: &CalibrationPolicy,
     fallback_gain: f64,
-) -> Result<GainSelection> {
+) -> Result<Sweep> {
     let gains = probe.supported_gains()?;
     if gains.is_empty() {
         tracing::warn!("device reported no gain steps; keeping configured gain");
-        return Ok(GainSelection {
-            gain_db: fallback_gain,
-            noise_floor_db: f64::NAN,
-            reason: SelectReason::Fallback,
+        return Ok(Sweep {
+            selection: GainSelection {
+                gain_db: fallback_gain,
+                noise_floor_db: f64::NAN,
+                reason: SelectReason::Fallback,
+            },
+            points: Vec::new(),
         });
     }
 
@@ -163,7 +203,7 @@ pub fn calibrate(
     }
 
     let selection = select_gain(&points, &policy.select_params(), fallback_gain);
-    Ok(selection)
+    Ok(Sweep { selection, points })
 }
 
 #[cfg(test)]
@@ -215,9 +255,17 @@ mod tests {
                 noise(1 << 16, amp, (g as u64) + 1)
             }),
         };
-        let sel = calibrate(&mut probe, &CalibrationPolicy::default(), 99.0).unwrap();
+        let sweep = calibrate(&mut probe, &CalibrationPolicy::default(), 99.0).unwrap();
+        let sel = sweep.selection;
         assert_eq!(sel.reason, SelectReason::Knee);
-        assert_eq!(sel.gain_db, 26.0);
+        // Knee confirmed at 26 (by 32); the margin asks for ≥ 32.
+        assert_eq!(sel.gain_db, 32.0);
+        assert_eq!(sweep.points.len(), 5);
+        let curve = sweep.curve(1e-3);
+        assert!(
+            curve.starts_with("0.0:") && curve.contains(" 32.0:"),
+            "{curve}"
+        );
     }
 
     #[test]
@@ -226,7 +274,9 @@ mod tests {
             gains: vec![],
             make_iq: Box::new(|_| Vec::new()),
         };
-        let sel = calibrate(&mut probe, &CalibrationPolicy::default(), 33.0).unwrap();
+        let sel = calibrate(&mut probe, &CalibrationPolicy::default(), 33.0)
+            .unwrap()
+            .selection;
         assert_eq!(sel.reason, SelectReason::Fallback);
         assert_eq!(sel.gain_db, 33.0);
     }

@@ -124,7 +124,7 @@ struct Calibrated {
     /// As `trunk.oxide.source.gain_db` labels it.
     reason: &'static str,
     /// A fresh sweep, to cache.
-    swept: Option<calibrate::GainSelection>,
+    swept: Option<calibrate::Sweep>,
 }
 
 impl Calibrated {
@@ -194,20 +194,22 @@ fn run_calibration(
 
     tracing::info!(device = %device, "starting gain auto-calibration sweep");
     match calibrate::calibrate(&mut probe, policy, fallback_gain) {
-        Ok(sel) => {
+        Ok(sweep) => {
+            let sel = sweep.selection;
             tracing::info!(
                 device = %device,
                 gain_db = sel.gain_db,
                 noise_floor_db = sel.noise_floor_db,
-                reason = ?sel.reason,
+                reason = sel.reason.label(),
                 configured_gain = fallback_gain,
+                curve = %sweep.curve(policy.sat_limit),
                 "gain auto-calibration complete"
             );
             Calibrated {
                 gain_db: sel.gain_db,
                 noise_floor_db: sel.noise_floor_db.is_finite().then_some(sel.noise_floor_db),
                 reason: sel.reason.label(),
-                swept: Some(sel),
+                swept: Some(sweep),
             }
         }
         Err(e) => {
@@ -272,9 +274,10 @@ fn calibrate_sources_parallel(
     for handle in handles {
         match handle.join() {
             Ok((idx, device, c)) => {
-                if let Some(sel) = &c.swept
-                    && sel.reason != calibrate::SelectReason::Fallback
+                if let Some(sweep) = &c.swept
+                    && sweep.selection.reason != calibrate::SelectReason::Fallback
                 {
+                    let sel = sweep.selection;
                     cache.put(
                         &device,
                         calibrate::cache::Cached {
@@ -284,6 +287,16 @@ fn calibrate_sources_parallel(
                             at: std::time::SystemTime::now()
                                 .duration_since(std::time::UNIX_EPOCH)
                                 .map_or(0, |d| d.as_secs()),
+                            algorithm: calibrate::cache::ALGORITHM,
+                            sweep: sweep
+                                .points
+                                .iter()
+                                .map(|p| calibrate::cache::SweepPoint {
+                                    gain_db: p.gain_db,
+                                    noise_floor_db: p.measurement.noise_floor_db,
+                                    sat_frac: p.measurement.sat_frac,
+                                })
+                                .collect(),
                         },
                     );
                     swept = true;

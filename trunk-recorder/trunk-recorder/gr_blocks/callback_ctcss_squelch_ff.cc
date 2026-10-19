@@ -7,6 +7,19 @@
  * CTCSS tones). The squelch state machine and callback are the same as
  * the power squelch now in trunk-channelizer's conditioner.
  *
+ * Attack with lookahead: one correlator window (100 ms) of FM noise passes
+ * the tone test often enough (centre above both neighbours and above the
+ * level) that the gate used to open for a single window dozens of times an
+ * hour on a quiet PL channel, each a ~1 s call holding a click and silence.
+ * A window now opens the gate only as part of a run of kAttackWindows tone
+ * windows. So that the start of a real transmission is not lost while the
+ * run is confirmed, the audio runs through a delay line of that length and
+ * the verdict for each window is made once the windows after it are known:
+ * the gate opens on the first window of a confirmed run, not the last.
+ * Once open it follows the per-window verdict, so a one-window dropout
+ * mid-transmission closes and reopens within the caller's debounce as
+ * before.
+ *
  * SPDX-License-Identifier: GPL-3.0-or-later
  */
 
@@ -14,10 +27,15 @@
 #include <gnuradio/fft/goertzel.h>
 #include <gnuradio/io_signature.h>
 #include <gnuradio/math.h>
+#include <array>
 #include <cmath>
 #include <memory>
+#include <vector>
 
 namespace {
+
+// Consecutive correlator windows a tone must span before the gate opens.
+constexpr int kAttackWindows = 3;
 
 // Standard CTCSS tones; used to choose neighbouring frequencies for the side
 // correlators (verbatim from gnuradio's ctcss_squelch_ff_impl).
@@ -65,6 +83,16 @@ private:
     std::unique_ptr<gr::fft::goertzel> d_goertzel_c;
     std::unique_ptr<gr::fft::goertzel> d_goertzel_r;
 
+    // Lookahead attack (see the file comment). The audio is delayed by
+    // kAttackWindows windows; d_verdicts holds the raw per-window tone
+    // verdicts for the windows in the delay line, oldest at d_verdict_pos.
+    std::vector<float> d_delay;
+    size_t d_delay_pos;
+    std::array<bool, kAttackWindows> d_verdicts;
+    int d_verdict_pos;
+    int d_run_before; // tone windows in a row just before the one being decided
+    bool d_gate_open; // the previous decided window passed
+
     // Squelch state machine (mirrors the power squelch in trunk-channelizer)
     int d_ramp;
     int d_ramped;
@@ -85,22 +113,57 @@ private:
     }
 
 protected:
-    // Feed one sample to the correlators; refresh d_mute once a full window of
-    // d_len samples has been accumulated.
+    // Feed one sample to the correlators. Once a full window of d_len samples
+    // has been accumulated, decide the window now leaving the delay line
+    // from its own verdict and the verdicts of the windows after it.
     void update_state(const float& in) override
     {
         d_goertzel_l->input(in);
         d_goertzel_c->input(in);
         d_goertzel_r->input(in);
 
-        if (d_goertzel_c->ready()) {
-            const float rounder = 100000.0f;
-            float out_l = std::floor(rounder * std::abs(d_goertzel_l->output())) / rounder;
-            float out_c = std::floor(rounder * std::abs(d_goertzel_c->output())) / rounder;
-            float out_r = std::floor(rounder * std::abs(d_goertzel_r->output())) / rounder;
-            d_last_level = out_c;
-            d_mute = (out_c < d_level || out_c < out_l || out_c < out_r);
+        if (!d_goertzel_c->ready())
+            return;
+
+        const float rounder = 100000.0f;
+        float out_l = std::floor(rounder * std::abs(d_goertzel_l->output())) / rounder;
+        float out_c = std::floor(rounder * std::abs(d_goertzel_c->output())) / rounder;
+        float out_r = std::floor(rounder * std::abs(d_goertzel_r->output())) / rounder;
+        d_last_level = out_c;
+        const bool tone_now = !(out_c < d_level || out_c < out_l || out_c < out_r);
+
+        // The ring now holds the verdicts of the kAttackWindows windows in
+        // the delay line; the oldest is the one about to be output.
+        d_verdicts[d_verdict_pos] = tone_now;
+        d_verdict_pos = (d_verdict_pos + 1) % kAttackWindows;
+        const bool oldest = d_verdicts[d_verdict_pos];
+
+        bool pass = false;
+        if (oldest) {
+            if (d_gate_open) {
+                pass = true;
+            } else {
+                int run = d_run_before + 1;
+                for (int i = 1; i < kAttackWindows; i++) {
+                    if (!d_verdicts[(d_verdict_pos + i) % kAttackWindows])
+                        break;
+                    run++;
+                }
+                pass = run >= kAttackWindows;
+            }
         }
+        d_run_before = oldest ? d_run_before + 1 : 0;
+        d_gate_open = pass;
+        d_mute = !pass;
+    }
+
+    // The input sample from kAttackWindows windows ago, in exchange for this one.
+    float delayed(float in)
+    {
+        float out = d_delay[d_delay_pos];
+        d_delay[d_delay_pos] = in;
+        d_delay_pos = (d_delay_pos + 1) % d_delay.size();
+        return out;
     }
 
     bool mute() const override { return d_mute; }
@@ -115,6 +178,11 @@ public:
           d_rate(rate),
           d_mute(true),
           d_last_level(0.0),
+          d_delay_pos(0),
+          d_verdicts{},
+          d_verdict_pos(0),
+          d_run_before(0),
+          d_gate_open(false),
           d_ramp(ramp),
           d_ramped(0),
           d_gate(gate),
@@ -126,6 +194,7 @@ public:
     {
         // gnuradio default: two cycles' worth at a 10 Hz resolution.
         d_len = (len == 0) ? static_cast<int>(d_rate / 10.0) : len;
+        d_delay.assign(static_cast<size_t>(d_len) * kAttackWindows, 0.0f);
 
         float f_l, f_r;
         compute_freqs(d_freq, f_l, f_r);
@@ -209,6 +278,7 @@ public:
 
         for (int i = 0; i < noutput_items; i++) {
             update_state(in[i]);
+            const float sample = delayed(in[i]);
 
             switch (d_state) {
             case ST_MUTED:
@@ -254,7 +324,7 @@ public:
             }
 
             if (d_state != ST_MUTED) {
-                out[j++] = in[i] * static_cast<float>(d_envelope);
+                out[j++] = sample * static_cast<float>(d_envelope);
             } else if (!d_gate) {
                 out[j++] = 0.0f;
             }

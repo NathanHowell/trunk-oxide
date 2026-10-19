@@ -274,8 +274,11 @@ void analog_recorder::set_squelch_callback(std::function<void(bool, double)> cb)
   // channel carries a constant carrier, so call boundaries must follow the
   // tone, not the carrier. The carrier squelch stays in the signal path as a
   // coarse pre-gate; the tone squelch drives the boundary callback.
+  // The tone squelch reports its correlator level; the caller wants the
+  // carrier power in dB like the power squelch gives, so substitute it.
   if (use_tone_squelch && tone_squelch) {
-    tone_squelch->set_squelch_callback(std::move(cb));
+    tone_squelch->set_squelch_callback(
+        [this, cb = std::move(cb)](bool muted, double) { cb(muted, get_pwr()); });
   } else {
     prefilter->set_squelch_callback(std::move(cb));
   }

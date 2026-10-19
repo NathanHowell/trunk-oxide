@@ -358,7 +358,7 @@ public:
     }
     CallCounts take_call_counts() override {
         const TrCallCounts c = h_->take_call_counts();
-        return {static_cast<long>(c.errors), static_cast<long>(c.spikes), static_cast<int>(c.algid)};
+        return {static_cast<long>(c.errors), static_cast<long>(c.spikes), static_cast<int>(c.algid), static_cast<long>(c.repeated), static_cast<long>(c.muted)};
     }
 
 private:
@@ -385,6 +385,8 @@ static void install_p25_voice(Config &config) {
         out.errors = r.errors;
         out.spikes = r.spikes;
         out.algid = static_cast<uint8_t>(r.algid);
+        out.repeated = r.repeated;
+        out.muted = r.muted;
         for (long src : r.sources) out.sources.push_back(src);
         p25_observe_call(out);
     };

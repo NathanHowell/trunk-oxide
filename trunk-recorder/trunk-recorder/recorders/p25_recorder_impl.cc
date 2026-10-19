@@ -154,7 +154,7 @@ std::vector<Transmission> p25_recorder_impl::get_transmission_list() {
 
 void p25_recorder_impl::report_call() {
   if (!config.p25_call_observer) return;
-  P25CallReport r{short_name, rec_num, talkgroup, chan_freq, call_phase2, 0.0, 0, 0, 0, decode->call_sources(), counts.algid};
+  P25CallReport r{short_name, rec_num, talkgroup, chan_freq, call_phase2, 0.0, 0, 0, 0, decode->call_sources(), counts.algid, counts.repeated, counts.muted};
   for (const auto &t : get_transmission_list()) {
     r.audio_seconds += static_cast<double>(t.sample_count) / 8000.0;
     r.transmissions++;

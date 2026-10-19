@@ -41,6 +41,8 @@ struct P25CallReport {
   long spikes;
   std::vector<long> sources; // source units named in band, first appearance order
   int algid;                 // encryption found on the call; 0x80 = clear
+  long repeated;             // voice frames the vocoder repeated for errors
+  long muted;                // and muted
 };
 
 struct Config {

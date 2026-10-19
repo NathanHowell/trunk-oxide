@@ -47,6 +47,9 @@ public:
     long errors = 0;
     long spikes = 0;
     int algid = 0x80; // confirmed on the call's slot; 0x80 = clear
+    // Voice frames the vocoder repeated, and muted, for errors.
+    long repeated = 0;
+    long muted = 0;
   };
   virtual CallCounts take_call_counts() = 0;
 };

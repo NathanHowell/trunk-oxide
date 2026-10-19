@@ -11,7 +11,7 @@ use trunk_p25::assemble::{
 };
 use trunk_p25::control::Received;
 use trunk_p25::tdma::{BurstContent, Scrambler, TdmaDecoder, op25_view};
-use trunk_p25::vocoder::{AmbeVocoder, ImbeVocoder, Pcm, SAMPLES_PER_FRAME};
+use trunk_p25::vocoder::{AmbeVocoder, Decision, ImbeVocoder, Pcm, SAMPLES_PER_FRAME};
 use trunk_p25::voice::signalling::ALGID_CLEAR;
 use trunk_p25::voice::{Encryption, EncryptionTracker, VoiceDecoder, VoiceEvent};
 use trunk_p25::{DemodConfig, Modulation};
@@ -51,6 +51,9 @@ pub struct VoicePipeline {
     crypto: EncryptionTracker,
     crypto_pending: Option<Encryption>,
     shared: Arc<VoiceShared>,
+    /// Frames the vocoders repeated and muted this call.
+    repeated: u64,
+    muted: u64,
 }
 
 impl VoicePipeline {
@@ -77,6 +80,8 @@ impl VoicePipeline {
             crypto: EncryptionTracker::default(),
             crypto_pending: None,
             shared: VoiceShared::register(recorder),
+            repeated: 0,
+            muted: 0,
         }
     }
 
@@ -93,6 +98,8 @@ impl VoicePipeline {
         self.counter = CallCounter::default();
         self.crypto.reset();
         self.crypto_pending = None;
+        self.repeated = 0;
+        self.muted = 0;
         if phase2 {
             self.p2 = TdmaDecoder::new(DemodConfig::phase2(self.rate), scrambler);
             self.a2.start_call(slot);
@@ -177,23 +184,33 @@ impl VoicePipeline {
 
     /// A frame's audio; silence where the frame is muted or encrypted.
     fn vocode(&mut self, v: Vocode) -> Pcm {
-        let pcm = match v {
-            Vocode::Imbe { frame, e0, et } => self.imbe.vocode(&frame, e0, et),
+        let (pcm, decision) = match v {
+            Vocode::Imbe { frame, e0, et } => {
+                (self.imbe.vocode(&frame, e0, et), Some(self.imbe.last()))
+            }
             Vocode::Ambe {
                 dibits,
                 frame,
                 encrypted: false,
-            } => self.ambe.vocode(&dibits, frame.as_ref()),
+            } => (
+                self.ambe.vocode(&dibits, frame.as_ref()),
+                Some(self.ambe.last()),
+            ),
             Vocode::Ambe {
                 dibits,
                 encrypted: true,
                 ..
             } => {
                 self.ambe.encrypted(&dibits);
-                None
+                (None, None)
             }
-            Vocode::Silence => None,
+            Vocode::Silence => (None, None),
         };
+        match decision {
+            Some(Decision::Repeated) => self.repeated += 1,
+            Some(Decision::Muted) => self.muted += 1,
+            Some(Decision::Played) | None => {}
+        }
         pcm.unwrap_or([0; SAMPLES_PER_FRAME])
     }
 }
@@ -333,6 +350,8 @@ impl P25VoiceHandle {
                 .crypto
                 .confirmed()
                 .map_or(ALGID_CLEAR, |e| e.algid),
+            repeated: std::mem::take(&mut self.pipeline.repeated),
+            muted: std::mem::take(&mut self.pipeline.muted),
         }
     }
 }

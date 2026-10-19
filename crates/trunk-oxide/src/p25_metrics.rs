@@ -11,8 +11,8 @@ use opentelemetry::metrics::{Counter, Gauge, Meter};
 use trunk_recorder_sys::p25::{
     ControlChannelReport, DecoderStats, TdmaStats, VoiceChannelReport, VoiceStats,
 };
-use trunk_recorder_sys::p25_parse::{self, ParseStats};
 use trunk_recorder_sys::p25_calls::{self, CallTally, Phase};
+use trunk_recorder_sys::p25_parse::{self, ParseStats};
 
 /// A decoder's identity across polls: (source, channelizer port).
 type Key = (i32, u32);
@@ -327,6 +327,8 @@ struct CallMetrics {
     call_bit_errors: Counter<u64>,
     call_spikes: Counter<u64>,
     call_encrypted: Counter<u64>,
+    call_repeated: Counter<u64>,
+    call_muted: Counter<u64>,
     prev: BTreeMap<(String, Phase), CallTally>,
 }
 
@@ -358,6 +360,14 @@ impl CallMetrics {
                 .u64_counter("trunk.oxide.p25call.encrypted")
                 .with_description("Calls whose encryption sync confirmed encryption")
                 .build(),
+            call_repeated: meter
+                .u64_counter("trunk.oxide.p25call.repeated")
+                .with_description("Voice frames the vocoder repeated for errors")
+                .build(),
+            call_muted: meter
+                .u64_counter("trunk.oxide.p25call.muted")
+                .with_description("Voice frames the vocoder muted for errors")
+                .build(),
             prev: BTreeMap::new(),
         }
     }
@@ -383,6 +393,8 @@ impl CallMetrics {
             self.call_bit_errors.add(d(t.errors, was.errors), &a);
             self.call_spikes.add(d(t.spikes, was.spikes), &a);
             self.call_encrypted.add(d(t.encrypted, was.encrypted), &a);
+            self.call_repeated.add(d(t.repeated, was.repeated), &a);
+            self.call_muted.add(d(t.muted, was.muted), &a);
         }
         self.prev = now;
     }

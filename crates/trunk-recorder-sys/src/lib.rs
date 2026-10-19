@@ -65,6 +65,9 @@ pub mod ffi {
         spikes: u64,
         /// The ALGID confirmed on the call's own slot (0x80: clear).
         algid: u8,
+        /// Voice frames the vocoder repeated, and muted, for errors.
+        repeated: u64,
+        muted: u64,
     }
 
     /// A P25 voice call's outcome, when it ends.
@@ -82,6 +85,9 @@ pub mod ffi {
         sources: Vec<i64>,
         /// The ALGID confirmed on the call (0x80: clear).
         algid: u8,
+        /// Voice frames the vocoder repeated, and muted, for errors.
+        repeated: i64,
+        muted: i64,
     }
 
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]

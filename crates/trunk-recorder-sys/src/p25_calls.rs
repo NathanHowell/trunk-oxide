@@ -30,6 +30,9 @@ pub struct CallTally {
     pub spikes: u64,
     /// Calls found encrypted.
     pub encrypted: u64,
+    /// Voice frames the vocoder repeated, and muted, for errors.
+    pub repeated: u64,
+    pub muted: u64,
 }
 
 static CALLS: Mutex<BTreeMap<(String, Phase), CallTally>> = Mutex::new(BTreeMap::new());
@@ -47,6 +50,8 @@ pub fn observe_call(report: &ffi::TrCallReport) {
         errors: u64::try_from(report.errors).unwrap_or(0),
         spikes: u64::try_from(report.spikes).unwrap_or(0),
         encrypted: u64::from(report.algid != trunk_p25::voice::signalling::ALGID_CLEAR),
+        repeated: u64::try_from(report.repeated).unwrap_or(0),
+        muted: u64::try_from(report.muted).unwrap_or(0),
     };
     CALLS
         .lock()
@@ -64,6 +69,8 @@ impl CallTally {
         self.errors += o.errors;
         self.spikes += o.spikes;
         self.encrypted += o.encrypted;
+        self.repeated += o.repeated;
+        self.muted += o.muted;
     }
 }
 

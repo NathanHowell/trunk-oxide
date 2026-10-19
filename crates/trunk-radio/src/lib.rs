@@ -11,6 +11,7 @@ pub mod alias;
 pub mod analog;
 pub mod audible;
 pub mod carrier;
+pub mod correction;
 pub mod fm;
 pub mod kind;
 pub mod p25;

@@ -422,9 +422,6 @@ pub struct CallManagerConfig {
     pub max_channels: usize,
     pub temp_dir: String,
     pub systems: HashMap<i32, SystemPolicy>,
-    /// Enable the per-source adaptive frequency-correction loop (tracks TCXO
-    /// drift by nudging the software tune offset toward zero FLL freq_error).
-    pub adaptive_freq_correction: bool,
 }
 
 pub(crate) struct SystemIdentity {
@@ -2424,7 +2421,6 @@ mod tests {
             max_channels: 8,
             temp_dir: String::new(),
             systems,
-            adaptive_freq_correction: false,
         }
     }
 

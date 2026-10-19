@@ -12,9 +12,10 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::{Result, bail};
-use trunk_channelizer::ConditioningSettings;
+use trunk_channelizer::{ConditioningSettings, ProfileId};
 use trunk_sdr::{Running, Stream};
 
+use crate::correction::Correction;
 use crate::kind::{Call, Cmd, Kind, OpenError, Opening};
 use crate::p25_lfsr::compute_xor_mask;
 use crate::recording::{Accounting, Recording, Tape};
@@ -26,6 +27,9 @@ pub struct RadioConfig {
     /// Where baseline taps go (`trunk-replay --tap`); none in production.
     pub tap_dir: Option<String>,
     pub conditioning: ConditioningSettings,
+    /// Each source's clock correction follows the FLL errors its channels
+    /// close with (see [`crate::correction`]).
+    pub adaptive_correction: bool,
 }
 
 /// What a system's channels are decoded with.
@@ -52,6 +56,10 @@ pub struct SourceSetup {
     pub stream: Stream,
     pub running: Box<dyn Running>,
     pub signal_detector_threshold: Option<f32>,
+    /// The hardware's whole-ppm correction, as tuned.
+    pub ppm: f64,
+    /// The software correction (Hz) added to every channel it tunes.
+    pub correction_hz: f64,
 }
 
 struct System {
@@ -76,6 +84,9 @@ struct Open {
     call: CallId,
     num: ChannelNum,
     kind: &'static str,
+    profile: ProfileId,
+    /// The channel's frequency (before the source's correction).
+    freq_hz: f64,
     tape: Tape,
     finished: fn(&Accounting),
 }
@@ -86,12 +97,17 @@ struct Open {
 pub struct ChannelReport {
     pub num: ChannelNum,
     pub kind: &'static str,
+    /// The source it is on.
+    pub source: i32,
     /// What it recorded; `None` on a channel that records nothing.
     pub recording: Option<Accounting>,
     /// The slot's smoothed power, dB, once it has a reading.
     pub power_db: Option<f64>,
     /// The FLL's frequency error, Hz.
     pub freq_error: i32,
+    /// The source's hardware ppm correction that would bring that error
+    /// to zero, to first order (raising it lowers a positive error).
+    pub preferred_ppm: f64,
 }
 
 impl ChannelReport {
@@ -149,14 +165,44 @@ impl Inner {
     /// The channel's readings, with `recording` for what it recorded.
     fn report(&self, open: &Open, recording: Option<Accounting>) -> ChannelReport {
         let slot = self.slot(open.num);
-        let chz = &self.sources[slot.source].channelizer;
+        let source = &self.sources[slot.source];
+        let chz = &source.channelizer;
         let power = chz.slot_power_db(slot.port);
+        let freq_error = chz.slot_freq_error_hz(slot.port);
         ChannelReport {
             num: open.num,
             kind: open.kind,
+            source: source.idx,
             recording,
             power_db: (!power.is_nan()).then_some(power),
-            freq_error: chz.slot_freq_error_hz(slot.port),
+            freq_error,
+            preferred_ppm: source.ppm + f64::from(freq_error) / open.freq_hz * 1e6,
+        }
+    }
+
+    /// A channel of source `src` ended with `report`'s FLL error: let the
+    /// source's correction follow it, and retune what is still open on the
+    /// source when it moves (a step this small keeps every decoder locked).
+    fn track(&mut self, src: usize, report: &ChannelReport) {
+        let source = &mut self.sources[src];
+        if !source.correction.observe(f64::from(report.freq_error)) {
+            return;
+        }
+        let offset = source.correction.hz() - source.center_hz;
+        tracing::info!(
+            source = source.idx,
+            correction_hz = source.correction.hz(),
+            "source clock correction moved"
+        );
+        for open in self.open.values() {
+            let slot = &self.slots[open.num.0 as usize];
+            if slot.source == src {
+                self.sources[src].channelizer.set_slot(
+                    slot.port,
+                    open.profile,
+                    open.freq_hz + offset,
+                );
+            }
         }
     }
 }
@@ -222,6 +268,8 @@ impl Radio {
             Arc::clone(&self.sink),
         )?;
         source.set_detector_threshold(setup.signal_detector_threshold);
+        source.ppm = setup.ppm;
+        source.correction = Correction::new(setup.correction_hz, self.cfg.adaptive_correction);
         i.sources.push(source);
         Ok(idx)
     }
@@ -364,7 +412,11 @@ impl Radio {
             chz.set_slot_squelch_db(port, db);
         }
         chz.set_slot_decoder(port, Some(Box::new(decoder)));
-        chz.set_slot(port, K::PROFILE, freq_hz - source.center_hz);
+        chz.set_slot(
+            port,
+            K::PROFILE,
+            freq_hz + source.correction.hz() - source.center_hz,
+        );
         let slot = &mut i.slots[num.0 as usize];
         slot.holder = Some(call.id);
         slot.kind = K::NAME;
@@ -374,6 +426,8 @@ impl Radio {
                 call: call.id,
                 num,
                 kind: K::NAME,
+                profile: K::PROFILE,
+                freq_hz,
                 tape,
                 finished: K::finished,
             },
@@ -393,6 +447,7 @@ impl Radio {
         slot.holder = None;
         let (src, port) = (slot.source, slot.port);
         i.sources[src].channelizer.release_slot(port);
+        i.track(src, &report);
         Some(report)
     }
 
@@ -400,10 +455,13 @@ impl Radio {
     /// channel staying open (a conventional channel's transmission is
     /// over): what was recorded, its held audio already sent.
     pub fn rotate(&self, id: CallId) -> Option<ChannelReport> {
-        let i = self.lock();
+        let mut i = self.lock();
         let open = i.open.get(&id)?;
         let recording = self.finish(open, open.tape.rotate());
-        Some(i.report(open, recording))
+        let report = i.report(open, recording);
+        let src = i.slot(open.num).source;
+        i.track(src, &report);
+        Some(report)
     }
 
     /// A recording ended: send its held audio, tell its kind.
@@ -435,6 +493,15 @@ impl Radio {
     }
 
     // ── Status ──
+
+    /// Each source's clock correction now, Hz, by source index.
+    pub fn corrections(&self) -> Vec<(i32, f64)> {
+        let i = self.lock();
+        i.sources
+            .iter()
+            .map(|s| (s.idx, s.correction.hz()))
+            .collect()
+    }
 
     /// Every slot the radio has used, by number.
     pub fn channels(&self) -> Vec<ChannelStatus> {
@@ -536,6 +603,8 @@ mod tests {
             stream,
             running,
             signal_detector_threshold: None,
+            ppm: 0.0,
+            correction_hz: 25.0,
         }
     }
 
@@ -605,7 +674,11 @@ mod tests {
         );
 
         let report = radio.close(CallId(2)).unwrap();
-        assert_eq!((report.num, report.kind), (ChannelNum(1), "p25"));
+        assert_eq!(
+            (report.num, report.kind, report.source),
+            (ChannelNum(1), "p25", 0)
+        );
+        assert_eq!(radio.corrections(), [(0, 25.0)], "not adaptive: fixed");
         assert!(report.transmissions().is_empty(), "no audio was decoded");
         assert!(radio.close(CallId(2)).is_none());
         assert!(

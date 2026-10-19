@@ -14,7 +14,6 @@ mod fm_metrics;
 mod p25_metrics;
 pub mod proc_stats;
 
-use std::ops::RangeInclusive;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -345,12 +344,6 @@ pub struct TrunkRecorderBuilder {
     pending: Arc<AtomicUsize>,
     call_mgr_config: CallManagerConfig,
     bridge: Arc<EventBridge>,
-    /// Per-source frequency coverage, indexed by source position.
-    source_ranges: Vec<RangeInclusive<f64>>,
-    /// Per-source configured ppm correction, indexed by source position.
-    source_ppms: Vec<f64>,
-    /// Per-source software Hz tune correction, indexed by source position.
-    source_freq_corrections_hz: Vec<f64>,
     /// The call state machine's time ([`clock::Clock::system`] unless
     /// [`Self::with_clock`] says otherwise).
     clock: clock::Clock,
@@ -415,12 +408,6 @@ pub struct TrunkRecorder {
     bridge: Arc<EventBridge>,
     event_rx: tokio::sync::mpsc::Receiver<RadioEvent>,
     pending: Arc<AtomicUsize>,
-    /// Per-source frequency coverage, indexed by source position.
-    source_ranges: Vec<RangeInclusive<f64>>,
-    /// Per-source configured ppm correction, indexed by source position.
-    source_ppms: Vec<f64>,
-    /// Per-source software Hz tune correction, indexed by source position.
-    source_freq_corrections_hz: Vec<f64>,
     clock: clock::Clock,
     /// Conventional channels whose calls the [`CallManager`] creates when
     /// it starts: (system, channel index).
@@ -477,6 +464,7 @@ impl TrunkRecorderBuilder {
         let radio = Arc::new(Radio::new(
             RadioConfig {
                 tap_dir: rec.and_then(|r| r.tap_dir.clone()),
+                adaptive_correction: rec.is_some_and(|r| r.adaptive_freq_correction),
                 conditioning,
             },
             sink,
@@ -517,9 +505,6 @@ impl TrunkRecorderBuilder {
                 .collect(),
         );
 
-        let mut source_ranges = Vec::new();
-        let mut source_ppms = Vec::new();
-        let mut source_freq_corrections_hz = Vec::new();
         for (idx, src) in config.source.iter().enumerate() {
             if src.enabled == Some(false) {
                 continue;
@@ -585,13 +570,11 @@ impl TrunkRecorderBuilder {
                     rate_hz: rate,
                     stream,
                     running,
+                    ppm: src.ppm,
+                    correction_hz: src.freq_correction_hz,
                     signal_detector_threshold: src.signal_detector_threshold,
                 })
                 .with_context(|| format!("starting source '{}'", src.device))?;
-            let half_rate = src.rate / 2.0;
-            source_ranges.push((src.center - half_rate)..=(src.center + half_rate));
-            source_ppms.push(src.ppm);
-            source_freq_corrections_hz.push(src.freq_correction_hz);
         }
 
         // ── Systems ──
@@ -759,7 +742,6 @@ impl TrunkRecorderBuilder {
             max_channels,
             temp_dir,
             systems: system_policies,
-            adaptive_freq_correction: rec.is_some_and(|r| r.adaptive_freq_correction),
         };
 
         Ok(Self {
@@ -768,9 +750,6 @@ impl TrunkRecorderBuilder {
             pending,
             call_mgr_config,
             bridge,
-            source_ranges,
-            source_ppms,
-            source_freq_corrections_hz,
             clock: clock::Clock::system(),
         })
     }
@@ -788,23 +767,12 @@ impl TrunkRecorderBuilder {
     /// main loop.
     pub fn start(self) -> TrunkRecorder {
         let mut pending_conventional_calls = Vec::new();
-        // In system order, so recorder numbers are the same run to run.
+        // In system order, so channel numbers are the same run to run. (A
+        // channel no source covers is rejected when it cannot be opened.)
         let mut systems: Vec<_> = self.call_mgr_config.systems.iter().collect();
         systems.sort_by_key(|(sys_num, _)| **sys_num);
         for (&sys_num, policy) in systems {
-            for (ch_idx, channel) in policy.channels.iter().enumerate() {
-                let freq_hz = channel.freq.as_hz();
-                if !self.source_ranges.iter().any(|r| r.contains(&freq_hz)) {
-                    tracing::error!(
-                        sys_num,
-                        freq = freq_hz,
-                        talkgroup = channel.talkgroup.0,
-                        "no source covers conventional channel frequency"
-                    );
-                    continue;
-                }
-                pending_conventional_calls.push((sys_num, ch_idx));
-            }
+            pending_conventional_calls.extend((0..policy.channels.len()).map(|i| (sys_num, i)));
         }
 
         TrunkRecorder {
@@ -813,9 +781,6 @@ impl TrunkRecorderBuilder {
             bridge: self.bridge,
             event_rx: self.event_rx,
             pending: self.pending,
-            source_ranges: self.source_ranges,
-            source_ppms: self.source_ppms,
-            source_freq_corrections_hz: self.source_freq_corrections_hz,
             clock: self.clock,
             pending_conventional_calls,
             conv_metrics: Arc::new(Mutex::new(ConventionalMetricsSnapshot::default())),
@@ -854,9 +819,6 @@ impl TrunkRecorder {
             self.call_mgr_config.clone(),
             self.bridge.clone(),
             Arc::clone(&self.radio),
-            self.source_ranges.clone(),
-            self.source_ppms.clone(),
-            self.source_freq_corrections_hz.clone(),
             Arc::clone(&self.conv_metrics),
             self.clock.clone(),
         );

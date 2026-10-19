@@ -13,6 +13,7 @@ use trunk_channelizer::{ConditioningSettings, DetectorConfig, NARROW, ProfileId}
 use trunk_sdr::{Running, Stream};
 
 use crate::ChannelizerStats;
+use crate::correction::Correction;
 use crate::kind::Chz;
 use crate::types::{AudioSink, Decoded, DetectedSignal, EventSender, RadioEvent};
 
@@ -117,6 +118,11 @@ pub struct Source {
     pub rate_hz: f64,
     pub device: String,
     pub channelizer: Arc<Chz>,
+    /// The software clock correction added to every channel tuned on it.
+    pub correction: Correction,
+    /// The hardware's (whole-ppm) correction, for the ppm the FLL errors
+    /// suggest.
+    pub ppm: f64,
     next_port: usize,
     stopping: Arc<AtomicBool>,
     got_samples: Arc<AtomicBool>,
@@ -193,6 +199,8 @@ impl Source {
             rate_hz,
             device,
             channelizer,
+            correction: Correction::new(0.0, false),
+            ppm: 0.0,
             next_port: 0,
             stopping,
             got_samples,

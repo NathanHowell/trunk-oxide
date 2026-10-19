@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::ops::RangeInclusive;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
@@ -142,18 +141,7 @@ pub struct CallManager {
     /// What each channel last carried, for the next call's span: a slot
     /// reused from another frequency can carry that into its next call.
     channel_last: HashMap<ChannelNum, ChannelUse>,
-    /// Per-source frequency coverage, indexed by source position.
-    source_ranges: Vec<RangeInclusive<f64>>,
-    /// Per-source configured ppm correction, indexed by source position.
-    source_ppms: Vec<f64>,
-    /// Per-source software Hz tune correction, indexed by source position. When
-    /// the adaptive loop is on, this is mutated at runtime to track clock drift.
-    source_freq_corrections_hz: Vec<f64>,
-    /// Whether the adaptive frequency-correction loop is enabled.
-    adaptive_freq_correction: bool,
-    /// Per-source EMA of FLL `freq_error` (Hz), the adaptive loop's smoothed input.
-    source_freq_error_ema: Vec<f64>,
-    /// Live per-source tune correction (Hz), so the loop is observable.
+    /// Each source's clock correction (Hz), polled from the radio.
     freq_correction_gauge: Gauge<f64>,
     calls_started: Counter<u64>,
     calls_ended: Counter<u64>,
@@ -253,9 +241,6 @@ impl CallManager {
         config: CallManagerConfig,
         bridge: Arc<EventBridge>,
         radio: Arc<Radio>,
-        source_ranges: Vec<RangeInclusive<f64>>,
-        source_ppms: Vec<f64>,
-        source_freq_corrections_hz: Vec<f64>,
         conv_metrics: Arc<Mutex<ConventionalMetricsSnapshot>>,
         clock: crate::clock::Clock,
     ) -> Self {
@@ -283,8 +268,6 @@ impl CallManager {
             }
         }
 
-        let adaptive_freq_correction = config.adaptive_freq_correction;
-        let source_count = source_ranges.len();
         let meter = opentelemetry::global::meter("trunk-oxide");
         Self {
             state: TrunkStateMachine::with_clock(config, clock),
@@ -293,11 +276,6 @@ impl CallManager {
             call_spans: HashMap::new(),
             channel_last: HashMap::new(),
             tallies: HashMap::new(),
-            source_ranges,
-            source_ppms,
-            source_freq_corrections_hz,
-            adaptive_freq_correction,
-            source_freq_error_ema: vec![0.0; source_count],
             freq_correction_gauge: meter
                 .f64_gauge("trunk.oxide.freq_correction_hz")
                 .with_description("Live per-source software tune correction (Hz)")
@@ -460,42 +438,6 @@ impl CallManager {
                 .build(),
             conv_metrics,
         }
-    }
-
-    /// Find the first source whose frequency range covers `freq_hz`.
-    fn find_source(&self, freq_hz: f64) -> Option<i32> {
-        let found = self
-            .source_ranges
-            .iter()
-            .position(|r| r.contains(&freq_hz))
-            .map(|i| i as i32);
-        if found.is_none() {
-            // No source's center±rate/2 covers this freq — it falls in a gap
-            // between dongles. Such a call gets no per-source ppm correction (and
-            // is recorded by whichever dongle trunk-recorder assigned at the
-            // edge). Surface it so coverage gaps are visible rather than silent.
-            tracing::warn!(
-                freq_mhz = freq_hz / 1e6,
-                "freq not covered by any source range (gap between dongles); no ppm correction applied"
-            );
-        }
-        found
-    }
-
-    /// Suggested per-source ppm correction that would pull the FLL frequency
-    /// error toward zero. `freq_error_hz > 0` means the signal sat above the
-    /// tuned center; empirically (confirmed against live readings on these
-    /// rtlsdr dongles) raising the ppm correction lowers a positive error, so
-    /// the suggestion adds the error-in-ppm to the configured value. Hardware
-    /// sensitivity is sub-unity and the offset drifts with temperature, so
-    /// converging on a dongle may take a step or two — treat this as a
-    /// first-order estimate, not an exact target. Returns the configured ppm
-    /// unchanged when there's no error, so a logged value drifting away from
-    /// the config is the calibration signal.
-    fn preferred_ppm(&self, freq_hz: f64, freq_error_hz: i32) -> Option<f64> {
-        let idx = usize::try_from(self.find_source(freq_hz)?).ok()?;
-        let current = *self.source_ppms.get(idx)?;
-        Some(current + f64::from(freq_error_hz) / freq_hz * 1e6)
     }
 
     /// Update a conventional channel's metrics entry by talkgroup + freq.
@@ -729,14 +671,13 @@ impl CallManager {
 
     // ── Effect executors ──
 
-    /// Open the channel the state machine gave `id`, tuned with its
-    /// source's clock correction, and tell the state machine how it went.
+    /// Open the channel the state machine gave `id`, and tell the state
+    /// machine how it went.
     fn exec_open(&mut self, id: CallId) {
-        let Some((recipe, mut call)) = self.state.opening(id) else {
+        let Some((recipe, call)) = self.state.opening(id) else {
             tracing::error!(?id, "opening a channel for nothing the state machine knows");
             return;
         };
-        call.channel.freq_hz += self.correction_hz(call.channel.freq_hz);
         let opened = recipe.open(&self.radio, &call);
         if let Err(e) = &opened {
             self.channel_open_failed.add(
@@ -751,18 +692,6 @@ impl CallManager {
         let followup = self.state.on_opened(id, opened);
         self.record_channel(id);
         self.process_effects(followup);
-    }
-
-    /// The software clock correction (Hz) of the source covering `freq_hz`:
-    /// the everyday sub-ppm knob (the integer hardware ppm handles only the
-    /// coarse part), which the adaptive loop moves. Only the tuning shifts;
-    /// the call's displayed frequency does not.
-    fn correction_hz(&self, freq_hz: f64) -> f64 {
-        self.find_source(freq_hz)
-            .and_then(|i| usize::try_from(i).ok())
-            .and_then(|i| self.source_freq_corrections_hz.get(i))
-            .copied()
-            .unwrap_or(0.0)
     }
 
     /// Records the call's channel, and what it carried last, on its span.
@@ -805,9 +734,6 @@ impl CallManager {
                 closed: self.state.clock().now(),
             },
         );
-        let pref_ppm = self
-            .preferred_ppm(view.freq().as_hz(), report.freq_error)
-            .unwrap_or(f64::NAN);
         tracing::info!(
             short_name = %view.short_name(),
             channel = %report.num,
@@ -816,7 +742,7 @@ impl CallManager {
             tdma = view.phase2_tdma(),
             slot = view.tdma_slot(),
             freq_error = format_args!("{:+.0} Hz", report.freq_error),
-            preferred_ppm = format_args!("{pref_ppm:.2}"),
+            preferred_ppm = format_args!("{:.2}", report.preferred_ppm),
             "stopping recorder"
         );
         self.state
@@ -955,7 +881,7 @@ impl CallManager {
                 });
             }
         }
-        let source = i64::from(self.find_source(final_freq.as_hz()).unwrap_or(-1));
+        let source = i64::from(last.map_or(-1, |r| r.source));
         let voice_attrs = [
             KeyValue::new("short_name", view.short_name().to_string()),
             KeyValue::new("tdma", view.phase2_tdma()),
@@ -999,50 +925,6 @@ impl CallManager {
                 KeyValue::new("source", source),
                 KeyValue::new("short_name", view.short_name().to_string()),
             ],
-        );
-        if self.adaptive_freq_correction
-            && let Ok(idx) = usize::try_from(source)
-        {
-            self.update_adaptive_correction(idx, f64::from(freq_error));
-        }
-    }
-
-    /// Nudge a source's software tune correction toward whatever zeroes the FLL
-    /// `freq_error`, tracking TCXO drift. Slow EMA + small gain + deadband so it
-    /// follows thermal/aging drift without chasing per-call noise; clamped per
-    /// step and in total. Empirically d(freq_error)/d(correction) > 0, so a
-    /// negative residual calls for a larger correction (hence `-= gain*ema`).
-    fn update_adaptive_correction(&mut self, source_idx: usize, freq_error_hz: f64) {
-        const ALPHA: f64 = 0.2; // EMA smoothing (~10-call memory)
-        const GAIN: f64 = 0.3; // fraction of the smoothed error applied per step
-        const DEADBAND_HZ: f64 = 30.0; // don't chase residuals inside the noise
-        const MAX_STEP_HZ: f64 = 50.0; // cap a single update
-        const MAX_CORRECTION_HZ: f64 = 5000.0; // sanity bound on total correction
-
-        let ema_val = {
-            let Some(ema) = self.source_freq_error_ema.get_mut(source_idx) else {
-                return;
-            };
-            *ema = ALPHA.mul_add(freq_error_hz, (1.0 - ALPHA) * *ema);
-            *ema
-        };
-        if ema_val.abs() <= DEADBAND_HZ {
-            return;
-        }
-        let new_corr = {
-            let Some(corr) = self.source_freq_corrections_hz.get_mut(source_idx) else {
-                return;
-            };
-            let step = (-GAIN * ema_val).clamp(-MAX_STEP_HZ, MAX_STEP_HZ);
-            *corr = (*corr + step).clamp(-MAX_CORRECTION_HZ, MAX_CORRECTION_HZ);
-            *corr
-        };
-        self.freq_correction_gauge.record(
-            new_corr,
-            &[KeyValue::new(
-                "source",
-                i64::try_from(source_idx).unwrap_or(-1),
-            )],
         );
     }
 
@@ -1193,7 +1075,7 @@ impl CallManager {
             .iter_calls()
             .filter(|v| !v.is_conventional() && v.state() == CallState::Recording)
             .filter_map(|v| {
-                let src = self.find_source(v.freq().as_hz())?;
+                let src = self.radio.reading(v.id())?.source;
                 worst.contains_key(&src).then_some((v.id(), src))
             })
             .collect();
@@ -1250,10 +1132,7 @@ impl CallManager {
                         &[
                             KeyValue::new("short_name", view.short_name().to_string()),
                             KeyValue::new("tdma", view.phase2_tdma()),
-                            KeyValue::new(
-                                "source",
-                                i64::from(self.find_source(view.freq().as_hz()).unwrap_or(-1)),
-                            ),
+                            KeyValue::new("source", i64::from(reading.source)),
                         ],
                     );
                 }
@@ -1274,6 +1153,10 @@ impl CallManager {
             .record(self.state.call_count() as u64, &[]);
         self.channels_held
             .record(self.state.channels_held() as u64, &[]);
+        for (source, hz) in self.radio.corrections() {
+            self.freq_correction_gauge
+                .record(hz, &[KeyValue::new("source", i64::from(source))]);
+        }
         self.channels_waiting
             .record(self.state.waiting() as u64, &[]);
         self.sync_conv_states();

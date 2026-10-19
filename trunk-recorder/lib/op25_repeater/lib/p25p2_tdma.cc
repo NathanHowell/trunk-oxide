@@ -714,6 +714,7 @@ void p25p2_tdma::handle_voice_frame(const uint8_t dibits[], int slot, int voice_
 	int rc = -1;
 	frame_type fr_type = FT_4V_0;
 
+	if (voice_tap) voice_tap(dibits, encrypted());
 	// Deinterleave and figure out frame type:
 	errs = vf.process_vcw(&errs_mp, dibits, b, u);
 	// Accumulate per-codeword errors so the frame assembler can tag a per-call

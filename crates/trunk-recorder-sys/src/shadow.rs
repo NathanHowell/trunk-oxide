@@ -18,20 +18,10 @@ const AUDIBLE_SECONDS: f64 = 0.5;
 
 impl From<ffi::TrP25Decoder> for Impl {
     fn from(d: ffi::TrP25Decoder) -> Self {
-        if d == ffi::TrP25Decoder::Op25 {
-            Self::Op25
-        } else {
-            Self::Rust
-        }
-    }
-}
-
-impl Impl {
-    #[must_use]
-    pub const fn other(self) -> Self {
-        match self {
-            Self::Rust => Self::Op25,
-            Self::Op25 => Self::Rust,
+        match d {
+            ffi::TrP25Decoder::Op25 => Self::Op25,
+            ffi::TrP25Decoder::Regen => Self::Regen,
+            _ => Self::Rust,
         }
     }
 }

@@ -28,10 +28,12 @@ class p25_recorder_decode;
 
 typedef std::shared_ptr<p25_recorder_decode> p25_recorder_decode_sptr;
 
-p25_recorder_decode_sptr make_p25_recorder_decode(const std::shared_ptr<Recorder> &recorder, const Config &config, int silence_frames, bool d_soft_vocoder);
+// audio_in: the input is decoded audio (int16, 8 kHz, tagged as op25's
+// frame assembler tags it), not symbols for op25 to frame and vocode.
+p25_recorder_decode_sptr make_p25_recorder_decode(const std::shared_ptr<Recorder> &recorder, const Config &config, int silence_frames, bool d_soft_vocoder, bool audio_in = false);
 
 class p25_recorder_decode : public gr::hier_block2 {
-  friend p25_recorder_decode_sptr make_p25_recorder_decode(const std::shared_ptr<Recorder> &recorder, const Config &config, int silence_frames, bool d_soft_vocoder);
+  friend p25_recorder_decode_sptr make_p25_recorder_decode(const std::shared_ptr<Recorder> &recorder, const Config &config, int silence_frames, bool d_soft_vocoder, bool audio_in);
 
 protected:
   virtual void initialize(int silence_frames, bool d_soft_vocoder);
@@ -53,7 +55,7 @@ protected:
   gr::blocks::plugin_wrapper::sptr plugin_sink;
 
 public:
-  p25_recorder_decode(const std::shared_ptr<Recorder> &recorder, const Config &config);
+  p25_recorder_decode(const std::shared_ptr<Recorder> &recorder, const Config &config, bool audio_in);
   void set_tdma_slot(int slot);
   std::vector<Transmission> get_transmission_list();
   void set_source(long src);
@@ -82,12 +84,16 @@ public:
   bool delay_open;
   virtual ~p25_recorder_decode();
   void plugin_callback_handler(int16_t *samples, int sampleCount);
+  // An op25 JSON message (M_P25_JSON_DATA): encryption parameters or a
+  // talker alias.
+  void handle_json(const std::string &json);
   void source_id_handler(long src_id);
   double get_output_sample_rate();
   RecorderState get_state();
   gr::op25_repeater::p25_frame_assembler::sptr get_transmission_sink();
 
 private:
+  bool d_audio_in;
   void handle_alias_message(const nlohmann::json& j);
   mutable std::mutex d_state_mutex;
   std::atomic<bool> d_shadow{false};

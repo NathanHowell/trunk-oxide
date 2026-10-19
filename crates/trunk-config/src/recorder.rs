@@ -25,22 +25,26 @@ impl DefaultMode {
     }
 }
 
-/// Who decodes P25 control channels.
+/// Who decodes P25 voice.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum P25Decoder {
-    /// trunk-p25, running on the channelizer slot.
-    #[default]
+    /// trunk-p25 all the way to audio (op25's vocoders only).
     Rust,
+    /// trunk-p25's decoding, regenerated for op25's frame assembler.
+    #[default]
+    Regen,
     /// op25's GNU Radio chain, kept for A/B replays.
     Op25,
 }
 
-/// Shadow mode: run the other P25 implementation too, for comparison.
+/// Shadow mode: run another P25 implementation too, for comparison.
 ///
-/// Per decoder, the implementation not chosen by `p25_voice_decoder` /
-/// `p25_tdma_decoder` also runs, and its output is only counted and
-/// compared. Costs about twice the decode CPU of whatever it covers.
+/// Beside `rust` or `op25` (`p25_voice_decoder` / `p25_tdma_decoder`) the
+/// regenerator runs (`regen`: against `rust`, the same decoding through
+/// op25's frame assembler); beside `regen`, op25. Its output is only
+/// counted and compared. Costs about twice the decode CPU of whatever it
+/// covers.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct P25Shadow {

@@ -341,6 +341,7 @@ impl TrunkRecorderBuilder {
             ffi::tr_config_set_soft_vocoder(ctx.pin_mut(), rec.soft_vocoder);
             let decoder = |d: trunk_config::P25Decoder| match d {
                 trunk_config::P25Decoder::Rust => ffi::TrP25Decoder::Rust,
+                trunk_config::P25Decoder::Regen => ffi::TrP25Decoder::Regen,
                 trunk_config::P25Decoder::Op25 => ffi::TrP25Decoder::Op25,
             };
             ffi::tr_config_set_p25_voice_decoder(

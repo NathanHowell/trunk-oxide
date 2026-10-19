@@ -9,6 +9,7 @@ const int DB_UNSET = 999;
 
 class EventSink;
 class symbol_regenerator_backend;
+class p25_voice_backend;
 
 struct Transmission {
   long source;
@@ -28,9 +29,17 @@ struct Transmission {
   char filename[255];
 };
 
-// Who decodes P25 voice: trunk-p25 (regenerating for op25's frame
-// assembler), or op25's GNU Radio chain.
-enum class P25DecoderImpl { Rust, Op25 };
+// Who decodes P25 voice: trunk-p25 all the way to audio (op25's vocoders
+// only), op25's GNU Radio chain, or trunk-p25 regenerating the stream for
+// op25's frame assembler.
+enum class P25DecoderImpl { Rust, Op25, Regen };
+
+// What shadows `primary` in shadow mode: the regenerator for both others
+// (against trunk-p25's assembler, the same decoding through op25's; against
+// op25, trunk-p25's decoding), and op25 for the regenerator.
+inline P25DecoderImpl p25_shadow_of(P25DecoderImpl primary) {
+  return primary == P25DecoderImpl::Regen ? P25DecoderImpl::Op25 : P25DecoderImpl::Regen;
+}
 
 // Shadow mode: the other implementation runs alongside the primary on the
 // same IQ, and its output is only reported (to the observer), never used.
@@ -70,12 +79,14 @@ struct Config {
   // When non-empty, channel conditioners and decoders write raw taps here for
   // offline baselines (see channel_control::enable_tap).
   std::string tap_dir;
-  // Set by the host when trunk-p25 decodes P25 voice: makes the backend of a
-  // recorder's regenerator (conditioned rate, recorder number). Empty =
-  // op25's demodulators throughout. The flags say which phases use it.
+  // Set by the host when trunk-p25 decodes P25 voice: make the backend of a
+  // recorder's voice decoder or regenerator (conditioned rate, recorder
+  // number). Empty = not used by any phase, as primary or shadow.
+  std::function<std::shared_ptr<p25_voice_backend>(double, int)> p25_voice_decoder;
   std::function<std::shared_ptr<symbol_regenerator_backend>(double, int)> p25_voice_regenerator;
-  bool p25_rust_phase1 = false;
-  bool p25_rust_phase2 = false;
+  // Who decodes each phase.
+  P25DecoderImpl p25_phase1 = P25DecoderImpl::Op25;
+  P25DecoderImpl p25_phase2 = P25DecoderImpl::Op25;
   P25Shadow p25_shadow;
   // Every P25 voice call, when it ends.
   std::function<void(const P25CallReport &)> p25_call_observer;

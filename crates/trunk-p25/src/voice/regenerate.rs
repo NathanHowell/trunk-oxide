@@ -16,6 +16,7 @@ use num_complex::Complex32;
 use super::layout::{IMBE_BASE, IMBE_BITS, PAYLOAD, imbe_bit, raw_bit, signalling_bit};
 use super::signalling::encode;
 use super::{Terminator, VoiceEvent, VoiceStats, decode_frame};
+use crate::assemble::CallCounter;
 use crate::control::Received;
 use crate::demod::{DemodConfig, Demodulator};
 use crate::framer::{Frame, Framer, nid_word};
@@ -108,13 +109,13 @@ pub fn regenerate(frame: &Frame, event: &VoiceEvent) -> Vec<u8> {
 /// op25's per-call "spike" count: frames whose corrected-bit count exceeds
 /// the standard deviation of the last 20 frames' counts (`p25p1_fdma.cc`).
 #[derive(Clone, Debug, Default)]
-struct SpikeDetector {
+pub(crate) struct SpikeDetector {
     history: VecDeque<u32>,
 }
 
 impl SpikeDetector {
     #[allow(clippy::cast_precision_loss)]
-    fn is_spike(&mut self, errors: u32) -> bool {
+    pub(crate) fn is_spike(&mut self, errors: u32) -> bool {
         self.history.push_front(errors);
         self.history.truncate(20);
         let n = self.history.len() as f64;
@@ -145,8 +146,7 @@ pub struct Regenerator {
     line: VecDeque<u8>,
     line_start: u64,
     stats: VoiceStats,
-    spikes: SpikeDetector,
-    call: CallCounts,
+    call: CallCounter,
 }
 
 impl Regenerator {
@@ -159,8 +159,7 @@ impl Regenerator {
             line: VecDeque::new(),
             line_start: 0,
             stats: VoiceStats::default(),
-            spikes: SpikeDetector::default(),
-            call: CallCounts::default(),
+            call: CallCounter::default(),
         }
     }
 
@@ -179,8 +178,7 @@ impl Regenerator {
         self.framer.reset();
         self.line.clear();
         self.line_start = self.framer.position();
-        self.spikes = SpikeDetector::default();
-        self.call = CallCounts::default();
+        self.call = CallCounter::default();
     }
 
     pub fn stats(&self) -> VoiceStats {
@@ -191,14 +189,8 @@ impl Regenerator {
         }
     }
 
-    pub const fn take_call_counts(&mut self) -> CallCounts {
-        std::mem::replace(
-            &mut self.call,
-            CallCounts {
-                errors: 0,
-                spikes: 0,
-            },
-        )
+    pub fn take_call_counts(&mut self) -> CallCounts {
+        self.call.take()
     }
 
     /// Demodulate `iq`; append regenerated symbols (ideal levels) to `out`
@@ -261,12 +253,7 @@ impl Regenerator {
 
     fn count(&mut self, event: &VoiceEvent) {
         self.stats.count(event);
-        if let Some(frames) = event.frames() {
-            for f in frames {
-                self.call.errors += u64::from(f.errors);
-                self.call.spikes += u64::from(self.spikes.is_spike(f.errors));
-            }
-        }
+        self.call.phase1(event);
     }
 }
 

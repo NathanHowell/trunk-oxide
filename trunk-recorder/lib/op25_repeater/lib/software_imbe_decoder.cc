@@ -30,6 +30,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <stdint.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -756,6 +757,21 @@ software_imbe_decoder::software_imbe_decoder()
    for(i=1; i < 211; i++) {
       u[i] = next_u(u[i-1]);
    }
+   // The first frames interpolate from the "old" half of these: left
+   // uninitialised, the audio depended on whatever the memory held.
+   memset(bee, 0, sizeof(bee));
+   memset(M, 0, sizeof(M));
+   memset(Mu, 0, sizeof(Mu));
+   memset(vee, 0, sizeof(vee));
+   memset(suv, 0, sizeof(suv));
+   memset(sv, 0, sizeof(sv));
+   memset(sym_b, 0, sizeof(sym_b));
+   memset(RxData, 0, sizeof(RxData));
+   w0 = 0.0;
+   Oldw0 = 0.0;
+   Luv = 0.0;
+   sym_bp = 0;
+   ErFlag = 0;
 }
 
 uint32_t

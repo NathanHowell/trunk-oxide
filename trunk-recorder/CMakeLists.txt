@@ -261,6 +261,9 @@ list(APPEND trunk_recorder_sources
   trunk-recorder/gr_blocks/wavfile_gr3.8.cc
   trunk-recorder/gr_blocks/channel_control.cc
   trunk-recorder/gr_blocks/symbol_regenerator.cc
+  trunk-recorder/gr_blocks/p25_voice_synth.cc
+  trunk-recorder/gr_blocks/p25_voice_decoder.cc
+  trunk-recorder/gr_blocks/op25_voice_reference.cc
     trunk-recorder/gr_blocks/signal_detector_cvf_impl.cc
   )
 

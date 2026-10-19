@@ -36,6 +36,7 @@
 #include "trunk-recorder/recorders/dmr_recorder.h"
 #include "trunk-recorder/source.h"
 #include "trunk-recorder/gr_blocks/symbol_regenerator.h"
+#include "trunk-recorder/gr_blocks/p25_voice_decoder.h"
 #include "trunk-recorder/systems/smartnet_parser.h"
 #include "trunk-recorder/systems/system.h"
 #include "trunk-recorder/recorders/p25_recorder.h"
@@ -357,30 +358,93 @@ private:
     rust::Box<P25RegeneratorHandle> h_;
     rust::Vec<float> out_;
 };
+
+
+class RustVoiceDecoder : public p25_voice_backend {
+public:
+    RustVoiceDecoder(double rate, int recorder, bool soft_vocoder) : h_(p25_voice_new(rate, recorder, soft_vocoder)) {}
+
+    void process(const gr_complex *in, size_t n, std::vector<int16_t> &audio, std::vector<Tag> &tags) override {
+        audio_.clear();
+        tags_.clear();
+        h_->process(rust::Slice<const float>(reinterpret_cast<const float *>(in), 2 * n), audio_, tags_);
+        audio.insert(audio.end(), audio_.begin(), audio_.end());
+        for (const auto &t : tags_) {
+            tags.push_back({t.offset, static_cast<Tag::Kind>(static_cast<int>(t.kind)), static_cast<long>(t.value), std::string(t.json)});
+        }
+    }
+    void start_call(bool qpsk, bool tdma, const std::string &xor_mask, const std::string &system, bool primary, int slot) override {
+        h_->start_call(qpsk, tdma,
+                       rust::Slice<const uint8_t>(reinterpret_cast<const uint8_t *>(xor_mask.data()), xor_mask.size()),
+                       rust::Str(system), primary, slot);
+    }
+    bool take_crypto(unsigned &algid, unsigned &keyid) override {
+        const uint32_t c = h_->take_crypto();
+        if (c == 0) return false;
+        algid = (c >> 16) & 0xff;
+        keyid = c & 0xffff;
+        return true;
+    }
+    CallCounts take_call_counts() override {
+        const TrCallCounts c = h_->take_call_counts();
+        return {static_cast<long>(c.errors), static_cast<long>(c.spikes), static_cast<int>(c.algid)};
+    }
+
+private:
+    rust::Box<P25VoiceHandle> h_;
+    rust::Vec<int16_t> audio_;
+    rust::Vec<TrVoiceTag> tags_;
+};
 } // namespace
 
-// Recorders get a trunk-p25 regenerator when it decodes some phase, as
-// primary or as shadow.
+// Recorders get trunk-p25's voice decoder and its regenerator for the phases
+// that use them, as primary or as shadow.
 static void update_voice_regenerator(Config &config) {
-    auto &f = config.p25_voice_regenerator;
-    const bool shadow = config.p25_shadow.phase1 || config.p25_shadow.phase2;
-    if (config.p25_rust_phase1 || config.p25_rust_phase2 || shadow) {
-        f = [](double rate, int recorder) -> std::shared_ptr<symbol_regenerator_backend> {
+    bool decoder = false, regenerator = false;
+    for (int phase = 1; phase <= 2; phase++) {
+        const P25DecoderImpl primary = phase == 1 ? config.p25_phase1 : config.p25_phase2;
+        const bool shadow = phase == 1 ? config.p25_shadow.phase1 : config.p25_shadow.phase2;
+        for (P25DecoderImpl d : {primary, shadow ? p25_shadow_of(primary) : primary}) {
+            decoder |= d == P25DecoderImpl::Rust;
+            regenerator |= d == P25DecoderImpl::Regen;
+        }
+    }
+    if (regenerator) {
+        config.p25_voice_regenerator = [](double rate, int recorder) -> std::shared_ptr<symbol_regenerator_backend> {
             return std::make_shared<RustVoiceRegenerator>(rate, recorder);
         };
     } else {
-        f = nullptr;
+        config.p25_voice_regenerator = nullptr;
+    }
+    if (decoder) {
+        const bool soft = config.soft_vocoder;
+        config.p25_voice_decoder = [soft](double rate, int recorder) -> std::shared_ptr<p25_voice_backend> {
+            return std::make_shared<RustVoiceDecoder>(rate, recorder, soft);
+        };
+    } else {
+        config.p25_voice_decoder = nullptr;
     }
 }
 
 static TrP25Decoder to_tr(P25DecoderImpl d) {
-    return d == P25DecoderImpl::Rust ? TrP25Decoder::Rust : TrP25Decoder::Op25;
+    switch (d) {
+    case P25DecoderImpl::Rust: return TrP25Decoder::Rust;
+    case P25DecoderImpl::Regen: return TrP25Decoder::Regen;
+    case P25DecoderImpl::Op25: break;
+    }
+    return TrP25Decoder::Op25;
+}
+
+static P25DecoderImpl from_tr(TrP25Decoder d) {
+    if (d == TrP25Decoder::Rust) return P25DecoderImpl::Rust;
+    if (d == TrP25Decoder::Regen) return P25DecoderImpl::Regen;
+    return P25DecoderImpl::Op25;
 }
 
 void tr_config_set_p25_voice_decoder(TrContext &ctx, TrP25Decoder phase1, TrP25Decoder phase2) {
     auto &config = ctx.impl->trunk_ctx.config;
-    config.p25_rust_phase1 = phase1 == TrP25Decoder::Rust;
-    config.p25_rust_phase2 = phase2 == TrP25Decoder::Rust;
+    config.p25_phase1 = from_tr(phase1);
+    config.p25_phase2 = from_tr(phase2);
     update_voice_regenerator(config);
 }
 
@@ -423,6 +487,63 @@ void tr_config_set_debug_recorder(TrContext &ctx, bool enabled, rust::Str addres
     ctx.impl->trunk_ctx.config.debug_recorder = enabled;
     ctx.impl->trunk_ctx.config.debug_recorder_address = std::string(address.data(), address.size());
     ctx.impl->trunk_ctx.config.debug_recorder_port = port;
+}
+
+// ── P25 vocoders and op25's voice frame assembler ──
+
+std::unique_ptr<P25VoiceSynth> tr_p25_voice_synth_new(bool soft_vocoder) {
+    return std::make_unique<P25VoiceSynth>(soft_vocoder);
+}
+
+void tr_p25_voice_synth_phase1(P25VoiceSynth &s, rust::Slice<const uint32_t> u, uint32_t e0, uint32_t et, rust::Slice<int16_t> out) {
+    if (u.size() < 8 || out.size() < static_cast<size_t>(p25_voice_synth::samples_per_frame)) return;
+    s.synth.phase1(u.data(), e0, et, out.data());
+}
+
+bool tr_p25_voice_synth_phase2(P25VoiceSynth &s, rust::Slice<const uint8_t> dibits, bool encrypted, rust::Slice<int16_t> out) {
+    if (dibits.size() < 36 || out.size() < static_cast<size_t>(p25_voice_synth::samples_per_frame)) return false;
+    return s.synth.phase2(dibits.data(), encrypted, out.data());
+}
+
+std::unique_ptr<Op25VoiceReference> tr_op25_voice_reference_new(bool phase2, int32_t slot, rust::Slice<const uint8_t> xor_mask, bool soft_vocoder) {
+    std::string mask(reinterpret_cast<const char *>(xor_mask.data()), xor_mask.size());
+    return std::make_unique<Op25VoiceReference>(phase2, slot, mask, soft_vocoder);
+}
+
+void tr_op25_voice_reference_push(Op25VoiceReference &r, rust::Slice<const uint8_t> dibits) {
+    r.r.push(dibits.data(), dibits.size());
+}
+
+rust::Vec<int16_t> tr_op25_voice_reference_pcm(const Op25VoiceReference &r) {
+    rust::Vec<int16_t> out;
+    out.reserve(r.r.pcm().size());
+    for (int16_t s : r.r.pcm()) out.push_back(s);
+    return out;
+}
+
+rust::Vec<int64_t> tr_op25_voice_reference_sources(const Op25VoiceReference &r) {
+    rust::Vec<int64_t> out;
+    for (long v : r.r.sources()) out.push_back(v);
+    return out;
+}
+
+rust::Vec<int64_t> tr_op25_voice_reference_terminators(const Op25VoiceReference &r) {
+    rust::Vec<int64_t> out;
+    for (long v : r.r.terminators()) out.push_back(v);
+    return out;
+}
+
+rust::Vec<uint32_t> tr_op25_voice_reference_inputs(const Op25VoiceReference &r) {
+    rust::Vec<uint32_t> out;
+    out.reserve(r.r.voice_inputs().size());
+    for (uint32_t v : r.r.voice_inputs()) out.push_back(v);
+    return out;
+}
+
+rust::Vec<rust::String> tr_op25_voice_reference_json(const Op25VoiceReference &r) {
+    rust::Vec<rust::String> out;
+    for (const auto &j : r.r.json()) out.push_back(rust::String(j));
+    return out;
 }
 
 // ── Shared channelizer backend (DSP in Rust: trunk-channelizer) ──

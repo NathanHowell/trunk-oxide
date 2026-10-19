@@ -124,7 +124,8 @@ struct VoiceMetrics {
     imbe_bit_errors: Counter<u64>,
     words: Counter<u64>,
     symbol_snr_db: Gauge<f64>,
-    prev: HashMap<i32, VoiceStats>,
+    /// By recorder and implementation (a recorder can run two).
+    prev: HashMap<(i32, Impl), VoiceStats>,
     tdma: TdmaMetrics,
 }
 
@@ -137,7 +138,7 @@ struct TdmaMetrics {
     encryption_sync: Counter<u64>,
     sync: Counter<u64>,
     symbol_snr_db: Gauge<f64>,
-    prev: HashMap<i32, TdmaStats>,
+    prev: HashMap<(i32, Impl), TdmaStats>,
 }
 
 impl TdmaMetrics {
@@ -176,8 +177,8 @@ impl TdmaMetrics {
         }
     }
 
-    fn export(&mut self, recorder: i32, base: &[KeyValue], now: &TdmaStats) {
-        let was = self.prev.insert(recorder, *now).unwrap_or_default();
+    fn export(&mut self, key: (i32, Impl), base: &[KeyValue], now: &TdmaStats) {
+        let was = self.prev.insert(key, *now).unwrap_or_default();
         let d = |a: u64, b: u64| a.saturating_sub(b);
         let mac_total = d(now.mac + now.mac_failed, was.mac + was.mac_failed);
         for (kind, n) in [
@@ -268,10 +269,11 @@ impl VoiceMetrics {
         let base = [
             KeyValue::new("recorder", i64::from(r.recorder)),
             KeyValue::new("system", r.system.clone()),
-            KeyValue::new("impl", Impl::Rust.label()),
+            KeyValue::new("impl", r.implementation.label()),
             KeyValue::new("role", r.role.label()),
         ];
-        let was = self.prev.insert(r.recorder, r.stats).unwrap_or_default();
+        let key = (r.recorder, r.implementation);
+        let was = self.prev.insert(key, r.stats).unwrap_or_default();
         let now = &r.stats;
         let d = |a: u64, b: u64| a.saturating_sub(b);
         for (kind, n) in [
@@ -315,7 +317,7 @@ impl VoiceMetrics {
             self.symbol_snr_db
                 .record(f64::from(now.demod.symbol_snr_db()), &base);
         }
-        self.tdma.export(r.recorder, &base, &r.tdma);
+        self.tdma.export(key, &base, &r.tdma);
     }
 }
 

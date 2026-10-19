@@ -29,6 +29,7 @@ use super::mac::{self, MacChannel};
 use super::{
     Burst, BurstContent, BurstFramer, BurstType, Scrambler, TdmaDecoder, TdmaEvent, TdmaStats,
 };
+use crate::assemble::CallCounter;
 use crate::control::Received;
 use crate::demod::{DemodConfig, Demodulator};
 use crate::symbols::{LEVELS, slice};
@@ -50,6 +51,29 @@ struct Voice4 {
     slot: usize,
 }
 
+/// Whether a burst carried something verifiable: a MAC PDU whose CRC
+/// checked, a decoded encryption sync, mostly trusted voice frames, or a
+/// near-clean ISCH.
+pub fn verified(event: &TdmaEvent) -> bool {
+    let frames = event.frames();
+    let trusted = frames.iter().filter(|f| f.trusted()).count();
+    let content = match &event.content {
+        BurstContent::Mac(pdu) => pdu.is_some(),
+        BurstContent::Voice2 { encryption, .. } => {
+            encryption.is_some() || 2 * trusted >= frames.len()
+        }
+        BurstContent::Voice4 { .. } => 2 * trusted >= frames.len(),
+        BurstContent::Unread => false,
+    };
+    content || event.isch.errors <= CLEAN_ISCH_ERRORS
+}
+
+/// Whether [`TdmaRegenerator`] re-sends a burst's DUID and content (else
+/// only its ISCH): verified, or its DUID decision sure.
+pub fn rewritten(event: &TdmaEvent) -> bool {
+    verified(event) || event.duid.margin >= DUID_MARGIN
+}
+
 pub struct TdmaRegenerator {
     demod: Demodulator,
     framer: BurstFramer,
@@ -62,7 +86,7 @@ pub struct TdmaRegenerator {
     line_start: u64,
     /// Per logical channel, by voice position (slot / 2).
     voice4: [[Option<Voice4>; 5]; 2],
-    call: CallCounts,
+    call: CallCounter,
     /// Bursts whose ISCH/DUID were rewritten.
     pub rewritten: u64,
 }
@@ -79,7 +103,7 @@ impl TdmaRegenerator {
             line: VecDeque::new(),
             line_start: 0,
             voice4: [[None; 5]; 2],
-            call: CallCounts::default(),
+            call: CallCounter::default(),
             rewritten: 0,
         }
     }
@@ -97,7 +121,7 @@ impl TdmaRegenerator {
         self.decoder.set_scrambler(scrambler.clone());
         self.scrambler = scrambler;
         self.voice4 = [[None; 5]; 2];
-        self.call = CallCounts::default();
+        self.call = CallCounter::default();
     }
 
     pub fn stats(&self) -> TdmaStats {
@@ -110,14 +134,8 @@ impl TdmaRegenerator {
 
     /// Bits corrected and untrusted frames ("spikes") since the last call, in
     /// bursts that carried a signal.
-    pub const fn take_call_counts(&mut self) -> CallCounts {
-        std::mem::replace(
-            &mut self.call,
-            CallCounts {
-                errors: 0,
-                spikes: 0,
-            },
-        )
+    pub fn take_call_counts(&mut self) -> CallCounts {
+        self.call.take()
     }
 
     pub fn process(
@@ -189,24 +207,8 @@ impl TdmaRegenerator {
     }
 
     fn rewrite(&mut self, burst: &Burst, event: &TdmaEvent) {
-        let frames = event.frames();
-        let trusted = frames.iter().filter(|f| f.trusted()).count();
-        let verified = match &event.content {
-            BurstContent::Mac(pdu) => pdu.is_some(),
-            BurstContent::Voice2 { encryption, .. } => {
-                encryption.is_some() || 2 * trusted >= frames.len()
-            }
-            BurstContent::Voice4 { .. } => 2 * trusted >= frames.len(),
-            BurstContent::Unread => false,
-        } || event.isch.errors <= CLEAN_ISCH_ERRORS;
-        // The call's counts cover bursts with a signal: noise between
-        // transmissions is not decode error.
-        if verified {
-            for f in frames {
-                self.call.errors += u64::from(f.errors);
-                self.call.spikes += u64::from(!f.trusted());
-            }
-        }
+        // The call's counts cover bursts with a signal.
+        self.call.phase2(event);
         // The ISCH is framing, which the flywheel knows whatever the burst
         // holds; it is rewritten throughout lock so op25 keeps sync too.
         let cw = event.isch.isch.codeword();
@@ -214,7 +216,7 @@ impl TdmaRegenerator {
             #[allow(clippy::cast_possible_truncation)]
             self.put(burst.start + i, ((cw >> (38 - 2 * i)) & 3) as u8);
         }
-        if !(verified || event.duid.margin >= DUID_MARGIN) {
+        if !rewritten(event) {
             return;
         }
         self.rewritten += 1;

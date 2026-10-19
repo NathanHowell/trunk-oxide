@@ -68,9 +68,18 @@ void p25_recorder_impl::build_graph() {
     // With trunk-p25 primary, its ESS (confirmed on the call's own slot) is
     // what marks a call encrypted; op25's is only compared.
     rust_regen->set_crypto_callback([this](unsigned algid, unsigned keyid) {
-      if (rust_crypto) notify_crypto(algid, keyid);
+      if (regen_crypto) notify_crypto(algid, keyid);
     });
     rust_p25_decode = make_p25_recorder_decode(self_recorder, config, silence_frames, d_soft_vocoder);
+  }
+  if (config.p25_voice_decoder) {
+    const double rate = channel_control::phase1_samples_per_symbol * channel_control::phase1_symbol_rate;
+    rust_voice = p25_voice_decoder::make(config.p25_voice_decoder(rate, rec_num), rate);
+    rust_voice->set_crypto_callback([this](unsigned algid, unsigned keyid) {
+      if (voice_crypto) notify_crypto(algid, keyid);
+    });
+    rust_voice_decode = make_p25_recorder_decode(self_recorder, config, silence_frames, d_soft_vocoder, true);
+    rust_voice->set_json_callback([this](const std::string &json) { rust_voice_decode->handle_json(json); });
   }
 
   connect(self(), 0, modulation_selector, 0);
@@ -82,6 +91,10 @@ void p25_recorder_impl::build_graph() {
   if (rust_regen) {
     connect(self(), 0, rust_regen, 0);
     connect(rust_regen, 0, rust_p25_decode, 0);
+  }
+  if (rust_voice) {
+    connect(self(), 0, rust_voice, 0);
+    connect(rust_voice, 0, rust_voice_decode, 0);
   }
 
   if (prefilter->tap_enabled()) {
@@ -100,15 +113,31 @@ void p25_recorder_impl::build_graph() {
   }
 }
 
-p25_recorder_impl::Branch p25_recorder_impl::branch_for(bool phase2) const {
-  if (rust_regen && (phase2 ? config.p25_rust_phase2 : config.p25_rust_phase1)) return Branch::Rust;
+p25_recorder_impl::Branch p25_recorder_impl::branch_of(P25DecoderImpl impl) const {
+  if (impl == P25DecoderImpl::Rust && rust_voice) return Branch::Rust;
+  if (impl == P25DecoderImpl::Regen && rust_regen) return Branch::Regen;
   return qpsk_mod ? Branch::Qpsk : Branch::Fsk4;
 }
 
+P25DecoderImpl p25_recorder_impl::impl_of(Branch b) {
+  switch (b) {
+  case Branch::Rust: return P25DecoderImpl::Rust;
+  case Branch::Regen: return P25DecoderImpl::Regen;
+  case Branch::Fsk4:
+  case Branch::Qpsk: break;
+  }
+  return P25DecoderImpl::Op25;
+}
+
+p25_recorder_impl::Branch p25_recorder_impl::branch_for(bool phase2) const {
+  return branch_of(phase2 ? config.p25_phase2 : config.p25_phase1);
+}
+
 std::optional<p25_recorder_impl::Branch> p25_recorder_impl::shadow_for(bool phase2) const {
-  if (!(phase2 ? config.p25_shadow.phase2 : config.p25_shadow.phase1) || !rust_regen) return std::nullopt;
-  if (branch_for(phase2) == Branch::Rust) return qpsk_mod ? Branch::Qpsk : Branch::Fsk4;
-  return Branch::Rust;
+  if (!(phase2 ? config.p25_shadow.phase2 : config.p25_shadow.phase1)) return std::nullopt;
+  const Branch b = branch_of(p25_shadow_of(impl_of(branch_for(phase2))));
+  if (b == branch_for(phase2)) return std::nullopt; // what it needs is not built
+  return b;
 }
 
 const p25_recorder_decode_sptr &p25_recorder_impl::decode() const {
@@ -117,16 +146,18 @@ const p25_recorder_decode_sptr &p25_recorder_impl::decode() const {
 
 const p25_recorder_decode_sptr &p25_recorder_impl::decode_of(Branch b) const {
   switch (b) {
-  case Branch::Rust: return rust_p25_decode;
+  case Branch::Rust: return rust_voice_decode;
+  case Branch::Regen: return rust_p25_decode;
   case Branch::Fsk4: return fsk4_p25_decode;
   case Branch::Qpsk: break;
   }
   return qpsk_p25_decode;
 }
 
-const gr::blocks::file_sink::sptr &p25_recorder_impl::symbol_tap() const {
+gr::blocks::file_sink::sptr p25_recorder_impl::symbol_tap() const {
   switch (active) {
-  case Branch::Rust: return rust_symbol_tap;
+  case Branch::Rust: return nullptr;
+  case Branch::Regen: return rust_symbol_tap;
   case Branch::Fsk4: return fsk4_symbol_tap;
   case Branch::Qpsk: break;
   }
@@ -141,9 +172,9 @@ void p25_recorder_impl::tap_begin(const RecorderConfig &rc) {
                                 ",\"center\":" + std::to_string(static_cast<long long>(center_freq)) +
                                 ",\"tdma\":" + (rc.phase2_tdma ? "true" : "false") + ",\"slot\":" + std::to_string(rc.tdma_slot) +
                                 ",\"call_id\":" + std::to_string(rc.rust_call_id) + ",\"recorder\":" + std::to_string(rec_num) +
-                                ",\"decoder\":\"" + (active == Branch::Rust ? "rust" : "op25") + "\"" +
-                                ",\"symbols_file\":\"" + base + ".symbols.f32\"");
-  symbol_tap()->open((base + ".symbols.f32").c_str());
+                                ",\"decoder\":\"" + (active == Branch::Rust ? "rust" : active == Branch::Regen ? "regen" : "op25") + "\"" +
+                                (symbol_tap() ? ",\"symbols_file\":\"" + base + ".symbols.f32\"" : std::string()));
+  if (auto tap = symbol_tap()) tap->open((base + ".symbols.f32").c_str());
 }
 
 void p25_recorder_impl::tap_end() {
@@ -168,6 +199,7 @@ void p25_recorder_impl::switch_tdma(bool phase2) {
     qpsk_demod->switch_tdma(phase2);
   }
   if (rust_p25_decode) rust_p25_decode->switch_tdma(phase2);
+  if (rust_voice_decode) rust_voice_decode->switch_tdma(phase2);
 }
 
 void p25_recorder_impl::set_tdma(bool phase2) {
@@ -216,6 +248,7 @@ void p25_recorder_impl::clear() {
   fsk4_demod->reset();
   fsk4_p25_decode->reset();
   if (rust_p25_decode) rust_p25_decode->reset();
+  if (rust_voice_decode) rust_voice_decode->reset();
 }
 
 void p25_recorder_impl::autotune() {
@@ -284,6 +317,7 @@ void p25_recorder_impl::set_system(const std::shared_ptr<System> &sys) {
   qpsk_p25_decode->set_system(sys);
   fsk4_p25_decode->set_system(sys);
   if (rust_p25_decode) rust_p25_decode->set_system(sys);
+  if (rust_voice_decode) rust_voice_decode->set_system(sys);
 }
 
 std::vector<Transmission> p25_recorder_impl::get_transmission_list() {
@@ -292,18 +326,19 @@ std::vector<Transmission> p25_recorder_impl::get_transmission_list() {
 
 std::vector<Transmission> p25_recorder_impl::transmissions_of(Branch b) const {
   std::vector<Transmission> list = decode_of(b)->get_transmission_list();
-  if (b != Branch::Rust) return list;
-  // The frame assembler only saw regenerated (error-free) frames; the call's
-  // decode errors are trunk-p25's, shared out by audio length.
-  const auto counts = rust_counts;
+  if (b != Branch::Rust && b != Branch::Regen) return list;
+  // The decode errors are trunk-p25's (the regenerator's frame assembler
+  // only saw error-free frames), shared out by audio length.
+  const long total_errors = b == Branch::Rust ? voice_counts.errors : rust_counts.errors;
+  const long total_spikes = b == Branch::Rust ? voice_counts.spikes : rust_counts.spikes;
   long total_samples = 0;
   for (const auto &t : list) total_samples += t.sample_count;
-  long errors = counts.errors, spikes = counts.spikes;
+  long errors = total_errors, spikes = total_spikes;
   for (size_t i = 0; i < list.size(); i++) {
     const bool last = i + 1 == list.size();
     const double share = total_samples > 0 ? static_cast<double>(list[i].sample_count) / total_samples : 1.0 / list.size();
-    list[i].error_count = last ? errors : static_cast<long>(counts.errors * share);
-    list[i].spike_count = last ? spikes : static_cast<long>(counts.spikes * share);
+    list[i].error_count = last ? errors : static_cast<long>(total_errors * share);
+    list[i].spike_count = last ? spikes : static_cast<long>(total_spikes * share);
     errors -= list[i].error_count;
     spikes -= list[i].spike_count;
   }
@@ -319,7 +354,7 @@ void p25_recorder_impl::report_call() {
   if (!config.p25_call_observer) return;
   P25CallReport r{short_name, rec_num, talkgroup, chan_freq, call_phase2, {}};
   auto account = [this](Branch b, bool primary) {
-    P25CallAccount a{b == Branch::Rust ? P25DecoderImpl::Rust : P25DecoderImpl::Op25, primary, 0.0, 0, 0, 0, {}, 0x80};
+    P25CallAccount a{impl_of(b), primary, 0.0, 0, 0, 0, {}, 0x80};
     for (const auto &t : transmissions_of(b)) {
       a.audio_seconds += static_cast<double>(t.sample_count) / 8000.0;
       a.transmissions++;
@@ -327,7 +362,7 @@ void p25_recorder_impl::report_call() {
       a.spikes += t.spike_count;
     }
     a.sources = decode_of(b)->call_sources();
-    a.algid = b == Branch::Rust ? rust_counts.algid : decode_of(b)->call_algid();
+    a.algid = b == Branch::Rust ? voice_counts.algid : b == Branch::Regen ? rust_counts.algid : decode_of(b)->call_algid();
     return a;
   };
   r.accounts.push_back(account(active, true));
@@ -338,7 +373,8 @@ void p25_recorder_impl::report_call() {
 void p25_recorder_impl::stop() {
   if (state == REC_ACTIVE) {
     state = REC_INACTIVE;
-    rust_crypto = false;
+    regen_crypto = false;
+    voice_crypto = false;
     set_enabled(false);
     tap_end();
 
@@ -347,7 +383,11 @@ void p25_recorder_impl::stop() {
     if (shadow) decode_of(*shadow)->stop();
     if (rust_regen) {
       rust_regen->set_enabled(false);
-      if (active == Branch::Rust || shadow == Branch::Rust) rust_counts = rust_regen->take_call_counts();
+      if (active == Branch::Regen || shadow == Branch::Regen) rust_counts = rust_regen->take_call_counts();
+    }
+    if (rust_voice) {
+      rust_voice->set_enabled(false);
+      if (active == Branch::Rust || shadow == Branch::Rust) voice_counts = rust_voice->take_call_counts();
     }
     disable_op25_chains();
     report_call();
@@ -372,6 +412,7 @@ bool p25_recorder_impl::start(const RecorderConfig &config) {
     shadow = shadow_for(config.phase2_tdma);
     call_phase2 = config.phase2_tdma;
     rust_counts = {};
+    voice_counts = {};
     set_tdma(config.phase2_tdma);
     if (config.phase2_tdma) {
       if (!qpsk_mod) {
@@ -403,19 +444,30 @@ bool p25_recorder_impl::start(const RecorderConfig &config) {
     prefilter->tune_offset(offset_amount);
     tap_begin(config);
 
-    if (active == Branch::Rust || shadow == Branch::Rust) {
-      rust_regen->start_call(qpsk_mod, config.phase2_tdma, config.xor_mask, config.short_name, active == Branch::Rust, config.phase2_tdma ? config.tdma_slot : 0);
+    const int slot = config.phase2_tdma ? config.tdma_slot : 0;
+    if (active == Branch::Regen || shadow == Branch::Regen) {
+      rust_regen->start_call(qpsk_mod, config.phase2_tdma, config.xor_mask, config.short_name, active == Branch::Regen, slot);
       rust_regen->take_call_counts(); // anything before this call is not its
       rust_regen->set_enabled(true);
     }
+    if (active == Branch::Rust || shadow == Branch::Rust) {
+      rust_voice->start_call(qpsk_mod, config.phase2_tdma, config.xor_mask, config.short_name, active == Branch::Rust, slot);
+      rust_voice->take_call_counts();
+      rust_voice->set_enabled(true);
+    }
     // The selector feeds whichever op25 chain runs, primary or shadow.
-    const Branch op25 = active != Branch::Rust ? active : shadow.value_or(Branch::Rust);
-    if (op25 != Branch::Rust) {
-      modulation_selector->set_output_index(static_cast<int>(op25)); // enables that port only
+    const auto is_op25 = [](Branch b) { return b == Branch::Fsk4 || b == Branch::Qpsk; };
+    if (is_op25(active)) {
+      modulation_selector->set_output_index(static_cast<int>(active)); // enables that port only
+    } else if (shadow && is_op25(*shadow)) {
+      modulation_selector->set_output_index(static_cast<int>(*shadow));
     }
     decode()->set_shadow(false);
-    decode()->set_forward_crypto(active != Branch::Rust);
-    rust_crypto = active == Branch::Rust;
+    // trunk-p25 confirms encryption on the call's own slot; op25's ESS
+    // reports are then only recorded.
+    decode()->set_forward_crypto(is_op25(active));
+    regen_crypto = active == Branch::Regen;
+    voice_crypto = active == Branch::Rust;
     decode()->start(config);
     if (shadow) {
       decode_of(*shadow)->set_shadow(true);

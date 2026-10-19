@@ -57,6 +57,7 @@
 class Source;
 class p25_recorder;
 
+#include "../gr_blocks/p25_voice_decoder.h"
 #include "../gr_blocks/symbol_regenerator.h"
 
 #include "../source.h"
@@ -112,23 +113,33 @@ protected:
   p25_recorder_decode_sptr fsk4_p25_decode;
   p25_recorder_qpsk_demod_sptr qpsk_demod;
   p25_recorder_decode_sptr qpsk_p25_decode;
-  // trunk-p25 when Config::p25_voice_regenerator is set: regenerated symbols
-  // into a third decode chain. Fed straight from the port (not through the
-  // selector) so it can run beside an op25 chain in shadow mode.
+  // trunk-p25's regenerator when Config::p25_voice_regenerator is set:
+  // regenerated symbols into a third decode chain. Fed straight from the
+  // port (not through the selector) so it can run beside another chain in
+  // shadow mode.
   p25_regenerator::sptr rust_regen;
   p25_recorder_decode_sptr rust_p25_decode;
+  // trunk-p25 to audio when Config::p25_voice_decoder is set, into a fourth
+  // chain that only records (and reports) the audio.
+  p25_voice_decoder::sptr rust_voice;
+  p25_recorder_decode_sptr rust_voice_decode;
   channel_control::sptr prefilter;
   // Which chain the call in progress uses; the selector feeds op25's.
-  enum class Branch { Fsk4 = 0, Qpsk = 1, Rust = 2 };
+  enum class Branch { Fsk4 = 0, Qpsk = 1, Regen = 2, Rust = 3 };
   Branch active = Branch::Qpsk;
-  // trunk-p25 is primary on the call in progress: its ESS marks encryption.
-  std::atomic<bool> rust_crypto{false};
+  // trunk-p25 (regenerator or decoder) is primary on the call in progress:
+  // its ESS marks encryption.
+  std::atomic<bool> regen_crypto{false};
+  std::atomic<bool> voice_crypto{false};
   // Shadow mode: the other implementation's chain, decoding the same call
   // with its audio discarded, reported to Config::p25_call_observer.
   std::optional<Branch> shadow;
   bool call_phase2 = false;
   // trunk-p25's counts for the call just stopped (taken once, at stop()).
   symbol_regenerator_backend::CallCounts rust_counts;
+  p25_voice_backend::CallCounts voice_counts;
+  Branch branch_of(P25DecoderImpl impl) const;
+  static P25DecoderImpl impl_of(Branch b);
   Branch branch_for(bool phase2) const;
   std::optional<Branch> shadow_for(bool phase2) const;
   const p25_recorder_decode_sptr &decode() const;
@@ -140,7 +151,8 @@ protected:
   gr::blocks::file_sink::sptr qpsk_symbol_tap;
   gr::blocks::file_sink::sptr fsk4_symbol_tap;
   gr::blocks::file_sink::sptr rust_symbol_tap;
-  const gr::blocks::file_sink::sptr &symbol_tap() const;
+  // The active chain's symbol tap (none for trunk-p25 to audio).
+  gr::blocks::file_sink::sptr symbol_tap() const;
   void tap_begin(const RecorderConfig &config);
   void tap_end();
 

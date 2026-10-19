@@ -8,6 +8,8 @@
 #include "trunk-recorder/call.h"
 #include "trunk-recorder/recorders/recorder.h"
 #include "trunk-recorder/systems/parser.h"
+#include "trunk-recorder/gr_blocks/op25_voice_reference.h"
+#include "trunk-recorder/gr_blocks/p25_voice_synth.h"
 
 #include <memory>
 
@@ -91,6 +93,28 @@ void tr_config_set_p25_voice_decoder(TrContext &ctx, TrP25Decoder phase1, TrP25D
 void tr_config_set_p25_shadow(TrContext &ctx, bool phase1, bool phase2);
 void tr_config_set_soft_vocoder(TrContext &ctx, bool enabled);
 void tr_config_set_debug_recorder(TrContext &ctx, bool enabled, rust::Str address, int32_t port);
+
+// ── P25 vocoders (op25's), one frame at a time ──
+struct P25VoiceSynth {
+  explicit P25VoiceSynth(bool soft) : synth(soft) {}
+  p25_voice_synth synth;
+};
+std::unique_ptr<P25VoiceSynth> tr_p25_voice_synth_new(bool soft_vocoder);
+void tr_p25_voice_synth_phase1(P25VoiceSynth &s, rust::Slice<const uint32_t> u, uint32_t e0, uint32_t et, rust::Slice<int16_t> out);
+bool tr_p25_voice_synth_phase2(P25VoiceSynth &s, rust::Slice<const uint8_t> dibits, bool encrypted, rust::Slice<int16_t> out);
+
+// op25's voice frame assembler, as the reference trunk-p25's is checked against.
+struct Op25VoiceReference {
+  Op25VoiceReference(bool phase2, int slot, const std::string &mask, bool soft) : r(phase2, slot, mask, soft) {}
+  op25_voice_reference r;
+};
+std::unique_ptr<Op25VoiceReference> tr_op25_voice_reference_new(bool phase2, int32_t slot, rust::Slice<const uint8_t> xor_mask, bool soft_vocoder);
+void tr_op25_voice_reference_push(Op25VoiceReference &r, rust::Slice<const uint8_t> dibits);
+rust::Vec<int16_t> tr_op25_voice_reference_pcm(const Op25VoiceReference &r);
+rust::Vec<int64_t> tr_op25_voice_reference_sources(const Op25VoiceReference &r);
+rust::Vec<int64_t> tr_op25_voice_reference_terminators(const Op25VoiceReference &r);
+rust::Vec<rust::String> tr_op25_voice_reference_json(const Op25VoiceReference &r);
+rust::Vec<uint32_t> tr_op25_voice_reference_inputs(const Op25VoiceReference &r);
 
 // ── Bulk source/system builder functions ──
 struct TrSourceConfig;

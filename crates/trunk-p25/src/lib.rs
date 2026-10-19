@@ -25,6 +25,7 @@
 //!
 //! [`testgen`] builds modulated test signals for the unit tests and benches.
 
+pub mod assemble;
 pub mod bch;
 pub mod control;
 pub mod crc;

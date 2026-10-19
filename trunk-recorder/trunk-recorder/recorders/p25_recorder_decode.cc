@@ -9,18 +9,19 @@
 #include <chrono>
 #include <gnuradio/msg_queue.h>
 
-p25_recorder_decode_sptr make_p25_recorder_decode(const std::shared_ptr<Recorder> &recorder, const Config &config, int silence_frames, bool d_soft_vocoder) {
-  auto decoder = new p25_recorder_decode(recorder, config);
+p25_recorder_decode_sptr make_p25_recorder_decode(const std::shared_ptr<Recorder> &recorder, const Config &config, int silence_frames, bool d_soft_vocoder, bool audio_in) {
+  auto decoder = new p25_recorder_decode(recorder, config, audio_in);
   decoder->initialize(silence_frames, d_soft_vocoder);
   return gnuradio::get_initial_sptr(decoder);
 }
 
-p25_recorder_decode::p25_recorder_decode(const std::shared_ptr<Recorder> &recorder, const Config &config)
+p25_recorder_decode::p25_recorder_decode(const std::shared_ptr<Recorder> &recorder, const Config &config, bool audio_in)
     : gr::hier_block2("p25_recorder_decode",
-                      gr::io_signature::make(1, 1, sizeof(float)),
+                      gr::io_signature::make(1, 1, audio_in ? sizeof(int16_t) : sizeof(float)),
                       gr::io_signature::make(0, 0, sizeof(float))),
       d_config(config),
-      d_source_id(-1) {
+      d_source_id(-1),
+      d_audio_in(audio_in) {
   d_recorder = recorder;
 }
 
@@ -57,7 +58,7 @@ void p25_recorder_decode::start(const RecorderConfig &config) {
   }
   d_last_notified_crypto = ~0u;
   d_call_algid = 0x80;
-  op25_frame_assembler->call_start();
+  if (op25_frame_assembler) op25_frame_assembler->call_start();
 
   if (config.phase2_tdma) {
     wav_sink->start_recording(config, config.tdma_slot);
@@ -67,7 +68,7 @@ void p25_recorder_decode::start(const RecorderConfig &config) {
 }
 
 void p25_recorder_decode::set_xor_mask(const std::string &mask) {
-  op25_frame_assembler->set_xormask(mask.data());
+  if (op25_frame_assembler) op25_frame_assembler->set_xormask(mask.data());
 }
 
 void p25_recorder_decode::set_source(long src) {
@@ -85,7 +86,7 @@ std::vector<Transmission> p25_recorder_decode::get_transmission_list() {
 void p25_recorder_decode::set_tdma_slot(int slot) {
 
   tdma_slot = slot;
-  op25_frame_assembler->set_slotid(tdma_slot);
+  if (op25_frame_assembler) op25_frame_assembler->set_slotid(tdma_slot);
 }
 RecorderState p25_recorder_decode::get_state() {
   return wav_sink->get_state();
@@ -100,77 +101,84 @@ std::chrono::duration<double> p25_recorder_decode::since_last_voice() {
 }
 
 void p25_recorder_decode::switch_tdma(bool phase2_tdma) {
-  op25_frame_assembler->set_phase2_tdma(phase2_tdma);
+  if (op25_frame_assembler) op25_frame_assembler->set_phase2_tdma(phase2_tdma);
 }
 
 void p25_recorder_decode::initialize(int silence_frames, bool d_soft_vocoder) {
-  // OP25 Slicer
-  const float l[] = {-2.0, 0.0, 2.0, 4.0};
-  std::vector<float> slices(l, l + sizeof(l) / sizeof(l[0]));
-  const int msgq_id = 0;
-  const int debug = 0;
-  slicer = gr::op25_repeater::fsk4_slicer_fb::make(msgq_id, debug, slices);
   wav_sink = gr::blocks::headless_sink::make(1, 8000, 16);
-  // recorder->initialize(src);
-
-  // OP25 Frame Assembler
-  auto rx_queue = gr::msg_queue::make(1);
-
-  int udp_port = 0;
-  int verbosity = 0; // 10 = lots of debug messages
-  const char *udp_host = "127.0.0.1";
-  bool do_imbe = 1;
-  bool do_output = 1;
-  bool do_msgq = 1;
-  bool do_audio_output = 1;
-  bool do_tdma = 0;
-  bool do_nocrypt = 1;
-
-  op25_frame_assembler = gr::op25_repeater::p25_frame_assembler::make(silence_frames, d_soft_vocoder, udp_host, udp_port, verbosity, do_imbe, do_output, do_msgq, rx_queue, do_audio_output, do_tdma, do_nocrypt);
-
-  // Wire callback to bypass the msg_queue — alias messages are processed
-  // directly on the GR thread instead of being polled from Rust.
-  op25_frame_assembler->set_msg_callback([this](gr::message::sptr msg) {
-    if (msg->type() != -3) return; // Only M_P25_JSON_DATA
-    try {
-      auto j = nlohmann::json::parse(msg->to_string());
-      // ESS crypto parameters ({"encrypted","algid","keyid"}, no "type"). Clear
-      // (0x80) voice is reported too by P25p2; only forward real encryption,
-      // and only on change.
-      if (j.contains("algid") && j.contains("keyid") && !j.contains("type")) {
-        unsigned algid = j["algid"].get<unsigned>();
-        unsigned keyid = j["keyid"].get<unsigned>();
-        if (j.value("encrypted", 0) != 0 && algid != 0x80 && d_recorder) {
-          d_call_algid = static_cast<int>(algid);
-          uint32_t packed = ((algid & 0xFFFF) << 16) | (keyid & 0xFFFF);
-          if (!d_shadow && d_forward_crypto && d_last_notified_crypto.exchange(packed) != packed) {
-            d_recorder->notify_crypto(algid, keyid);
-          }
-        }
-        return;
-      }
-      if (d_shadow) return;
-      if (!j.contains("type")) return;
-      std::string t = j["type"];
-      if (t == "motorola_alias_p1" || t == "motorola_alias_p2" ||
-          t == "harris_alias_p1" || t == "harris_alias_p2") {
-        handle_alias_message(j);
-      }
-    } catch (const std::exception &e) {
-      BOOST_LOG_TRIVIAL(debug) << "Malformed P25 JSON message: " << e.what();
-    }
-  });
   levels = gr::blocks::multiply_const_ss::make(1);
-
   plugin_sink = gr::blocks::plugin_wrapper_impl::make(std::bind(&p25_recorder_decode::plugin_callback_handler, this, std::placeholders::_1, std::placeholders::_2));
   plugin_sink->set_source_id_callback(std::bind(&p25_recorder_decode::source_id_handler, this, std::placeholders::_1));
 
-  connect(self(), 0, slicer, 0);
-  connect(slicer, 0, op25_frame_assembler, 0);
-  connect(op25_frame_assembler, 0, levels, 0);
+  if (d_audio_in) {
+    connect(self(), 0, levels, 0);
+  } else {
+    // OP25 Slicer
+    const float l[] = {-2.0, 0.0, 2.0, 4.0};
+    std::vector<float> slices(l, l + sizeof(l) / sizeof(l[0]));
+    const int msgq_id = 0;
+    const int debug = 0;
+    slicer = gr::op25_repeater::fsk4_slicer_fb::make(msgq_id, debug, slices);
+
+    // OP25 Frame Assembler
+    auto rx_queue = gr::msg_queue::make(1);
+
+    int udp_port = 0;
+    int verbosity = 0; // 10 = lots of debug messages
+    const char *udp_host = "127.0.0.1";
+    bool do_imbe = 1;
+    bool do_output = 1;
+    bool do_msgq = 1;
+    bool do_audio_output = 1;
+    bool do_tdma = 0;
+    bool do_nocrypt = 1;
+
+    op25_frame_assembler = gr::op25_repeater::p25_frame_assembler::make(silence_frames, d_soft_vocoder, udp_host, udp_port, verbosity, do_imbe, do_output, do_msgq, rx_queue, do_audio_output, do_tdma, do_nocrypt);
+
+    // Wire callback to bypass the msg_queue — alias messages are processed
+    // directly on the GR thread instead of being polled from Rust.
+    op25_frame_assembler->set_msg_callback([this](gr::message::sptr msg) {
+      if (msg->type() != -3) return; // Only M_P25_JSON_DATA
+      handle_json(msg->to_string());
+    });
+
+    connect(self(), 0, slicer, 0);
+    connect(slicer, 0, op25_frame_assembler, 0);
+    connect(op25_frame_assembler, 0, levels, 0);
+  }
 
   connect(levels, 0, plugin_sink, 0);
   connect(levels, 0, wav_sink, 0);
+}
+
+void p25_recorder_decode::handle_json(const std::string &s) {
+  try {
+    auto j = nlohmann::json::parse(s);
+    // ESS crypto parameters ({"encrypted","algid","keyid"}, no "type"). Clear
+    // (0x80) voice is reported too by P25p2; only forward real encryption,
+    // and only on change.
+    if (j.contains("algid") && j.contains("keyid") && !j.contains("type")) {
+      unsigned algid = j["algid"].get<unsigned>();
+      unsigned keyid = j["keyid"].get<unsigned>();
+      if (j.value("encrypted", 0) != 0 && algid != 0x80 && d_recorder) {
+        d_call_algid = static_cast<int>(algid);
+        uint32_t packed = ((algid & 0xFFFF) << 16) | (keyid & 0xFFFF);
+        if (!d_shadow && d_forward_crypto && d_last_notified_crypto.exchange(packed) != packed) {
+          d_recorder->notify_crypto(algid, keyid);
+        }
+      }
+      return;
+    }
+    if (d_shadow) return;
+    if (!j.contains("type")) return;
+    std::string t = j["type"];
+    if (t == "motorola_alias_p1" || t == "motorola_alias_p2" ||
+        t == "harris_alias_p1" || t == "harris_alias_p2") {
+      handle_alias_message(j);
+    }
+  } catch (const std::exception &e) {
+    BOOST_LOG_TRIVIAL(debug) << "Malformed P25 JSON message: " << e.what();
+  }
 }
 
 void p25_recorder_decode::plugin_callback_handler(int16_t *samples, int sampleCount) {
@@ -215,7 +223,7 @@ void p25_recorder_decode::reset() {
   reset_block(slicer);
   reset_block(levels);
   reset_block(wav_sink);*/
-  op25_frame_assembler->clear();
+  if (op25_frame_assembler) op25_frame_assembler->clear();
 }
 
 gr::op25_repeater::p25_frame_assembler::sptr p25_recorder_decode::get_transmission_sink() {

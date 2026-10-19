@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 pub mod p25;
 pub mod p25_parse;
+pub mod p25_voice;
 pub mod shadow;
 
 // cxx derives `Clone` field by field for shared structs.
@@ -39,10 +40,34 @@ pub mod ffi {
     /// Which implementation decodes P25 control channels.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     enum TrP25Decoder {
-        /// trunk-p25 on the channelizer slot.
+        /// trunk-p25 all the way to audio (op25's vocoders only).
         Rust = 0,
-        /// op25's GNU Radio chain (kept for A/B replays).
+        /// op25's GNU Radio chain.
         Op25 = 1,
+        /// trunk-p25's decoding, regenerated for op25's frame assembler.
+        Regen = 2,
+    }
+
+    /// What a voice tag says (`TrVoiceTag::kind`).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum TrVoiceTagKind {
+        /// The unit talking (`value`).
+        Source = 0,
+        /// The talkgroup (`value`).
+        Group = 1,
+        /// The transmission ended.
+        Terminate = 2,
+        /// An op25-style JSON message (`json`): a talker alias.
+        Json = 3,
+    }
+
+    /// Something said in band, at a sample of the decoded audio.
+    struct TrVoiceTag {
+        /// Into the audio this call to `process` appended.
+        offset: u32,
+        kind: TrVoiceTagKind,
+        value: i64,
+        json: String,
     }
 
     /// A call's voice decode errors (bits corrected) and op25-style spikes.
@@ -467,6 +492,44 @@ pub mod ffi {
         /// reports every decoder's account of a call to Rust.
         fn tr_config_set_p25_shadow(ctx: Pin<&mut TrContext>, phase1: bool, phase2: bool);
         fn tr_config_set_soft_vocoder(ctx: Pin<&mut TrContext>, enabled: bool);
+
+        /// op25's P25 vocoders, one 20 ms frame (160 samples) at a time.
+        type P25VoiceSynth;
+        fn tr_p25_voice_synth_new(soft_vocoder: bool) -> UniquePtr<P25VoiceSynth>;
+        /// One IMBE frame: op25's `u[0..8]` and the bits corrected in c0 and
+        /// in all.
+        fn tr_p25_voice_synth_phase1(
+            synth: Pin<&mut P25VoiceSynth>,
+            u: &[u32],
+            e0: u32,
+            et: u32,
+            out: &mut [i16],
+        );
+        /// One AMBE+2 frame: its 36 descrambled dibits. False if muted.
+        fn tr_p25_voice_synth_phase2(
+            synth: Pin<&mut P25VoiceSynth>,
+            dibits: &[u8],
+            encrypted: bool,
+            out: &mut [i16],
+        ) -> bool;
+
+        /// op25's voice frame assembler driven with dibits, as the reference
+        /// trunk-p25's call assembler is checked against.
+        type Op25VoiceReference;
+        fn tr_op25_voice_reference_new(
+            phase2: bool,
+            slot: i32,
+            xor_mask: &[u8],
+            soft_vocoder: bool,
+        ) -> UniquePtr<Op25VoiceReference>;
+        fn tr_op25_voice_reference_push(reference: Pin<&mut Op25VoiceReference>, dibits: &[u8]);
+        fn tr_op25_voice_reference_pcm(reference: &Op25VoiceReference) -> Vec<i16>;
+        fn tr_op25_voice_reference_sources(reference: &Op25VoiceReference) -> Vec<i64>;
+        fn tr_op25_voice_reference_terminators(reference: &Op25VoiceReference) -> Vec<i64>;
+        fn tr_op25_voice_reference_json(reference: &Op25VoiceReference) -> Vec<String>;
+        /// Every frame's vocoder input as records: phase 1 {u0..u7, E0,
+        /// ET, encrypted}, phase 2 {36 dibits, encrypted}.
+        fn tr_op25_voice_reference_inputs(reference: &Op25VoiceReference) -> Vec<u32>;
         fn tr_config_set_debug_recorder(
             ctx: Pin<&mut TrContext>,
             enabled: bool,
@@ -589,6 +652,35 @@ pub mod ffi {
     extern "Rust" {
         /// A P25 voice call ended.
         fn p25_observe_call(report: &TrCallReport);
+    }
+
+    // ── trunk-p25 voice decoder, phase 1 and 2, with op25's vocoders ──
+
+    extern "Rust" {
+        type P25VoiceHandle;
+
+        fn p25_voice_new(rate: f64, recorder: i32, soft_vocoder: bool) -> Box<P25VoiceHandle>;
+        fn start_call(
+            self: &mut P25VoiceHandle,
+            qpsk: bool,
+            tdma: bool,
+            xor_mask: &[u8],
+            system: &str,
+            primary: bool,
+            slot: i32,
+        );
+        /// `iq`: interleaved IQ. Appends the decoded audio (8 kHz) and the
+        /// tags at offsets into what was appended.
+        fn process(
+            self: &mut P25VoiceHandle,
+            iq: &[f32],
+            audio: &mut Vec<i16>,
+            tags: &mut Vec<TrVoiceTag>,
+        );
+        /// Encryption confirmed on the call's own slot since the last call
+        /// (0: none; else `1 << 24 | algid << 16 | keyid`).
+        fn take_crypto(self: &mut P25VoiceHandle) -> u32;
+        fn take_call_counts(self: &mut P25VoiceHandle) -> TrCallCounts;
     }
 
     // ── trunk-p25 voice regenerator, phase 1 and 2 (one per P25 recorder) ──
@@ -949,6 +1041,7 @@ fn drop_event_handler_box(_handler: Box<EventHandlerBox>) {
 // ── Shared FFT channelizer ──
 
 use p25::P25RegeneratorHandle;
+use p25_voice::{P25VoiceHandle, p25_voice_new};
 
 fn p25_observe_call(report: &ffi::TrCallReport) {
     shadow::observe_call(report);
@@ -983,13 +1076,10 @@ impl P25RegeneratorHandle {
     }
 
     const fn regenerator_take_crypto(&mut self) -> u32 {
-        match self.take_crypto() {
-            Some(e) => 1 << 24 | (e.algid as u32) << 16 | e.keyid as u32,
-            None => 0,
-        }
+        p25::packed_encryption(self.take_crypto())
     }
 
-    const fn regenerator_take_call_counts(&mut self) -> ffi::TrCallCounts {
+    fn regenerator_take_call_counts(&mut self) -> ffi::TrCallCounts {
         self.take_call_counts()
     }
 }

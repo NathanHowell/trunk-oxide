@@ -46,8 +46,11 @@ pub struct ControlChannel {
 /// Which implementation produced a result.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum Impl {
+    /// trunk-p25 to audio.
     Rust,
     Op25,
+    /// trunk-p25's decoding through op25's frame assembler.
+    Regen,
 }
 
 impl Impl {
@@ -55,6 +58,7 @@ impl Impl {
         match self {
             Self::Rust => "rust",
             Self::Op25 => "op25",
+            Self::Regen => "regen",
         }
     }
 }
@@ -300,6 +304,9 @@ impl RawLog {
 #[derive(Clone, Debug, PartialEq)]
 pub struct VoiceChannelReport {
     pub recorder: i32,
+    /// Which of the recorder's decoders: trunk-p25 to audio, or its
+    /// regenerator.
+    pub implementation: Impl,
     /// The system of the call in progress (or last call).
     pub system: String,
     /// Phase 1 calls.
@@ -318,9 +325,70 @@ struct Snapshot {
     role: Role,
 }
 
-struct VoiceShared {
+pub(crate) struct VoiceShared {
     recorder: i32,
+    implementation: Impl,
     snapshot: Mutex<Snapshot>,
+}
+
+impl VoiceShared {
+    /// A recorder's voice decoder, registered for [`voice_channels`].
+    pub(crate) fn register(recorder: i32, implementation: Impl) -> Arc<Self> {
+        let shared = Arc::new(Self {
+            recorder,
+            implementation,
+            snapshot: Mutex::new(Snapshot::default()),
+        });
+        VOICE_REGISTRY
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(Arc::downgrade(&shared));
+        shared
+    }
+
+    fn snapshot(&self) -> std::sync::MutexGuard<'_, Snapshot> {
+        self.snapshot.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    pub(crate) fn phase1(&self, stats: VoiceStats) {
+        self.snapshot().phase1 = stats;
+    }
+
+    pub(crate) fn phase2(&self, stats: TdmaStats) {
+        self.snapshot().phase2 = stats;
+    }
+
+    /// The call in progress: its system, and whether this decoder is its
+    /// primary.
+    pub(crate) fn call(&self, system: &str, primary: bool) {
+        let mut snap = self.snapshot();
+        system.clone_into(&mut snap.system);
+        snap.role = Role::of(primary);
+    }
+}
+
+/// One superframe's ESS on the call's own slot (`None`: it did not decode).
+pub(crate) fn track_encryption(
+    tracker: &mut EncryptionTracker,
+    pending: &mut Option<Encryption>,
+    es: Option<&trunk_p25::voice::EncryptionSync>,
+) {
+    match es {
+        Some(es) => {
+            if let Some(e) = tracker.observe(es) {
+                *pending = Some(e);
+            }
+        }
+        None => tracker.missed(),
+    }
+}
+
+/// `1 << 24 | algid << 16 | keyid`, or 0: how C++ takes encryption.
+pub(crate) const fn packed_encryption(e: Option<Encryption>) -> u32 {
+    match e {
+        Some(e) => 1 << 24 | (e.algid as u32) << 16 | e.keyid as u32,
+        None => 0,
+    }
 }
 
 static VOICE_REGISTRY: Mutex<Vec<Weak<VoiceShared>>> = Mutex::new(Vec::new());
@@ -341,6 +409,7 @@ pub fn voice_channels() -> Vec<VoiceChannelReport> {
                 .clone();
             VoiceChannelReport {
                 recorder: s.recorder,
+                implementation: s.implementation,
                 system: snap.system,
                 stats: snap.phase1,
                 tdma: snap.phase2,
@@ -370,14 +439,7 @@ pub struct P25RegeneratorHandle {
 }
 
 pub(crate) fn regenerator_new(rate: f64, recorder: i32) -> Box<P25RegeneratorHandle> {
-    let shared = Arc::new(VoiceShared {
-        recorder,
-        snapshot: Mutex::new(Snapshot::default()),
-    });
-    VOICE_REGISTRY
-        .lock()
-        .unwrap_or_else(PoisonError::into_inner)
-        .push(Arc::downgrade(&shared));
+    let shared = VoiceShared::register(recorder, Impl::Regen);
     Box::new(P25RegeneratorHandle {
         regen: Regenerator::new(DemodConfig::new(rate, Modulation::Cqpsk)),
         tdma: TdmaRegenerator::new(DemodConfig::phase2(rate), None),
@@ -395,21 +457,16 @@ pub(crate) fn regenerator_new(rate: f64, recorder: i32) -> Box<P25RegeneratorHan
 impl P25RegeneratorHandle {
     pub(crate) fn process(&mut self, iq: &[Complex32], out: &mut Vec<f32>) {
         out.clear();
-        let mut snap = self
-            .shared
-            .snapshot
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
         if self.phase2 {
             self.tdma_events.clear();
             self.tdma.process(iq, out, &mut self.tdma_events);
-            snap.phase2 = self.tdma.stats();
+            self.shared.phase2(self.tdma.stats());
             for e in &self.tdma_events {
                 if e.message.channel != self.slot {
                     continue;
                 }
                 if let BurstContent::Voice2 { encryption, .. } = &e.message.content {
-                    Self::track(
+                    track_encryption(
                         &mut self.crypto,
                         &mut self.crypto_pending,
                         encryption.as_ref().map(|c| &c.value),
@@ -419,32 +476,16 @@ impl P25RegeneratorHandle {
         } else {
             self.events.clear();
             self.regen.process(iq, out, &mut self.events);
-            snap.phase1 = self.regen.stats();
+            self.shared.phase1(self.regen.stats());
             for e in &self.events {
                 if let VoiceEvent::Ldu2 { encryption, .. } = &e.message {
-                    Self::track(
+                    track_encryption(
                         &mut self.crypto,
                         &mut self.crypto_pending,
                         encryption.as_ref().map(|c| &c.value),
                     );
                 }
             }
-        }
-    }
-
-    /// One superframe's ESS (`None`: it did not decode).
-    fn track(
-        tracker: &mut EncryptionTracker,
-        pending: &mut Option<Encryption>,
-        es: Option<&trunk_p25::voice::EncryptionSync>,
-    ) {
-        match es {
-            Some(es) => {
-                if let Some(e) = tracker.observe(es) {
-                    *pending = Some(e);
-                }
-            }
-            None => tracker.missed(),
         }
     }
 
@@ -482,16 +523,10 @@ impl P25RegeneratorHandle {
             self.regen
                 .start_call(DemodConfig::new(self.rate, modulation));
         }
-        let mut snap = self
-            .shared
-            .snapshot
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        system.clone_into(&mut snap.system);
-        snap.role = Role::of(primary);
+        self.shared.call(system, primary);
     }
 
-    pub(crate) const fn take_call_counts(&mut self) -> ffi::TrCallCounts {
+    pub(crate) fn take_call_counts(&mut self) -> ffi::TrCallCounts {
         let c = if self.phase2 {
             self.tdma.take_call_counts()
         } else {
@@ -500,10 +535,10 @@ impl P25RegeneratorHandle {
         ffi::TrCallCounts {
             errors: c.errors,
             spikes: c.spikes,
-            algid: match self.crypto.confirmed() {
-                Some(e) => e.algid,
-                None => trunk_p25::voice::signalling::ALGID_CLEAR,
-            },
+            algid: self
+                .crypto
+                .confirmed()
+                .map_or(trunk_p25::voice::signalling::ALGID_CLEAR, |e| e.algid),
         }
     }
 }

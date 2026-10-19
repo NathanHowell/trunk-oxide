@@ -232,6 +232,70 @@ pub fn decode_burst(burst: &Burst, scrambler: Option<&Scrambler>) -> TdmaEvent {
     }
 }
 
+/// A voice frame's 36 dibits at payload dibit `p`, descrambled, as
+/// [`TdmaRegenerator`] sends them: re-encoded when the burst is rewritten
+/// ([`regenerate::rewritten`]) and the frame trusted, else as received.
+pub fn regenerated_voice(
+    burst: &Burst,
+    scrambler: Option<&Scrambler>,
+    p: usize,
+    reencode: Option<&AmbeFrame>,
+) -> [u8; VOICE_DIBITS] {
+    reencode.map_or_else(
+        || {
+            std::array::from_fn(|k| {
+                let raw = burst
+                    .soft
+                    .get(payload_dibit(p + k))
+                    .map_or(0, |&s| crate::symbols::slice(s));
+                raw ^ scrambler.map_or(0, |s| s.payload(burst.slot, p + k))
+            })
+        },
+        |frame| {
+            let cw = frame.params.encode();
+            std::array::from_fn(|k| u8::from(cw.bit(2 * k)) << 1 | u8::from(cw.bit(2 * k + 1)))
+        },
+    )
+}
+
+/// What op25 makes of a burst after [`TdmaRegenerator`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Op25View {
+    /// The burst type op25 reads: the one decided here if the burst is
+    /// rewritten, else op25's hard decoding of the DUID as received (`None`
+    /// when that fails).
+    pub burst_type: Option<BurstType>,
+    /// For a voice type, its frames' dibits as op25 receives them.
+    pub voice: Vec<[u8; VOICE_DIBITS]>,
+}
+
+pub fn op25_view(burst: &Burst, scrambler: Option<&Scrambler>, event: &TdmaEvent) -> Op25View {
+    let rewritten = regenerate::rewritten(event);
+    let burst_type = if rewritten {
+        Some(event.burst_type)
+    } else {
+        let word = DUID_AT.iter().fold(0u8, |w, &at| {
+            (w << 2) | burst.soft.get(at).map_or(0, |&s| crate::symbols::slice(s))
+        });
+        duid::decode_hard(word)
+    };
+    let starts: &[usize] = match burst_type {
+        Some(BurstType::Voice4) => &VOICE_4V,
+        Some(BurstType::Voice2) => &VOICE_2V,
+        _ => &[],
+    };
+    let frames = event.frames();
+    let voice = starts
+        .iter()
+        .enumerate()
+        .map(|(i, &p)| {
+            let reencode = frames.get(i).filter(|f| rewritten && f.trusted());
+            regenerated_voice(burst, scrambler, p, reencode)
+        })
+        .collect();
+    Op25View { burst_type, voice }
+}
+
 /// A Phase 2 voice channel: conditioned IQ in, bursts out (both logical
 /// channels; callers pick theirs).
 pub struct TdmaDecoder {
@@ -285,16 +349,40 @@ impl TdmaDecoder {
     }
 
     pub fn process_symbols(&mut self, soft: &[f32], out: &mut Vec<Received<TdmaEvent>>) {
+        self.process_symbols_with(soft, &mut |_, event, symbol| {
+            out.push(Received {
+                symbol,
+                message: event,
+            });
+        });
+    }
+
+    /// [`Self::process`], handing each burst to `f` with its event and the
+    /// symbol index it completed at.
+    pub fn process_with(&mut self, iq: &[Complex32], f: &mut dyn FnMut(&Burst, TdmaEvent, u64)) {
+        let mut soft = std::mem::take(&mut self.soft);
+        soft.clear();
+        self.demod.process(iq, &mut soft);
+        self.process_symbols_with(&soft, f);
+        self.soft = soft;
+    }
+
+    pub fn process_symbols_with(
+        &mut self,
+        soft: &[f32],
+        f: &mut dyn FnMut(&Burst, TdmaEvent, u64),
+    ) {
         for &s in soft {
             self.framer.push(s, &mut self.bursts);
             for burst in std::mem::take(&mut self.bursts) {
                 let event = self.decode(&burst);
-                out.push(Received {
-                    symbol: self.framer.position(),
-                    message: event,
-                });
+                f(&burst, event, self.framer.position());
             }
         }
+    }
+
+    pub const fn scrambler(&self) -> Option<&Scrambler> {
+        self.scrambler.as_ref()
     }
 
     /// Decode `burst`, assembling encryption sync across bursts.

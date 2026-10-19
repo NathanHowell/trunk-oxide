@@ -28,10 +28,12 @@ use super::tables::{
     AMBE_BLOCKS, AMBE_GAIN, AMBE_HOC5, AMBE_HOC6, AMBE_HOC7, AMBE_HOC8, AMBE_L, AMBE_PRBA24,
     AMBE_PRBA58, AMBE_VUV, AMBE_W0,
 };
-use crate::tdma::ambe::{AmbeCodeword, AmbeParams};
+use super::{Decision, PLAY_MARGIN, Policy, Spectrum};
+use crate::tdma::ambe::{AmbeCodeword, AmbeFrame, AmbeParams};
 
 /// A recorder's phase 2 vocoder, kept across calls as op25 keeps its own.
 pub struct AmbeVocoder {
+    policy: Policy,
     model: Model,
     tone: Tone,
     /// Running bit error rate; frames are muted above [`MAX_ERROR_RATE`].
@@ -40,6 +42,7 @@ pub struct AmbeVocoder {
     rejected: u32,
     /// Whether the last frame rendered was a tone.
     tone_frame: bool,
+    last: Decision,
     synth: Synthesizer,
 }
 
@@ -52,22 +55,83 @@ impl Default for AmbeVocoder {
 }
 
 impl AmbeVocoder {
+    /// op25's rules ([`Policy::Op25`]).
     pub fn new() -> Self {
+        Self::with_policy(Policy::Op25)
+    }
+
+    pub fn with_policy(policy: Policy) -> Self {
         Self {
+            policy,
             model: Model::INITIAL,
             tone: Tone::default(),
             error_rate: 0.0,
             rejected: 0,
             tone_frame: false,
+            last: Decision::Played,
             synth: Synthesizer::new(),
         }
     }
 
-    /// One frame, its 36 descrambled dibits as received. `None` if it is
-    /// muted (silence) for errors or too many repeats.
+    /// What became of the last frame.
+    pub const fn last(&self) -> Decision {
+        self.last
+    }
+
+    /// The model the last frame was played from, unless muted or a tone.
+    pub fn spectrum(&self) -> Option<Spectrum> {
+        (self.last != Decision::Muted && !self.tone_frame).then(|| Spectrum {
+            w0: self.model.w0,
+            amplitudes: self.model.ml[1..=self.model.l].to_vec(),
+        })
+    }
+
+    /// One clear frame: its 36 descrambled dibits as op25 receives them,
+    /// and the frame decoded here from the same burst, if there is one
+    /// (without it the policy is op25's). `None` if the frame is muted.
+    pub fn vocode(&mut self, dibits: &[u8; 36], frame: Option<&AmbeFrame>) -> Option<Pcm> {
+        match (self.policy, frame) {
+            (Policy::Soft, Some(f)) => self.soft(f),
+            _ => self.decode(dibits),
+        }
+    }
+
+    /// [`Policy::Soft`]: the frame as decoded if its decision had margin,
+    /// else the last again (three times at most), else silence.
+    fn soft(&mut self, frame: &AmbeFrame) -> Option<Pcm> {
+        let render = if frame.reliability >= PLAY_MARGIN {
+            self.decide(frame.params, [0, 0])
+        } else {
+            self.reject(true)
+        };
+        render.then(|| self.play())
+    }
+
+    /// One frame as op25 takes it, its 36 descrambled dibits as received,
+    /// under op25's rules whatever the policy. `None` if it is muted
+    /// (silence) for errors or too many repeats.
     pub fn decode(&mut self, dibits: &[u8; 36]) -> Option<Pcm> {
         let (u, errors) = self.receive(dibits);
-        let render = match ToneFrame::of(u, errors) {
+        let render = self.decide(u, errors) && self.error_rate <= MAX_ERROR_RATE;
+        if !render {
+            self.last = Decision::Muted;
+        }
+        render.then(|| self.play())
+    }
+
+    /// What is heard: the tone or the model.
+    fn play(&mut self) -> Pcm {
+        if self.tone_frame {
+            self.tone.render()
+        } else {
+            self.render()
+        }
+    }
+
+    /// Takes a frame in: a tone, voice, or neither (rejected, so repeated
+    /// or muted). Whether anything is to be rendered.
+    fn decide(&mut self, u: AmbeParams, errors: [u32; 2]) -> bool {
+        match ToneFrame::of(u, errors) {
             ToneFrame::Tone { id, amplitude } => {
                 self.tone.set(id, amplitude);
                 self.accept(true)
@@ -80,14 +144,7 @@ impl AmbeVocoder {
                 }
                 None => self.reject(!self.tone_frame),
             },
-        };
-        (render && self.error_rate <= MAX_ERROR_RATE).then(|| {
-            if self.tone_frame {
-                self.tone.render()
-            } else {
-                self.render()
-            }
-        })
+        }
     }
 
     /// An encrypted frame: no audio, but its errors count toward the rate.
@@ -104,6 +161,7 @@ impl AmbeVocoder {
     const fn accept(&mut self, tone: bool) -> bool {
         self.tone_frame = tone;
         self.rejected = 0;
+        self.last = Decision::Played;
         true
     }
 
@@ -113,9 +171,11 @@ impl AmbeVocoder {
     const fn reject(&mut self, repeatable: bool) -> bool {
         self.rejected += 1;
         if self.rejected < 4 && repeatable {
+            self.last = Decision::Repeated;
             true
         } else {
             self.tone_frame = false;
+            self.last = Decision::Muted;
             false
         }
     }

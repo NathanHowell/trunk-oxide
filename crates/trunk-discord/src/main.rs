@@ -1,3 +1,4 @@
+mod ab;
 mod aggregator;
 mod aggregator_state;
 mod audio_shape;
@@ -43,6 +44,17 @@ struct Args {
     /// Directory for hourly `SQLite` databases
     #[arg(long, default_value = "/var/lib/trunk-discord/db")]
     db_path: PathBuf,
+
+    /// One-off jobs instead of the service.
+    #[command(subcommand)]
+    command: Option<Command>,
+}
+
+#[derive(clap::Subcommand)]
+enum Command {
+    /// Blind A/B listening tests: post clips, tally votes.
+    #[command(subcommand)]
+    Ab(ab::Ab),
 }
 
 struct OtelProviders {
@@ -235,6 +247,9 @@ async fn main() -> Result<()> {
         token.trim().clone_into(&mut discord.bot_token);
     } else if let Ok(token) = std::env::var("DISCORD_TOKEN") {
         token.trim().clone_into(&mut discord.bot_token);
+    }
+    if let Some(Command::Ab(ab)) = args.command {
+        return ab::run(ab, discord).await;
     }
 
     let (reporter, health_service) = tonic_health::server::health_reporter();

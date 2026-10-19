@@ -20,19 +20,26 @@
 
 use crate::control::Received;
 use crate::tdma::mac::MacPdu;
-use crate::tdma::{BurstContent, BurstType, MacOpcode, Op25View, TdmaEvent};
+use crate::tdma::{AmbeFrame, BurstContent, BurstType, MacOpcode, Op25View, TdmaEvent};
 use crate::voice::regenerate::SpikeDetector;
 use crate::voice::signalling::ALGID_CLEAR;
-use crate::voice::{CallCounts, LinkControl, Terminator, VoiceEvent};
+use crate::voice::{CallCounts, ImbeFrame, LinkControl, Terminator, VoiceEvent};
 
-/// One voice frame for the vocoder.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// One voice frame for the vocoder: the frame as decoded here, and what
+/// op25 would have been given ([`crate::vocoder::Policy`] picks).
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Vocode {
-    /// IMBE: op25's `u[0..8]` (u7 shifted left one bit) and the bits
-    /// corrected in c0 (`e0`) and in all (`et`).
-    Imbe { u: [u32; 8], e0: u32, et: u32 },
-    /// AMBE+2: the frame's 36 descrambled dibits.
-    Ambe { dibits: [u8; 36], encrypted: bool },
+    /// IMBE: the decoded frame, and the bits op25 would count corrected in
+    /// c0 (`e0`) and in all (`et`) after regeneration.
+    Imbe { frame: ImbeFrame, e0: u32, et: u32 },
+    /// AMBE+2: the frame's 36 descrambled dibits as op25 receives them,
+    /// and the frame decoded here from the same burst, if any (none when
+    /// op25 read a voice burst where the decoder here saw something else).
+    Ambe {
+        dibits: [u8; 36],
+        frame: Option<AmbeFrame>,
+        encrypted: bool,
+    },
     /// An encrypted phase 1 frame: silence (op25 does not vocode it).
     Silence,
 }
@@ -57,7 +64,7 @@ pub enum Alias {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum CallEvent {
     /// 160 samples.
     Frame(Vocode),
@@ -272,11 +279,7 @@ impl Phase1Assembler {
                     ImbeErrors::Regenerated => (0, 0),
                     ImbeErrors::Decoded => (f.errors_c0, f.errors),
                 };
-                out.push(CallEvent::Frame(Vocode::Imbe {
-                    u: f.params.to_op25(),
-                    e0,
-                    et,
-                }));
+                out.push(CallEvent::Frame(Vocode::Imbe { frame: *f, e0, et }));
             }
         }
     }
@@ -428,9 +431,9 @@ impl Phase2Assembler {
         }
         let now_ms = r.symbol * 10 / PHASE2_SYMBOLS_PER_10MS;
         match view.burst_type {
-            Some(BurstType::Voice4) => self.voice(&view.voice, out),
+            Some(BurstType::Voice4) => self.voice(&view.voice, e.frames(), out),
             Some(BurstType::Voice2) => {
-                self.voice(&view.voice, out);
+                self.voice(&view.voice, e.frames(), out);
                 if let BurstContent::Voice2 {
                     encryption: Some(es),
                     ..
@@ -455,10 +458,13 @@ impl Phase2Assembler {
         }
     }
 
-    fn voice(&self, voice: &[[u8; 36]], out: &mut Vec<CallEvent>) {
-        for &dibits in voice {
+    /// op25's frames (`voice`) with the decoder's own (`frames`), which
+    /// pair up by position when both read the burst as the same voice type.
+    fn voice(&self, voice: &[[u8; 36]], frames: &[AmbeFrame], out: &mut Vec<CallEvent>) {
+        for (i, &dibits) in voice.iter().enumerate() {
             out.push(CallEvent::Frame(Vocode::Ambe {
                 dibits,
+                frame: (frames.len() == voice.len()).then(|| frames[i]),
                 encrypted: self.encrypted(),
             }));
         }

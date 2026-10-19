@@ -142,6 +142,11 @@ impl Synthesizer {
         &mut self.models[1 - self.new]
     }
 
+    /// The model last played (after [`Self::advance`]).
+    pub const fn played(&self) -> &Model {
+        &self.models[1 - self.new]
+    }
+
     /// The current frame's model and the previous one's.
     const fn both(&mut self) -> (&mut Model, &Model) {
         let [a, b] = &mut self.models;

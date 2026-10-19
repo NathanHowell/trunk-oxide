@@ -121,6 +121,17 @@ Offline, without a replay:
   Every call's vocoder inputs as op25 framed them must make op25's audio
   through trunk-p25's vocoders, sample for sample.
 
+The vocoders' policy (`trunk_p25::vocoder::Policy`, what to play, repeat
+or mute) was measured against an alternative built on trunk-p25's soft
+decisions: `VOCODER_CORPUS=<dir> cargo run --release -p trunk-p25 --example
+vocoder_noise` scores both on tapped speech (the corpus is written by the
+`voice_capture` test with `VOICE_CORPUS=<dir>`) under injected noise, by
+decision class and log-spectral distance; `--example vocoder_ab -- <out>`
+cuts blind A/B clips from the calls where they diverge most, and
+`trunk-discord ab post <out>` / `ab tally <out>` puts them to a vote in the
+hourly thread. Verdict (2026-10-19, one listener): op25's policy 5, soft 1;
+phase 1 unanimous. Nothing shipped; the apparatus stays for the next idea.
+
 The vocoders are also checked frame by frame against op25's
 (`op25_vocoder_reference`) on random streams that reach every pitch, repeat,
 mute, tone and erasure (`the_imbe_vocoder_is_op25s`,

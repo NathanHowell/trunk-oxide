@@ -117,6 +117,8 @@ pub struct ImbeFrame {
     pub errors_c0: u32,
     /// The weakest vector decision's margin: low means the frame is suspect.
     pub reliability: f32,
+    /// The least |LLR| among the unprotected bits (u7).
+    pub unprotected: f32,
 }
 
 /// One u0 hypothesis carried through c1–c6.
@@ -201,6 +203,9 @@ pub fn decode(llr: &[f32; CODEWORD_BITS]) -> ImbeFrame {
         errors: chosen.errors,
         errors_c0,
         reliability: chosen.reliability,
+        unprotected: vector(llr, 7)
+            .iter()
+            .fold(f32::INFINITY, |m, &l| m.min(l.abs())),
     }
 }
 

@@ -106,6 +106,9 @@ pub struct AmbeFrame {
     pub errors: u32,
     /// The weaker of the two decisions' margins.
     pub reliability: f32,
+    /// The least |LLR| among the unprotected bits (u2, u3): how sure the
+    /// least sure of them is.
+    pub unprotected: f32,
 }
 
 /// Least decision margin (total |LLR|) of a frame worth re-sending.
@@ -180,7 +183,13 @@ pub fn decode(llr: &[f32; CODEWORD_BITS]) -> AmbeFrame {
         ]),
         errors,
         reliability: c0.margin.min(d1.margin),
+        unprotected: least(vector(&s, 2)).min(least(vector(&s, 3))),
     }
+}
+
+/// The least |LLR| of a vector.
+fn least(llr: &[f32]) -> f32 {
+    llr.iter().fold(f32::INFINITY, |m, &l| m.min(l.abs()))
 }
 
 /// op25's decoder ([`AmbeCodeword::decode_op25`]) on the LLRs' signs: the

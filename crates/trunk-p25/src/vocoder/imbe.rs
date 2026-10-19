@@ -19,14 +19,18 @@ use std::f64::consts::PI;
 
 use super::synth::{HARMONICS, Pcm, Synthesizer};
 use super::tables::{BIT_COUNT, BMT_B, BMT_N, GAIN_LEVELS, STEP_SIZE};
+use super::{Decision, PLAY_MARGIN, Policy, Spectrum};
+use crate::voice::ImbeFrame;
 
 /// A recorder's phase 1 vocoder, kept across calls as op25 keeps its own.
 pub struct ImbeVocoder {
+    policy: Policy,
     synth: Synthesizer,
     /// Running bit error rate.
     error_rate: f32,
     /// Frames repeated in a row.
     repeats: u32,
+    last: Decision,
 }
 
 impl Default for ImbeVocoder {
@@ -35,41 +39,102 @@ impl Default for ImbeVocoder {
     }
 }
 
+/// op25's b̂0 of a frame: the pitch, 0..=207 for voice.
+const fn b0(u: &[u32; 8]) -> u32 {
+    ((u[0] >> 4) & 0xfc) | ((u[7] >> 1) & 0x3)
+}
+
 impl ImbeVocoder {
+    /// op25's rules ([`Policy::Op25`]).
     pub fn new() -> Self {
+        Self::with_policy(Policy::Op25)
+    }
+
+    pub fn with_policy(policy: Policy) -> Self {
         Self {
+            policy,
             synth: Synthesizer::new(),
             error_rate: 0.0,
             repeats: 0,
+            last: Decision::Played,
         }
     }
 
-    /// One frame: op25's `u[0..8]` (u7 shifted left one bit) and the bits
-    /// corrected in c0 (`e0`) and in all (`et`). `None` if the frame is
-    /// muted for errors (silence).
+    /// What became of the last frame.
+    pub const fn last(&self) -> Decision {
+        self.last
+    }
+
+    /// The model the last frame was played from, unless muted (or nothing
+    /// was yet decoded to repeat).
+    pub fn spectrum(&self) -> Option<Spectrum> {
+        (self.last != Decision::Muted && self.synth.old_l > 0).then(|| Spectrum {
+            w0: self.synth.old_w0,
+            amplitudes: self.synth.played().mu[1..=self.synth.old_l].to_vec(),
+        })
+    }
+
+    /// One frame as decoded here, with the bits op25 would count corrected
+    /// in c0 (`e0`) and in all (`et`). `None` if the frame is muted.
+    pub fn vocode(&mut self, frame: &ImbeFrame, e0: u32, et: u32) -> Option<Pcm> {
+        match self.policy {
+            Policy::Op25 => self.decode(&frame.params.to_op25(), e0, et),
+            Policy::Soft => self.soft(frame),
+        }
+    }
+
+    /// [`Policy::Soft`]: the frame as decoded if its decision had margin,
+    /// else the last again (three times at most), else silence.
+    fn soft(&mut self, frame: &ImbeFrame) -> Option<Pcm> {
+        let u = frame.params.to_op25();
+        self.last = if frame.reliability >= PLAY_MARGIN && b0(&u) <= 207 {
+            self.repeats = 0;
+            self.decode_model(&u);
+            let se = self.synth.enhance();
+            self.synth.smooth(se, 0.0, 0.0);
+            Decision::Played
+        } else {
+            self.repeats += 1;
+            if self.repeats < 4 {
+                self.repeat_last();
+                self.synth.smooth(0.0, 0.0, 0.0);
+                Decision::Repeated
+            } else {
+                Decision::Muted
+            }
+        };
+        let pcm = (self.last != Decision::Muted).then(|| self.synth.synthesize());
+        self.synth.advance();
+        pcm
+    }
+
+    /// One frame as op25 takes it: its `u[0..8]` (u7 shifted left one bit)
+    /// and the bits corrected in c0 (`e0`) and in all (`et`), under op25's
+    /// rules whatever the policy. `None` if the frame is muted for errors
+    /// (silence).
     pub fn decode(&mut self, u: &[u32; 8], e0: u32, et: u32) -> Option<Pcm> {
-        let b0 = ((u[0] >> 4) & 0xfc) | ((u[7] >> 1) & 0x3);
+        let b0 = b0(u);
         self.error_rate = (0.95 * f64::from(self.error_rate) + 0.000365 * f64::from(et)) as f32;
         let mut se = 0.0;
-        let audible = if f64::from(self.error_rate) > 0.0875 {
+        self.last = if f64::from(self.error_rate) > 0.0875 {
             // Muting (7.8).
-            false
+            Decision::Muted
         } else if b0 > 207 || e0 >= 2 || et as f32 >= 10.0 + 40.0 * self.error_rate {
             // Repeat (7.7), at most three in a row.
             self.repeats += 1;
             if self.repeats < 4 {
                 self.repeat_last();
-                true
+                Decision::Repeated
             } else {
-                false
+                Decision::Muted
             }
         } else {
             self.repeats = 0;
             self.decode_model(u);
             se = self.synth.enhance();
-            true
+            Decision::Played
         };
-        let pcm = audible.then(|| {
+        let pcm = (self.last != Decision::Muted).then(|| {
             self.synth.smooth(se, self.error_rate, et as f32);
             self.synth.synthesize()
         });

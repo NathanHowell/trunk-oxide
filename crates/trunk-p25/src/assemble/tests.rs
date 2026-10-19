@@ -54,20 +54,37 @@ fn frames(out: &[CallEvent]) -> Vec<Vocode> {
         .collect()
 }
 
+/// op25's inputs of the phase 1 frames: `u`, e0, et.
+fn op25_inputs(out: &[CallEvent]) -> Vec<([u32; 8], u32, u32)> {
+    frames(out)
+        .iter()
+        .filter_map(|v| match v {
+            Vocode::Imbe { frame, e0, et } => Some((frame.params.to_op25(), *e0, *et)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The phase 2 frames as op25 receives them: dibits, encrypted.
+fn op25_dibits(out: &[CallEvent]) -> Vec<([u8; 36], bool)> {
+    frames(out)
+        .iter()
+        .filter_map(|v| match v {
+            Vocode::Ambe {
+                dibits, encrypted, ..
+            } => Some((*dibits, *encrypted)),
+            _ => None,
+        })
+        .collect()
+}
+
 #[test]
 fn a_clear_phase1_call_vocodes_every_frame_as_sent() {
     let mut rng = Rng::new(1);
     let (d, sent) = phase1_call(&mut rng, ALGID_CLEAR, 3);
     let out = assemble_phase1(&d);
-    let want: Vec<Vocode> = sent
-        .iter()
-        .map(|p| Vocode::Imbe {
-            u: p.to_op25(),
-            e0: 0,
-            et: 0,
-        })
-        .collect();
-    assert_eq!(frames(&out), want);
+    let want: Vec<([u32; 8], u32, u32)> = sent.iter().map(|p| (p.to_op25(), 0, 0)).collect();
+    assert_eq!(op25_inputs(&out), want);
     assert_eq!(out[0], CallEvent::Group(865));
     assert!(out.contains(&CallEvent::Source(0x12_3456)));
     assert_eq!(out.last(), Some(&CallEvent::Terminator));
@@ -88,14 +105,7 @@ fn an_encrypted_phase1_call_is_silent_until_its_terminator() {
     let f = frames(&out);
     assert_eq!(f.len(), 36 + 18);
     assert!(f[..36].iter().all(|v| *v == Vocode::Silence));
-    assert_eq!(
-        f[36],
-        Vocode::Imbe {
-            u: sent[0].to_op25(),
-            e0: 0,
-            et: 0
-        }
-    );
+    assert!(matches!(f[36], Vocode::Imbe { frame, e0: 0, et: 0 } if frame.params == sent[0]));
     let reports = out
         .iter()
         .filter(|e| {
@@ -115,6 +125,7 @@ fn ldu1(lc: [u8; 9]) -> Received<VoiceEvent> {
         errors: 0,
         errors_c0: 0,
         reliability: 1.0,
+        unprotected: 1.0,
     };
     Received {
         symbol: 4800,
@@ -239,19 +250,17 @@ fn a_clean_phase2_call_vocodes_its_channels_frames_as_sent() {
             &mut out,
         );
     });
-    let got = frames(&out);
+    let got = op25_dibits(&out);
     // Every frame of channel 0, re-encoded (all trusted on a clean stream).
-    let want: Vec<Vocode> = sent
+    let want: Vec<([u8; 36], bool)> = sent
         .voice
         .iter()
         .map(|p| {
             let cw = p.encode();
-            Vocode::Ambe {
-                dibits: std::array::from_fn(|k| {
-                    u8::from(cw.bit(2 * k)) << 1 | u8::from(cw.bit(2 * k + 1))
-                }),
-                encrypted: false,
-            }
+            (
+                std::array::from_fn(|k| u8::from(cw.bit(2 * k)) << 1 | u8::from(cw.bit(2 * k + 1))),
+                false,
+            )
         })
         .collect();
     // The framer acquires on the first burst; the last are still in it.
@@ -291,11 +300,12 @@ fn mac_ptt_names_the_unit_and_its_encryption_holds_to_the_hangtime() {
         [CallEvent::Source(0x12_3456), CallEvent::Group(0x0abc)]
     );
     out.clear();
-    a.voice(&[[0; 36]], &mut out);
+    a.voice(&[[0; 36]], &[], &mut out);
     assert_eq!(
         out,
         [CallEvent::Frame(Vocode::Ambe {
             dibits: [0; 36],
+            frame: None,
             encrypted: true
         })]
     );

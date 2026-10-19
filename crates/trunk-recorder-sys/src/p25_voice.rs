@@ -20,7 +20,7 @@ use crate::ffi;
 use crate::p25::{VoiceShared, packed_encryption, track_encryption};
 
 /// What a call produced, in order.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq)]
 #[allow(
     clippy::large_enum_variant,
     reason = "nearly every output is audio, into a buffer that is reused"
@@ -178,14 +178,16 @@ impl VoicePipeline {
     /// A frame's audio; silence where the frame is muted or encrypted.
     fn vocode(&mut self, v: Vocode) -> Pcm {
         let pcm = match v {
-            Vocode::Imbe { u, e0, et } => self.imbe.decode(&u, e0, et),
+            Vocode::Imbe { frame, e0, et } => self.imbe.vocode(&frame, e0, et),
             Vocode::Ambe {
                 dibits,
+                frame,
                 encrypted: false,
-            } => self.ambe.decode(&dibits),
+            } => self.ambe.vocode(&dibits, frame.as_ref()),
             Vocode::Ambe {
                 dibits,
                 encrypted: true,
+                ..
             } => {
                 self.ambe.encrypted(&dibits);
                 None

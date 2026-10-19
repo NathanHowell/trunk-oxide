@@ -172,3 +172,98 @@ fn tones_are_their_frequencies() {
         "repeats the last tone"
     );
 }
+
+// ── Policy::Soft ──
+
+use crate::tdma::AmbeFrame;
+use crate::voice::ImbeFrame;
+
+fn sure_imbe(rng: &mut Rng, b0: u32) -> ImbeFrame {
+    ImbeFrame {
+        params: crate::voice::ImbeParams::from_op25(imbe_with_b0(rng, b0)),
+        errors: 0,
+        errors_c0: 0,
+        reliability: f32::INFINITY,
+        unprotected: f32::INFINITY,
+    }
+}
+
+fn sure_ambe(rng: &mut Rng, b0: u16) -> AmbeFrame {
+    AmbeFrame {
+        params: ambe_with_b0(rng, b0),
+        errors: 0,
+        reliability: f32::INFINITY,
+        unprotected: f32::INFINITY,
+    }
+}
+
+/// Under `Soft`, a trusted frame plays, an untrusted one repeats the last
+/// three times and then mutes, whatever op25 would have counted.
+#[test]
+fn soft_plays_trusted_frames_and_repeats_untrusted_ones() {
+    let mut rng = Rng::new(6);
+    let mut v = ImbeVocoder::with_policy(Policy::Soft);
+    // op25 would mute this (e0 = 5), Soft goes by the decoder's margin.
+    let mut sure = sure_imbe(&mut rng, 100);
+    sure.errors = 30;
+    assert!(v.vocode(&sure, 5, 30).is_some());
+    assert_eq!(v.last(), Decision::Played);
+    let mut doubtful = sure_imbe(&mut rng, 100);
+    doubtful.reliability = PLAY_MARGIN / 2.0;
+    let decisions: Vec<Decision> = (0..5)
+        .map(|_| {
+            v.vocode(&doubtful, 0, 0);
+            v.last()
+        })
+        .collect();
+    assert_eq!(
+        decisions,
+        [
+            Decision::Repeated,
+            Decision::Repeated,
+            Decision::Repeated,
+            Decision::Muted,
+            Decision::Muted
+        ]
+    );
+    assert!(v.vocode(&sure_imbe(&mut rng, 100), 0, 0).is_some());
+    assert_eq!(v.last(), Decision::Played);
+
+    let mut a = AmbeVocoder::with_policy(Policy::Soft);
+    let frame = sure_ambe(&mut rng, 60);
+    // Dibits op25 could not decode: Soft never looks at them.
+    assert!(a.vocode(&[0; 36], Some(&frame)).is_some());
+    assert_eq!(a.last(), Decision::Played);
+    let mut doubtful = frame;
+    doubtful.reliability = PLAY_MARGIN / 2.0;
+    let decisions: Vec<Decision> = (0..5)
+        .map(|_| {
+            a.vocode(&[0; 36], Some(&doubtful));
+            a.last()
+        })
+        .collect();
+    assert_eq!(
+        decisions,
+        [
+            Decision::Repeated,
+            Decision::Repeated,
+            Decision::Repeated,
+            Decision::Muted,
+            Decision::Muted
+        ]
+    );
+    assert!(a.vocode(&[0; 36], Some(&frame)).is_some());
+    assert_eq!(a.last(), Decision::Played);
+}
+
+/// Without the decoder's frame, `Soft` falls back to op25's rules.
+#[test]
+fn soft_without_a_frame_is_op25() {
+    let mut rng = Rng::new(8);
+    let mut a = AmbeVocoder::with_policy(Policy::Soft);
+    let mut b = AmbeVocoder::new();
+    for _ in 0..20 {
+        let d = dibits(ambe_with_b0(&mut rng, 60));
+        assert_eq!(a.vocode(&d, None), b.vocode(&d, None));
+    }
+}

@@ -7,7 +7,7 @@ use trunk_p25::tdma::{AmbeParams, TdmaRegenerator};
 use trunk_p25::testgen::{self, Rng};
 use trunk_p25::types::Nac;
 use trunk_p25::voice::signalling::{ALGID_CLEAR, encode};
-use trunk_p25::voice::{EncryptionSync, ImbeParams, Regenerator};
+use trunk_p25::voice::{EncryptionSync, ImbeFrame, ImbeParams, Regenerator};
 
 use super::*;
 
@@ -29,17 +29,34 @@ enum Input {
 impl Input {
     fn of(v: Vocode) -> Self {
         match v {
-            Vocode::Imbe { u, e0, et } => Self::Imbe(Some((u, e0, et))),
+            Vocode::Imbe { frame, e0, et } => Self::Imbe(Some((frame.params.to_op25(), e0, et))),
             Vocode::Silence => Self::Imbe(None),
-            Vocode::Ambe { dibits, encrypted } => Self::Ambe(dibits, encrypted),
+            Vocode::Ambe {
+                dibits, encrypted, ..
+            } => Self::Ambe(dibits, encrypted),
         }
     }
 
     fn vocode(self) -> Vocode {
         match self {
-            Self::Imbe(Some((u, e0, et))) => Vocode::Imbe { u, e0, et },
+            // op25's inputs alone: as op25 would see them, nothing soft.
+            Self::Imbe(Some((u, e0, et))) => Vocode::Imbe {
+                frame: ImbeFrame {
+                    params: ImbeParams::from_op25(u),
+                    errors: et,
+                    errors_c0: e0,
+                    reliability: f32::INFINITY,
+                    unprotected: f32::INFINITY,
+                },
+                e0,
+                et,
+            },
             Self::Imbe(None) => Vocode::Silence,
-            Self::Ambe(dibits, encrypted) => Vocode::Ambe { dibits, encrypted },
+            Self::Ambe(dibits, encrypted) => Vocode::Ambe {
+                dibits,
+                frame: None,
+                encrypted,
+            },
         }
     }
 }
@@ -322,6 +339,32 @@ fn read_cf32(path: &str) -> Vec<Complex32> {
         .collect()
 }
 
+/// With `VOICE_CORPUS=<dir>`, appends each call's clear frames as op25
+/// framed them to `<dir>/imbe.txt` (op25's `u`, one frame a line) or
+/// `<dir>/ambe.txt` (36 dibits a line), calls separated by a blank line:
+/// real speech for `examples/vocoder_noise.rs`.
+fn dump_corpus(inputs: &[Input], phase2: bool) {
+    use std::io::Write as _;
+    let Ok(dir) = std::env::var("VOICE_CORPUS") else {
+        return;
+    };
+    let path = format!("{dir}/{}.txt", if phase2 { "ambe" } else { "imbe" });
+    let mut f = std::fs::OpenOptions::new()
+        .append(true)
+        .create(true)
+        .open(path)
+        .unwrap();
+    for i in inputs {
+        let line: Vec<String> = match i {
+            Input::Imbe(Some((u, _, _))) => u.iter().map(ToString::to_string).collect(),
+            Input::Ambe(d, false) => d.iter().map(ToString::to_string).collect(),
+            _ => continue,
+        };
+        writeln!(f, "{}", line.join(" ")).unwrap();
+    }
+    writeln!(f).unwrap();
+}
+
 /// Every voice call of a tapped replay (`v_*.out.cf32`), op25 after the
 /// regenerator against the pipeline: `TRUNK_P25_TAPS=<dir> cargo test -p
 /// trunk-recorder-sys --release --lib voice_capture -- --ignored --nocapture`.
@@ -368,6 +411,7 @@ fn voice_capture_sounds_as_op25_makes_it() {
         }
         let dibits: Vec<u8> = symbols.iter().map(|&s| slice(s)).collect();
         let op25 = reference(&dibits, phase2, i32::from(slot));
+        dump_corpus(&op25.inputs, phase2);
 
         // Per voice frame of our channel, in order: was its burst rewritten
         // (so op25 read the DUID the Rust decoders decided)?

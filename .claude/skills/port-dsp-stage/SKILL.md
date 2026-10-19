@@ -69,6 +69,12 @@ P25 control channel (qii), P25 phase 1 voice (nih), P25 phase 2 TDMA (has).
   end-to-end number). Flush held output at the end of each tap.
 - Ground truth from the signal itself: CRC/RS-verified words, talkgroups
   that match the call, pitch continuity of voice frames.
+- For anything audible, a blind listening test beats any metric: cut A/B
+  clips only where the candidates diverge most (`vocoder_ab`), post them
+  with `trunk-discord ab post`, tally with `ab tally`. Waveform SNR is
+  meaningless for a parametric vocoder (one repeat shifts every later
+  phase); log-spectral distance is honest but undervalues artifacts, and
+  the ears disagreed with it on phase 2.
 - Sweep parameters offline before choosing defaults (timing loop bandwidth
   mattered more than anything for voice).
 

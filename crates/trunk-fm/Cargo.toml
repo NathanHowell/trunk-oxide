@@ -1,0 +1,12 @@
+[package]
+name = "trunk-fm"
+description = "Analog FM voice channel: demodulator, de-emphasis, audio filters, CTCSS and noise detectors, and the transmission gate."
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+num-complex = { workspace = true }
+
+[lints]
+workspace = true

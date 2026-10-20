@@ -33,7 +33,6 @@ pub struct Channel {
 pub struct Source {
     pub center: i64,
     pub rate: i64,
-    pub gain: i64,
     pub ppm: i64,
     pub driver: String,
     pub device: String,

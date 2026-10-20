@@ -1,9 +1,9 @@
 pub mod discord;
 pub mod recorder;
-pub mod removed;
 pub mod service;
 pub mod source;
 pub mod system;
+pub mod tunable;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -18,6 +18,7 @@ pub use source::{SourceConfig, SourceDriver};
 pub use system::{
     ChannelConfig, Modulation, SystemConfig, SystemType, TalkgroupConfig, TalkgroupMode,
 };
+pub use tunable::Tunable;
 
 #[derive(Debug, Deserialize)]
 pub struct Config {
@@ -49,13 +50,6 @@ impl Config {
     /// only explicitly-set TOML fields override CSV values.
     pub fn load(path: &str) -> Result<Self> {
         let content = std::fs::read_to_string(path)?;
-        let removed = removed::find(&toml::from_str(&content)?);
-        if !removed.is_empty() {
-            anyhow::bail!(
-                "{path} sets options that no longer exist:\n  {}",
-                removed.join("\n  ")
-            );
-        }
         let mut config: Self = toml::from_str(&content)?;
 
         // Check if any system uses CSV files
@@ -214,29 +208,6 @@ max_channels = 12
     }
 
     #[test]
-    fn a_config_setting_a_removed_option_is_refused_with_why() {
-        let dir = std::env::temp_dir().join(format!("trunk-config-removed-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("config.toml");
-        std::fs::write(
-            &path,
-            "[recorder]\nsoft_vocoder = true\n\n[[source]]\ndigital_recorders = 6\n",
-        )
-        .unwrap();
-        let err = Config::load(path.to_str().unwrap())
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("recorder.soft_vocoder: "), "{err}");
-        assert!(
-            err.contains("source.0.digital_recorders: channels are shared"),
-            "{err}"
-        );
-        std::fs::write(&path, "[recorder]\nmax_channels = 4\n").unwrap();
-        assert!(Config::load(path.to_str().unwrap()).is_ok());
-        std::fs::remove_dir_all(&dir).unwrap();
-    }
-
-    #[test]
     fn parse_source_config() {
         let toml = r#"
 [[source]]
@@ -252,7 +223,7 @@ gain = 36.0
         let src = &config.source[0];
         assert_eq!(src.driver, SourceDriver::Osmosdr);
         assert_eq!(src.device, "rtl=0");
-        assert!((src.gain - 36.0).abs() < f64::EPSILON);
+        assert_eq!(src.gain, crate::Tunable::Fixed(36.0));
     }
 
     #[test]

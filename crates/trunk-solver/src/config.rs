@@ -33,7 +33,7 @@ impl SolverConfig {
             .source
             .iter()
             .map(|s| {
-                Device::from_source_config(&s.device, hz(s.gain), hz(s.ppm))
+                Device::from_source_config(&s.device, hz(s.ppm))
                     .ok_or_else(|| anyhow::anyhow!("Unknown device type: {}", s.device))
             })
             .collect()

@@ -165,7 +165,7 @@ fn run_calibration(
         Err(e) => {
             tracing::warn!(
                 device = %device, error = %e,
-                "gain calibration: could not open device; using configured gain"
+                "gain calibration: could not open device; using the fallback gain"
             );
             return Calibrated::configured(fallback_gain);
         }
@@ -213,7 +213,7 @@ fn run_calibration(
                 noise_floor_db = sel.noise_floor_db,
                 reason = sel.reason.label(),
                 penalty_db = sel.penalty_db,
-                configured_gain = fallback_gain,
+                fallback_gain,
                 curve = %sweep.curve(policy.sat_limit),
                 "gain auto-calibration complete"
             );
@@ -227,14 +227,14 @@ fn run_calibration(
         Err(e) => {
             tracing::warn!(
                 device = %device, error = %e,
-                "gain calibration failed; using configured gain"
+                "gain calibration failed; using the fallback gain"
             );
             Calibrated::configured(fallback_gain)
         }
     }
 }
 
-/// Calibrate every `auto_gain` source concurrently — one thread per device —
+/// Calibrate every `gain = "auto"` source concurrently — one thread per device —
 /// and return a map from source index to the outcome. Sources absent from
 /// the map keep their configured gain.
 ///
@@ -251,21 +251,16 @@ fn calibrate_sources_parallel(
     let mut handles = Vec::new();
 
     for (idx, src) in sources.iter().enumerate() {
-        if src.enabled == Some(false) || !src.auto_gain {
-            continue;
-        }
-        if src.driver != SourceDriver::Rtlsdr {
-            tracing::warn!(
-                device = %src.device,
-                "auto_gain is only supported for the rtlsdr driver; using configured gain"
-            );
+        // Only an RTL-SDR's gain is tuned; a file has none.
+        if src.enabled == Some(false) || !src.gain.is_auto() || src.driver != SourceDriver::Rtlsdr {
             continue;
         }
         let spec = trunk_sdr::DeviceSpec::parse(&src.device);
-        let tuning = rtl_tuning(src, trunk_sdr::Gain::Manual(src.gain));
         let device = src.device.clone();
-        let fallback = src.gain;
         let cached = cache.get(&device).cloned();
+        // Should calibration fail: this dongle's last pick, else the default.
+        let fallback = cached.as_ref().map_or(DEFAULT_GAIN_DB, |c| c.gain_db);
+        let tuning = rtl_tuning(src, trunk_sdr::Gain::Manual(fallback));
         handles.push(std::thread::spawn(move || {
             let c = run_calibration(&spec, &tuning, &policy, fallback, &device, cached.as_ref());
             (idx, device, c)
@@ -350,6 +345,16 @@ fn warn_on_placement(radio: &Radio, config: &Config) {
             }
         }
     }
+}
+
+/// An RTL-SDR's gain when `gain = "auto"` has nothing better: calibration
+/// failed and the dongle has no earlier pick (an R820T step mid-range, near
+/// what the live dongles' sweeps choose).
+const DEFAULT_GAIN_DB: f64 = 40.2;
+
+/// A source's gain when it is not tuned: the pinned value, else the default.
+fn configured_gain(src: &SourceConfig) -> f64 {
+    src.gain.fixed().unwrap_or(DEFAULT_GAIN_DB)
 }
 
 fn rtl_tuning(src: &SourceConfig, gain: trunk_sdr::Gain) -> trunk_sdr::Tuning {
@@ -494,7 +499,7 @@ impl ScannerBuilder {
         ));
 
         // ── Sources ──
-        // Pre-flight gain calibration for all auto_gain sources runs first, in
+        // Pre-flight gain calibration for every gain = "auto" source runs first, in
         // parallel (one thread per device), so the devices are free before any
         // source is opened below. Maps source index → calibrated gain.
         let state_dir = rec.map_or("/var/lib/trunk-oxide", |r| r.state_dir.as_str());
@@ -510,7 +515,7 @@ impl ScannerBuilder {
                     let c = calibrated_gains
                         .get(&idx)
                         .cloned()
-                        .unwrap_or(Calibrated::configured(src.gain));
+                        .unwrap_or(Calibrated::configured(configured_gain(src)));
                     calibrate::report::SourceGain {
                         device: src.device.clone(),
                         source: idx,
@@ -528,7 +533,9 @@ impl ScannerBuilder {
             }
             // Use the pre-flight calibrated gain if this source was swept,
             // otherwise the configured gain.
-            let gain = calibrated_gains.get(&idx).map_or(src.gain, |c| c.gain_db);
+            let gain = calibrated_gains
+                .get(&idx)
+                .map_or_else(|| configured_gain(src), |c| c.gain_db);
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let capacity = ((src.rate * STREAM_QUEUE_SECS) as usize).max(4 * STREAM_BLOCK);
             let (stream, running, rate) = match src.driver {

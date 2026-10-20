@@ -251,7 +251,6 @@ fn extract_sources(
             sources.push(Source {
                 center: i64::midpoint(upper, lower),
                 rate,
-                gain: device.gain,
                 ppm: device.ppm,
                 driver: device.driver.clone(),
                 device: device.device_template.replace("{}", &i.to_string()),
@@ -292,7 +291,6 @@ mod tests {
         let source = |center| Source {
             center,
             rate: 912_000,
-            gain: 0,
             ppm: 0,
             driver: "rtlsdr".into(),
             device: String::new(),

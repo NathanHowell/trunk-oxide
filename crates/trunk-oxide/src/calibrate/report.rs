@@ -16,8 +16,8 @@ pub struct SourceGain {
     /// (the sweep's relative dB scale).
     pub noise_floor_db: Option<f64>,
     /// `budget`, `saturation_limited`, `adc_limited`, `fallback`, `cached`
-    /// (the last sweep's pick re-checked and kept) or `configured` (no
-    /// `auto_gain`).
+    /// (the last sweep's pick re-checked and kept) or `configured` (the
+    /// config pins `gain`, or the source has no tuner).
     pub reason: &'static str,
 }
 

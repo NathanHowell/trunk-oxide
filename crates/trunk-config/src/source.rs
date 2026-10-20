@@ -1,5 +1,7 @@
 use serde::Deserialize;
 
+use crate::Tunable;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SourceDriver {
@@ -50,16 +52,14 @@ pub struct SourceConfig {
     /// a fixed ppm, so per-channel scaling isn't needed.
     #[serde(default)]
     pub freq_correction_hz: f64,
+    /// Tuner gain, dB. `"auto"` (the default): an `rtlsdr` source sweeps its
+    /// gain steps at startup and takes the lowest gain within a small SNR
+    /// penalty of the best that stays clear of overload, re-checking the
+    /// last sweep's pick on later starts. A number pins it.
     #[serde(default)]
-    pub gain: f64,
+    pub gain: Tunable<f64>,
     #[serde(default)]
     pub agc: bool,
-    /// When true, sweep the device's gain steps at startup and pick the gain
-    /// with the best noise figure that stays clear of overload, ignoring the
-    /// configured `gain` (which becomes a fallback if calibration fails).
-    /// Only supported for the `osmosdr` driver.
-    #[serde(default)]
-    pub auto_gain: bool,
     #[serde(default)]
     pub signal_detector_threshold: Option<f32>,
     #[serde(default)]

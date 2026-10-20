@@ -10,7 +10,6 @@ pub struct Device {
     pub ppm: i64,
     pub driver: String,
     pub device_template: String,
-    pub gain: i64,
     /// Sample rate must be a multiple of this value (driver requirement).
     /// For osmosdr sources, trunk-recorder requires a multiple of 24000.
     pub rate_multiple: i64,
@@ -27,7 +26,6 @@ impl Device {
             ppm: 1,
             driver: "osmosdr".into(),
             device_template: "rtl={}".into(),
-            gain: 24,
             rate_multiple: 24_000,
         }
     }
@@ -39,7 +37,6 @@ impl Device {
             ppm: 1,
             driver: "osmosdr".into(),
             device_template: "airspy={}".into(),
-            gain: 24,
             rate_multiple: 24_000,
         }
     }
@@ -54,17 +51,16 @@ impl Device {
     }
 
     /// Infer device type from a trunk-recorder source `device` string
-    /// (e.g. `"rtl=0"`, `"airspy=1"`), overriding gain and ppm with
-    /// the values from the existing config.
+    /// (e.g. `"rtl=0"`, `"airspy=1"`), overriding ppm with the value from
+    /// the existing config.
     #[must_use]
-    pub fn from_source_config(device_str: &str, gain: i64, ppm: i64) -> Option<Self> {
+    pub fn from_source_config(device_str: &str, ppm: i64) -> Option<Self> {
         let prefix = device_str.split('=').next()?;
         let mut device = match prefix {
             "rtl" => Self::rtlsdr(),
             "airspy" => Self::airspy(),
             _ => return None,
         };
-        device.gain = gain;
         device.ppm = ppm;
         Some(device)
     }

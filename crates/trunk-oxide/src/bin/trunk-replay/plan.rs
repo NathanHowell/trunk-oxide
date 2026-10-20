@@ -216,9 +216,6 @@ pub fn build(
     let capture_dir = capture_dir.canonicalize()?;
 
     migrate_recorder_counts(&mut root, &capture_dir)?;
-    for gone in trunk_config::removed::strip(&mut root) {
-        eprintln!("capture config: dropping {gone}");
-    }
 
     let mut duration_s = 0.0_f64;
     let mut skipped = Vec::new();
@@ -256,7 +253,6 @@ pub fn build(
             tbl.insert("iq_format".into(), "cu8".into());
             tbl.insert("iq_repeat".into(), false.into());
             // Hardware knobs mean nothing for a file.
-            tbl.insert("auto_gain".into(), false.into());
             tbl.remove("gain");
             tbl.remove("ppm");
         }

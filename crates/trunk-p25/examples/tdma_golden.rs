@@ -474,6 +474,8 @@ fn main() {
     let mut regen_total = Score::default();
     let (mut agree_sym, mut agree_iq) = (Agreement::default(), Agreement::default());
     let mut calls = 0;
+    // The Rust receiver's MAC PDUs on both logical channels, by opcode.
+    let (mut by_opcode, mut foreign) = ([0u64; 8], 0);
     for json in names.iter().filter(|p| {
         let n = p.file_name().unwrap().to_string_lossy();
         n.starts_with("v_") && p.extension().is_some_and(|e| e == "json")
@@ -512,6 +514,10 @@ fn main() {
         }
         let (iqs, iq_voice) = score_rust(&ev, channel, tg);
         let st = dec.stats();
+        for (t, n) in by_opcode.iter_mut().zip(st.mac_by_opcode) {
+            *t += n;
+        }
+        foreign += st.end_ptt_foreign;
 
         // op25 itself, on the Rust-regenerated stream.
         let mut regen = TdmaRegenerator::new(cfg, Some(scrambler.clone()));
@@ -580,6 +586,20 @@ fn main() {
             s.muted,
         );
     }
+    let opcodes: Vec<String> = (0..8u8)
+        .filter(|&b| by_opcode[usize::from(b)] > 0)
+        .map(|b| {
+            format!(
+                "{} {}",
+                MacOpcode::from_bits(b).name(),
+                by_opcode[usize::from(b)]
+            )
+        })
+        .collect();
+    println!(
+        "rust on IQ, MAC PDUs (both channels): {}; END_PTT with another system's color code {foreign}",
+        opcodes.join(", ")
+    );
     for (name, a) in [("op25 symbols", &agree_sym), ("IQ", &agree_iq)] {
         println!(
             "rust ({name}) vs op25 on bursts both decoded: frames {}, u0/u1 differ {} ({:.2}%); pitch nearer neighbours rust {} op25 {}; non-voice pitch rust {} op25 {}",

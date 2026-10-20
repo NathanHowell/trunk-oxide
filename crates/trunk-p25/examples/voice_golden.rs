@@ -7,6 +7,8 @@
 //! soft decoders on exactly the same bits.
 //!
 //! cargo run --release -p trunk-p25 --example `voice_golden` -- <tap dir>
+//!     [lp=<cutoff>:<transition>|none] [iq=in] [pre=<cutoff>:<transition>]
+//!     [agc=<alpha>] [df=<memory>] [bw=<timing bandwidth>] [quiet]
 
 #![allow(
     clippy::cast_precision_loss,
@@ -16,10 +18,12 @@
     clippy::comparison_chain
 )]
 
+mod front_end;
+use front_end::FrontEnd;
+
 use std::collections::BTreeMap;
 use std::fs;
 
-use num_complex::Complex32;
 use trunk_p25::fec::{HAMMING_10, RS_24_12, RS_24_16};
 use trunk_p25::framer::{Duid, Frame, Framer};
 use trunk_p25::gf64::Gf64;
@@ -125,14 +129,20 @@ fn frames_of(symbols: &[f32]) -> Vec<Frame> {
 fn main() {
     let mut args = std::env::args().skip(1);
     let dir = args.next().expect("tap dir");
-    let (mut mf, mut df, mut bw, mut quiet) = (false, 0.0f32, None, false);
+    let (mut df, mut bw, mut quiet) = (0.0f32, None, false);
+    let mut lp = None;
+    let mut front = FrontEnd::default();
     for a in args {
-        if let Some(v) = a.strip_prefix("mf=") {
-            mf = v == "1";
+        if front.parse(&a) {
         } else if let Some(v) = a.strip_prefix("df=") {
             df = v.parse().unwrap();
         } else if let Some(v) = a.strip_prefix("bw=") {
             bw = Some(v.parse().unwrap());
+        } else if let Some(v) = a.strip_prefix("lp=") {
+            lp = Some(
+                v.split_once(':')
+                    .map(|(c, t)| (c.parse().unwrap(), t.parse().unwrap())),
+            );
         } else if a == "quiet" {
             quiet = true;
         }
@@ -214,21 +224,12 @@ fn main() {
         pitch_check(&mut t, &pairs);
 
         // Conditioned IQ through the whole Rust receiver.
-        let raw = fs::read(format!("{base}.out.cf32")).unwrap();
-        let iq: Vec<Complex32> = raw
-            .as_chunks::<8>()
-            .0
-            .iter()
-            .map(|c| {
-                Complex32::new(
-                    f32::from_le_bytes([c[0], c[1], c[2], c[3]]),
-                    f32::from_le_bytes([c[4], c[5], c[6], c[7]]),
-                )
-            })
-            .collect();
+        let iq = front.load(&base, meta["out_rate"].as_f64().unwrap());
         let modulation = Modulation::Cqpsk;
         let mut cfg = DemodConfig::new(meta["out_rate"].as_f64().unwrap(), modulation);
-        cfg.matched_filter = mf;
+        if let Some(lp) = lp {
+            cfg.lowpass = lp;
+        }
         cfg.reference_memory = df;
         if let Some(bw) = bw {
             cfg.timing_bandwidth = bw;

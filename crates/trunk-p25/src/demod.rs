@@ -3,7 +3,8 @@
 //! The channelizer delivers each control channel at 24 kS/s (5 samples per
 //! symbol), level-controlled and frequency-locked. From there:
 //!
-//! 1. Optional root-raised-cosine matched filter (α = 0.2).
+//! 1. For CQPSK, a low-pass receive filter ([`RECEIVE_CUTOFF_HZ`]) that
+//!    takes out the noise the channel filter lets in beyond the signal.
 //! 2. Gardner timing recovery with a proportional-integral loop and cubic
 //!    interpolation. For CQPSK the detector runs on the complex samples (as
 //!    op25's `gardner_cc`); for C4FM, whose envelope is constant, it runs on
@@ -25,12 +26,17 @@ use num_complex::Complex32;
 
 use crate::symbols::{LEVELS, PHASE2_SYMBOL_RATE, SYMBOL_RATE, slice, wrap};
 
-/// Roll-off of the optional receive filter, that of the Phase 1 transmit
-/// raised cosine (TIA-102.BAAA-A §9.3). The transmit pulse is a full raised
-/// cosine, not a root, so this filter only limits noise; it is not matched.
-const RRC_ROLLOFF: f64 = 0.2;
-/// Matched filter length, in symbols.
-const RRC_SPAN_SYMBOLS: usize = 8;
+/// The CQPSK receive filter's 6 dB point and transition width.
+///
+/// Not the 2880 Hz band edge of TIA-102.BAAA-A §9.3's raised cosine: the sites heard
+/// here transmit wider (phase 1 is -6.6 dB at 2880 Hz and -14 dB at 4.5 kHz,
+/// phase 2's H-DQPSK -6 dB at 4 kHz), and on two tapped captures 4.5 kHz cut
+/// phase 1's corrected bits by 7 % and raised phase 2's good MAC PDUs by
+/// 3.5 %, where 2.9 kHz made both worse and wider cut-offs gained less
+/// (bead a4p.2, 2026-10-20). The root-raised cosine this replaces nearly
+/// doubled phase 1's corrected bits.
+pub const RECEIVE_CUTOFF_HZ: f64 = 4_500.0;
+pub const RECEIVE_TRANSITION_HZ: f64 = 2_000.0;
 /// Damping of the timing loop (critically damped is 1; 1/√2 settles fastest
 /// without ringing).
 const TIMING_DAMPING: f64 = 0.707;
@@ -71,7 +77,10 @@ pub struct DemodConfig {
     /// 4800 baud for Phase 1, 6000 for Phase 2 TDMA.
     pub symbol_rate: f64,
     pub modulation: Modulation,
-    pub matched_filter: bool,
+    /// The low-pass receive filter's 6 dB point and transition width, Hz:
+    /// [`RECEIVE_CUTOFF_HZ`] for CQPSK, none for C4FM, whose
+    /// discriminator-and-integrate receiver (BAAA-A §9.6) filters itself.
+    pub lowpass: Option<(f64, f64)>,
     /// Timing loop noise bandwidth, normalised to the symbol rate.
     pub timing_bandwidth: f32,
     /// Decision-feedback reference weight in [0, 1); 0 is plain differential
@@ -87,7 +96,10 @@ impl DemodConfig {
             sample_rate,
             symbol_rate: SYMBOL_RATE,
             modulation,
-            matched_filter: false,
+            lowpass: match modulation {
+                Modulation::Cqpsk => Some((RECEIVE_CUTOFF_HZ, RECEIVE_TRANSITION_HZ)),
+                Modulation::C4fm => None,
+            },
             timing_bandwidth: DEFAULT_TIMING_BANDWIDTH,
             reference_memory: 0.0,
             bias_gain: DEFAULT_BIAS_GAIN,
@@ -163,8 +175,8 @@ impl Demodulator {
     pub fn new(cfg: DemodConfig) -> Self {
         let sps = cfg.sample_rate / cfg.symbol_rate;
         assert!(sps >= 2.0, "need at least 2 samples per symbol");
-        let taps = if cfg.matched_filter {
-            rrc_taps(sps, RRC_ROLLOFF, RRC_SPAN_SYMBOLS)
+        let taps = if let Some((cutoff, transition)) = cfg.lowpass {
+            lowpass_taps(cfg.sample_rate, cutoff, transition)
         } else {
             vec![1.0]
         };
@@ -328,32 +340,34 @@ fn loop_gains(bn_t: f64, zeta: f64) -> (f64, f64) {
     (4.0 * zeta * theta / d, 4.0 * theta * theta / d)
 }
 
+/// A windowed-sinc low-pass (Blackman-Harris, 60 dB), 6 dB down at
+/// `cutoff`, unit gain at DC.
 #[allow(
     clippy::cast_possible_truncation,
     clippy::cast_precision_loss,
     clippy::cast_sign_loss
 )]
-fn rrc_taps(sps: f64, alpha: f64, span: usize) -> Vec<f32> {
-    let n = (sps * span as f64).round() as usize | 1;
-    let mid = (n / 2) as f64;
+#[must_use]
+pub fn lowpass_taps(fs: f64, cutoff: f64, transition: f64) -> Vec<f32> {
+    use std::f64::consts::PI;
+    let n = (60.0 * fs / (22.0 * transition)) as usize | 1;
+    let m = (n - 1) as f64;
+    let half = (n - 1) / 2;
+    let w0 = 2.0 * PI * cutoff / fs;
     let taps: Vec<f64> = (0..n)
         .map(|i| {
-            let t = (i as f64 - mid) / sps;
-            let pi = std::f64::consts::PI;
-            if t.abs() < 1e-12 {
-                1.0 - alpha + 4.0 * alpha / pi
-            } else if (t.abs() - 1.0 / (4.0 * alpha)).abs() < 1e-9 {
-                alpha / 2f64.sqrt()
-                    * (1.0 - 2.0 / pi).mul_add(
-                        (pi / (4.0 * alpha)).cos(),
-                        (1.0 + 2.0 / pi) * (pi / (4.0 * alpha)).sin(),
-                    )
+            let x = 2.0 * PI * i as f64 / m;
+            let window = 0.01168f64.mul_add(
+                -(3.0 * x).cos(),
+                0.14128f64.mul_add((2.0 * x).cos(), 0.48829f64.mul_add(-x.cos(), 0.35875)),
+            );
+            let k = i as f64 - half as f64;
+            let sinc = if i == half {
+                w0 / PI
             } else {
-                (4.0 * alpha * t).mul_add(
-                    (pi * t * (1.0 + alpha)).cos(),
-                    (pi * t * (1.0 - alpha)).sin(),
-                ) / (pi * t * (4.0 * alpha * t).mul_add(-(4.0 * alpha * t), 1.0))
-            }
+                (k * w0).sin() / (k * PI)
+            };
+            sinc * window
         })
         .collect();
     let gain: f64 = taps.iter().sum();
@@ -413,16 +427,6 @@ mod tests {
         r
     }
 
-    /// The synthetic channel's noise is white across the whole 24 kHz (the
-    /// real channelizer has already band-limited it), so noise tests use the
-    /// matched filter.
-    fn filtered(modulation: Modulation) -> DemodConfig {
-        DemodConfig {
-            matched_filter: true,
-            ..DemodConfig::new(24000.0, modulation)
-        }
-    }
-
     fn impaired(es_n0_db: f64) -> Channel {
         Channel {
             es_n0_db,
@@ -447,14 +451,14 @@ mod tests {
 
     #[test]
     fn cqpsk_tracks_timing_and_frequency_in_noise() {
-        let cfg = filtered(Modulation::Cqpsk);
+        let cfg = DemodConfig::new(24000.0, Modulation::Cqpsk);
         let r = ser(cfg, &impaired(16.0), testgen::modulate_cqpsk);
         assert!(r < 0.01, "SER {r}");
     }
 
     #[test]
     fn decision_feedback_reference_lowers_symbol_errors() {
-        let plain = filtered(Modulation::Cqpsk);
+        let plain = DemodConfig::new(24000.0, Modulation::Cqpsk);
         let df = DemodConfig {
             reference_memory: 0.6,
             ..plain

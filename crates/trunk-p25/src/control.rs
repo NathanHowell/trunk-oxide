@@ -421,9 +421,12 @@ mod tests {
     }
 
     fn stream(rng: &mut Rng, frames: usize) -> (Vec<u8>, Vec<[u8; 10]>) {
-        // A control channel never stops; start mid-stream (random dibits).
+        // A control channel never stops; start mid-stream (random dibits),
+        // 125 ms before the first frame, as a receiver that has been
+        // listening a while (the receive filter slows the timing loop's
+        // first lock: with 62 ms it missed the first frame at -60 ppm).
         #[allow(clippy::cast_possible_truncation)]
-        let mut dibits: Vec<u8> = (0..300).map(|_| (rng.next_u64() & 3) as u8).collect();
+        let mut dibits: Vec<u8> = (0..600).map(|_| (rng.next_u64() & 3) as u8).collect();
         let mut sent = Vec::new();
         for _ in 0..frames {
             let t = testgen::random_tsbks(rng, 3);
@@ -495,13 +498,9 @@ mod tests {
             seed: 8,
         };
         let iq = ch.apply(&iq, 5, crate::symbols::SYMBOL_RATE);
-        // White noise over the full band: CQPSK gets its matched filter, as
-        // the channelizer's band-limiting would (C4FM's receiver integrates).
-        let matched_filter = modulation == Modulation::Cqpsk;
-        let demod = DemodConfig {
-            matched_filter,
-            ..DemodConfig::new(24000.0, modulation)
-        };
+        // The channel's noise has been through the channel filter, as live;
+        // the receiver is the live one too.
+        let demod = DemodConfig::new(24000.0, modulation);
         let cfg = DecoderConfig {
             list_size,
             ..DecoderConfig::new(demod)

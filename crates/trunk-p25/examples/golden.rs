@@ -8,7 +8,7 @@
 //! A Rust-only TSBK that also appears elsewhere in the Rust output is counted
 //! as corroborated (control channels repeat most messages).
 //!
-//! cargo run --release -p trunk-p25 --example golden -- <tap dir> [mf=0|1] [df=<memory>] [list=<n>]
+//! cargo run --release -p trunk-p25 --example golden -- <tap dir> [lp=<cutoff>:<transition>|none] [df=<memory>] [list=<n>]
 
 #![allow(
     clippy::cast_precision_loss,
@@ -106,16 +106,14 @@ fn print(label: &str, s: &Score, cpp_total: usize, st: &DecoderStats) {
 fn main() {
     let mut args = std::env::args().skip(1);
     let dir = args.next().expect("tap dir");
-    let mut mf = None;
     let mut df = 0.0f32;
     let mut list = 8usize;
     let mut bw = None;
+    let mut lp = None;
     // Write each channel's IQ-decoded TSBKs, in order, to <dump>/<base>.hex.
     let mut dump: Option<String> = None;
     for a in args {
-        if let Some(v) = a.strip_prefix("mf=") {
-            mf = Some(v == "1");
-        } else if let Some(v) = a.strip_prefix("df=") {
+        if let Some(v) = a.strip_prefix("df=") {
             df = v.parse().unwrap();
         } else if let Some(v) = a.strip_prefix("list=") {
             list = v.parse().unwrap();
@@ -123,6 +121,11 @@ fn main() {
             dump = Some(v.to_string());
         } else if let Some(v) = a.strip_prefix("bw=") {
             bw = Some(v.parse().unwrap());
+        } else if let Some(v) = a.strip_prefix("lp=") {
+            lp = Some(
+                v.split_once(':')
+                    .map(|(c, t)| (c.parse().unwrap(), t.parse().unwrap())),
+            );
         }
     }
 
@@ -156,13 +159,13 @@ fn main() {
         };
         let rate = meta["out_rate"].as_f64().unwrap();
         let mut demod = DemodConfig::new(rate, modulation);
-        if let Some(mf) = mf {
-            demod.matched_filter = mf;
-        }
         if let Some(bw) = bw {
             demod.timing_bandwidth = bw;
         }
         demod.reference_memory = df;
+        if let Some(lp) = lp {
+            demod.lowpass = lp;
+        }
         let cfg = DecoderConfig {
             list_size: list,
             ..DecoderConfig::new(demod)

@@ -11,7 +11,8 @@
 //! Only the call's own logical channel is counted, as op25 decodes only it.
 //!
 //! cargo run --release -p trunk-p25 --example `tdma_golden` -- <tap dir>
-//!     [wacn=0xbee00 sysid=0x5e4 nac=0x5e1] [quiet]
+//!     [wacn=0xbee00 sysid=0x5e4 nac=0x5e1] [lp=<cutoff>:<transition>|none]
+//!     [iq=in] [pre=<cutoff>:<transition>] [agc=<alpha>] [quiet]
 
 #![allow(
     clippy::cast_precision_loss,
@@ -22,10 +23,12 @@
     clippy::similar_names
 )]
 
+mod front_end;
+use front_end::FrontEnd;
+
 use std::collections::BTreeMap;
 use std::fs;
 
-use num_complex::Complex32;
 use trunk_p25::DemodConfig;
 use trunk_p25::control::Received;
 use trunk_p25::gf64::Gf64;
@@ -422,21 +425,6 @@ fn read_f32(path: &str) -> Vec<f32> {
         .collect()
 }
 
-fn read_cf32(path: &str) -> Vec<Complex32> {
-    fs::read(path)
-        .unwrap()
-        .as_chunks::<8>()
-        .0
-        .iter()
-        .map(|c| {
-            Complex32::new(
-                f32::from_le_bytes([c[0], c[1], c[2], c[3]]),
-                f32::from_le_bytes([c[4], c[5], c[6], c[7]]),
-            )
-        })
-        .collect()
-}
-
 fn parse(v: &str) -> u32 {
     v.strip_prefix("0x").map_or_else(
         || v.parse().unwrap(),
@@ -449,8 +437,11 @@ fn main() {
     let dir = args.next().expect("tap dir");
     let (mut wacn, mut sysid, mut nac, mut quiet) = (0xbee00, 0x5e4, 0x5e1, false);
     let mut bw = None;
+    let mut lp = None;
+    let mut front = FrontEnd::default();
     for a in args {
-        if let Some(v) = a.strip_prefix("wacn=") {
+        if front.parse(&a) {
+        } else if let Some(v) = a.strip_prefix("wacn=") {
             wacn = parse(v);
         } else if let Some(v) = a.strip_prefix("sysid=") {
             sysid = parse(v);
@@ -458,6 +449,11 @@ fn main() {
             nac = parse(v);
         } else if let Some(v) = a.strip_prefix("bw=") {
             bw = Some(v.parse().unwrap());
+        } else if let Some(v) = a.strip_prefix("lp=") {
+            lp = Some(
+                v.split_once(':')
+                    .map(|(c, t)| (c.parse().unwrap(), t.parse().unwrap())),
+            );
         } else if a == "quiet" {
             quiet = true;
         }
@@ -502,10 +498,13 @@ fn main() {
         dec.process_symbols(&symbols, &mut ev);
         let (sym, sym_voice) = score_rust(&ev, channel, tg);
 
-        let iq = read_cf32(&format!("{base}.out.cf32"));
+        let iq = front.load(&base, meta["out_rate"].as_f64().unwrap());
         let mut cfg = DemodConfig::phase2(meta["out_rate"].as_f64().unwrap());
         if let Some(bw) = bw {
             cfg.timing_bandwidth = bw;
+        }
+        if let Some(lp) = lp {
+            cfg.lowpass = lp;
         }
         let mut dec = TdmaDecoder::new(cfg, Some(scrambler.clone()));
         let mut ev = Vec::new();

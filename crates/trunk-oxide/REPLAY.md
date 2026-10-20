@@ -172,6 +172,11 @@ twice) and smoothed on its ε_R and ε_T, which op25 passed as zero. On the
 tapped corpus at σ 0.5, 0.6 and 0.7 (`vocoder_noise`) the log-spectral
 distance fell from 1.4, 3.1 and 7.3 dB to 1.2, 2.4 and 4.7, and repeats
 from 1.1, 8.3 and 22.6% to 0.2, 3.1 and 14.1%; clean audio is unchanged.
+The last of the standards' error handling scored level and was taken
+too: any frame may be repeated, a tone too (BABA-1 §5.6, §7.3), a mute
+keeps the last model (§5.7, BABA §7.8), phase 1 repeats without op25's
+limit of three (BABA §7.7), phase 2 starts from BABA-1's initial state,
+and a muted frame is heard as comfort noise uniform on [−5, 5].
 
 The vocoders were checked frame by frame against op25's on random streams
 that reach every pitch, repeat, mute, tone and erasure, 16k frames a phase,

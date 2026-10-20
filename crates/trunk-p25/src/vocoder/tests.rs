@@ -72,28 +72,22 @@ fn every_pitch_synthesises() {
     }
 }
 
-/// Phase 1 repeats a frame it cannot use at most three times, then mutes
-/// until one decodes (TIA-102.BABA 7.7).
+/// Phase 1 repeats every frame it cannot use, however many come in a row
+/// (TIA-102.BABA 7.7): only the error rate mutes (7.8). op25 muted the
+/// fourth.
 #[test]
-fn imbe_repeats_three_frames_then_mutes() {
+fn imbe_repeats_without_limit() {
     let mut rng = Rng::new(2);
     let mut v = ImbeVocoder::new();
     for _ in 0..5 {
         assert!(v.decode(&imbe_with_b0(&mut rng, 100), 0, 0, 0).is_some());
     }
-    let heard: Vec<bool> = (0..6)
-        .map(|i| {
-            v.decode(
-                &imbe_with_b0(&mut rng, if i % 2 == 0 { 100 } else { 220 }),
-                2,
-                0,
-                12,
-            )
-            .is_some()
-        })
-        .collect();
-    assert_eq!(heard, [true, true, true, false, false, false]);
+    for _ in 0..10 {
+        assert!(v.decode(&imbe_with_b0(&mut rng, 220), 0, 0, 0).is_some());
+        assert_eq!(v.last(), Decision::Repeated);
+    }
     assert!(v.decode(&imbe_with_b0(&mut rng, 100), 0, 0, 0).is_some());
+    assert_eq!(v.last(), Decision::Played);
 }
 
 /// A frame is repeated only when c0 failed (Eq. 97) and it has many errors
@@ -236,6 +230,33 @@ fn corrected_errors_smooth_phase_2() {
         differ |= a != b;
     }
     assert!(differ);
+}
+
+/// An erasure repeats the last frame whatever it was, a tone too
+/// (BABA-1 §5.6); op25 muted an erasure after a tone.
+#[test]
+fn an_erasure_after_a_tone_repeats_it() {
+    let mut rng = Rng::new(7);
+    let mut v = AmbeVocoder::new();
+    let tone_pcm = (0..3).map(|_| v.decode(&dibits(tone(129, 100)))).last();
+    assert!(tone_pcm.flatten().is_some());
+    let repeat = v.decode(&dibits(ambe_with_b0(&mut rng, 121))).expect("a repeat");
+    assert_eq!(v.last(), Decision::Repeated);
+    assert!(power(&repeat, 1209.0) > 100.0 * power(&repeat, 950.0));
+}
+
+/// Comfort noise is uniform on [−5, 5].
+#[test]
+fn comfort_noise_is_uniform_on_five() {
+    let mut noise = ComfortNoise::new();
+    let mut counts = [0usize; 11];
+    for _ in 0..100 {
+        for x in noise.frame() {
+            counts[usize::try_from(x + 5).unwrap()] += 1;
+        }
+    }
+    let n = 100 * SAMPLES_PER_FRAME / 11;
+    assert!(counts.iter().all(|&c| c > n * 9 / 10 && c < n * 11 / 10), "{counts:?}");
 }
 
 /// A DTMF tone frame plays both of its tones, continuing across frames.

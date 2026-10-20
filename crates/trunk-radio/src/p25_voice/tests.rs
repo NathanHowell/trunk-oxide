@@ -172,7 +172,7 @@ fn a_clean_phase2_call_is_vocoded_as_op25_framed_it() {
     let us = call_of(&out);
     assert!(us.pcm.iter().any(|&s| s != 0));
     assert_eq!(us.inputs.len(), 104);
-    assert_eq!(fnv(&vocode_fresh(&us.inputs[4..])), 0x0086_0c13_e3d9_6c29);
+    assert_eq!(fnv(&vocode_fresh(&us.inputs[4..])), 0x074e_5618_db4e_af45);
     assert_eq!(us.sources, Vec::<i64>::new());
     assert_eq!(us.terminators, 0);
 }
@@ -334,14 +334,14 @@ fn imbe_frames(rng: &mut Rng, n: usize) -> Vec<([u32; 8], u32, u32, u32)> {
 
 /// The audio of `imbe_frames` for seeds 100.., as (hash, audible frames).
 const IMBE_FIXTURES: [(u64, usize); 8] = [
-    (0x2e1c_9b00_2fc0_629b, 1538),
-    (0x1116_ebc0_8b59_541e, 1257),
-    (0x45fd_7569_3f39_da5a, 1381),
-    (0xc7d0_5068_6122_3c4b, 1549),
-    (0xf1dd_608a_919e_99e6, 1534),
-    (0x4677_0f2b_f189_4634, 1402),
-    (0x9672_7204_f3ec_9057, 1573),
-    (0x230b_a512_2fc7_8b15, 1548),
+    (0x57e5_887a_28a8_2b8e, 1551),
+    (0x2fee_c35e_8966_95fd, 1272),
+    (0x0640_a95e_fd1c_a101, 1395),
+    (0xdf8d_fbb8_acf8_1c4d, 1558),
+    (0x6ac8_7341_a45e_ad5f, 1552),
+    (0xa65b_46f4_1c66_fffd, 1417),
+    (0x7b32_feaa_f99e_dc7c, 1593),
+    (0x66be_9bc3_5d22_0b9b, 1565),
 ];
 
 #[test]
@@ -430,14 +430,14 @@ fn ambe_frames(rng: &mut Rng, n: usize) -> Vec<([u8; 36], bool)> {
 /// The audio of `ambe_frames` for seeds 200.., as (hash, frames not
 /// muted, encrypted ones aside).
 const AMBE_FIXTURES: [(u64, usize); 8] = [
-    (0x158b_b5e2_fbb2_4351, 1485),
-    (0x90e6_819a_da99_7af9, 1525),
-    (0x8a73_8f2e_6650_6120, 1472),
-    (0xca5c_70a9_b691_3b67, 1577),
-    (0xc1cc_4fc9_4381_cf3e, 1537),
-    (0x1e43_bfbe_846a_f1da, 1563),
-    (0xde5a_6935_e181_4244, 1654),
-    (0x71a0_27d2_43fd_1c85, 1528),
+    (0xe98e_7f72_c66e_bf91, 1623),
+    (0x25ba_3ea4_df30_ca42, 1672),
+    (0x0a2d_8c12_463c_0112, 1592),
+    (0xb5f5_b1f9_2b32_60e5, 1716),
+    (0xf1fe_cbee_d1e8_66a7, 1637),
+    (0x3c23_d9d1_58c3_40f1, 1675),
+    (0x2a2b_fbb7_7647_de1b, 1784),
+    (0x7cf0_cb4a_4e5c_ecd2, 1627),
 ];
 
 #[test]

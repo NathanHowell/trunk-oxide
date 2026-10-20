@@ -134,8 +134,8 @@ impl AmbeVocoder {
     pub fn with_policy(policy: Policy) -> Self {
         Self {
             policy,
-            model: Model::MBELIB_INITIAL,
-            prediction: Model::MBELIB_INITIAL,
+            model: Model::INITIAL,
+            prediction: Model::INITIAL,
             tone: Tone::default(),
             error_rate: 0.0,
             errors: [0, 0],
@@ -177,24 +177,24 @@ impl AmbeVocoder {
         let render = if frame.reliability >= PLAY_MARGIN {
             self.decide(frame.params, [0, 0])
         } else {
-            self.reject(true)
+            self.reject()
         };
         render.then(|| self.play())
     }
 
-    /// One frame as op25 takes it, its 36 descrambled dibits as received,
-    /// under the error rules with the bits the decision corrected. `None` if it is muted (silence) for errors
-    /// or too many repeats.
+    /// One frame, its 36 descrambled dibits as received, under BABA-1's
+    /// error rules (§5.5–5.7) on the bits the decision corrected. `None` if
+    /// it is muted for errors or too many repeats.
     pub fn decode(&mut self, dibits: &[u8; 36]) -> Option<Pcm> {
         let (u, errors) = self.receive(dibits);
-        // op25's order: the frame is taken in (its model kept, the repeat
-        // count reset) before the error rate mutes it, where BABA-1 §5.7
-        // mutes with the repeat's update instead (trunk-oxide-13y.8).
-        let render = self.decide(u, errors) && self.error_rate <= MAX_ERROR_RATE;
-        if !render {
+        if self.error_rate > MAX_ERROR_RATE {
+            // Muted with the repeat's update (BABA-1 §5.7): the frame is
+            // not taken in. op25 takes it, so the model the mute leaves is
+            // the damaged frame's.
             self.last = Decision::Muted;
+            return None;
         }
-        render.then(|| self.play())
+        self.decide(u, errors).then(|| self.play())
     }
 
     /// What is heard: the tone or the model.
@@ -214,7 +214,7 @@ impl AmbeVocoder {
                 self.tone.set(id, amplitude);
                 self.accept(true)
             }
-            ToneFrame::Erased => self.reject(self.tone_frame),
+            ToneFrame::Erased => self.reject(),
             ToneFrame::Voice => {
                 let b = indices(u);
                 match self.prediction.dequantize(&b, errors) {
@@ -228,7 +228,7 @@ impl AmbeVocoder {
                         self.model = model;
                         self.accept(false)
                     }
-                    None => self.reject(!self.tone_frame),
+                    None => self.reject(),
                 }
             }
         }
@@ -254,16 +254,13 @@ impl AmbeVocoder {
         true
     }
 
-    /// A frame that would not decode: the last one again if fewer than four
-    /// have been rejected in a row and `repeatable` (the last frame was of
-    /// the same kind), else silence.
-    ///
-    /// `repeatable` is op25's: BABA-1 §5.6 and §7.3 repeat whatever the
-    /// last frame was (trunk-oxide-13y.6). Muting is silence, not §5.7's
-    /// comfort noise.
-    const fn reject(&mut self, repeatable: bool) -> bool {
+    /// A frame that would not decode: the last one again, voice or tone,
+    /// if fewer than four have been rejected in a row (BABA-1 §5.6, §7.3),
+    /// else muted (§5.7). op25 repeats only a frame of the same kind and
+    /// mutes an erasure after a tone or a bad tone after voice.
+    const fn reject(&mut self) -> bool {
         self.rejected += 1;
-        if self.rejected < MUTE_AFTER_INVALID && repeatable {
+        if self.rejected < MUTE_AFTER_INVALID {
             self.last = Decision::Repeated;
             true
         } else {
@@ -316,15 +313,22 @@ struct Model {
 }
 
 impl Model {
-    /// mbelib's (`mbe_initMbeParms`): log2 Ml = 0 and L = 30, where
-    /// BABA-1 §4.4.3 starts from Λ̃l(−1) = 1 and L̃(−1) = 15
-    /// (trunk-oxide-13y.7). γ̃(−1) = 0 is the spec's (Eq. 26).
-    const MBELIB_INITIAL: Self = Self {
+    /// BABA-1's (after Eq. 45, and Eq. 26): Λ̃l(−1) = 1 for every l,
+    /// L̃(−1) = 15 and γ̃(−1) = 0, where mbelib (`mbe_initMbeParms`) starts
+    /// from log2 Ml = 0 and L = 30. The spec gives no ω0 or amplitudes:
+    /// mbelib's ω0 is kept, and no amplitude, so a repeat before the first
+    /// frame is silent.
+    const INITIAL: Self = Self {
         w0: 0.09378,
-        l: 30,
+        l: 15,
         voiced: [false; HARMONICS],
         ml: [0.0; HARMONICS],
-        log2_ml: [0.0; HARMONICS + 1],
+        log2_ml: {
+            let mut log2_ml = [1.0; HARMONICS + 1];
+            log2_ml[0] = 0.0;
+            log2_ml[HARMONICS] = 0.0;
+            log2_ml
+        },
         gamma: 0.0,
     };
 

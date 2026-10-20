@@ -28,7 +28,7 @@ pub struct ImbeVocoder {
     synth: Synthesizer,
     /// Running bit error rate.
     error_rate: f32,
-    /// Frames repeated in a row.
+    /// Frames [`Policy::Soft`] has repeated in a row.
     repeats: u32,
     last: Decision,
 }
@@ -53,9 +53,9 @@ const MUTE_EPS_R: f64 = 0.0875;
 const REPEAT_EPS_0: u32 = 2;
 const REPEAT_EPS_T_BASE: f32 = 10.0;
 const REPEAT_EPS_T_PER_RATE: f32 = 40.0;
-/// op25 mutes rather than repeat a fourth frame in a row; BABA has no limit
-/// (trunk-oxide-4hj.5).
-const OP25_MAX_REPEATS: u32 = 3;
+/// [`Policy::Soft`]'s repeats in a row before it mutes, as op25's. BABA has
+/// no limit (§7.7): the error rate mutes a bad enough run (§7.8).
+const SOFT_MAX_REPEATS: u32 = 3;
 
 /// b̂0 of a frame: the pitch, 0..=207 for voice. Its low two bits are u7's
 /// bits 2..1 as sent (BABA §7.1, Fig. 22). op25 shifts u7 left a bit
@@ -119,7 +119,7 @@ impl ImbeVocoder {
             Decision::Played
         } else {
             self.repeats += 1;
-            if self.repeats <= OP25_MAX_REPEATS {
+            if self.repeats <= SOFT_MAX_REPEATS {
                 self.repeat_last();
                 self.synth.smooth(Thresholds::CLEAN);
                 Decision::Repeated
@@ -145,19 +145,15 @@ impl ImbeVocoder {
             && et as f32 >= REPEAT_EPS_T_BASE + REPEAT_EPS_T_PER_RATE * self.error_rate;
         let mut rm0 = None;
         self.last = if f64::from(self.error_rate) > MUTE_EPS_R {
-            // Muting (7.8).
+            // Muting (7.8), with the repeat's update.
+            self.repeat_last();
             Decision::Muted
         } else if b0 > MAX_PITCH_INDEX || invalid {
-            // Repeat (7.7), at most three in a row.
-            self.repeats += 1;
-            if self.repeats <= OP25_MAX_REPEATS {
-                self.repeat_last();
-                Decision::Repeated
-            } else {
-                Decision::Muted
-            }
+            // Repeat (7.7), as many in a row as come: op25 mutes the
+            // fourth.
+            self.repeat_last();
+            Decision::Repeated
         } else {
-            self.repeats = 0;
             self.decode_model(u);
             rm0 = Some(self.synth.enhance());
             Decision::Played

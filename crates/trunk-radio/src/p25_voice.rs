@@ -10,7 +10,9 @@ use trunk_channelizer::{ChannelDecoder, ConditioningSpec, NARROW, Reading, Squel
 use trunk_p25::assemble::{CallCounter, CallEvent, Phase1Assembler, Phase2Assembler, Vocode};
 use trunk_p25::control::Received;
 use trunk_p25::tdma::{BurstContent, Scrambler, TdmaDecoder, op25_view};
-use trunk_p25::vocoder::{AmbeVocoder, Decision, ImbeVocoder, Pcm, SAMPLES_PER_FRAME};
+use trunk_p25::vocoder::{
+    AmbeVocoder, ComfortNoise, Decision, ImbeVocoder, Pcm, SAMPLES_PER_FRAME,
+};
 use trunk_p25::voice::signalling::ALGID_CLEAR;
 use trunk_p25::voice::{Encryption, EncryptionTracker, VoiceDecoder, VoiceEvent};
 use trunk_p25::{DemodConfig, Modulation};
@@ -74,6 +76,8 @@ pub struct VoicePipeline {
     a2: Phase2Assembler,
     imbe: ImbeVocoder,
     ambe: AmbeVocoder,
+    /// What a muted frame is heard as.
+    comfort: ComfortNoise,
     events: Vec<Received<VoiceEvent>>,
     calls: Vec<CallEvent>,
     counter: CallCounter,
@@ -104,6 +108,7 @@ impl VoicePipeline {
             a2: Phase2Assembler::new(0),
             imbe: ImbeVocoder::new(),
             ambe: AmbeVocoder::new(),
+            comfort: ComfortNoise::new(),
             events: Vec::new(),
             calls: Vec::new(),
             counter: CallCounter::default(),
@@ -222,7 +227,8 @@ impl VoicePipeline {
         }
     }
 
-    /// A frame's audio; silence where the frame is muted or encrypted.
+    /// A frame's audio: comfort noise where the vocoder muted it, silence
+    /// where it is encrypted or there is no frame.
     fn vocode(&mut self, v: Vocode) -> Pcm {
         let (pcm, decision) = match v {
             Vocode::Imbe { frame } => (self.imbe.vocode(&frame), Some(self.imbe.last())),
@@ -246,7 +252,10 @@ impl VoicePipeline {
         };
         match decision {
             Some(Decision::Repeated) => self.repeated += 1,
-            Some(Decision::Muted) => self.muted += 1,
+            Some(Decision::Muted) => {
+                self.muted += 1;
+                return self.comfort.frame();
+            }
             Some(Decision::Played) | None => {}
         }
         pcm.unwrap_or([0; SAMPLES_PER_FRAME])

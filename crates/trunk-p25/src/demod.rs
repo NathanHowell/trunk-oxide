@@ -28,14 +28,17 @@ use crate::symbols::{LEVELS, PHASE2_SYMBOL_RATE, SYMBOL_RATE, slice, wrap};
 
 /// The CQPSK receive filter's 6 dB point and transition width.
 ///
-/// Not the 2880 Hz band edge of TIA-102.BAAA-A §9.3's raised cosine: the sites heard
-/// here transmit wider (phase 1 is -6.6 dB at 2880 Hz and -14 dB at 4.5 kHz,
-/// phase 2's H-DQPSK -6 dB at 4 kHz), and on two tapped captures 4.5 kHz cut
-/// phase 1's corrected bits by 7 % and raised phase 2's good MAC PDUs by
-/// 3.5 %, where 2.9 kHz made both worse and wider cut-offs gained less
-/// (bead a4p.2, 2026-10-20). The root-raised cosine this replaces nearly
+/// Not the 2880 Hz band edge of TIA-102.BAAA-A §9.3's raised cosine: the
+/// sites heard here transmit wider (phase 1 is -6.6 dB at 2880 Hz and -14 dB
+/// at 4.5 kHz, phase 2's H-DQPSK -6 dB at 4 kHz), and a 2.9 kHz filter made
+/// every score worse. The best cut-off moves with the capture: 4.5 kHz led on
+/// the two 10-17 tap sets but cost phase 2 2 % of its good MAC PDUs on the
+/// 10-19 spare-dongle capture. 5 kHz never lost to it: phase 1's corrected
+/// bits down 8 %, phase 2's good MAC PDUs up 3.5 % on the 10-17 sets and
+/// level on 10-19, control channels best on all three (bead a4p.2). Tuning
+/// it per channel is 71l.5. The root-raised cosine this replaced nearly
 /// doubled phase 1's corrected bits.
-pub const RECEIVE_CUTOFF_HZ: f64 = 4_500.0;
+pub const RECEIVE_CUTOFF_HZ: f64 = 5_000.0;
 pub const RECEIVE_TRANSITION_HZ: f64 = 2_000.0;
 /// Damping of the timing loop (critically damped is 1; 1/√2 settles fastest
 /// without ringing).

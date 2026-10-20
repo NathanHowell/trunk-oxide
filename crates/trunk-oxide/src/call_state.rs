@@ -1430,21 +1430,22 @@ impl TrunkStateMachine {
 
         if let Some(idx) = existing_idx {
             let same_channel = self.calls[idx].on_channel(v);
+            // A grant for a call already recording is a new key-up: from
+            // another handset (the grant names it), or from the same one
+            // after the voice channel ended its transmission. Each is its
+            // own transmission, on this channel or another. The grant usually
+            // beats the in-band source change, which then matches and is
+            // ignored, so cut here.
+            let entry = &self.calls[idx];
+            let other_handset = source.is_some() && source != entry.current_source;
+            let key_up = is_grant_message
+                && entry.is_trunked()
+                && entry.state == CallState::Recording
+                && (other_handset || entry.ptt_ended)
+                && now.saturating_duration_since(entry.segment_start) >= MIN_TRANSMISSION;
             if same_channel {
                 let entry = &mut self.calls[idx];
-
-                // A grant for a call already recording is a new key-up: from
-                // another handset (the grant names it), or from the same one
-                // after the voice channel ended its transmission. Each is its
-                // own transmission. The grant usually beats the in-band source
-                // change, which then matches and is ignored, so cut here.
-                let other_handset = source.is_some() && source != entry.current_source;
-                if is_grant_message
-                    && entry.is_trunked()
-                    && entry.state == CallState::Recording
-                    && (other_handset || entry.ptt_ended)
-                    && now.saturating_duration_since(entry.segment_start) >= MIN_TRANSMISSION
-                {
+                if key_up {
                     let call_id = entry.id;
                     let unit = source.or(entry.current_source);
                     entry.current_source = unit;
@@ -1466,7 +1467,19 @@ impl TrunkStateMachine {
                 // downstream embed (it is keyed by talkgroup, not call id).
                 self.update_call_source(idx, source, &mut effects);
             } else {
-                self.retune(idx, sys_num, v, &mut effects);
+                let cut = key_up.then(|| {
+                    let entry = &self.calls[idx];
+                    let unit = source.or(entry.current_source);
+                    tracing::info!(
+                        short_name = %entry.short_name,
+                        talkgroup = entry.talkgroup.0,
+                        source = ?unit,
+                        other_handset,
+                        "new key-up on another channel: cutting per-PTT transmission boundary"
+                    );
+                    Cut::KeyUp { source: unit }
+                });
+                self.retune(idx, sys_num, v, cut, &mut effects);
             }
             return effects;
         }
@@ -1542,7 +1555,17 @@ impl TrunkStateMachine {
     /// Move the call at `idx` to the channel (or slot) `v` names. A call on
     /// a channel keeps its place: its old channel closes and its new one
     /// opens under the same claim.
-    fn retune(&mut self, idx: usize, sys_num: i32, v: &Voice, effects: &mut Effects) {
+    /// Move call `idx` to `v`'s channel. With a `cut` (a new key-up), its
+    /// transmission ends with the old channel and the next opens on the
+    /// new one.
+    fn retune(
+        &mut self,
+        idx: usize,
+        sys_num: i32,
+        v: &Voice,
+        cut: Option<Cut>,
+        effects: &mut Effects,
+    ) {
         let now = self.clock.now();
         let entry = &mut self.calls[idx];
         let id = entry.id;
@@ -1567,6 +1590,11 @@ impl TrunkStateMachine {
             call_id: id,
             freq: v.freq(),
         });
+        // After the old channel's Close (its audio is the ending
+        // transmission's), before the new one's Open.
+        if let Some(cut) = cut {
+            effects.extend(self.cut_transmission(id, cut));
+        }
         let assessed = self.assess(idx, sys_num, v);
         match (was_held, assessed) {
             (true, Ok(a)) => {
@@ -3055,6 +3083,57 @@ mod tests {
         exec(&mut sm, effects);
         assert!(!sm.calls[0].ptt_ended, "a new transmission starts unended");
         assert_eq!(state(&sm, call_id), CallState::Recording);
+    }
+
+    #[test]
+    fn a_key_up_granted_on_another_channel_cuts_as_it_moves() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let call_id = recording_trunked_call(&mut sm);
+        sm.calls[0].segment_start = Instant::now() - Duration::from_secs(2);
+        // Moved mid-transmission, the same unit, nothing ended: one transmission.
+        let moved = sm.on_message(&from_source(&grant_msg(100, 852_000_000.0), 100));
+        assert!(!has(&moved, "EmitCallEnd"), "{:?}", names(&moved));
+        exec(&mut sm, moved);
+
+        // The transmission ended; the next key-up is granted elsewhere.
+        sm.calls[0].segment_start = Instant::now() - Duration::from_secs(2);
+        sm.on_ptt_ended(call_id);
+        let effects = sm.on_message(&from_source(&grant_msg(100, 853_000_000.0), 2002));
+        let order: Vec<_> = names(&effects)
+            .into_iter()
+            .filter(|n| {
+                [
+                    "Close",
+                    "SetFreq",
+                    "EmitCallEnd",
+                    "NextTransmission",
+                    "EmitCallStart",
+                    "Open",
+                ]
+                .contains(n)
+            })
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "Close",
+                "SetFreq",
+                "EmitCallEnd",
+                "NextTransmission",
+                "EmitCallStart",
+                "Open"
+            ]
+        );
+        assert!(effects.iter().any(|e| matches!(
+            e,
+            Effect::EmitCallEnd {
+                reason: CallEndReason::KeyUp,
+                ..
+            }
+        )));
+        exec(&mut sm, effects);
+        assert_eq!(sm.calls[0].current_source, Some(2002));
+        assert!(!sm.calls[0].ptt_ended);
     }
 
     #[test]

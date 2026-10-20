@@ -50,7 +50,10 @@ impl ParserMetrics {
         Self {
             osp: meter
                 .u64_counter("trunk.oxide.p25cc.osp")
-                .with_description("Control channel packets parsed, by system and kind")
+                .with_description(
+                    "Control channel packets parsed, by system and kind; \
+                     `other` (not read) by manufacturer ID and opcode",
+                )
                 .build(),
             channels: meter
                 .u64_counter("trunk.oxide.p25cc.channels")
@@ -92,8 +95,18 @@ impl ParserMetrics {
             let now = &r.stats;
             let base = [KeyValue::new("system", r.system.clone())];
             for (&kind, &n) in &now.kinds {
+                if kind == "other" {
+                    continue;
+                }
                 let w = was.kinds.get(kind).copied().unwrap_or(0);
                 self.osp.add(d(n, w), &with(&base, "kind", kind));
+            }
+            for (&(mfid, opcode), &n) in &now.others {
+                let w = was.others.get(&(mfid, opcode)).copied().unwrap_or(0);
+                let mut attrs = with(&base, "kind", "other");
+                attrs.push(KeyValue::new("mfid", format!("{mfid:#04x}")));
+                attrs.push(KeyValue::new("opcode", format!("{opcode:#04x}")));
+                self.osp.add(d(n, w), &attrs);
             }
             for (plan, n, w) in [
                 ("own", now.own_plans, was.own_plans),

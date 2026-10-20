@@ -72,6 +72,9 @@ pub enum Divergence {
 #[derive(Clone, Debug, Default)]
 pub struct ParseStats {
     pub kinds: HashMap<&'static str, u64>,
+    /// The `other` kind by (manufacturer ID, opcode): what is heard and not
+    /// read.
+    pub others: HashMap<(u8, u8), u64>,
     /// Channels resolved through this control channel's own plans.
     pub own_plans: u64,
     /// Channels resolved through another control channel of the system.
@@ -243,6 +246,9 @@ impl P25TrunkParser {
         note: &mut dyn FnMut(Divergence),
     ) -> Vec<TrunkMessage> {
         *system.stats.kinds.entry(osp.kind()).or_default() += 1;
+        if let Osp::Other { opcode, mfid } = osp {
+            *system.stats.others.entry((mfid, opcode)).or_default() += 1;
+        }
         self.plans.learn(&osp, &mut system.plans);
         self.parsed += 1;
         let mut out = if self.unplaced(&osp, system) && self.pending.len() < MAX_PENDING {

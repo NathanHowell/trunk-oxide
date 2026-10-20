@@ -203,16 +203,21 @@ impl TdmaMetrics {
             let i = usize::from(bits);
             let mut n = d(now.mac_by_opcode[i], was.mac_by_opcode[i]);
             let opcode = MacOpcode::from_bits(bits);
+            // Only opcodes heard: eight per channel would be mostly zeros.
             if opcode == MacOpcode::EndPtt {
                 let foreign = d(now.end_ptt_foreign, was.end_ptt_foreign);
                 n = n.saturating_sub(foreign);
-                let mut attrs = with(base, "result", "foreign");
-                attrs.push(KeyValue::new("opcode", opcode.name()));
-                self.mac.add(foreign, &attrs);
+                if foreign > 0 {
+                    let mut attrs = with(base, "result", "foreign");
+                    attrs.push(KeyValue::new("opcode", opcode.name()));
+                    self.mac.add(foreign, &attrs);
+                }
             }
-            let mut attrs = with(base, "result", "ok");
-            attrs.push(KeyValue::new("opcode", opcode.name()));
-            self.mac.add(n, &attrs);
+            if n > 0 {
+                let mut attrs = with(base, "result", "ok");
+                attrs.push(KeyValue::new("opcode", opcode.name()));
+                self.mac.add(n, &attrs);
+            }
         }
         self.mac.add(
             d(now.mac_failed, was.mac_failed),

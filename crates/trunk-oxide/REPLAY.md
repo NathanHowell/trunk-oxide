@@ -5,10 +5,24 @@ recorders and decoders, call state machine) against recorded IQ instead of
 dongles, and records what came out. Use it to tune squelch / tuning, to compare
 builds, and as the baseline for replacing C++ decoders.
 
-Replay is **real time** (the state machine uses wall-clock timers), so a 10
-minute capture takes 10 minutes; parallel variants run side by side. Always use
-a release build — a debug build cannot keep up and the summary shows
-`overruns > 0` when a run was not faithful.
+Replay runs in **real time** by default (`--speed 1x`), on the wall clock as
+live does, so a 10 minute capture takes 10 minutes; parallel variants run side
+by side. Always use a release build — a debug build cannot keep up and the
+summary shows `overruns > 0` when a run was not faithful.
+
+`--speed max` runs as fast as it decodes (10-20x on this box), and comes out
+the same every time. The files play unpaced and the sources keep the time
+(`trunk_radio::pace`): one block at a time, the earliest source's first, and
+the monitor loop handles everything a block caused, its clock moved to the
+capture time, before the next block runs; the 1 s tick and 200 s status fall
+due on capture time, and recording ages (write and grant timeouts) are capture
+time too. A source also waits while the event recorder is behind, so nothing is
+dropped. Channelizer overruns mean nothing at max speed. Against 1x, expect the
+same calls and audio but for the races 1x has with its wall clock (a timeout
+that fires a few ms either side of a new grant, say), and the first block or
+so of each control channel: at max each source's first block runs before the
+control channels open. Use max for A/B comparisons and iteration; use 1x to
+check a build keeps up in real time.
 
 ## Capture directory
 
@@ -28,8 +42,8 @@ apply `freq_correction_hz`; replay does, through the normal tune path.
 ## Commands
 
 ```
-trunk-replay run   --capture DIR --out RUN [--set key=value]... [--limit-s N] [--tap]
-trunk-replay sweep --capture DIR --out DIR [--grid key=v1,v2,..]... [--set key=value]... [-j 4]
+trunk-replay run   --capture DIR --out RUN [--set key=value]... [--limit-s N] [--tap] [--speed 1x|max]
+trunk-replay sweep --capture DIR --out DIR [--grid key=v1,v2,..]... [--set key=value]... [-j 4] [--speed 1x|max]
 trunk-replay compare DIR
 trunk-replay taps  RUN/taps
 ```
@@ -78,9 +92,12 @@ and `events.jsonl` from the same run are the end-to-end golden output.
 The taps are deterministic: two replays of the same capture produce
 byte-identical `.out.cf32` / `.dibits` and identical raw message
 sequences (only the tail length differs, by a few blocks, because the run is
-stopped by wall clock). Call-level results (`events.jsonl`, `summary.json`) vary
-slightly run to run — ±1 call, ~1 s of audio — because the state machine is
-wall-clock driven, so compare those with a tolerance. Taps are big (~4 GB per
+stopped by wall clock). At 1x, call-level results (`events.jsonl`,
+`summary.json`) vary slightly run to run — ±1 call, ~1 s of audio — because the
+state machine is wall-clock driven, so compare those with a tolerance. At
+`--speed max` they do not: two runs give the same events in the same order
+(only `t` in `events.jsonl` differs by a few ms, as the recorder stamps events
+as it reads them), and the same `summary.json` but for `wall_seconds`. Taps are big (~4 GB per
 10 minutes); `recorder.tap_dir` enables them outside replay.
 
 ## P25 decoders

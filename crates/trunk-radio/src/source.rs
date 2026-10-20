@@ -15,6 +15,7 @@ use trunk_sdr::{Running, Stream};
 use crate::ChannelizerStats;
 use crate::correction::Correction;
 use crate::kind::Chz;
+use crate::pace::Pacer;
 use crate::types::{AudioSink, Decoded, DetectedSignal, EventSender, RadioEvent};
 
 /// How long a block read waits before the thread checks for a stop.
@@ -48,7 +49,9 @@ struct Thread {
     got_samples: Arc<AtomicBool>,
     idx: i32,
     center_hz: f64,
+    rate_hz: f64,
     device: String,
+    pacer: Option<Pacer>,
 }
 
 impl Thread {
@@ -57,6 +60,10 @@ impl Thread {
         let mut buf = vec![Complex32::ZERO; hop];
         let mut filled = 0;
         let mut out = Decoded::default();
+        // A paced replay runs one block at a time across the sources (see
+        // `crate::pace`).
+        let slot = self.pacer.as_ref().map(Pacer::join);
+        let mut consumed = 0u64;
         while !self.stopping.load(Ordering::Relaxed) {
             let n = self.stream.read(&mut buf[filled..], READ_WAIT);
             filled += n;
@@ -67,9 +74,25 @@ impl Thread {
                 continue;
             }
             filled = 0;
+            if let (Some(p), Some(slot)) = (&self.pacer, slot)
+                && !p.turn(slot, &self.stopping)
+            {
+                break;
+            }
             self.chz.run(&buf, &mut out);
             self.got_samples.store(true, Ordering::Relaxed);
             self.route(&mut out);
+            if let (Some(p), Some(slot)) = (&self.pacer, slot) {
+                consumed += hop as u64;
+                #[allow(clippy::cast_precision_loss)]
+                p.advanced(
+                    slot,
+                    Duration::from_secs_f64(consumed as f64 / self.rate_hz),
+                );
+            }
+        }
+        if let (Some(p), Some(slot)) = (&self.pacer, slot) {
+            p.ended(slot);
         }
         tracing::info!(source = self.idx, device = %self.device, "source thread finished");
     }
@@ -103,12 +126,14 @@ impl Thread {
     }
 }
 
-/// What a source is tuned to.
-#[derive(Clone, Debug, PartialEq)]
+/// What a source is tuned to, and the pacer it keeps time for in a replay
+/// faster than real time.
+#[derive(Clone, Debug)]
 pub struct SourceSpec {
     pub device: String,
     pub center_hz: f64,
     pub rate_hz: f64,
+    pub pacer: Option<Pacer>,
 }
 
 /// One SDR (or file) and its channelizer, running.
@@ -159,6 +184,7 @@ impl Source {
             device,
             center_hz,
             rate_hz,
+            pacer,
         } = spec;
         let cfg = trunk_channelizer::Config::standard(rate_hz)
             .with_context(|| format!("channelizer for {rate_hz} S/s"))?;
@@ -187,7 +213,9 @@ impl Source {
             got_samples: Arc::clone(&got_samples),
             idx,
             center_hz,
+            rate_hz,
             device: device.clone(),
+            pacer,
         };
         let thread = std::thread::Builder::new()
             .name(format!("source-{idx}"))

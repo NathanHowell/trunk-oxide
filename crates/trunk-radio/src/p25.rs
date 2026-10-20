@@ -12,7 +12,7 @@ use std::fmt::Write as _;
 use std::fs::File;
 use std::io::{LineWriter, Write as _};
 use std::sync::{Arc, Mutex, PoisonError};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Instant, UNIX_EPOCH};
 
 use num_complex::Complex32;
 use trunk_channelizer::{ChannelDecoder, NARROW, Reading};
@@ -218,7 +218,7 @@ impl RawLog {
         match File::create(path) {
             Ok(f) => Some(Self {
                 out: LineWriter::new(f),
-                t0: Instant::now(),
+                t0: crate::pace::now(),
                 seq: 0,
             }),
             Err(e) => {
@@ -234,13 +234,15 @@ impl RawLog {
             h
         });
         let arg2 = if matches!(m, Message::Timeout) {
-            SystemTime::now()
+            crate::pace::wall_now()
                 .duration_since(UNIX_EPOCH)
                 .map_or(0.0, |d| d.as_secs_f64())
         } else {
             0.0
         };
-        let ms = self.t0.elapsed().as_millis();
+        let ms = crate::pace::now()
+            .saturating_duration_since(self.t0)
+            .as_millis();
         let line = format!(
             r#"{{"seq":{},"ms":{ms},"type":{},"arg1":0,"arg2":{arg2},"hex":"{hex}"}}"#,
             self.seq,

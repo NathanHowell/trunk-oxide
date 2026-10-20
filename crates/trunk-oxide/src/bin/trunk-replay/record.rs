@@ -11,6 +11,7 @@ use anyhow::Result;
 use serde::Serialize;
 use serde_json::{Value, json};
 use tokio::sync::broadcast;
+use trunk_oxide::clock::Clock;
 use trunk_oxide_grpc::proto::{self, plugin_event::Event, stream_message::Message};
 
 /// Minimal streaming 16-bit mono PCM WAV writer (header patched on finish).
@@ -74,6 +75,8 @@ struct TalkgroupStats {
 #[derive(Serialize)]
 pub struct Summary {
     pub wall_seconds: f64,
+    /// `1x` (real time) or `max`.
+    pub speed: String,
     pub overrides: Vec<String>,
     pub trunk_messages_total: u64,
     pub calls_started_total: u64,
@@ -134,7 +137,10 @@ struct OpenCall {
 }
 
 pub struct Recorder {
+    /// When the run started, on the wall clock (`wall_seconds`).
     t0: Instant,
+    /// What events are stamped with.
+    clock: Clock,
     events: BufWriter<File>,
     audio_dir: PathBuf,
     systems: BTreeMap<String, SystemStats>,
@@ -176,11 +182,14 @@ fn call_info_json(c: &proto::CallInfo) -> Value {
 }
 
 impl Recorder {
-    pub fn new(run_dir: &Path) -> Result<Self> {
+    /// Events are stamped with `clock`'s time since it started (the
+    /// capture's, in a paced replay).
+    pub fn new(run_dir: &Path, clock: Clock) -> Result<Self> {
         let audio_dir = run_dir.join("audio");
         std::fs::create_dir_all(&audio_dir)?;
         Ok(Self {
             t0: Instant::now(),
+            clock,
             events: BufWriter::new(File::create(run_dir.join("events.jsonl"))?),
             audio_dir,
             systems: BTreeMap::new(),
@@ -197,7 +206,7 @@ impl Recorder {
     }
 
     fn t(&self) -> f64 {
-        round(self.t0.elapsed().as_secs_f64(), 3)
+        round(self.clock.elapsed().as_secs_f64(), 3)
     }
 
     fn emit(&mut self, kind: &str, mut body: Value) {
@@ -375,7 +384,12 @@ impl Recorder {
         }
     }
 
-    pub fn finish(mut self, overrides: Vec<String>, channelizer: Vec<Value>) -> Result<Summary> {
+    pub fn finish(
+        mut self,
+        speed: &str,
+        overrides: Vec<String>,
+        channelizer: Vec<Value>,
+    ) -> Result<Summary> {
         for (_, o) in self.open.drain() {
             if let Some(w) = o.wav {
                 let _ = w.finish();
@@ -394,6 +408,7 @@ impl Recorder {
         }
         Ok(Summary {
             wall_seconds: round(self.t0.elapsed().as_secs_f64(), 1),
+            speed: speed.to_owned(),
             overrides,
             trunk_messages_total: self.messages_total,
             calls_started_total,

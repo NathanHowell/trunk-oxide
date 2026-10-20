@@ -1,5 +1,6 @@
-//! A recorded IQ file played as a source, paced at its sample rate, for
-//! replay and hardware-free tests.
+//! A recorded IQ file played as a source, paced at its sample rate (or as
+//! fast as it is read, for a replay faster than real time), for replay and
+//! hardware-free tests.
 
 use std::fs::File;
 use std::io::{Read, Seek, SeekFrom};
@@ -48,6 +49,9 @@ pub struct FileSpec {
     pub rate_hz: f64,
     /// Loop forever (else end when the file does).
     pub repeat: bool,
+    /// Deliver samples at `rate_hz` (else as fast as the consumer takes
+    /// them: the stream's bounded queue is the only brake).
+    pub paced: bool,
 }
 
 /// Start playing `spec` into a stream of `capacity` samples, `block` at a
@@ -126,7 +130,7 @@ fn player(mut file: File, spec: &FileSpec, producer: &Producer, block: usize, st
         // Pace: this block's last sample is due at sent/rate after start.
         sent += out.len() as u64;
         let due = started + Duration::from_secs_f64(sent as f64 / spec.rate_hz);
-        while Instant::now() < due {
+        while spec.paced && Instant::now() < due {
             if stop.load(Ordering::Relaxed) {
                 break 'play;
             }
@@ -185,6 +189,7 @@ mod tests {
             format: Format::Cu8,
             rate_hz: 40_000.0,
             repeat: false,
+            paced: true,
         };
         let t0 = Instant::now();
         let (stream, mut playing) = play(&spec, 1000, 2000).unwrap();
@@ -213,6 +218,38 @@ mod tests {
     }
 
     #[test]
+    fn unpaced_plays_every_sample_as_fast_as_it_is_read() {
+        // 40000 samples at 40 kS/s: a second paced, far less unpaced, and
+        // none lost though the queue holds only 2000.
+        let bytes: Vec<u8> = (0..80_000u32)
+            .map(|i| u8::try_from(i % 256).unwrap())
+            .collect();
+        let path = temp("unpaced.cu8", &bytes);
+        let spec = FileSpec {
+            path: path.clone(),
+            format: Format::Cu8,
+            rate_hz: 40_000.0,
+            repeat: false,
+            paced: false,
+        };
+        let t0 = Instant::now();
+        let (stream, mut playing) = play(&spec, 1000, 2000).unwrap();
+        let mut out = vec![Complex32::ZERO; 512];
+        let mut total = 0;
+        while !stream.is_ended() {
+            total += stream.read(&mut out, Duration::from_millis(500));
+        }
+        assert_eq!(total, 40_000);
+        assert!(
+            t0.elapsed() < Duration::from_millis(500),
+            "{:?}",
+            t0.elapsed()
+        );
+        playing.stop();
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
     fn repeats_until_stopped_and_cf32_round_trips() {
         let samples = [Complex32::new(0.25, -0.5), Complex32::new(1.0, 2.0)];
         let mut bytes = Vec::new();
@@ -226,6 +263,7 @@ mod tests {
             format: Format::Cf32,
             rate_hz: 1_000_000.0,
             repeat: true,
+            paced: true,
         };
         let (stream, mut playing) = play(&spec, 4, 64).unwrap();
         let mut out = [Complex32::ZERO; 10];

@@ -107,6 +107,26 @@ fn talkgroup_id(system: &str, id: i64) -> anyhow::Result<Talkgroup> {
         .with_context(|| format!("system '{system}': talkgroup {id} is not a valid id"))
 }
 
+/// The monitor loop's housekeeping period, and its status report's.
+const TICK: Duration = Duration::from_secs(1);
+const STATUS: Duration = Duration::from_secs(200);
+
+/// The monitor loop's tick: timeouts, stale patches, source health.
+fn on_tick(call_mgr: &mut CallManager, radio: &Radio, check_sources: bool) {
+    call_mgr.tick();
+    call_mgr.clear_stale_patches();
+    if check_sources && let Err(e) = radio.check_sources() {
+        tracing::error!(%e, "source health check failed, exiting");
+        std::process::exit(1);
+    }
+}
+
+fn on_status(call_mgr: &CallManager) {
+    call_mgr.print_status();
+    call_mgr.print_active_patches();
+    call_mgr.print_channel_status();
+}
+
 /// Create an interval whose first tick fires after `period` (not immediately).
 fn delayed_interval(period: Duration) -> tokio::time::Interval {
     tokio::time::interval_at(tokio::time::Instant::now() + period, period)
@@ -386,6 +406,8 @@ pub struct ScannerBuilder {
     /// The call state machine's time ([`clock::Clock::system`] unless
     /// [`Self::with_clock`] says otherwise).
     clock: clock::Clock,
+    /// A replay faster than real time (see [`trunk_radio::pace`]).
+    pacer: Option<trunk_radio::Pacer>,
 }
 
 /// Talkgroup/channel metadata from a parsed config, keyed by `(short_name, id)`,
@@ -448,6 +470,7 @@ pub struct Scanner {
     event_rx: tokio::sync::mpsc::Receiver<RadioEvent>,
     pending: Arc<AtomicUsize>,
     clock: clock::Clock,
+    pacer: Option<trunk_radio::Pacer>,
     /// Conventional channels whose calls the [`CallManager`] creates when
     /// it starts: (system, channel index).
     pending_conventional_calls: Vec<(i32, usize)>,
@@ -464,6 +487,23 @@ impl ScannerBuilder {
     ///
     /// Returns an error if an SDR source fails to open or system setup fails.
     pub fn from_config(config: &Config, bridge: Arc<EventBridge>) -> anyhow::Result<Self> {
+        Self::from_config_paced(config, bridge, None)
+    }
+
+    /// [`Self::from_config`] for a replay faster than real time: IQ files
+    /// play unpaced and `pacer` keeps capture time (see
+    /// [`trunk_radio::pace`]); run the state machine on a manual clock
+    /// ([`Self::with_clock`]) the monitor loop moves to it. `None` is
+    /// [`Self::from_config`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::from_config`].
+    pub fn from_config_paced(
+        config: &Config,
+        bridge: Arc<EventBridge>,
+        pacer: Option<trunk_radio::Pacer>,
+    ) -> anyhow::Result<Self> {
         let rec = config.recorder.as_ref();
         let max_channels = rec
             .and_then(|r| r.max_channels)
@@ -493,6 +533,7 @@ impl ScannerBuilder {
                 tap_dir: rec.and_then(|r| r.tap_dir.clone()),
                 adaptive_correction: rec.is_some_and(|r| r.adaptive_freq_correction),
                 conditioning,
+                pacer: pacer.clone(),
             },
             sink,
             events,
@@ -527,6 +568,15 @@ impl ScannerBuilder {
                 .collect(),
         );
 
+        if let Some(p) = &pacer {
+            p.expect(
+                config
+                    .source
+                    .iter()
+                    .filter(|s| s.enabled != Some(false))
+                    .count(),
+            );
+        }
         for (idx, src) in config.source.iter().enumerate() {
             if src.enabled == Some(false) {
                 continue;
@@ -576,6 +626,7 @@ impl ScannerBuilder {
                         format: trunk_sdr::Format::parse(&src.iq_format)?,
                         rate_hz: src.rate,
                         repeat: src.iq_repeat,
+                        paced: pacer.is_none(),
                     };
                     let (stream, playing) = trunk_sdr::file::play(&spec, STREAM_BLOCK, capacity)
                         .with_context(|| format!("playing IQ file '{}'", src.device))?;
@@ -787,6 +838,7 @@ impl ScannerBuilder {
             call_mgr_config,
             bridge,
             clock: clock::Clock::system(),
+            pacer,
         })
     }
 
@@ -818,6 +870,7 @@ impl ScannerBuilder {
             event_rx: self.event_rx,
             pending: self.pending,
             clock: self.clock,
+            pacer: self.pacer,
             pending_conventional_calls,
             conv_metrics: Arc::new(Mutex::new(ConventionalMetricsSnapshot::default())),
         }
@@ -872,8 +925,12 @@ impl Scanner {
         // refreshes) a second or so apart.
         let mut trunk_dedup = dedup::TimedDedup::new(Duration::from_millis(500));
 
-        let mut tick = delayed_interval(Duration::from_secs(1));
-        let mut status = delayed_interval(Duration::from_secs(200));
+        // Live, the 1 s tick and the 200 s status run on tokio's clock; in a
+        // paced replay they fall due as capture time passes their marks.
+        let paced = self.pacer.clone();
+        let mut tick = delayed_interval(TICK);
+        let mut status = delayed_interval(STATUS);
+        let (mut next_tick, mut next_status) = (TICK, STATUS);
 
         loop {
             tokio::select! {
@@ -946,6 +1003,21 @@ impl Scanner {
                         } => {
                             call_mgr.handle_signals_detected(source_center_freq, &signals);
                         }
+                        RadioEvent::Paced { slot, at } => {
+                            if let Some(p) = &paced {
+                                let now = p.capture_time();
+                                call_mgr.clock().advance_to(now);
+                                while now >= next_tick {
+                                    on_tick(&mut call_mgr, &self.radio, check_sources);
+                                    next_tick += TICK;
+                                }
+                                while now >= next_status {
+                                    on_status(&call_mgr);
+                                    next_status += STATUS;
+                                }
+                                p.acknowledge(slot, at);
+                            }
+                        }
                         RadioEvent::UnitAlias { sys_num, alias } => {
                             let info = call_mgr.get_system_info(sys_num);
                             self.bridge.unit_alias_discovered(
@@ -958,21 +1030,10 @@ impl Scanner {
                         }
                     }
                 },
-                _ = tick.tick() => {
-                    call_mgr.tick();
-                    call_mgr.clear_stale_patches();
-                    if check_sources
-                        && let Err(e) = self.radio.check_sources()
-                    {
-                        tracing::error!(%e, "source health check failed, exiting");
-                        std::process::exit(1);
-                    }
+                _ = tick.tick(), if paced.is_none() => {
+                    on_tick(&mut call_mgr, &self.radio, check_sources);
                 },
-                _ = status.tick() => {
-                    call_mgr.print_status();
-                    call_mgr.print_active_patches();
-                    call_mgr.print_channel_status();
-                },
+                _ = status.tick(), if paced.is_none() => on_status(&call_mgr),
             }
         }
     }

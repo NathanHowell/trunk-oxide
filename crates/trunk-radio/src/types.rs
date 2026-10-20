@@ -330,6 +330,13 @@ pub enum RadioEvent {
     },
     /// A radio announced its alias.
     UnitAlias { sys_num: i32, alias: UnitAlias },
+    /// A paced replay's source `slot` has consumed `at` of samples (`None`:
+    /// the replay coasting on after the sources ended). See
+    /// [`crate::pace::Pacer`].
+    Paced {
+        slot: Option<usize>,
+        at: std::time::Duration,
+    },
 }
 
 /// Sends [`RadioEvent`]s to the monitor loop; counts what is in flight.
@@ -342,6 +349,14 @@ pub struct EventSender {
 impl EventSender {
     pub const fn new(tx: tokio::sync::mpsc::Sender<RadioEvent>, pending: Arc<AtomicUsize>) -> Self {
         Self { tx, pending }
+    }
+
+    /// Queue an event, waiting for room: a paced replay's markers must not be
+    /// dropped. Not from an async context.
+    pub fn send_blocking(&self, event: RadioEvent) {
+        if self.tx.blocking_send(event).is_ok() {
+            self.pending.fetch_add(1, Ordering::Relaxed);
+        }
     }
 
     /// Queue an event; dropped (and logged) if the loop has fallen 256 behind.

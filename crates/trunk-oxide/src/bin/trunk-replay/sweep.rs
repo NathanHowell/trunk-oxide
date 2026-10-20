@@ -81,6 +81,7 @@ pub struct SweepJob<'a> {
     pub axes: &'a [Axis],
     pub jobs: usize,
     pub limit_s: Option<f64>,
+    pub speed: crate::Speed,
 }
 
 pub fn run(job: &SweepJob<'_>) -> Result<()> {
@@ -115,6 +116,7 @@ pub fn run(job: &SweepJob<'_>) -> Result<()> {
             if let Some(l) = job.limit_s {
                 cmd.arg("--limit-s").arg(l.to_string());
             }
+            cmd.arg("--speed").arg(job.speed.name());
             let child = cmd
                 .stdout(Stdio::from(log.try_clone()?))
                 .stderr(Stdio::from(log))

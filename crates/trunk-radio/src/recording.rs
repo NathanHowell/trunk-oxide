@@ -45,14 +45,14 @@ impl Accounting {
     /// A recording starting now.
     #[must_use]
     pub fn new(system: &str, talkgroup: u32, freq: f64, phase2: bool, rate: f64) -> Self {
-        let now = Instant::now();
+        let now = crate::pace::now();
         Self {
             system: system.to_owned(),
             talkgroup,
             freq,
             phase2,
             rate,
-            start: SystemTime::now(),
+            start: crate::pace::wall_now(),
             last_write: now,
             last_voice: now,
             sample_count: 0,
@@ -78,7 +78,7 @@ impl Accounting {
 
     /// Audio was written: `n` samples, voice among them or not.
     pub fn wrote(&mut self, n: usize, voice: bool) {
-        let now = Instant::now();
+        let now = crate::pace::now();
         self.sample_count += i64::try_from(n).unwrap_or(0);
         self.last_write = now;
         if voice {
@@ -89,13 +89,17 @@ impl Accounting {
     /// Seconds since audio was last written (since the start, before any).
     #[must_use]
     pub fn since_write_s(&self) -> f64 {
-        self.last_write.elapsed().as_secs_f64()
+        crate::pace::now()
+            .saturating_duration_since(self.last_write)
+            .as_secs_f64()
     }
 
     /// Seconds since voice was last written (since the start, before any).
     #[must_use]
     pub fn since_voice_s(&self) -> f64 {
-        self.last_voice.elapsed().as_secs_f64()
+        crate::pace::now()
+            .saturating_duration_since(self.last_voice)
+            .as_secs_f64()
     }
 
     /// What was recorded, if anything was.
@@ -110,7 +114,7 @@ impl Accounting {
         Some(Transmission {
             talkgroup: self.talkgroup,
             start_time: secs(self.start),
-            stop_time: secs(SystemTime::now()),
+            stop_time: secs(crate::pace::wall_now()),
             sample_count: self.sample_count,
             spike_count: i64::try_from(self.counts.spikes).unwrap_or(i64::MAX),
             error_count: i64::try_from(self.counts.errors).unwrap_or(i64::MAX),

@@ -1,7 +1,8 @@
 //! trunk-replay: run the real trunk-oxide pipeline against recorded IQ.
 //!
-//! `run` replays a capture directory (see `plan.rs`) in real time and writes
-//! `events.jsonl`, per-call WAVs and `summary.json`. `sweep` runs a grid of
+//! `run` replays a capture directory (see `plan.rs`) in real time, or as
+//! fast as it decodes (`--speed max`), and writes `events.jsonl`, per-call
+//! WAVs and `summary.json`. `sweep` runs a grid of
 //! parameter overrides in parallel child processes and tabulates the results;
 //! `compare` re-tabulates an existing sweep directory.
 
@@ -12,14 +13,16 @@ mod taps;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use serde_json::json;
 use tokio::sync::Notify;
+use trunk_oxide::clock::Clock;
 use trunk_oxide::{MonitorOptions, ScannerBuilder};
 use trunk_oxide_grpc::EventBridge;
+use trunk_radio::Pacer;
 
 use plan::Override;
 
@@ -29,6 +32,28 @@ struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
 }
+
+/// How fast a replay runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
+pub enum Speed {
+    /// The capture's own rate, on the wall clock, as live.
+    #[value(name = "1x")]
+    RealTime,
+    /// As fast as it decodes: the sources keep the time.
+    Max,
+}
+
+impl Speed {
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::RealTime => "1x",
+            Self::Max => "max",
+        }
+    }
+}
+
+/// Seconds of capture time per paced coasting step after the sources end.
+const COAST_STEP: Duration = Duration::from_millis(100);
 
 #[derive(Subcommand)]
 enum Cmd {
@@ -55,6 +80,9 @@ enum Cmd {
         /// symbols/dibits, raw control messages); see REPLAY.md.
         #[arg(long)]
         tap: bool,
+        /// `1x` (real time, as live) or `max` (as fast as it decodes).
+        #[arg(long, value_enum, default_value_t = Speed::RealTime)]
+        speed: Speed,
     },
     /// Run a grid of overrides in parallel and print a comparison table.
     Sweep {
@@ -68,11 +96,14 @@ enum Cmd {
         /// Override applied to every variant.
         #[arg(long = "set")]
         set: Vec<Override>,
-        /// Concurrent replays (each is real time and ~0.5-1 core).
+        /// Concurrent replays (each is real time and ~0.5-1 core at 1x,
+        /// a few cores at max).
         #[arg(short, long, default_value_t = 4)]
         jobs: usize,
         #[arg(long)]
         limit_s: Option<f64>,
+        #[arg(long, value_enum, default_value_t = Speed::RealTime)]
+        speed: Speed,
     },
     /// Tabulate the summary.json of every run under a directory.
     Compare { dir: PathBuf },
@@ -93,7 +124,16 @@ fn main() -> Result<()> {
             limit_s,
             grace_s,
             tap,
-        } => run(&capture, &out, &set, limit_s, grace_s, tap),
+            speed,
+        } => run(&Job {
+            capture: &capture,
+            out: &out,
+            overrides: &set,
+            limit_s,
+            grace_s,
+            tap,
+            speed,
+        }),
         Cmd::Sweep {
             capture,
             out,
@@ -101,6 +141,7 @@ fn main() -> Result<()> {
             set,
             jobs,
             limit_s,
+            speed,
         } => sweep::run(&sweep::SweepJob {
             capture: &capture,
             out: &out,
@@ -108,6 +149,7 @@ fn main() -> Result<()> {
             axes: &grid,
             jobs,
             limit_s,
+            speed,
         }),
         Cmd::Compare { dir } => {
             println!("{}", sweep::compare(&dir)?);
@@ -120,14 +162,27 @@ fn main() -> Result<()> {
     }
 }
 
-fn run(
-    capture: &std::path::Path,
-    out: &std::path::Path,
-    overrides: &[Override],
+struct Job<'a> {
+    capture: &'a std::path::Path,
+    out: &'a std::path::Path,
+    overrides: &'a [Override],
     limit_s: Option<f64>,
     grace_s: f64,
     tap: bool,
-) -> Result<()> {
+    speed: Speed,
+}
+
+#[allow(clippy::too_many_lines)]
+fn run(job: &Job<'_>) -> Result<()> {
+    let &Job {
+        capture,
+        out,
+        overrides,
+        limit_s,
+        grace_s,
+        tap,
+        speed,
+    } = job;
     std::fs::create_dir_all(out)?;
     let plan = plan::build(capture, out, overrides, tap)?;
     for s in &plan.skipped_sources {
@@ -140,10 +195,31 @@ fn run(
     let bridge = Arc::new(bridge);
     let events_rx = stream_tx.subscribe();
 
+    let replay_s = limit_s.map_or(plan.duration_s, |l| l.min(plan.duration_s));
+    // A real-time replay stops on the wall clock after this, the files
+    // playing on through the grace if they last that long.
+    let total = Duration::from_secs_f64(replay_s + grace_s);
+    // At max speed the sources keep the time: the state machine runs on a
+    // manual clock the monitor moves to the capture time, and a source
+    // waits while the event recorder is behind (it would drop events). The
+    // sources stop where real time would have, and capture time coasts on
+    // to there if the files end first.
+    let (clock, pacer) = match speed {
+        Speed::RealTime => (Clock::system(), None),
+        Speed::Max => {
+            let b = Arc::clone(&bridge);
+            let room = b.broadcast_capacity() / 4;
+            let pacer = Pacer::new(SystemTime::now(), Some(total), move || {
+                b.broadcast_depth() < room
+            });
+            (Clock::manual(pacer.wall_epoch()), Some(pacer))
+        }
+    };
+
     let rt = tokio::runtime::Runtime::new()?;
     let stop_recorder = Arc::new(Notify::new());
     let recorder_task = {
-        let mut rec = record::Recorder::new(out)?;
+        let mut rec = record::Recorder::new(out, clock.clone())?;
         let stop = Arc::clone(&stop_recorder);
         rt.spawn(async move {
             rec.run(events_rx, stop).await;
@@ -151,9 +227,12 @@ fn run(
         })
     };
 
-    let mut scanner = ScannerBuilder::from_config(&config, bridge)
-        .context("building the scanner")?
-        .start();
+    let mut builder = ScannerBuilder::from_config_paced(&config, bridge, pacer.clone())
+        .context("building the scanner")?;
+    if pacer.is_some() {
+        builder = builder.with_clock(clock.clone());
+    }
+    let mut scanner = builder.start();
 
     let shutdown = Arc::new(Notify::new());
     let monitor = {
@@ -167,18 +246,36 @@ fn run(
             .spawn(move || handle.block_on(scanner.run_monitor_with(opts)))?
     };
 
-    let replay_s = limit_s.map_or(plan.duration_s, |l| l.min(plan.duration_s));
-    tracing::info!(replay_s, grace_s, "replaying");
-    let total = Duration::from_secs_f64(replay_s + grace_s);
+    tracing::info!(replay_s, grace_s, speed = speed.name(), "replaying");
     let channelizer = rt.block_on(async {
         let start = tokio::time::Instant::now();
         let mut report = tokio::time::interval(Duration::from_secs(60));
         report.tick().await;
+        // Real time: the replay ends on the wall clock. Max: once every
+        // source has ended, capture time coasts on to the same end.
+        let finished = async {
+            match &pacer {
+                None => tokio::time::sleep_until(start + total).await,
+                Some(p) => {
+                    while !p.all_ended() {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    let p = p.clone();
+                    let rest = total.saturating_sub(p.capture_time());
+                    let _ = tokio::task::spawn_blocking(move || p.coast(rest, COAST_STEP)).await;
+                }
+            }
+        };
+        tokio::pin!(finished);
         loop {
             tokio::select! {
                 _ = tokio::signal::ctrl_c() => { tracing::warn!("interrupted"); break; }
-                () = tokio::time::sleep_until(start + total) => break,
-                _ = report.tick() => tracing::info!(elapsed_s = start.elapsed().as_secs(), "replaying"),
+                () = &mut finished => break,
+                _ = report.tick() => tracing::info!(
+                    elapsed_s = start.elapsed().as_secs(),
+                    capture_s = clock.elapsed().as_secs(),
+                    "replaying"
+                ),
             }
         }
         trunk_radio::channelizer_stats()
@@ -199,6 +296,7 @@ fn run(
     stop_recorder.notify_one();
     let rec = rt.block_on(recorder_task)?;
     let summary = rec.finish(
+        speed.name(),
         overrides.iter().map(ToString::to_string).collect(),
         channelizer,
     )?;

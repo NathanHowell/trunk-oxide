@@ -31,6 +31,9 @@ pub struct RadioConfig {
     /// Each source's clock correction follows the FLL errors its channels
     /// close with (see [`crate::correction`]).
     pub adaptive_correction: bool,
+    /// A replay faster than real time: the sources keep capture time (see
+    /// [`crate::pace`]). None live.
+    pub pacer: Option<crate::pace::Pacer>,
 }
 
 /// What a system's channels are decoded with.
@@ -253,6 +256,10 @@ impl std::fmt::Debug for Radio {
 
 impl Radio {
     pub fn new(cfg: RadioConfig, sink: Arc<dyn AudioSink>, events: EventSender) -> Self {
+        if let Some(p) = &cfg.pacer {
+            p.attach(events.clone());
+            crate::pace::install(p);
+        }
         Self {
             inner: Mutex::new(Inner {
                 sources: Vec::new(),
@@ -285,6 +292,7 @@ impl Radio {
                 device: setup.device,
                 center_hz: setup.center_hz,
                 rate_hz: setup.rate_hz,
+                pacer: self.cfg.pacer.clone(),
             },
             setup.stream,
             setup.running,
@@ -624,6 +632,7 @@ mod tests {
                 format: trunk_sdr::Format::Cf32,
                 rate_hz,
                 repeat: true,
+                paced: true,
             },
             8192,
             rate_hz as usize,

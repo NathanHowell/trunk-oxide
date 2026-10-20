@@ -6,12 +6,13 @@
 //! dequantiser, with op25's rules for repeating and muting damaged frames.
 //! The arithmetic is theirs operation for operation, in their precision
 //! (built without fused multiply-adds, which C compilers may otherwise
-//! contract). Where op25 departs from the standards, the standards were put
-//! to a blind vote (2026-10-20, two listeners, `examples/vocoder_ab.rs`,
-//! `trunk-discord ab`) and are followed where they won: phase 1 reads u7 as
-//! sent (BABA §7.1), but keeps op25's repeat, mute and smoothing rules;
-//! phase 2 predicts past silence frames from the last voice frame, knows a
-//! tone by u0 alone and plays it at its log level (BABA-1 §4, §7).
+//! contract). Where op25 departs from the standards, the standards'
+//! way was put to two blind votes (2026-10-20, `examples/vocoder_ab.rs`,
+//! `trunk-discord ab`), heard as close or not at all, and is followed:
+//! phase 1 reads u7 as sent (BABA §7.1) and repeats, mutes and smooths by
+//! BABA §7.7–7.8 and §9 on the bits the decoder here corrected; phase 2
+//! predicts past silence frames from the last voice frame, knows a tone by
+//! u0 alone and plays it at its log level (BABA-1 §4, §7).
 //!
 //! One of each is kept per recorder across calls, as op25 keeps its own:
 //! each carries pitch, phase, noise and error rate from frame to frame.
@@ -40,8 +41,9 @@ pub use synth::{Pcm, SAMPLES_PER_FRAME};
 /// Only [`Policy::Hard`] is used by the recorders (see the module doc).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Policy {
-    /// op25's rules on the error counts of a hard decoding of the frame:
-    /// its erasure thresholds, its running error rate.
+    /// The error counts of a hard decoding of the frame, by the standards'
+    /// thresholds and running error rate (and phase 2's counts op25's,
+    /// trunk-oxide-13y.2).
     #[default]
     Hard,
     /// The decoders': a frame plays as decoded here when its weakest

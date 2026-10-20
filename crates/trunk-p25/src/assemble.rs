@@ -5,12 +5,12 @@
 //! transmission ends, whether it is encrypted, and the talker aliases sent
 //! in band.
 //!
-//! The vocoder itself stays out: each voice frame comes out as a [`Vocode`],
-//! the input op25 would give its vocoder after regeneration, so the same
-//! vocoder ([`crate::vocoder`]) makes the same audio. Phase 1 frames are regenerated whole (op25
-//! then corrects nothing), so they carry no error counts; phase 2 frames are
-//! the 36 dibits op25 would receive ([`crate::tdma::op25_view`]), which its
-//! vocoder decodes and mutes on its own running error rate. Which bursts are
+//! The vocoder itself stays out: each voice frame comes out as a [`Vocode`]
+//! for [`crate::vocoder`]. A phase 1 frame is as decoded here, with the bits
+//! it corrected (op25 regenerated it whole and then counted none); a phase
+//! 2 frame is the 36 dibits op25 would receive
+//! ([`crate::tdma::op25_view`]), which the vocoder decodes and mutes on
+//! its own running error rate. Which bursts are
 //! voice follows op25 too: a burst the regenerator does not rewrite is what
 //! op25 reads of its DUID as received.
 //!
@@ -26,13 +26,13 @@ use crate::voice::regenerate::SpikeDetector;
 use crate::voice::signalling::ALGID_CLEAR;
 use crate::voice::{CallCounts, ImbeFrame, LinkControl, Terminator, VoiceEvent};
 
-/// One voice frame for the vocoder: the frame as decoded here, and what
-/// op25 would have been given ([`crate::vocoder::Policy`] picks).
+/// One voice frame for the vocoder: the frame as decoded here, and for
+/// phase 2 what op25 would have been given ([`crate::vocoder::Policy`]
+/// picks).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Vocode {
-    /// IMBE: the decoded frame, and the bits op25 would count corrected in
-    /// c0 (`e0`) and in all (`et`) after regeneration.
-    Imbe { frame: ImbeFrame, e0: u32, et: u32 },
+    /// IMBE: the decoded frame, with the bits it corrected.
+    Imbe { frame: ImbeFrame },
     /// AMBE+2: the frame's 36 descrambled dibits as op25 receives them,
     /// and the frame decoded here from the same burst, if any (none when
     /// op25 read a voice burst where the decoder here saw something else).
@@ -114,16 +114,6 @@ impl Ended {
             Self::Hangtime => "hangtime",
         }
     }
-}
-
-/// Bits corrected, for the vocoder's frame repeat and muting.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum ImbeErrors {
-    /// None: what op25 sees after regeneration.
-    #[default]
-    Regenerated,
-    /// Those the decoder corrected.
-    Decoded,
 }
 
 /// A call's decode errors as op25 counts them for its transmissions.
@@ -220,7 +210,6 @@ impl Cached {
 /// Phase 1: op25's `p25p1_fdma`.
 #[derive(Clone, Debug, Default)]
 pub struct Phase1Assembler {
-    pub errors: ImbeErrors,
     /// The encryption sync in force (header or last LDU2).
     algid: u8,
     keyid: u16,
@@ -311,11 +300,7 @@ impl Phase1Assembler {
                     keyid: self.keyid,
                 });
             } else {
-                let (e0, et) = match self.errors {
-                    ImbeErrors::Regenerated => (0, 0),
-                    ImbeErrors::Decoded => (f.errors_c0, f.errors),
-                };
-                out.push(CallEvent::Frame(Vocode::Imbe { frame: *f, e0, et }));
+                out.push(CallEvent::Frame(Vocode::Imbe { frame: *f }));
             }
         }
     }

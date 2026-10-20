@@ -154,22 +154,25 @@ values as expectations under the bits' posteriors; by log-spectral distance
 never better than playing the soft decode as received.
 
 Where op25 departs from TIA-102.BABA and BABA-1 (beads 4hj, 13y), the
-standards' way was put to the same vote (2026-10-20, two listeners, 12
-clips): phase 2 went to the standard (it predicts past silence frames from
-the last voice frame, knows a tone by u0 alone and plays it at its log
-level), though every phase 2 vote fell on the right-hand clip; phase 1
-split, so it takes only the fix to how u7 is read (op25 reads b̂0's low
-bits one bit low; read as sent, the pitch on the tapped corpus moves 29%
-less from frame to frame) and keeps op25's repeat, mute and smoothing
-rules on op25's error counts. The standard's phase 1 error rules were
-deleted.
+standards' way was put to the same vote, twice (2026-10-20). The first
+round (7 s clips, two listeners) put every phase 2 vote on the right-hand
+clip and split phase 1; the second (`vocoder_ab` tests `u7`, `rules`,
+`p2`: two-second clips where the two differ, each posted both ways round,
+with a can't-tell vote) was mostly can't-tell, the standard's phase 1
+error rules preferred 2 pairs to 1. Heard as close, the standards are
+followed: phase 1 reads u7 as sent (op25 reads b̂0's low bits one bit low;
+read as sent, the pitch on the tapped corpus moves 29% less from frame to
+frame) and repeats, mutes and smooths by the standard on the bits the
+decoder here corrected (op25 was given a regenerated frame and counted
+none); phase 2 predicts past silence frames from the last voice frame,
+knows a tone by u0 alone and plays it at its log level.
 
 The vocoders were checked frame by frame against op25's on random streams
 that reach every pitch, repeat, mute, tone and erasure, 16k frames a phase,
 and on every tapped call's frames, and the C++ oracles are gone. Their
 audio is frozen as hashes in the trunk-radio `p25_voice` tests
 (`the_imbe_vocoder_is_frozen`, `the_ambe_vocoder_is_frozen`, the
-clean-call tests), op25's until the vote and the vote's since. The match
+clean-call tests), op25's until the votes and the standards' since. The match
 with op25 needed its vocoder sources built with `-ffp-contract=off` (GCC
 fuses multiply-adds under `-march=znver2`, Rust never does).
 

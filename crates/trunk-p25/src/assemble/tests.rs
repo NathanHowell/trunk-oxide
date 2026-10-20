@@ -54,12 +54,12 @@ fn frames(out: &[CallEvent]) -> Vec<Vocode> {
         .collect()
 }
 
-/// op25's inputs of the phase 1 frames: `u`, e0, et.
-fn op25_inputs(out: &[CallEvent]) -> Vec<([u32; 8], u32, u32)> {
+/// The phase 1 frames: parameters, bits corrected in c0 and in all.
+fn imbe_frames(out: &[CallEvent]) -> Vec<(ImbeParams, u32, u32)> {
     frames(out)
         .iter()
         .filter_map(|v| match v {
-            Vocode::Imbe { frame, e0, et } => Some((frame.params.to_op25(), *e0, *et)),
+            Vocode::Imbe { frame } => Some((frame.params, frame.errors_c0, frame.errors)),
             _ => None,
         })
         .collect()
@@ -83,8 +83,8 @@ fn a_clear_phase1_call_vocodes_every_frame_as_sent() {
     let mut rng = Rng::new(1);
     let (d, sent) = phase1_call(&mut rng, ALGID_CLEAR, 3);
     let out = assemble_phase1(&d);
-    let want: Vec<([u32; 8], u32, u32)> = sent.iter().map(|p| (p.to_op25(), 0, 0)).collect();
-    assert_eq!(op25_inputs(&out), want);
+    let want: Vec<(ImbeParams, u32, u32)> = sent.iter().map(|&p| (p, 0, 0)).collect();
+    assert_eq!(imbe_frames(&out), want);
     assert_eq!(out[0], CallEvent::Group(865));
     assert!(out.contains(&CallEvent::Source(0x12_3456)));
     assert_eq!(out.last(), Some(&CallEvent::Terminator(Ended::Tdu)));
@@ -105,7 +105,9 @@ fn an_encrypted_phase1_call_is_silent_until_its_terminator() {
     let f = frames(&out);
     assert_eq!(f.len(), 36 + 18);
     assert!(f[..36].iter().all(|v| *v == Vocode::Silence));
-    assert!(matches!(f[36], Vocode::Imbe { frame, e0: 0, et: 0 } if frame.params == sent[0]));
+    assert!(
+        matches!(f[36], Vocode::Imbe { frame } if frame.params == sent[0] && frame.errors == 0)
+    );
     let reports = out
         .iter()
         .filter(|e| {
@@ -124,6 +126,7 @@ fn ldu1(lc: [u8; 9]) -> Received<VoiceEvent> {
         params: ImbeParams::default(),
         errors: 0,
         errors_c0: 0,
+        errors_c4: 0,
         reliability: 1.0,
         unprotected: 1.0,
     };

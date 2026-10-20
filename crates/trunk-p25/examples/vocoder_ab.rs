@@ -154,7 +154,7 @@ fn phase1(call: &[ImbeParams], sigma: f64, policies: [Policy; 2], rng: &mut Rng)
             let (llr, _) = channel::<144>(|j| p.encode().bit(j), 0.0, rng);
             let sent = imbe::decode(&llr);
             let reference = [0, 1].map(|k| {
-                clean[k].vocode(&sent, 0, 0);
+                clean[k].vocode(&sent);
                 clean[k].spectrum()
             });
             let [Some(r0), Some(r1)] = &reference else {
@@ -162,8 +162,7 @@ fn phase1(call: &[ImbeParams], sigma: f64, policies: [Policy; 2], rng: &mut Rng)
             };
             let (llr, _) = channel::<144>(|j| p.encode().bit(j), sigma, rng);
             let frame = imbe::decode(&llr);
-            // e0 = et = 0: what op25 is given after regeneration, as live.
-            let pcm = [0, 1].map(|k| v[k].vocode(&frame, 0, 0));
+            let pcm = [0, 1].map(|k| v[k].vocode(&frame));
             let decisions = [0, 1].map(|k| v[k].last());
             Some(Frame::new(
                 pcm,

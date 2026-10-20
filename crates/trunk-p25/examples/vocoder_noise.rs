@@ -6,8 +6,9 @@
 //! later harmonic's phase, and the vocoder's output is a model, not a
 //! waveform). The measurement behind `Policy::Soft` and its thresholds.
 //!
-//! `op25` is the path as shipped: phase 1 regenerated (op25 counts no
-//! errors), phase 2 op25's hard decoding of the received dibits. Each
+//! `op25` is the path as shipped (`Policy::Hard`): phase 1 the frame as
+//! decoded here under the standard's rules on its corrected bits, phase 2
+//! op25's hard decoding of the received dibits. Each
 //! `soft m/u/e` row is the decoder's own frame played when its weakest
 //! vector margin ≥ m, its weakest unprotected |LLR| ≥ u and ≤ e bits were
 //! corrected, else repeated (three times), then muted.
@@ -169,7 +170,7 @@ fn phase1(calls: &[Vec<ImbeParams>], sigma: f64, rng: &mut Rng) -> Vec<Score> {
             .collect();
         for p in call {
             let cw = p.encode();
-            clean.decode(&p.0.map(u32::from), 0, 0);
+            clean.decode(&p.0.map(u32::from), 0, 0, 0);
             let Some(reference) = clean.spectrum() else {
                 continue;
             };
@@ -177,12 +178,11 @@ fn phase1(calls: &[Vec<ImbeParams>], sigma: f64, rng: &mut Rng) -> Vec<Score> {
             let frame = imbe::decode(&llr);
             let truth = imbe_truth(&frame.params, p);
 
-            // As shipped: the frame as decoded here, regenerated for op25,
-            // which then counts no errors.
-            op25.vocode(&frame, 0, 0);
+            // As shipped.
+            op25.vocode(&frame);
             scores[0].add(op25.last(), truth, op25.spectrum().as_ref(), &reference);
             for (k, g) in GATES.iter().enumerate() {
-                soft[k].vocode(&gated_imbe(&frame, *g), 0, 0);
+                soft[k].vocode(&gated_imbe(&frame, *g));
                 scores[k + 1].add(
                     soft[k].last(),
                     truth,

@@ -3,7 +3,9 @@
 //! deleted) while they were in the tree, and the Rust had matched them
 //! sample for sample on 16k random frames a phase and 375 tapped calls;
 //! the audio hashes were taken again when the vocoders took the standards'
-//! way where op25 departs from them (trunk-oxide-4hj, trunk-oxide-13y).
+//! way where op25 departs from them (trunk-oxide-4hj, trunk-oxide-13y), and
+//! phase 1's checked then against the standard's policy as first written
+//! (f2a28be), identical.
 //! The hashes are of the 16-bit samples, little endian (FNV-1a 64).
 
 use std::collections::BTreeMap;
@@ -33,18 +35,25 @@ fn fnv(pcm: &[i16]) -> u64 {
         })
 }
 
-/// One frame's vocoder input as op25 would have been given it.
+/// One frame's vocoder input: phase 1's as decoded, phase 2's as op25
+/// would have been given it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Input {
-    /// Phase 1: the parameters and error counts, or encrypted (silent).
-    Imbe(Option<([u32; 8], u32, u32)>),
+    /// Phase 1: op25's `u` and the bits corrected in c0, c4 and all, or
+    /// encrypted (silent).
+    Imbe(Option<([u32; 8], u32, u32, u32)>),
     Ambe([u8; 36], bool),
 }
 
 impl Input {
     fn of(v: Vocode) -> Self {
         match v {
-            Vocode::Imbe { frame, e0, et } => Self::Imbe(Some((frame.params.to_op25(), e0, et))),
+            Vocode::Imbe { frame } => Self::Imbe(Some((
+                frame.params.to_op25(),
+                frame.errors_c0,
+                frame.errors_c4,
+                frame.errors,
+            ))),
             Vocode::Silence => Self::Imbe(None),
             Vocode::Ambe {
                 dibits, encrypted, ..
@@ -54,17 +63,16 @@ impl Input {
 
     fn vocode(self) -> Vocode {
         match self {
-            // op25's inputs alone: as op25 would see them, nothing soft.
-            Self::Imbe(Some((u, e0, et))) => Vocode::Imbe {
+            // Nothing soft.
+            Self::Imbe(Some((u, e0, e4, et))) => Vocode::Imbe {
                 frame: ImbeFrame {
                     params: ImbeParams::from_op25(u),
                     errors: et,
                     errors_c0: e0,
+                    errors_c4: e4,
                     reliability: f32::INFINITY,
                     unprotected: f32::INFINITY,
                 },
-                e0,
-                et,
             },
             Self::Imbe(None) => Vocode::Silence,
             Self::Ambe(dibits, encrypted) => Vocode::Ambe {
@@ -208,7 +216,7 @@ fn dump_corpus(inputs: &[Input], phase2: bool) {
         .unwrap();
     for i in inputs {
         let line: Vec<String> = match i {
-            Input::Imbe(Some((u, _, _))) => u.iter().map(ToString::to_string).collect(),
+            Input::Imbe(Some((u, ..))) => u.iter().map(ToString::to_string).collect(),
             Input::Ambe(d, false) => d.iter().map(ToString::to_string).collect(),
             _ => continue,
         };
@@ -297,9 +305,9 @@ impl Channel {
 const RUN: usize = 40;
 const FRAMES: usize = 2000;
 
-/// Phase 1 frames (`u` as sent, e0, et) in runs of clean, noisy or bad;
-/// only bad runs send b̂0 > 207, which is no pitch.
-fn imbe_frames(rng: &mut Rng, n: usize) -> Vec<([u32; 8], u32, u32)> {
+/// Phase 1 frames (`u` as sent, e0, e4, et) in runs of clean, noisy or
+/// bad; only bad runs send b̂0 > 207, which is no pitch.
+fn imbe_frames(rng: &mut Rng, n: usize) -> Vec<([u32; 8], u32, u32, u32)> {
     let mut out = Vec::new();
     while out.len() < n {
         let channel = Channel::pick(rng);
@@ -316,8 +324,9 @@ fn imbe_frames(rng: &mut Rng, n: usize) -> Vec<([u32; 8], u32, u32)> {
                 Channel::Noisy => (rng.below(2), rng.below(8)),
                 Channel::Bad => (rng.below(5), 4 + rng.below(24)),
             };
+            let e4 = rng.below(more + 1).min(3);
             #[allow(clippy::cast_possible_truncation)]
-            out.push((u, e0 as u32, (e0 + more) as u32));
+            out.push((u, e0 as u32, e4 as u32, (e0 + more) as u32));
         }
     }
     out
@@ -325,14 +334,14 @@ fn imbe_frames(rng: &mut Rng, n: usize) -> Vec<([u32; 8], u32, u32)> {
 
 /// The audio of `imbe_frames` for seeds 100.., as (hash, audible frames).
 const IMBE_FIXTURES: [(u64, usize); 8] = [
-    (0xc470_4cf9_acad_5ace, 1615),
-    (0x039f_4a20_344d_e6f7, 1409),
-    (0x36c8_cba8_2e92_bf76, 1441),
-    (0x5394_450c_91f7_ac07, 1526),
-    (0x4c91_6db9_01f0_9596, 1345),
-    (0x7c3e_63c1_1516_ba10, 1433),
-    (0xbd74_7d22_bfb4_4a60, 1217),
-    (0x897b_ece1_c633_de09, 1306),
+    (0x2e1c_9b00_2fc0_629b, 1538),
+    (0x1116_ebc0_8b59_541e, 1257),
+    (0x45fd_7569_3f39_da5a, 1381),
+    (0xc7d0_5068_6122_3c4b, 1549),
+    (0xf1dd_608a_919e_99e6, 1534),
+    (0x4677_0f2b_f189_4634, 1402),
+    (0x9672_7204_f3ec_9057, 1573),
+    (0x230b_a512_2fc7_8b15, 1548),
 ];
 
 #[test]
@@ -342,8 +351,8 @@ fn the_imbe_vocoder_is_frozen() {
         let mut v = ImbeVocoder::new();
         let mut pcm = Vec::with_capacity(FRAMES * SAMPLES_PER_FRAME);
         let mut heard = 0;
-        for (u, e0, et) in imbe_frames(&mut rng, FRAMES) {
-            let got = v.decode(&u, e0, et);
+        for (u, e0, e4, et) in imbe_frames(&mut rng, FRAMES) {
+            let got = v.decode(&u, e0, e4, et);
             heard += usize::from(got.is_some_and(|p| p.iter().any(|&s| s != 0)));
             pcm.extend(got.unwrap_or([0; SAMPLES_PER_FRAME]));
         }

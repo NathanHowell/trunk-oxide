@@ -17,7 +17,7 @@
 
 use std::f64::consts::PI;
 
-use super::synth::{Errors, HARMONICS, Pcm, Synthesizer, Thresholds, op25_energy};
+use super::synth::{Errors, HARMONICS, Pcm, Synthesizer, Thresholds};
 use super::tables::{BIT_COUNT, BMT_B, BMT_N, GAIN_LEVELS, STEP_SIZE};
 use super::{Decision, PLAY_MARGIN, Policy, Spectrum};
 use crate::voice::ImbeFrame;
@@ -49,8 +49,7 @@ const EPS_R_PER_ERROR: f64 = 0.000365;
 /// Frames are muted above this error rate (BABA §7.8).
 const MUTE_EPS_R: f64 = 0.0875;
 /// Frame repeat thresholds: `ε0 ≥ 2` (Eq. 97) and `ε_T ≥ 10 + 40 ε_R`
-/// (Eq. 98). The spec repeats when both hold; op25, and so this, when
-/// either does (kept by the vote of trunk-oxide-4hj).
+/// (Eq. 98). The spec repeats when both hold, op25 when either does.
 const REPEAT_EPS_0: u32 = 2;
 const REPEAT_EPS_T_BASE: f32 = 10.0;
 const REPEAT_EPS_T_PER_RATE: f32 = 40.0;
@@ -95,11 +94,15 @@ impl ImbeVocoder {
         })
     }
 
-    /// One frame as decoded here, with the bits op25 would count corrected
-    /// in c0 (`e0`) and in all (`et`). `None` if the frame is muted.
-    pub fn vocode(&mut self, frame: &ImbeFrame, e0: u32, et: u32) -> Option<Pcm> {
+    /// One frame as decoded here. `None` if the frame is muted.
+    pub fn vocode(&mut self, frame: &ImbeFrame) -> Option<Pcm> {
         match self.policy {
-            Policy::Hard => self.decode(&frame.params.0.map(u32::from), e0, et),
+            Policy::Hard => self.decode(
+                &frame.params.0.map(u32::from),
+                frame.errors_c0,
+                frame.errors_c4,
+                frame.errors,
+            ),
             Policy::Soft => self.soft(frame),
         }
     }
@@ -129,16 +132,17 @@ impl ImbeVocoder {
         pcm
     }
 
-    /// One frame: its `u[0..8]` as sent and the bits corrected in c0
-    /// (`e0`) and in all (`et`), under op25's rules whatever the policy.
-    /// `None` if the frame is muted for errors (silence).
-    pub fn decode(&mut self, u: &[u32; 8], e0: u32, et: u32) -> Option<Pcm> {
+    /// One frame by the standard's rules (BABA §7.7–7.8, §9): its
+    /// `u[0..8]` as sent and the bits corrected in c0 (`e0`), in c4 (`e4`)
+    /// and in all (`et`), whatever the policy. `None` if the frame is muted
+    /// for errors (silence).
+    pub fn decode(&mut self, u: &[u32; 8], e0: u32, e4: u32, et: u32) -> Option<Pcm> {
         let b0 = b0(u);
         self.error_rate =
             (EPS_R_DECAY * f64::from(self.error_rate) + EPS_R_PER_ERROR * f64::from(et)) as f32;
-        // Eqs. 97 and 98, which op25 takes either of.
+        // Eqs. 97 and 98 both.
         let invalid = e0 >= REPEAT_EPS_0
-            || et as f32 >= REPEAT_EPS_T_BASE + REPEAT_EPS_T_PER_RATE * self.error_rate;
+            && et as f32 >= REPEAT_EPS_T_BASE + REPEAT_EPS_T_PER_RATE * self.error_rate;
         let mut rm0 = None;
         self.last = if f64::from(self.error_rate) > MUTE_EPS_R {
             // Muting (7.8).
@@ -162,10 +166,10 @@ impl ImbeVocoder {
             let errors = Errors {
                 rate: self.error_rate,
                 total: et as f32,
+                c4: e4 as f32,
             };
-            // op25's S_E is zero on a repeat.
-            self.synth
-                .smooth(Thresholds::op25(rm0.map_or(0.0, op25_energy), errors));
+            let thresholds = self.synth.thresholds(rm0, errors);
+            self.synth.smooth(thresholds);
             self.synth.synthesize()
         });
         self.synth.advance();

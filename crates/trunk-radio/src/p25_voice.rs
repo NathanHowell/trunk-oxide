@@ -225,9 +225,7 @@ impl VoicePipeline {
     /// A frame's audio; silence where the frame is muted or encrypted.
     fn vocode(&mut self, v: Vocode) -> Pcm {
         let (pcm, decision) = match v {
-            Vocode::Imbe { frame, e0, et } => {
-                (self.imbe.vocode(&frame, e0, et), Some(self.imbe.last()))
-            }
+            Vocode::Imbe { frame } => (self.imbe.vocode(&frame), Some(self.imbe.last())),
             Vocode::Ambe {
                 dibits,
                 frame,

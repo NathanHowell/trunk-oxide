@@ -59,7 +59,7 @@ fn every_pitch_synthesises() {
     let mut imbe = ImbeVocoder::new();
     for b0 in 0..=207 {
         for _ in 0..3 {
-            let pcm = imbe.decode(&imbe_with_b0(&mut rng, b0), 0, 0);
+            let pcm = imbe.decode(&imbe_with_b0(&mut rng, b0), 0, 0, 0);
             assert!(pcm.is_some_and(|p| p.iter().any(|&s| s != 0)), "b0 {b0}");
         }
     }
@@ -79,20 +79,82 @@ fn imbe_repeats_three_frames_then_mutes() {
     let mut rng = Rng::new(2);
     let mut v = ImbeVocoder::new();
     for _ in 0..5 {
-        assert!(v.decode(&imbe_with_b0(&mut rng, 100), 0, 0).is_some());
+        assert!(v.decode(&imbe_with_b0(&mut rng, 100), 0, 0, 0).is_some());
     }
     let heard: Vec<bool> = (0..6)
         .map(|i| {
             v.decode(
                 &imbe_with_b0(&mut rng, if i % 2 == 0 { 100 } else { 220 }),
                 2,
-                2,
+                0,
+                12,
             )
             .is_some()
         })
         .collect();
     assert_eq!(heard, [true, true, true, false, false, false]);
-    assert!(v.decode(&imbe_with_b0(&mut rng, 100), 0, 0).is_some());
+    assert!(v.decode(&imbe_with_b0(&mut rng, 100), 0, 0, 0).is_some());
+}
+
+/// A frame is repeated only when c0 failed (Eq. 97) and it has many errors
+/// (Eq. 98); op25 repeated when either held.
+#[test]
+fn imbe_repeats_only_on_both_tests() {
+    let mut rng = Rng::new(10);
+    let mut v = ImbeVocoder::new();
+    v.decode(&imbe_with_b0(&mut rng, 100), 0, 0, 0);
+    // c0 failed, few errors besides.
+    v.decode(&imbe_with_b0(&mut rng, 100), 2, 0, 2);
+    assert_eq!(v.last(), Decision::Played);
+    // Many errors, c0 sound.
+    v.decode(&imbe_with_b0(&mut rng, 100), 0, 0, 12);
+    assert_eq!(v.last(), Decision::Played);
+    v.decode(&imbe_with_b0(&mut rng, 100), 3, 0, 12);
+    assert_eq!(v.last(), Decision::Repeated);
+}
+
+/// A phase 1 frame plays by the bits the decoder corrected in it.
+#[test]
+fn imbe_counts_the_bits_it_corrected() {
+    let mut rng = Rng::new(11);
+    let mut v = ImbeVocoder::new();
+    let mut frame = sure_imbe(&mut rng, 100);
+    v.vocode(&frame);
+    (frame.errors_c0, frame.errors) = (3, 12);
+    v.vocode(&frame);
+    assert_eq!(v.last(), Decision::Repeated);
+}
+
+/// τ<sub>M</sub> builds on the last frame's while errors persist, and `S_E`
+/// is a running average (BABA Eqs. 111, 115).
+#[test]
+fn imbe_thresholds_carry_from_frame_to_frame() {
+    use super::synth::{Errors, Synthesizer};
+    let mut s = Synthesizer::new();
+    let noisy = Errors {
+        rate: 0.02,
+        total: 10.0,
+        c4: 1.0,
+    };
+    let rm0 = 1e6;
+    let mut se = 75000.0;
+    for tm in [23480.0, 26480.0, 29480.0] {
+        se = 0.95f32.mul_add(se, 0.05 * rm0);
+        let t = s.thresholds(Some(rm0), noisy);
+        assert_eq!(t.amplitude(), tm);
+        let vm = 1.414 * f64::from(se).powf(0.375);
+        assert!(
+            (f64::from(t.voicing()) / vm - 1.0).abs() < 1e-5,
+            "{t:?} {vm}"
+        );
+    }
+    // A repeat keeps S_E; a clean frame resets τ_M.
+    let t = s.thresholds(None, noisy);
+    assert!((f64::from(t.voicing()) / (1.414 * f64::from(se).powf(0.375)) - 1.0).abs() < 1e-5);
+    assert_eq!(
+        s.thresholds(Some(rm0), Errors::default()).amplitude(),
+        20480.0
+    );
 }
 
 /// Phase 1 mutes while its running error rate is high (7.8), and recovers
@@ -103,12 +165,13 @@ fn imbe_mutes_on_a_high_error_rate() {
     let mut v = ImbeVocoder::new();
     let mut run = |v: &mut ImbeVocoder, n: usize, et: u32| -> Vec<bool> {
         (0..n)
-            .map(|_| v.decode(&imbe_with_b0(&mut rng, 100), 0, et).is_some())
+            .map(|_| v.decode(&imbe_with_b0(&mut rng, 100), 0, 0, et).is_some())
             .collect()
     };
     assert!(run(&mut v, 10, 0).iter().all(|&a| a));
-    // Fifteen errors a frame (repeated, then muted for the rate).
-    assert!(run(&mut v, 60, 15).iter().rev().take(40).all(|&a| !a));
+    // Fifteen errors a frame: muted once the rate passes 0.0875, about
+    // thirty frames in.
+    assert!(run(&mut v, 60, 15).iter().rev().take(25).all(|&a| !a));
     let recovery = run(&mut v, 60, 0);
     assert!(!recovery[0] && recovery[59], "{recovery:?}");
 }
@@ -184,6 +247,7 @@ fn sure_imbe(rng: &mut Rng, b0: u32) -> ImbeFrame {
         params: crate::voice::ImbeParams(imbe_with_b0(rng, b0).map(|x| u16::try_from(x).unwrap())),
         errors: 0,
         errors_c0: 0,
+        errors_c4: 0,
         reliability: f32::INFINITY,
         unprotected: f32::INFINITY,
     }
@@ -204,16 +268,16 @@ fn sure_ambe(rng: &mut Rng, b0: u16) -> AmbeFrame {
 fn soft_plays_trusted_frames_and_repeats_untrusted_ones() {
     let mut rng = Rng::new(6);
     let mut v = ImbeVocoder::with_policy(Policy::Soft);
-    // op25 would mute this (e0 = 5), Soft goes by the decoder's margin.
+    // Hard would repeat this (e0 = 5), Soft goes by the decoder's margin.
     let mut sure = sure_imbe(&mut rng, 100);
-    sure.errors = 30;
-    assert!(v.vocode(&sure, 5, 30).is_some());
+    (sure.errors_c0, sure.errors) = (5, 30);
+    assert!(v.vocode(&sure).is_some());
     assert_eq!(v.last(), Decision::Played);
     let mut doubtful = sure_imbe(&mut rng, 100);
     doubtful.reliability = PLAY_MARGIN / 2.0;
     let decisions: Vec<Decision> = (0..5)
         .map(|_| {
-            v.vocode(&doubtful, 0, 0);
+            v.vocode(&doubtful);
             v.last()
         })
         .collect();
@@ -227,7 +291,7 @@ fn soft_plays_trusted_frames_and_repeats_untrusted_ones() {
             Decision::Muted
         ]
     );
-    assert!(v.vocode(&sure_imbe(&mut rng, 100), 0, 0).is_some());
+    assert!(v.vocode(&sure_imbe(&mut rng, 100)).is_some());
     assert_eq!(v.last(), Decision::Played);
 
     let mut a = AmbeVocoder::with_policy(Policy::Soft);
@@ -279,7 +343,7 @@ fn the_pitch_is_read_from_u7_as_sent() {
     let mut rng = Rng::new(9);
     for b0 in [100, 101, 102, 103] {
         let mut v = ImbeVocoder::new();
-        v.vocode(&sure_imbe(&mut rng, b0), 0, 0);
+        v.vocode(&sure_imbe(&mut rng, b0));
         let w0 = (4.0 * std::f64::consts::PI / (f64::from(b0) + 39.5)) as f32;
         assert_eq!(v.spectrum().map(|s| s.w0), Some(w0), "b0 {b0}");
     }

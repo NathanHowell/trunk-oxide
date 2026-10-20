@@ -290,6 +290,7 @@ impl AmbeVocoder {
         let errors = Errors {
             rate: OP25_SMOOTHING_ERROR_RATE,
             total: OP25_SMOOTHING_ERRORS,
+            c4: OP25_SMOOTHING_ERRORS,
         };
         s.smooth(Thresholds::op25(op25_energy(rm0), errors));
         let pcm = s.synthesize();

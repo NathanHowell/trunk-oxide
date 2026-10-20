@@ -255,7 +255,7 @@ mod tests {
             call: &call,
             params: &params,
             system: &system,
-            xor_mask: &[],
+            scrambler: None,
             channelizer: &cfg,
             num: ChannelNum(7),
             source: 0,

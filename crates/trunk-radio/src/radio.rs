@@ -13,11 +13,12 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use anyhow::{Result, bail};
 use trunk_channelizer::{ConditioningSettings, ProfileId};
+use trunk_p25::Nac;
+use trunk_p25::tdma::Scrambler;
 use trunk_sdr::{Running, Stream};
 
 use crate::correction::Correction;
 use crate::kind::{Call, Cmd, Kind, OpenError, Opening};
-use crate::p25_lfsr::compute_xor_mask;
 use crate::recording::{Accounting, Recording, Tape};
 use crate::source::Source;
 use crate::types::{AudioSink, CallId, ChannelNum, ChannelStatus, EventSender, Transmission};
@@ -64,10 +65,21 @@ pub struct SourceSetup {
     pub correction_hz: f64,
 }
 
+/// A system's phase 2 scrambling sequence, once its identity is known (a
+/// NAC of 0 names no system).
+fn scrambler(nac: u64, sys_id: u64, wacn: u64) -> Option<Scrambler> {
+    let nac = Nac::new(u16::try_from(nac).ok()?)?;
+    Some(Scrambler::new(
+        u32::try_from(wacn).ok()?,
+        u16::try_from(sys_id).ok()?,
+        nac,
+    ))
+}
+
 struct System {
     setup: SystemSetup,
-    /// The phase 2 scrambling mask (empty while the identity is unknown).
-    xor_mask: Vec<u8>,
+    /// The phase 2 scrambling sequence (none while the identity is unknown).
+    scrambler: Option<Scrambler>,
     sysid_received: bool,
     status_received: bool,
 }
@@ -300,10 +312,10 @@ impl Radio {
                 setup.sys_num
             );
         }
-        let xor_mask = compute_xor_mask(setup.nac, setup.sys_id, setup.wacn);
+        let scrambler = scrambler(setup.nac, setup.sys_id, setup.wacn);
         i.systems.push(System {
             setup,
-            xor_mask,
+            scrambler,
             sysid_received: false,
             status_received: false,
         });
@@ -363,7 +375,7 @@ impl Radio {
             return false;
         }
         s.status_received = true;
-        s.xor_mask = compute_xor_mask(u64::from(nac), u64::from(sys_id), u64::from(wacn));
+        s.scrambler = scrambler(u64::from(nac), u64::from(sys_id), u64::from(wacn));
         tracing::info!(
             system = %s.setup.short_name,
             sys_id = format_args!("{sys_id:X}"),
@@ -406,7 +418,7 @@ impl Radio {
             call,
             params,
             system: &system.setup,
-            xor_mask: &system.xor_mask,
+            scrambler: system.scrambler.as_ref(),
             channelizer: source.channelizer.config(),
             num,
             source: source.idx,

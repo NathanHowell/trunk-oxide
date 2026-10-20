@@ -16,7 +16,6 @@ pub mod fm;
 pub mod kind;
 pub mod p25;
 pub mod p25_calls;
-pub mod p25_lfsr;
 pub mod p25_parse;
 pub mod p25_voice;
 pub mod radio;

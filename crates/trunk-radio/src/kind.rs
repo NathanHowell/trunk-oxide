@@ -57,8 +57,8 @@ pub struct Opening<'a, K: Kind> {
     pub call: &'a Call,
     pub params: &'a K::Params,
     pub system: &'a SystemSetup,
-    /// The system's phase 2 scrambling mask (empty until known).
-    pub xor_mask: &'a [u8],
+    /// The system's phase 2 scrambling sequence (none until known).
+    pub scrambler: Option<&'a trunk_p25::tdma::Scrambler>,
     pub channelizer: &'a trunk_channelizer::Config,
     pub num: ChannelNum,
     /// The source and channelizer slot, for the metrics.

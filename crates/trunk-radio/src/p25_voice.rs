@@ -130,8 +130,9 @@ impl VoicePipeline {
         self.repeated = 0;
         self.muted = 0;
         if phase2 {
+            self.a2
+                .start_call(slot, scrambler.as_ref().map(Scrambler::color_code));
             self.p2 = TdmaDecoder::new(DemodConfig::phase2(self.rate), scrambler);
-            self.a2.start_call(slot);
         } else {
             self.p1 = VoiceDecoder::new(DemodConfig::new(self.rate, modulation));
         }
@@ -306,12 +307,12 @@ impl P25VoiceHandle {
     }
 
     /// A new call: CQPSK (else C4FM), phase 2 on `slot` with the system's
-    /// 2160-dibit scrambling mask.
+    /// scrambling sequence.
     pub fn start_call(
         &mut self,
         qpsk: bool,
         tdma: bool,
-        xor_mask: &[u8],
+        scrambler: Option<&Scrambler>,
         system: &str,
         freq_hz: f64,
         slot: i32,
@@ -324,7 +325,7 @@ impl P25VoiceHandle {
         self.pipeline.start_call(
             modulation,
             tdma,
-            Scrambler::from_dibits(xor_mask),
+            scrambler.cloned(),
             u8::try_from(slot).unwrap_or(0),
         );
         self.pipeline.shared.call(system, freq_hz);
@@ -433,14 +434,14 @@ impl Kind for P25Voice {
 
     fn decoder(at: &Opening<'_, Self>, tape: Tape) -> Result<P25VoiceChannel, OpenError> {
         let slot = at.call.channel.slot;
-        if slot.is_some() && at.xor_mask.is_empty() {
+        if slot.is_some() && at.scrambler.is_none() {
             return Err(OpenError::NoScramblingMask);
         }
         let mut voice = P25VoiceHandle::new(NARROW_RATE, Some(at.num));
         voice.start_call(
             at.system.qpsk,
             slot.is_some(),
-            at.xor_mask,
+            at.scrambler,
             &at.system.short_name,
             at.call.channel.freq_hz,
             slot.map_or(0, i32::from),

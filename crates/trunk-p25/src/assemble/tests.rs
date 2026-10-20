@@ -317,6 +317,40 @@ fn mac_ptt_names_the_unit_and_its_encryption_holds_to_the_hangtime() {
     assert!(!a.encrypted());
 }
 
+/// An encrypted `MAC_PTT` for group 0x0abc, then `MAC_END_PTT` with
+/// `color_code`, on a system whose color code is 0x5e1.
+fn end_ptt_events(color_code: u16) -> (Vec<CallEvent>, bool) {
+    let mut a = Phase2Assembler::new(0);
+    a.start_call(0, Nac::new(0x5e1));
+    let mut ptt = [0u8; 21];
+    ptt[0] = 0x20; // MAC_PTT
+    ptt[10] = 0x84;
+    ptt[16..18].copy_from_slice(&0x0abcu16.to_be_bytes());
+    let mut out = Vec::new();
+    a.mac(&pdu(MacChannel::Sacch, &ptt), 0, &mut out);
+    out.clear();
+    let mut end = [0u8; 21];
+    end[0] = 0x40; // MAC_END_PTT
+    end[1..3].copy_from_slice(&color_code.to_be_bytes());
+    end[16..18].copy_from_slice(&0x0abcu16.to_be_bytes());
+    a.mac(&pdu(MacChannel::Sacch, &end), 0, &mut out);
+    (out, a.encrypted())
+}
+
+#[test]
+fn mac_end_ptt_ends_the_transmission_on_a_transmission_trunked_system() {
+    let (out, encrypted) = end_ptt_events(0x5e1);
+    assert_eq!(out, [CallEvent::Group(0x0abc), CallEvent::Terminator]);
+    assert!(!encrypted);
+}
+
+#[test]
+fn mac_end_ptt_with_another_systems_color_code_is_not_ours() {
+    let (out, encrypted) = end_ptt_events(0x123);
+    assert_eq!(out, []);
+    assert!(encrypted);
+}
+
 #[test]
 fn mac_messages_name_units_and_carry_harris_aliases() {
     let mut a = Phase2Assembler::new(0);

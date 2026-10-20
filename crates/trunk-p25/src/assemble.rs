@@ -19,8 +19,9 @@
 //! check changes nothing, where op25 may take a miscorrected one.
 
 use crate::control::Received;
-use crate::tdma::mac::{END_PTT_GROUP, MacPdu};
+use crate::tdma::mac::{END_PTT_COLOR_CODE, END_PTT_COLOR_CODE_HIGH_MASK, END_PTT_GROUP, MacPdu};
 use crate::tdma::{AmbeFrame, BurstContent, BurstType, MacOpcode, Op25View, TdmaEvent};
+use crate::types::Nac;
 use crate::voice::regenerate::SpikeDetector;
 use crate::voice::signalling::ALGID_CLEAR;
 use crate::voice::{CallCounts, ImbeFrame, LinkControl, Terminator, VoiceEvent};
@@ -78,7 +79,8 @@ pub enum CallEvent {
         algid: u8,
         keyid: u16,
     },
-    /// The transmission ended (phase 1 TDU or TDULC, phase 2 `MAC_HANGTIME`).
+    /// The transmission ended (phase 1 TDU or TDULC, phase 2 `MAC_END_PTT`
+    /// or `MAC_HANGTIME`).
     Terminator,
     Alias(Alias),
 }
@@ -433,12 +435,16 @@ pub struct Phase2Assembler {
     next_keyid: u16,
     alias: AliasBuffer,
     cached: Cached,
+    /// The system's color code, when known: a `MAC_END_PTT` carrying
+    /// another is not this system's.
+    color_code: Option<Nac>,
 }
 
 impl Phase2Assembler {
     pub fn new(channel: u8) -> Self {
         Self {
             channel,
+            color_code: None,
             algid: ALGID_CLEAR,
             keyid: 0,
             next_algid: ALGID_CLEAR,
@@ -448,9 +454,10 @@ impl Phase2Assembler {
         }
     }
 
-    /// A new call (op25's `call_start`).
-    pub const fn start_call(&mut self, channel: u8) {
+    /// A new call (op25's `call_start`) on a system with `color_code`.
+    pub const fn start_call(&mut self, channel: u8, color_code: Option<Nac>) {
         self.channel = channel;
+        self.color_code = color_code;
         self.reset_ess();
     }
 
@@ -528,11 +535,17 @@ impl Phase2Assembler {
                     self.heard(i64::from(ptt.source), i64::from(ptt.group), now_ms, out);
                 }
             }
+            // The transmission is over once the color code checks (BBAC
+            // §7.3.3); op25 waited for the MAC_HANGTIME that only message
+            // trunking sends.
             MacOpcode::EndPtt => {
-                if b.len() >= END_PTT_GROUP.end {
-                    let g = END_PTT_GROUP.start;
-                    heard(-1, i64::from(u16::from_be_bytes([b[g], b[g + 1]])), out);
+                if b.len() < END_PTT_GROUP.end || !self.ours(b) {
+                    return;
                 }
+                let g = END_PTT_GROUP.start;
+                heard(-1, i64::from(u16::from_be_bytes([b[g], b[g + 1]])), out);
+                out.push(CallEvent::Terminator);
+                self.reset_ess();
                 self.cached = Cached::default();
             }
             MacOpcode::Idle | MacOpcode::Active => self.messages(b, now_ms, out),
@@ -544,6 +557,13 @@ impl Phase2Assembler {
             }
             MacOpcode::Reserved(_) => {}
         }
+    }
+
+    /// `MAC_END_PTT` `b` names this system's color code, or it is unknown.
+    fn ours(&self, b: &[u8]) -> bool {
+        let c = END_PTT_COLOR_CODE.start;
+        let code = u16::from_be_bytes([b[c] & END_PTT_COLOR_CODE_HIGH_MASK, b[c + 1]]);
+        self.color_code.is_none_or(|n| n.get() == code)
     }
 
     fn heard(&mut self, source: i64, group: i64, now_ms: u64, out: &mut Vec<CallEvent>) {

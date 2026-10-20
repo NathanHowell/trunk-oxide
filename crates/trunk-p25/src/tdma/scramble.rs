@@ -32,13 +32,22 @@ const fn feedback() -> u64 {
     f
 }
 
-/// The 2160 scrambling dibits of a superframe.
+/// The 2160 scrambling dibits of a superframe, and the color code (NAC)
+/// they were seeded with.
 #[derive(Clone, PartialEq, Eq)]
-pub struct Scrambler([u8; SUPERFRAME_DIBITS]);
+pub struct Scrambler {
+    dibits: [u8; SUPERFRAME_DIBITS],
+    nac: Nac,
+}
 
 impl std::fmt::Debug for Scrambler {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Scrambler({:?}…)", &self.0[..8])
+        write!(
+            f,
+            "Scrambler({:03x}: {:?}…)",
+            self.nac.get(),
+            &self.dibits[..8]
+        )
     }
 }
 
@@ -71,28 +80,22 @@ impl Scrambler {
             out[d] = two;
             d += 1;
         }
-        Self(out)
-    }
-
-    /// From the 2160-dibit mask trunk-recorder hands op25.
-    pub fn from_dibits(mask: &[u8]) -> Option<Self> {
-        let mut out = [0u8; SUPERFRAME_DIBITS];
-        if mask.len() != SUPERFRAME_DIBITS {
-            return None;
-        }
-        for (o, &m) in out.iter_mut().zip(mask) {
-            *o = m & 3;
-        }
-        Some(Self(out))
+        Self { dibits: out, nac }
     }
 
     /// The mask dibit for payload dibit `p` of superframe slot `slot`.
     pub const fn payload(&self, slot: usize, p: usize) -> u8 {
-        self.0[mask_index(slot, p)]
+        self.dibits[mask_index(slot, p)]
     }
 
     pub const fn dibits(&self) -> &[u8; SUPERFRAME_DIBITS] {
-        &self.0
+        &self.dibits
+    }
+
+    /// The color code: the system's NAC, which a phase 2 channel's
+    /// `MAC_END_PTT` repeats (BBAC §7.3.3).
+    pub const fn color_code(&self) -> Nac {
+        self.nac
     }
 }
 
@@ -112,7 +115,6 @@ mod tests {
             0,3,2,2,3,1,3,0,2,0,2,3,3,0,2,3,0,2,0,1,1,2,2,0,1,0,3,3,0,2,2,1,
         ];
         assert_eq!(S.dibits()[..128], expected);
-        assert_eq!(Scrambler::from_dibits(S.dibits()), Some(S));
     }
 
     #[test]

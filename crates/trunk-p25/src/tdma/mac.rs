@@ -83,6 +83,10 @@ pub const PTT_ALGID: usize = 10;
 pub const PTT_KID: Range<usize> = 11..13;
 pub const PTT_SOURCE: Range<usize> = 13..16;
 pub const PTT_GROUP: Range<usize> = 16..18;
+/// `MAC_END_PTT`'s color code: the low 4 bits of its first octet after the
+/// header, then the next (BBAC §8.2.2 Figs. 8-7 to 8-9).
+pub const END_PTT_COLOR_CODE: Range<usize> = 1..3;
+pub const END_PTT_COLOR_CODE_HIGH_MASK: u8 = 0x0f;
 /// `MAC_END_PTT`'s group address octets (BBAC §8.2.2 Figs. 8-7 to 8-9).
 pub const END_PTT_GROUP: Range<usize> = 16..18;
 

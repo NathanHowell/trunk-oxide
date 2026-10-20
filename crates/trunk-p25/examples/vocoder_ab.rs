@@ -1,18 +1,21 @@
-//! Blind A/B listening clips for two vocoder policies (hard and soft
-//! unless named): a tapped call, clean or under injected noise,
-//! vocoded both ways, both halves of one clip with a gap between, which
-//! half is which drawn at random and written to the key.
+//! Blind A/B listening clips between two vocoder policies: tapped calls,
+//! clean or under injected noise, vocoded both ways, the two halves of one
+//! clip with a pause between. Each clip is written twice, the halves
+//! swapped, so a listener's preference for a side cancels out; the order
+//! of the clips is shuffled and the key records which half is which.
 //!
-//! Not every call: each call at each noise level is scored by how far the
-//! two policies' played spectra diverge from each other (log-spectral
-//! distance, frame by frame), the clip is cut from the window where they
-//! diverge most, and only the few calls that diverge most, plus one typical
-//! of the rest, are written, clean and noisy apart. Where the policies
-//! agree there is nothing to hear. Each policy's distance from its own
-//! clean decoding of the call is reported beside it.
+//! A clip is short (`WINDOW`, 2 s) and cut where the policies diverge
+//! most: each call at each noise level is scored frame by frame by how far
+//! the two policies' played spectra are apart (log-spectral distance), and
+//! the window with the most of it is the clip, so what differs is the
+//! thing heard. Only the calls that diverge most are kept, a few per noise
+//! level. Each policy's distance from its own clean decoding is reported
+//! beside it.
 //!
 //! `VOCODER_CORPUS=<dir> cargo run --release -p trunk-p25 --example
-//! vocoder_ab -- <out dir> [<policy a> <policy b>]` (`hard`, `soft`)
+//! vocoder_ab -- <out dir> <test>...`, a test being
+//! `<name>:<phase>:<policy a>:<policy b>:<σ>,<σ>..` (policies `hard`,
+//! `soft`), e.g. `soft:1:hard:soft:0.4,0.6`.
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 mod common;
 
@@ -28,31 +31,34 @@ use trunk_p25::vocoder::{
 use trunk_p25::voice::ImbeParams;
 use trunk_p25::voice::imbe;
 
-const SIGMAS: [f64; 3] = [0.0, 0.5, 0.6];
-/// Frames a clip's half holds (7 s).
-const WINDOW: usize = 350;
+/// Frames a clip's half holds (2 s).
+const WINDOW: usize = 100;
+/// How far apart the windows tried start (frames).
+const WINDOW_STEP: usize = 5;
 /// Silence between the halves.
 const GAP_FRAMES: usize = 30;
-/// Clips a phase gets, clean and noisy each: the most divergent calls,
-/// then one typical.
-const MOST_DIVERGENT: [usize; 2] = [2, 2];
+/// Each half fades in and out over this many samples (10 ms), so a cut
+/// mid-word does not click.
+const FADE: usize = 80;
+/// Clips per test and noise level: the calls that diverge most.
+const PER_SIGMA: usize = 2;
+/// Fewer frames differing than this and there is nothing to hear.
+const MIN_DIFFERING: usize = 10;
 const RATE: u32 = 8000;
 
 /// One call under one noise level, both ways.
 struct Candidate {
-    phase: u8,
     call: usize,
     sigma: f64,
     /// Where the window starts (frames).
     start: usize,
-    /// Σ|`LSD_a` − `LSD_b`| over the window.
+    /// Σ distance between the two over the window.
     divergence: f64,
     /// Frames in the window whose audio differs.
     differing: usize,
     /// Mean LSD of each policy from its own clean decoding, over the window.
     lsd: [f64; 2],
-    a: Vec<i16>,
-    b: Vec<i16>,
+    pcm: [Vec<i16>; 2],
 }
 
 /// Per frame: both policies' audio, each one's distance from its own
@@ -88,33 +94,38 @@ impl Frame {
     }
 }
 
-fn candidate(phase: u8, call: usize, sigma: f64, frames: &[Frame]) -> Option<Candidate> {
+fn candidate(call: usize, sigma: f64, frames: &[Frame]) -> Option<Candidate> {
     if frames.len() < WINDOW {
         return None;
     }
     let d: Vec<f64> = frames.iter().map(|f| f.apart).collect();
     let (start, divergence) = (0..=frames.len() - WINDOW)
-        .step_by(25)
+        .step_by(WINDOW_STEP)
         .map(|s| (s, d[s..s + WINDOW].iter().sum::<f64>()))
         .max_by(|x, y| x.1.total_cmp(&y.1))?;
     let window = &frames[start..start + WINDOW];
     let silence = [0i16; SAMPLES_PER_FRAME];
     let audio = |k: usize| -> Vec<i16> {
-        window
+        let mut pcm: Vec<i16> = window
             .iter()
             .flat_map(|f| f.pcm[k].unwrap_or(silence))
-            .collect()
+            .collect();
+        let n = pcm.len();
+        for i in 0..FADE {
+            let g = i as f32 / FADE as f32;
+            pcm[i] = (f32::from(pcm[i]) * g) as i16;
+            pcm[n - 1 - i] = (f32::from(pcm[n - 1 - i]) * g) as i16;
+        }
+        pcm
     };
     Some(Candidate {
-        phase,
         call,
         sigma,
         start,
         divergence,
         differing: window.iter().filter(|f| f.pcm[0] != f.pcm[1]).count(),
         lsd: [0, 1].map(|k| window.iter().map(|f| f.lsd[k]).sum::<f64>() / WINDOW as f64),
-        a: audio(0),
-        b: audio(1),
+        pcm: [audio(0), audio(1)],
     })
 }
 
@@ -186,27 +197,90 @@ fn policy(name: &str) -> Policy {
     }
 }
 
-/// The most divergent candidates of a phase (distinct calls), then the
-/// median of those that differ at all.
-fn pick(mut all: Vec<Candidate>, most: usize) -> Vec<(Candidate, &'static str)> {
+/// The `most` candidates that diverge most, from distinct calls.
+fn pick(mut all: Vec<Candidate>, most: usize) -> Vec<Candidate> {
     all.sort_by(|x, y| y.divergence.total_cmp(&x.divergence));
-    let mut chosen = Vec::new();
     let mut calls = Vec::new();
-    let mut rest = Vec::new();
-    // Where the two agree there is nothing to hear.
-    for c in all.into_iter().filter(|c| c.differing >= 10) {
-        if chosen.len() < most && !calls.contains(&c.call) {
-            calls.push(c.call);
-            chosen.push((c, "most divergent"));
-        } else {
-            rest.push(c);
+    all.into_iter()
+        .filter(|c| c.differing >= MIN_DIFFERING)
+        .filter(|c| {
+            let new = !calls.contains(&c.call);
+            if new {
+                calls.push(c.call);
+            }
+            new
+        })
+        .take(most)
+        .collect()
+}
+
+/// One comparison: two policies on one phase at some noise levels.
+struct Test {
+    name: String,
+    phase: u8,
+    names: [String; 2],
+    policies: [Policy; 2],
+    sigmas: Vec<f64>,
+}
+
+impl Test {
+    fn parse(spec: &str) -> Self {
+        let parts: Vec<&str> = spec.split(':').collect();
+        let [name, phase, a, b, sigmas] = parts[..] else {
+            panic!("a test is <name>:<phase>:<policy a>:<policy b>:<σ>,..: {spec}");
+        };
+        Self {
+            name: name.to_owned(),
+            phase: phase.parse().expect("phase 1 or 2"),
+            names: [a.to_owned(), b.to_owned()],
+            policies: [policy(a), policy(b)],
+            sigmas: sigmas.split(',').map(|s| s.parse().expect("a σ")).collect(),
         }
     }
-    if !rest.is_empty() {
-        let mid = rest.len() / 2;
-        chosen.push((rest.into_iter().nth(mid).unwrap(), "typical"));
+
+    /// The test's clips, scored and picked.
+    fn run(&self, corpus: &Corpus, rng: &mut Rng) -> Vec<Candidate> {
+        let mut chosen = Vec::new();
+        for &sigma in &self.sigmas {
+            let calls = if self.phase == 1 {
+                corpus.imbe.len()
+            } else {
+                corpus.ambe.len()
+            };
+            let (mut frames_in, mut differing, mut lsd) = (0usize, 0usize, [0f64; 2]);
+            let mut unplayed = [0usize; 2];
+            let mut all = Vec::new();
+            for call in 0..calls {
+                let frames = if self.phase == 1 {
+                    phase1(&corpus.imbe[call], sigma, self.policies, rng)
+                } else {
+                    phase2(&corpus.ambe[call], sigma, self.policies, rng)
+                };
+                frames_in += frames.len();
+                differing += frames.iter().filter(|f| f.pcm[0] != f.pcm[1]).count();
+                for f in &frames {
+                    for k in 0..2 {
+                        lsd[k] += f.lsd[k];
+                        unplayed[k] += usize::from(!f.played[k]);
+                    }
+                }
+                all.extend(candidate(call, sigma, &frames));
+            }
+            println!(
+                "{} (phase {}) σ {sigma}: {differing} of {frames_in} frames differ; LSD from own clean {} {:.2} dB ({} repeated or muted), {} {:.2} dB ({})",
+                self.name,
+                self.phase,
+                self.names[0],
+                lsd[0] / frames_in as f64,
+                unplayed[0],
+                self.names[1],
+                lsd[1] / frames_in as f64,
+                unplayed[1],
+            );
+            chosen.extend(pick(all, PER_SIGMA));
+        }
+        chosen
     }
-    chosen
 }
 
 fn wav(path: &str, pcm: &[i16]) {
@@ -233,91 +307,64 @@ fn wav(path: &str, pcm: &[i16]) {
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     let out = args.get(1).expect("an output directory");
-    let names = [
-        args.get(2).map_or("hard", String::as_str),
-        args.get(3).map_or("soft", String::as_str),
-    ];
-    let policies = names.map(policy);
+    let tests: Vec<Test> = args[2..].iter().map(|s| Test::parse(s)).collect();
+    assert!(!tests.is_empty(), "no tests");
     std::fs::create_dir_all(out).unwrap();
     let corpus = Corpus::load_frames(true).expect("VOCODER_CORPUS");
     let mut rng = Rng::new(21);
-    let mut chosen = Vec::new();
-    for (phase, most) in [(1u8, MOST_DIVERGENT[0]), (2, MOST_DIVERGENT[1])] {
-        let mut clean = Vec::new();
-        let mut noisy = Vec::new();
-        for sigma in SIGMAS {
-            let calls = if phase == 1 {
-                corpus.imbe.len()
-            } else {
-                corpus.ambe.len()
-            };
-            let (mut frames_in, mut differing, mut lsd) = (0usize, 0usize, [0f64; 2]);
-            let mut unplayed = [0usize; 2];
-            for call in 0..calls {
-                let frames = if phase == 1 {
-                    phase1(&corpus.imbe[call], sigma, policies, &mut rng)
-                } else {
-                    phase2(&corpus.ambe[call], sigma, policies, &mut rng)
-                };
-                frames_in += frames.len();
-                differing += frames.iter().filter(|f| f.pcm[0] != f.pcm[1]).count();
-                for f in &frames {
-                    for k in 0..2 {
-                        lsd[k] += f.lsd[k];
-                        unplayed[k] += usize::from(!f.played[k]);
-                    }
-                }
-                let to = if sigma == 0.0 { &mut clean } else { &mut noisy };
-                to.extend(candidate(phase, call, sigma, &frames));
-            }
-            println!(
-                "phase {phase} sigma {sigma}: {differing} of {frames_in} frames differ; LSD from own clean {} {:.2} dB ({} repeated or muted), {} {:.2} dB ({})",
-                names[0],
-                lsd[0] / frames_in as f64,
-                unplayed[0],
-                names[1],
-                lsd[1] / frames_in as f64,
-                unplayed[1],
-            );
-        }
-        chosen.extend(pick(clean, most));
-        chosen.extend(pick(noisy, most));
-    }
-
-    // Sides drawn from the clock, so the key is the only record.
+    let chosen: Vec<(&Test, Candidate)> = tests
+        .iter()
+        .flat_map(|t| t.run(&corpus, &mut rng).into_iter().map(move |c| (t, c)))
+        .collect();
+    // Every clip both ways round, in an order drawn from the clock, so the
+    // key is the only record.
     let seed = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
         .as_nanos() as u64;
     let mut sides = Rng::new(seed);
+    let mut order: Vec<(usize, bool)> = (0..chosen.len())
+        .flat_map(|i| [(i, false), (i, true)])
+        .collect();
+    for i in (1..order.len()).rev() {
+        order.swap(i, sides.below(i + 1));
+    }
     let mut key = String::from("[\n");
-    for (i, (c, why)) in chosen.iter().enumerate() {
-        let b_first = sides.next_u64().is_multiple_of(2);
-        let (first, second) = if b_first { (&c.b, &c.a) } else { (&c.a, &c.b) };
-        let mut pcm = first.clone();
+    for (n, &(i, swapped)) in order.iter().enumerate() {
+        let (t, c) = &chosen[i];
+        let [first, second] = if swapped { [1, 0] } else { [0, 1] };
+        let mut pcm = c.pcm[first].clone();
         pcm.extend(std::iter::repeat_n(0i16, GAP_FRAMES * SAMPLES_PER_FRAME));
-        pcm.extend(second);
-        let file = format!("clip_{:02}.wav", i + 1);
+        pcm.extend(&c.pcm[second]);
+        let file = format!("clip_{:02}.wav", n + 1);
         wav(&format!("{out}/{file}"), &pcm);
-        let [left, right] = if b_first { [names[1], names[0]] } else { names };
         let _ = writeln!(
             key,
-            "  {{\"file\": \"{file}\", \"phase\": {}, \"sigma\": {}, \"call\": {}, \"start_s\": {:.1}, \"why\": \"{why}\", \"left\": \"{left}\", \"right\": \"{right}\", \"divergence\": {:.1}, \"differing_frames\": {}, \"lsd_{}\": {:.2}, \"lsd_{}\": {:.2}}}{}",
-            c.phase,
+            "  {{\"file\": \"{file}\", \"test\": \"{}\", \"pair\": {i}, \"phase\": {}, \"sigma\": {}, \"call\": {}, \"start_s\": {:.1}, \"left\": \"{}\", \"right\": \"{}\", \"divergence\": {:.1}, \"differing_frames\": {}, \"lsd_left\": {:.2}, \"lsd_right\": {:.2}}}{}",
+            t.name,
+            t.phase,
             c.sigma,
             c.call,
             c.start as f64 / 50.0,
+            t.names[first],
+            t.names[second],
             c.divergence,
             c.differing,
-            names[0],
-            c.lsd[0],
-            names[1],
-            c.lsd[1],
-            if i + 1 < chosen.len() { "," } else { "" }
+            c.lsd[first],
+            c.lsd[second],
+            if n + 1 < order.len() { "," } else { "" }
         );
         println!(
-            "{file}: phase {} sigma {} call {} ({why}); {} of {WINDOW} frames differ, LSD {} {:.1} {} {:.1}",
-            c.phase, c.sigma, c.call, c.differing, names[0], c.lsd[0], names[1], c.lsd[1]
+            "{file}: {} σ {} call {} at {:.1} s, pair {i}; {} of {WINDOW} frames differ, LSD {} {:.2} {} {:.2}",
+            t.name,
+            c.sigma,
+            c.call,
+            c.start as f64 / 50.0,
+            c.differing,
+            t.names[0],
+            c.lsd[0],
+            t.names[1],
+            c.lsd[1]
         );
     }
     key.push_str("]\n");

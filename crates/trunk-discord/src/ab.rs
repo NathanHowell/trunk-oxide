@@ -1,12 +1,16 @@
 //! Blind A/B listening tests in Discord: posts clips (two versions of the
 //! same audio in one file, `examples/vocoder_ab.rs` in trunk-p25) to the
-//! current hourly thread with ⬅️ and ➡️ to vote with, and tallies the votes
-//! against the key.
+//! current hourly thread with ⬅️, ➡️ and 🤷 (can't tell) to vote with, and
+//! tallies the votes against the key.
 //!
 //! `trunk-discord ab post <dir>` posts every clip the directory's
 //! `key.json` lists and writes `posted.json`; `trunk-discord ab tally <dir>`
-//! reads the reactions back.
+//! reads the reactions back. A clip the key pairs with its mirror (the
+//! same halves the other way round) scores a listener's preference only
+//! when it holds both ways round: picking the same side twice is a side,
+//! not a policy.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context as _, Result, bail};
@@ -21,6 +25,7 @@ use crate::resampler::Resampler;
 
 const LEFT: &str = "\u{2b05}\u{fe0f}";
 const RIGHT: &str = "\u{27a1}\u{fe0f}";
+const UNSURE: &str = "\u{1f937}";
 const HOURLY_THREAD_PREFIX: &str = "System Events - ";
 
 #[derive(Subcommand)]
@@ -35,10 +40,15 @@ pub enum Ab {
 #[derive(Deserialize, Serialize)]
 struct Clip {
     file: String,
+    /// Which comparison it belongs to, if the key names them.
+    #[serde(default)]
+    test: String,
+    /// The clip and its mirror share a pair.
+    #[serde(default)]
+    pair: Option<usize>,
     phase: u8,
     sigma: f64,
     call: usize,
-    why: String,
     left: String,
     right: String,
     #[serde(flatten)]
@@ -130,7 +140,7 @@ async fn post(http: &Http, config: &trunk_config::DiscordConfig, dir: &Path) -> 
     };
     for (i, clip) in clips.iter().enumerate() {
         let text = format!(
-            "**Listening test {}/{}** — phase {}, noise σ {:.1}. The same transmission decoded two ways, one after the other with a pause between. React {LEFT} if the first sounds better, {RIGHT} if the second.",
+            "**Listening test {}/{}** — phase {}, noise σ {:.1}. Two seconds of one transmission decoded two ways, one after the other with a pause between; they differ somewhere in those two seconds. React {LEFT} if the first sounds better, {RIGHT} if the second, {UNSURE} if you can't tell.",
             i + 1,
             clips.len(),
             clip.phase,
@@ -146,7 +156,7 @@ async fn post(http: &Http, config: &trunk_config::DiscordConfig, dir: &Path) -> 
                 CreateMessage::new().content(text).add_file(attachment),
             )
             .await?;
-        for emoji in [LEFT, RIGHT] {
+        for emoji in [LEFT, RIGHT, UNSURE] {
             http.create_reaction(
                 channel,
                 message.id,
@@ -164,32 +174,139 @@ async fn post(http: &Http, config: &trunk_config::DiscordConfig, dir: &Path) -> 
     Ok(())
 }
 
+/// A listener's vote on one clip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Vote {
+    Left,
+    Right,
+    Unsure,
+}
+
+/// Who voted what on a message (people only; both sides at once is no
+/// vote).
+async fn votes(
+    http: &Http,
+    channel: ChannelId,
+    message: MessageId,
+) -> Result<BTreeMap<String, Vote>> {
+    let mut by: BTreeMap<String, Vec<Vote>> = BTreeMap::new();
+    for (emoji, vote) in [
+        (LEFT, Vote::Left),
+        (RIGHT, Vote::Right),
+        (UNSURE, Vote::Unsure),
+    ] {
+        let users = http
+            .get_reaction_users(
+                channel,
+                message,
+                &ReactionType::Unicode(emoji.to_owned()),
+                100,
+                None,
+            )
+            .await?;
+        for u in users.into_iter().filter(|u| !u.bot) {
+            by.entry(u.name).or_default().push(vote);
+        }
+    }
+    Ok(by
+        .into_iter()
+        .filter_map(|(who, v)| match v[..] {
+            [one] => Some((who, one)),
+            _ => None,
+        })
+        .collect())
+}
+
+/// Per test and pair, each listener's choices: the policy each
+/// presentation's vote chose (`None`: unsure).
+type Pairs = BTreeMap<(String, usize), BTreeMap<String, Vec<Option<String>>>>;
+
+/// What a listener's two votes on a pair say.
+#[derive(Default)]
+struct Verdicts {
+    /// Pairs a policy won both ways round (or once, unsure the other time).
+    preferred: BTreeMap<String, u64>,
+    /// The same side both times.
+    side: u64,
+    /// Unsure both times.
+    unsure: u64,
+}
+
 async fn tally(http: &Http, dir: &Path) -> Result<()> {
     let clips = key(dir)?;
     let posted: Posted = serde_json::from_str(&std::fs::read_to_string(dir.join("posted.json"))?)?;
     let channel = ChannelId::new(posted.channel);
-    let mut totals = std::collections::BTreeMap::<String, u64>::new();
+    let mut pairs = Pairs::new();
+    let mut totals: BTreeMap<(String, String), u64> = BTreeMap::new();
+    let mut sides: BTreeMap<&str, u64> = BTreeMap::new();
     for (file, id) in &posted.messages {
         let Some(clip) = clips.iter().find(|c| &c.file == file) else {
             continue;
         };
-        let message = http.get_message(channel, MessageId::new(*id)).await?;
-        // Less the bot's own reaction on each side.
-        let votes = |emoji: &str| {
-            message
-                .reactions
-                .iter()
-                .find(|r| r.reaction_type == ReactionType::Unicode(emoji.to_owned()))
-                .map_or(0, |r| r.count.saturating_sub(u64::from(r.me)))
-        };
-        let (l, r) = (votes(LEFT), votes(RIGHT));
-        *totals.entry(clip.left.clone()).or_default() += l;
-        *totals.entry(clip.right.clone()).or_default() += r;
+        let votes = votes(http, channel, MessageId::new(*id)).await?;
+        let mut line = Vec::new();
+        for (who, &vote) in &votes {
+            let chose = match vote {
+                Vote::Left => Some(clip.left.clone()),
+                Vote::Right => Some(clip.right.clone()),
+                Vote::Unsure => None,
+            };
+            let label = chose.clone().unwrap_or_else(|| "unsure".to_owned());
+            *totals
+                .entry((clip.test.clone(), label.clone()))
+                .or_default() += 1;
+            *sides
+                .entry(match vote {
+                    Vote::Left => "left",
+                    Vote::Right => "right",
+                    Vote::Unsure => "unsure",
+                })
+                .or_default() += 1;
+            line.push(format!("{who}={label}"));
+            if let Some(pair) = clip.pair {
+                pairs
+                    .entry((clip.test.clone(), pair))
+                    .or_default()
+                    .entry(who.clone())
+                    .or_default()
+                    .push(chose);
+            }
+        }
         println!(
-            "{file}: phase {} σ {:.1} ({}): {LEFT} {l} = {}, {RIGHT} {r} = {}",
-            clip.phase, clip.sigma, clip.why, clip.left, clip.right
+            "{file}: {} phase {} σ {:.1} call {} pair {:?} ({} | {}): {}",
+            clip.test,
+            clip.phase,
+            clip.sigma,
+            clip.call,
+            clip.pair,
+            clip.left,
+            clip.right,
+            line.join(" ")
         );
     }
-    println!("totals: {totals:?}");
+    println!("votes by side: {sides:?}");
+    println!("votes by policy: {totals:?}");
+    let mut verdicts: BTreeMap<(String, String), Verdicts> = BTreeMap::new();
+    for ((test, _), voters) in &pairs {
+        for (who, v) in voters {
+            let [a, b] = &v[..] else {
+                continue;
+            };
+            let entry = verdicts.entry((test.clone(), who.clone())).or_default();
+            match (a, b) {
+                (None, None) => entry.unsure += 1,
+                (Some(x), Some(y)) if x != y => entry.side += 1,
+                (Some(x), _) | (None, Some(x)) => {
+                    *entry.preferred.entry(x.clone()).or_default() += 1;
+                }
+            }
+        }
+    }
+    for ((test, who), v) in &verdicts {
+        println!(
+            "{test} {who}: preferred {:?}, same side twice {}, unsure twice {}",
+            v.preferred, v.side, v.unsure
+        );
+    }
     Ok(())
 }

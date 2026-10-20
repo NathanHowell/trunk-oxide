@@ -152,6 +152,10 @@ pub struct Transmission {
     pub spike_count: i64,
     pub error_count: i64,
     pub term_events: i64,
+    /// `term_events` by what ended them, indexed by [`Ended::index`].
+    ///
+    /// [`Ended::index`]: trunk_p25::assemble::Ended::index
+    pub ended_by: [i64; 4],
     pub after_term_samples: i64,
     pub freq: f64,
 }
@@ -234,7 +238,7 @@ pub enum VoiceTagKind {
     /// The talkgroup.
     Group(u16),
     /// The transmission ended.
-    Terminate,
+    Terminate(trunk_p25::assemble::Ended),
     /// An over-the-air alias.
     Alias(trunk_p25::assemble::Alias),
 }

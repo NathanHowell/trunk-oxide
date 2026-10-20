@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, HashMap};
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Gauge, Meter};
 use trunk_radio::p25::{
-    ControlChannelReport, DecoderStats, TdmaStats, VoiceChannelReport, VoiceStats,
+    ControlChannelReport, DecoderStats, MacOpcode, TdmaStats, VoiceChannelReport, VoiceStats,
 };
 use trunk_radio::p25_calls::{self, CallTally, Phase};
 use trunk_radio::p25_parse::{self, ParseStats};
@@ -158,7 +158,7 @@ impl TdmaMetrics {
                 .build(),
             mac: meter
                 .u64_counter("trunk.oxide.p25tdma.mac")
-                .with_description("FACCH/SACCH MAC PDUs: ok (Reed-Solomon and CRC-12) or failed")
+                .with_description("FACCH/SACCH MAC PDUs: ok (Reed-Solomon and CRC-12) by opcode, failed, or foreign (a MAC_END_PTT with another system's color code)")
                 .build(),
             encryption_sync: meter
                 .u64_counter("trunk.oxide.p25tdma.encryption_sync")
@@ -199,8 +199,21 @@ impl TdmaMetrics {
         );
         self.ambe_bit_errors
             .add(d(now.ambe_errors, was.ambe_errors), base);
-        self.mac
-            .add(d(now.mac, was.mac), &with(base, "result", "ok"));
+        for bits in 0..8u8 {
+            let i = usize::from(bits);
+            let mut n = d(now.mac_by_opcode[i], was.mac_by_opcode[i]);
+            let opcode = MacOpcode::from_bits(bits);
+            if opcode == MacOpcode::EndPtt {
+                let foreign = d(now.end_ptt_foreign, was.end_ptt_foreign);
+                n = n.saturating_sub(foreign);
+                let mut attrs = with(base, "result", "foreign");
+                attrs.push(KeyValue::new("opcode", opcode.name()));
+                self.mac.add(foreign, &attrs);
+            }
+            let mut attrs = with(base, "result", "ok");
+            attrs.push(KeyValue::new("opcode", opcode.name()));
+            self.mac.add(n, &attrs);
+        }
         self.mac.add(
             d(now.mac_failed, was.mac_failed),
             &with(base, "result", "failed"),

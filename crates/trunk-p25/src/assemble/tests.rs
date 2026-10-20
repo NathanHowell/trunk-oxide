@@ -87,7 +87,7 @@ fn a_clear_phase1_call_vocodes_every_frame_as_sent() {
     assert_eq!(op25_inputs(&out), want);
     assert_eq!(out[0], CallEvent::Group(865));
     assert!(out.contains(&CallEvent::Source(0x12_3456)));
-    assert_eq!(out.last(), Some(&CallEvent::Terminator));
+    assert_eq!(out.last(), Some(&CallEvent::Terminator(Ended::Tdu)));
     assert!(
         !out.iter()
             .any(|e| matches!(e, CallEvent::Encryption { .. }))
@@ -313,7 +313,7 @@ fn mac_ptt_names_the_unit_and_its_encryption_holds_to_the_hangtime() {
     let mut hangtime = [0u8; 21];
     hangtime[0] = 0xc0; // MAC_HANGTIME
     a.mac(&pdu(MacChannel::Sacch, &hangtime), 0, &mut out);
-    assert_eq!(out, [CallEvent::Terminator]);
+    assert_eq!(out, [CallEvent::Terminator(Ended::Hangtime)]);
     assert!(!a.encrypted());
 }
 
@@ -340,7 +340,13 @@ fn end_ptt_events(color_code: u16) -> (Vec<CallEvent>, bool) {
 #[test]
 fn mac_end_ptt_ends_the_transmission_on_a_transmission_trunked_system() {
     let (out, encrypted) = end_ptt_events(0x5e1);
-    assert_eq!(out, [CallEvent::Group(0x0abc), CallEvent::Terminator]);
+    assert_eq!(
+        out,
+        [
+            CallEvent::Group(0x0abc),
+            CallEvent::Terminator(Ended::EndPtt)
+        ]
+    );
     assert!(!encrypted);
 }
 

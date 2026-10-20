@@ -19,7 +19,7 @@
 //! check changes nothing, where op25 may take a miscorrected one.
 
 use crate::control::Received;
-use crate::tdma::mac::{END_PTT_COLOR_CODE, END_PTT_COLOR_CODE_HIGH_MASK, END_PTT_GROUP, MacPdu};
+use crate::tdma::mac::{END_PTT_GROUP, MacPdu};
 use crate::tdma::{AmbeFrame, BurstContent, BurstType, MacOpcode, Op25View, TdmaEvent};
 use crate::types::Nac;
 use crate::voice::regenerate::SpikeDetector;
@@ -79,10 +79,41 @@ pub enum CallEvent {
         algid: u8,
         keyid: u16,
     },
-    /// The transmission ended (phase 1 TDU or TDULC, phase 2 `MAC_END_PTT`
-    /// or `MAC_HANGTIME`).
-    Terminator,
+    /// The transmission ended.
+    Terminator(Ended),
     Alias(Alias),
+}
+
+/// What ended a transmission.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Ended {
+    /// Phase 1 terminator without link control.
+    Tdu,
+    /// Phase 1 terminator with link control.
+    Tdulc,
+    /// Phase 2 `MAC_END_PTT` (transmission trunking).
+    EndPtt,
+    /// Phase 2 `MAC_HANGTIME` (message trunking).
+    Hangtime,
+}
+
+impl Ended {
+    pub const ALL: [Self; 4] = [Self::Tdu, Self::Tdulc, Self::EndPtt, Self::Hangtime];
+
+    /// Its place in [`Self::ALL`].
+    pub const fn index(self) -> usize {
+        self as usize
+    }
+
+    /// A name for metrics and traces.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Tdu => "tdu",
+            Self::Tdulc => "tdulc",
+            Self::EndPtt => "end_ptt",
+            Self::Hangtime => "hangtime",
+        }
+    }
 }
 
 /// Bits corrected, for the vocoder's frame repeat and muting.
@@ -259,7 +290,10 @@ impl Phase1Assembler {
             }
             VoiceEvent::Terminator { terminator, .. } => {
                 self.algid = ALGID_CLEAR;
-                out.push(CallEvent::Terminator);
+                out.push(CallEvent::Terminator(match terminator {
+                    Terminator::Simple => Ended::Tdu,
+                    Terminator::LinkControl(_) => Ended::Tdulc,
+                }));
                 if let Terminator::LinkControl(Some(lc)) = terminator {
                     self.link_control(&lc.value, now_ms, out);
                 }
@@ -539,31 +573,24 @@ impl Phase2Assembler {
             // §7.3.3); op25 waited for the MAC_HANGTIME that only message
             // trunking sends.
             MacOpcode::EndPtt => {
-                if b.len() < END_PTT_GROUP.end || !self.ours(b) {
+                if b.len() < END_PTT_GROUP.end || pdu.is_foreign_end_ptt(self.color_code) {
                     return;
                 }
                 let g = END_PTT_GROUP.start;
                 heard(-1, i64::from(u16::from_be_bytes([b[g], b[g + 1]])), out);
-                out.push(CallEvent::Terminator);
+                out.push(CallEvent::Terminator(Ended::EndPtt));
                 self.reset_ess();
                 self.cached = Cached::default();
             }
             MacOpcode::Idle | MacOpcode::Active => self.messages(b, now_ms, out),
             MacOpcode::Hangtime => {
                 self.messages(b, now_ms, out);
-                out.push(CallEvent::Terminator);
+                out.push(CallEvent::Terminator(Ended::Hangtime));
                 self.reset_ess();
                 self.cached = Cached::default();
             }
             MacOpcode::Reserved(_) => {}
         }
-    }
-
-    /// `MAC_END_PTT` `b` names this system's color code, or it is unknown.
-    fn ours(&self, b: &[u8]) -> bool {
-        let c = END_PTT_COLOR_CODE.start;
-        let code = u16::from_be_bytes([b[c] & END_PTT_COLOR_CODE_HIGH_MASK, b[c + 1]]);
-        self.color_code.is_none_or(|n| n.get() == code)
     }
 
     fn heard(&mut self, source: i64, group: i64, now_ms: u64, out: &mut Vec<CallEvent>) {

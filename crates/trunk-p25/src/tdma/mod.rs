@@ -34,6 +34,7 @@ use crate::demod::{DemodConfig, DemodStats, Demodulator};
 use crate::fec::Decision;
 use crate::gf64::Gf64;
 use crate::symbols::bit_llrs;
+use crate::types::Nac;
 use crate::voice::{Checked, EncryptionSync};
 use layout::{
     CHANNEL_OF_SLOT, DUID_AT, PAYLOAD_BITS, VOICE_2V, VOICE_4V, VOICE_DIBITS, payload_dibit,
@@ -135,6 +136,10 @@ pub struct TdmaStats {
     pub ambe_trusted: u64,
     pub mac: u64,
     pub mac_failed: u64,
+    /// MAC PDUs decoded, by opcode ([`MacOpcode::bits`]).
+    pub mac_by_opcode: [u64; 8],
+    /// `MAC_END_PTT`s naming another system's color code.
+    pub end_ptt_foreign: u64,
     pub encryption_sync: u64,
     pub encryption_sync_failed: u64,
     /// Bursts not read (LCCH, reserved, or scrambled with no scrambler).
@@ -142,7 +147,7 @@ pub struct TdmaStats {
 }
 
 impl TdmaStats {
-    fn count(&mut self, e: &TdmaEvent) {
+    fn count(&mut self, e: &TdmaEvent, color_code: Option<Nac>) {
         match &e.content {
             BurstContent::Voice4 { .. } => self.voice4 += 1,
             BurstContent::Voice2 { encryption, .. } => {
@@ -153,6 +158,10 @@ impl TdmaStats {
             BurstContent::Mac(pdu) => {
                 self.mac += u64::from(pdu.is_some());
                 self.mac_failed += u64::from(pdu.is_none());
+                if let Some(p) = pdu {
+                    self.mac_by_opcode[usize::from(p.value.opcode().bits())] += 1;
+                    self.end_ptt_foreign += u64::from(p.value.is_foreign_end_ptt(color_code));
+                }
             }
             BurstContent::Unread => self.unread += 1,
         }
@@ -399,7 +408,8 @@ impl TdmaDecoder {
                 _ => {}
             }
         }
-        self.stats.count(&event);
+        self.stats
+            .count(&event, self.scrambler.as_ref().map(Scrambler::color_code));
         event
     }
 

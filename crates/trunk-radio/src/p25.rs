@@ -22,7 +22,8 @@ use trunk_p25::{
 };
 
 pub use trunk_p25::DecoderStats;
-pub use trunk_p25::tdma::TdmaStats;
+pub use trunk_p25::assemble::Ended;
+pub use trunk_p25::tdma::{MacOpcode, TdmaStats};
 pub use trunk_p25::voice::VoiceStats;
 
 use crate::kind::{Cmd, Kind, OpenError, Opening, Tuning};

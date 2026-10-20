@@ -20,6 +20,7 @@ use super::layout::{ESS_A, ESS_B, FACCH_GAP, PAYLOAD_DIBITS};
 use crate::crc::{crc12, crc12_ok};
 use crate::fec::ReedSolomon;
 use crate::gf64::Gf64;
+use crate::types::Nac;
 use crate::voice::{Checked, EncryptionSync};
 
 /// The mother code, RS(63,35,29) over GF(64) (BBAC §5.6 Table 5-5).
@@ -147,6 +148,32 @@ impl MacOpcode {
             v => Self::Reserved(v),
         }
     }
+
+    /// The opcode's three bits.
+    pub const fn bits(self) -> u8 {
+        match self {
+            Self::Signal => 0,
+            Self::Ptt => MAC_PTT,
+            Self::EndPtt => MAC_END_PTT,
+            Self::Idle => MAC_IDLE,
+            Self::Active => MAC_ACTIVE,
+            Self::Hangtime => MAC_HANGTIME,
+            Self::Reserved(v) => v,
+        }
+    }
+
+    /// A name for metrics.
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Signal => "signal",
+            Self::Ptt => "ptt",
+            Self::EndPtt => "end_ptt",
+            Self::Idle => "idle",
+            Self::Active => "active",
+            Self::Hangtime => "hangtime",
+            Self::Reserved(_) => "reserved",
+        }
+    }
 }
 
 /// What a `MAC_PTT` says about the transmission starting.
@@ -178,6 +205,24 @@ impl MacPdu {
 
     pub const fn opcode(&self) -> MacOpcode {
         MacOpcode::from_bits(self.bytes[0] >> OPCODE_SHIFT)
+    }
+
+    /// A `MAC_END_PTT`'s color code.
+    pub const fn end_ptt_color_code(&self) -> Option<u16> {
+        if !matches!(self.opcode(), MacOpcode::EndPtt) {
+            return None;
+        }
+        let c = END_PTT_COLOR_CODE.start;
+        Some(u16::from_be_bytes([
+            self.bytes[c] & END_PTT_COLOR_CODE_HIGH_MASK,
+            self.bytes[c + 1],
+        ]))
+    }
+
+    /// A `MAC_END_PTT` naming a color code other than `ours` (when that is
+    /// known): another system's, heard co-channel.
+    pub const fn is_foreign_end_ptt(&self, ours: Option<Nac>) -> bool {
+        matches!((self.end_ptt_color_code(), ours), (Some(c), Some(n)) if c != n.get())
     }
 
     /// The offset field: bursts until the first 4V of the voice that follows.
@@ -446,6 +491,23 @@ pub mod encode {
 mod tests {
     use super::*;
     use crate::testgen::Rng;
+
+    #[test]
+    fn end_ptt_names_its_color_code() {
+        let mut b = [0u8; 21];
+        b[0] = MAC_END_PTT << OPCODE_SHIFT;
+        b[1] = 0xf5; // the high nibble is not the color code's
+        b[2] = 0xe1;
+        let end = MacPdu::new(MacChannel::Sacch, &b);
+        assert_eq!(end.end_ptt_color_code(), Some(0x5e1));
+        assert!(!end.is_foreign_end_ptt(Nac::new(0x5e1)));
+        assert!(end.is_foreign_end_ptt(Nac::new(0x5e2)));
+        assert!(!end.is_foreign_end_ptt(None), "unknown is not foreign");
+        b[0] = MAC_HANGTIME << OPCODE_SHIFT;
+        let hangtime = MacPdu::new(MacChannel::Sacch, &b);
+        assert_eq!(hangtime.end_ptt_color_code(), None);
+        assert!(!hangtime.is_foreign_end_ptt(Nac::new(0x5e2)));
+    }
 
     fn hex<const M: usize>(v: &[u8]) -> [Gf64; M] {
         std::array::from_fn(|i| Gf64::new(v[i]))

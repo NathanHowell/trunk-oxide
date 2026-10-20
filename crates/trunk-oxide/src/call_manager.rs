@@ -5,6 +5,7 @@ use std::time::Instant;
 use opentelemetry::KeyValue;
 use opentelemetry::metrics::{Counter, Gauge, Histogram};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+use trunk_radio::p25::Ended;
 use trunk_radio::{
     ChannelNum, ChannelReport, DetectedSignal, Radio, Squelch, TrunkMessage, Trunking,
 };
@@ -65,6 +66,8 @@ struct VoiceCounters {
     /// terminator position within the same work call (candidate end-of-call
     /// clipping).
     term_events: i64,
+    /// `term_events` by cause ([`trunk_radio::Transmission::ended_by`]).
+    ended_by: [i64; 4],
     after_term_samples: i64,
 }
 
@@ -76,9 +79,22 @@ impl VoiceCounters {
             c.spikes += t.spike_count;
             c.samples += t.sample_count;
             c.term_events += t.term_events;
+            for (c, t) in c.ended_by.iter_mut().zip(t.ended_by) {
+                *c += t;
+            }
             c.after_term_samples += t.after_term_samples;
         }
         c
+    }
+
+    /// The causes seen, comma-separated.
+    fn ended_by_names(&self) -> String {
+        Ended::ALL
+            .into_iter()
+            .filter(|e| self.ended_by[e.index()] > 0)
+            .map(Ended::name)
+            .collect::<Vec<_>>()
+            .join(",")
     }
 
     /// This transmission's slice since the prior snapshot (clamped at 0).
@@ -88,6 +104,7 @@ impl VoiceCounters {
             spikes: (self.spikes - prior.spikes).max(0),
             samples: (self.samples - prior.samples).max(0),
             term_events: (self.term_events - prior.term_events).max(0),
+            ended_by: std::array::from_fn(|i| (self.ended_by[i] - prior.ended_by[i]).max(0)),
             after_term_samples: (self.after_term_samples - prior.after_term_samples).max(0),
         }
     }
@@ -554,6 +571,8 @@ impl CallManager {
                             voice_errors = tracing::field::Empty,
                             voice_spikes = tracing::field::Empty,
                             term_events = tracing::field::Empty,
+                            // What ended the transmissions (tdu, tdulc, end_ptt, hangtime).
+                            ended_by = tracing::field::Empty,
                             stop_audio_age_s = tracing::field::Empty,
                             stop_voice_age_s = tracing::field::Empty,
                             // Stopped by a timeout with voice still arriving.
@@ -855,6 +874,9 @@ impl CallManager {
                 s.record("voice_errors", delta.errors);
                 s.record("voice_spikes", delta.spikes);
                 s.record("term_events", delta.term_events);
+                if delta.term_events > 0 {
+                    s.record("ended_by", delta.ended_by_names().as_str());
+                }
                 s.record("after_term_ms", delta.after_term_samples / 8);
                 s.record("voice_samples", delta.samples);
             }
@@ -901,8 +923,14 @@ impl CallManager {
             .add(u64::try_from(delta.errors).unwrap_or(0), &voice_attrs);
         self.voice_frame_spikes
             .add(u64::try_from(delta.spikes).unwrap_or(0), &voice_attrs);
-        self.terminator_events
-            .add(u64::try_from(delta.term_events).unwrap_or(0), &voice_attrs);
+        for ended in Ended::ALL {
+            let n = u64::try_from(delta.ended_by[ended.index()]).unwrap_or(0);
+            if n > 0 {
+                let mut attrs = voice_attrs.to_vec();
+                attrs.push(KeyValue::new("ended_by", ended.name()));
+                self.terminator_events.add(n, &attrs);
+            }
+        }
         if delta.term_events > 0 {
             #[allow(clippy::cast_precision_loss)]
             self.terminator_after_ms
@@ -1548,7 +1576,7 @@ fn proto_transmission(t: &trunk_radio::Transmission) -> proto::Transmission {
 
 #[cfg(test)]
 mod tests {
-    use super::VoiceCounters;
+    use super::{Ended, VoiceCounters};
 
     fn tx(error_count: i64, spike_count: i64, sample_count: i64) -> trunk_radio::Transmission {
         trunk_radio::Transmission {
@@ -1559,6 +1587,7 @@ mod tests {
             spike_count,
             error_count,
             term_events: 0,
+            ended_by: [0; 4],
             after_term_samples: 0,
             freq: 0.0,
         }
@@ -1628,5 +1657,17 @@ mod tests {
         };
         let d = after_reset.since(stale);
         assert_eq!((d.errors, d.spikes, d.samples), (0, 0, 0));
+    }
+
+    #[test]
+    fn a_transmission_names_what_ended_it() {
+        let mut was = VoiceCounters::default();
+        was.ended_by[Ended::Hangtime.index()] = 1;
+        let mut now = was;
+        now.term_events = 2;
+        now.ended_by[Ended::EndPtt.index()] = 1;
+        now.ended_by[Ended::Hangtime.index()] = 2;
+        assert_eq!(now.since(was).ended_by_names(), "end_ptt,hangtime");
+        assert_eq!(was.since(was).ended_by_names(), "");
     }
 }

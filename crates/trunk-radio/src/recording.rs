@@ -32,6 +32,8 @@ pub struct Accounting {
     pub last_voice: Instant,
     pub sample_count: i64,
     pub term_events: i64,
+    /// `term_events` by cause ([`Transmission::ended_by`]).
+    pub ended_by: [i64; 4],
     pub after_term_samples: i64,
     /// The decoder's counts so far (P25).
     pub counts: CallCounts,
@@ -55,6 +57,7 @@ impl Accounting {
             last_voice: now,
             sample_count: 0,
             term_events: 0,
+            ended_by: [0; 4],
             after_term_samples: 0,
             counts: CallCounts::default(),
             sources: Vec::new(),
@@ -112,6 +115,7 @@ impl Accounting {
             spike_count: i64::try_from(self.counts.spikes).unwrap_or(i64::MAX),
             error_count: i64::try_from(self.counts.errors).unwrap_or(i64::MAX),
             term_events: self.term_events,
+            ended_by: self.ended_by,
             after_term_samples: self.after_term_samples,
             freq: self.freq,
         })

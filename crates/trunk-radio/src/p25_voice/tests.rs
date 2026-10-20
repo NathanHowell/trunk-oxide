@@ -98,7 +98,7 @@ fn call_of(out: &[CallOutput]) -> Call {
                     c.sources.push(i64::from(*s));
                 }
             }
-            CallOutput::Event(CallEvent::Terminator) => c.terminators += 1,
+            CallOutput::Event(CallEvent::Terminator(_)) => c.terminators += 1,
             CallOutput::Event(_) => {}
         }
     }

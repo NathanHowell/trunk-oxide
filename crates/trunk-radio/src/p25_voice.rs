@@ -353,10 +353,10 @@ impl P25VoiceHandle {
                 CallOutput::Event(CallEvent::Group(g)) => {
                     tag(VoiceTagKind::Group(g));
                 }
-                CallOutput::Event(CallEvent::Terminator) => {
+                CallOutput::Event(CallEvent::Terminator(ended)) => {
                     if !self.terminated {
                         self.terminated = true;
-                        tag(VoiceTagKind::Terminate);
+                        tag(VoiceTagKind::Terminate(ended));
                     }
                 }
                 CallOutput::Event(CallEvent::Alias(a)) => {
@@ -561,8 +561,9 @@ impl ChannelDecoder for P25VoiceChannel {
                             }
                         }
                     }
-                    VoiceTagKind::Terminate => {
+                    VoiceTagKind::Terminate(ended) => {
                         acct.term_events += 1;
+                        acct.ended_by[ended.index()] += 1;
                         acct.after_term_samples +=
                             i64::try_from(audio.len()).unwrap_or(0) - i64::from(t.offset);
                     }

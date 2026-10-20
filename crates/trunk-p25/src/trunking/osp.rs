@@ -13,6 +13,8 @@ use crate::types::Tsbk;
 /// §4.2.5.2 Fig. 4.2.5-2): source WACN and system (0–3), source ID (4–6),
 /// then these.
 const UU_MBT_TARGET: std::ops::Range<usize> = 7..10;
+/// An MBT header's manufacturer ID (TIA-102.AABB-B §6.1 Fig. 6.1-2).
+const MBT_MFID: usize = 2;
 const UU_MBT_CHANNEL_T: std::ops::Range<usize> = 10..12;
 
 /// `width` bits, `shift` bits up from the end of `bytes` followed by `pad`
@@ -584,9 +586,13 @@ impl Osp {
         #[allow(clippy::cast_possible_truncation)]
         let dch = |shift| ChannelId::new(d(shift, 16) as u16);
         let opcode = h.u8(32, 6);
+        let mfid = header[MBT_MFID];
+        // The standard opcodes mean what AABC-B says only under a standard
+        // MFID, as for a TSBK.
+        let standard = matches!(mfid, mfid::STANDARD | mfid::STANDARD_ALT);
         #[allow(clippy::cast_possible_truncation)]
         match opcode {
-            opcode::GRP_V_CH_GRANT => Self::GroupVoiceGrant {
+            opcode::GRP_V_CH_GRANT if standard => Self::GroupVoiceGrant {
                 options: ServiceOptions(h.u8(24, 8)),
                 channel: dch(64),
                 group: d(32, 16) as u16,
@@ -598,7 +604,7 @@ impl Osp {
                 supergroup: d(48, 16) as u16,
                 source: None,
             },
-            opcode::UU_V_CH_GRANT if data.len() >= UU_MBT_CHANNEL_T.end => {
+            opcode::UU_V_CH_GRANT if standard && data.len() >= UU_MBT_CHANNEL_T.end => {
                 let (t, c) = (UU_MBT_TARGET.start, UU_MBT_CHANNEL_T.start);
                 Self::UnitVoiceGrant {
                     options: ServiceOptions(h.u8(24, 8)),
@@ -607,7 +613,7 @@ impl Osp {
                     source: h.u32(48, 24),
                 }
             }
-            opcode::RFSS_STS_BCST => Self::RfssStatus {
+            opcode::RFSS_STS_BCST if standard => Self::RfssStatus {
                 site: Site {
                     system: h.u16(48, 12),
                     rfss: d(88, 8) as u8,
@@ -615,15 +621,12 @@ impl Osp {
                 },
                 channel: dch(64),
             },
-            opcode::NET_STS_BCST => Self::NetworkStatus {
+            opcode::NET_STS_BCST if standard => Self::NetworkStatus {
                 wacn: d(76, 20),
                 system: h.u16(48, 12),
                 channel: dch(56),
             },
-            _ => Self::Other {
-                opcode,
-                mfid: header[2],
-            },
+            _ => Self::Other { opcode, mfid },
         }
     }
 
@@ -683,6 +686,25 @@ impl Osp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_vendor_mbt_is_not_read_as_a_standard_one() {
+        let mut header = [0u8; 12];
+        header[7] = opcode::UU_V_CH_GRANT;
+        let data = [0u8; 20];
+        assert!(matches!(
+            Osp::from_mbt(&header, &data),
+            Osp::UnitVoiceGrant { .. }
+        ));
+        header[MBT_MFID] = mfid::HARRIS;
+        assert_eq!(
+            Osp::from_mbt(&header, &data),
+            Osp::Other {
+                opcode: opcode::UU_V_CH_GRANT,
+                mfid: mfid::HARRIS
+            }
+        );
+    }
 
     #[test]
     fn an_extended_unit_to_unit_grant_reads_fig_4_2_5_2() {

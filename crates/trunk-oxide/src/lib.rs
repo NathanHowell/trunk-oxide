@@ -9,6 +9,7 @@ pub mod calibrate;
 mod call_manager;
 mod call_state;
 pub mod clock;
+pub mod cpu_weight;
 mod dedup;
 mod fm_metrics;
 mod p25_metrics;

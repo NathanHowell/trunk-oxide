@@ -15,6 +15,8 @@ services:
     volumes:
       - oxide-socket:/run/service
       - oxide-state:/var/lib/trunk-oxide
+      # Read by the startup CPU weight check (deploy/systemd/user.slice.d/).
+      - /sys/fs/cgroup:/host/sys/fs/cgroup:ro
       - ./config.toml:/app/config.toml:ro
       - ./smco-talkgroups.csv:/app/smco-talkgroups.csv:ro
       - ./svrcs-talkgroups.csv:/app/svrcs-talkgroups.csv:ro

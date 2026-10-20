@@ -128,6 +128,13 @@ fn main() -> Result<()> {
 
     let config = trunk_config::Config::load(config_path).context("failed to load TOML config")?;
 
+    let min_cpu_weight = config.oxide.as_ref().map_or_else(
+        || trunk_config::OxideConfig::default().min_cpu_weight,
+        |o| o.min_cpu_weight,
+    );
+    let cgroups = trunk_oxide::cpu_weight::require(min_cpu_weight)?;
+    tracing::info!(?cgroups, "cpu weight");
+
     let tg_map = trunk_oxide::talkgroup_meta_map(&config);
 
     let (bridge, stream_tx) = EventBridge::new(tg_map);

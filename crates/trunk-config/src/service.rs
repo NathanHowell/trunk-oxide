@@ -4,10 +4,27 @@ use serde::Deserialize;
 pub struct OxideConfig {
     #[serde(default = "default_oxide_socket")]
     pub socket_path: String,
+    /// The least `cpu.weight` some cgroup the scanner runs in must have, or
+    /// it will not start (0: no check). See `deploy/systemd/user.slice.d/`.
+    #[serde(default = "default_min_cpu_weight")]
+    pub min_cpu_weight: u32,
+}
+
+impl Default for OxideConfig {
+    fn default() -> Self {
+        Self {
+            socket_path: default_oxide_socket(),
+            min_cpu_weight: default_min_cpu_weight(),
+        }
+    }
 }
 
 fn default_oxide_socket() -> String {
     "/run/trunk-oxide/grpc.sock".to_string()
+}
+
+const fn default_min_cpu_weight() -> u32 {
+    1000
 }
 
 #[derive(Debug, Deserialize)]

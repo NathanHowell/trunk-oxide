@@ -358,6 +358,20 @@ fn mac_end_ptt_with_another_systems_color_code_is_not_ours() {
 }
 
 #[test]
+fn an_unknown_mac_message_is_skipped_by_its_length_not_the_rest_of_the_pdu() {
+    let mut a = Phase2Assembler::new(0);
+    let mut out = Vec::new();
+    let mut active = [0u8; 21];
+    active[0] = 0x80; // MAC_ACTIVE
+    // Opcode 0x0a, not in the table: 4 octets by its length octet.
+    active[1..5].copy_from_slice(&[0x0a, 0x04, 0xff, 0xff]);
+    // Then group voice channel user (abbreviated): group 0x0123, unit 0x00beef.
+    active[5..12].copy_from_slice(&[0x01, 0x00, 0x01, 0x23, 0x00, 0xbe, 0xef]);
+    a.mac(&pdu(MacChannel::Sacch, &active), 0, &mut out);
+    assert_eq!(out, [CallEvent::Source(0xbeef), CallEvent::Group(0x0123)]);
+}
+
+#[test]
 fn mac_messages_name_units_and_carry_harris_aliases() {
     let mut a = Phase2Assembler::new(0);
     let mut out = Vec::new();

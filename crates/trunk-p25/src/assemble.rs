@@ -427,6 +427,10 @@ const B1B2_MANUFACTURER: u8 = 0b10;
 
 /// A message's length octet holds the length in its low 6 bits (BBAC §8.3).
 const LENGTH_MASK: u8 = 0x3f;
+/// Every message added since BBAC's first publication carries its length
+/// in its second octet, so a receiver can skip one it does not know
+/// (BBAC-1 §8.3).
+const LENGTH_OCTET: usize = 1;
 /// Manufacturer message: MFID in octet 2, length in octet 3 (BBAC-1
 /// §8.3.1.37 Fig. 8-63); offsets from the opcode octet.
 const MFR_MFID: usize = 1;
@@ -619,8 +623,6 @@ impl Phase2Assembler {
                     self.heard(i64::from(source), i64::from(group), now_ms, out);
                     usize::from(MAC_MSG_LEN[usize::from(op)])
                 }
-                // Not in BBAC or BBAC-1; op25 reads its length octet.
-                0x08 => usize::from(at(p + 1) & LENGTH_MASK),
                 INDIRECT_GROUP_PAGING => group_paging_len(at(p + 1) & PAGING_LEN_MASK),
                 INDIVIDUAL_PAGING => individual_paging_len(at(p + 1) & PAGING_LEN_MASK),
                 GRP_V_CH_USR_EXTENDED => {
@@ -633,7 +635,12 @@ impl Phase2Assembler {
                     mfid = at(p + MFR_MFID);
                     usize::from(at(p + MFR_LENGTH) & LENGTH_MASK)
                 }
-                _ => usize::from(MAC_MSG_LEN[usize::from(op)]),
+                // One with no fixed length (unknown here, or newer than
+                // this table, as 0x08) says its own.
+                _ => match MAC_MSG_LEN[usize::from(op)] {
+                    0 => usize::from(at(p + LENGTH_OCTET) & LENGTH_MASK),
+                    n => usize::from(n),
+                },
             };
             // op25 reads on past the PDU; here a message ends with it.
             let msg = &b[p..(p + len).min(b.len())];

@@ -104,7 +104,7 @@ fn proto_trunk_message(m: &TrunkMessage) -> proto::TrunkMessage {
             out.duplex = options.duplex;
             out.mode = options.packet;
         }
-        K::Acknowledge { group, unit: u } => unit(&mut out, P::Acknowledge, *group, *u),
+        K::Acknowledge { unit: u } => unit(&mut out, P::Acknowledge, 0, *u),
         K::Affiliation { group, unit: u } => unit(&mut out, P::Affiliation, *group, *u),
         K::Location { group, unit: u } => unit(&mut out, P::Location, *group, *u),
         K::Registration { unit: u } => unit(&mut out, P::Registration, 0, *u),

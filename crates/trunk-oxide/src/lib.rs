@@ -76,10 +76,12 @@ impl From<&TrunkMessage> for TrunkMsgKey {
             | K::UnitUpdate(v)
             | K::AnswerRequest(v) => (v.talkgroup, v.source, v.channel.freq_hz),
             K::DataGrant { freq_hz, unit, .. } => (0, Some(unit), freq_hz),
-            K::Acknowledge { group, unit }
-            | K::Affiliation { group, unit }
-            | K::Location { group, unit } => (u32::from(group), Some(unit), 0.0),
-            K::Registration { unit } | K::Deregistration { unit } => (0, Some(unit), 0.0),
+            K::Affiliation { group, unit } | K::Location { group, unit } => {
+                (u32::from(group), Some(unit), 0.0)
+            }
+            K::Acknowledge { unit } | K::Registration { unit } | K::Deregistration { unit } => {
+                (0, Some(unit), 0.0)
+            }
             K::ControlChannel { freq_hz } | K::Network { freq_hz, .. } => (0, None, freq_hz),
             K::Site { .. }
             | K::PatchAdd(_)

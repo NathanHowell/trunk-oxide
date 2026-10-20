@@ -67,8 +67,10 @@ pub enum Access {
 pub struct ChannelPlan {
     pub base_hz: u64,
     pub spacing_hz: u32,
-    /// Mobile transmit offset.
-    pub tx_offset_hz: i64,
+    /// Mobile transmit offset; `None` where the identifier has no standard
+    /// one and grants name the transmit channel (`IDEN_UP` $80, AABC-B
+    /// §2.3.35).
+    pub tx_offset_hz: Option<i64>,
     pub bandwidth_hz: u32,
     pub access: Access,
 }
@@ -154,7 +156,7 @@ mod tests {
     const FDMA: ChannelPlan = ChannelPlan {
         base_hz: 851_006_250,
         spacing_hz: 6_250,
-        tx_offset_hz: -45_000_000,
+        tx_offset_hz: Some(-45_000_000),
         bandwidth_hz: 12_500,
         access: Access::Fdma,
     };

@@ -45,8 +45,9 @@ pub enum Trunking {
         unit: u32,
         options: Options,
     },
+    /// The control channel acknowledged something `unit` did; it names no
+    /// group (AABC-B §6.2.1).
     Acknowledge {
-        group: u16,
         unit: u32,
     },
     Affiliation {

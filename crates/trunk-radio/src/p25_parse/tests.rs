@@ -231,6 +231,14 @@ fn explains(notes: &[Divergence], rust: &[TrTrunkMessage], cpp: &[TrTrunkMessage
             kinds(rust) == [TrMessageType::Unknown]
                 || (rust.len() > cpp.len() && rust[..cpp.len()] == *cpp)
         }
+        Divergence::AcknowledgeGroup => {
+            rust.len() == 1
+                && cpp.len() == 1
+                && TrTrunkMessage {
+                    talkgroup: 0,
+                    ..cpp[0].clone()
+                } == rust[0]
+        }
     })
 }
 
@@ -328,6 +336,7 @@ fn matches_trunk_recorder_except_where_noted() {
         "EarlyStatus",
         "UnitGrantOptions",
         "Deferred",
+        "AcknowledgeGroup",
     ] {
         assert!(tally.diverged.contains_key(d), "{d}: {tally:?}");
     }

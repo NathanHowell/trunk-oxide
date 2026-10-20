@@ -19,7 +19,7 @@ pub mod osp;
 use std::collections::HashMap;
 
 pub use iden::{Access, Channel, ChannelId, ChannelPlan, Iden, IdenTable};
-pub use osp::{GroupChannel, Osp, Response, ServiceOptions, Site};
+pub use osp::{AckInfo, GroupChannel, Osp, Response, ServiceOptions, Site, SiteFlags};
 
 /// Where a channel number's plan came from.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -133,7 +133,7 @@ mod tests {
     const PLAN: ChannelPlan = ChannelPlan {
         base_hz: 762_006_250,
         spacing_hz: 12_500,
-        tx_offset_hz: 30_000_000,
+        tx_offset_hz: Some(30_000_000),
         bandwidth_hz: 12_500,
         access: Access::Tdma { slots: 2 },
     };

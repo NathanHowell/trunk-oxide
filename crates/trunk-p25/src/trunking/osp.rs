@@ -132,6 +132,36 @@ impl Response {
     }
 }
 
+/// What an `ACK_RSP_FNE`'s Additional Information (octets 3–6) carries
+/// (TIA-102.AABC-B §6.2.1, Figs. 6.2.1-2 and -3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum AckInfo {
+    /// AIV = 0: nothing.
+    None,
+    /// AIV = 1, EX = 0: the source address.
+    Source(u32),
+    /// AIV = 1, EX = 1: the target's WACN and system (its address is then
+    /// a Target ID).
+    System { wacn: u32, system: u16 },
+}
+
+/// An adjacent site's status bits, octet 3 bits 7–4 of `ADJ_STS_BCST`
+/// (TIA-102.AABC-B §6.2.2.1).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+#[allow(clippy::struct_excessive_bools)] // four independent bits of the message
+pub struct SiteFlags {
+    /// C: the broadcast advertises a conventional channel.
+    pub conventional: bool,
+    /// F: the site is in a failure condition.
+    pub failed: bool,
+    /// V: the information is known to be current; clear, it is the last
+    /// known.
+    pub valid: bool,
+    /// A: the site has an active network connection to the RFSS
+    /// controller.
+    pub networked: bool,
+}
+
 /// A group and the channel it is on, as grant updates pair them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct GroupChannel {
@@ -224,6 +254,68 @@ pub mod iden_up {
     pub const BW_VU_6_25_KHZ: u8 = 0b0100;
     /// BW VU: 12.5 kHz receiver bandwidth (§2.3.7, Table 2.3.7-1).
     pub const BW_VU_12_5_KHZ: u8 = 0b0101;
+    /// Transmit Offset $80: no standard transmit offset; grants name the
+    /// transmit channel explicitly (§2.3.35).
+    pub const NO_STANDARD_OFFSET: u64 = 0x80;
+    /// Base Frequency fields in the VHF (136–172 MHz) and UHF (380–512 MHz)
+    /// bands, where an `IDEN_UP` takes the layout of Fig. 6.2.9-2 under the
+    /// same opcode (§6.2.9).
+    const VHF: (u32, u32) = (0x019f_0a00, 0x020c_e700);
+    const UHF: (u32, u32) = (0x0487_abd0, 0x061a_8000);
+
+    pub const fn is_vhf_uhf(base: u32) -> bool {
+        (VHF.0 <= base && base <= VHF.1) || (UHF.0 <= base && base <= UHF.1)
+    }
+}
+
+/// An `IDEN_UP` plan outside the VHF and UHF bands (AABC-B Fig. 6.2.9-1).
+#[allow(clippy::cast_possible_wrap)] // the offset is at most 8 bits × 250 kHz
+const fn iden_up_plan(t: &Fields<'_>) -> Option<ChannelPlan> {
+    let spacing = t.u32(48, 10) * iden_up::CHANNEL_SPACING_HZ;
+    let bandwidth = t.u32(67, 9) * iden_up::BW_HZ;
+    if spacing == 0 || bandwidth == 0 {
+        return None;
+    }
+    let toff = field(t.0, 2, 58, iden_up::TRANSMIT_OFFSET_BITS as usize);
+    Some(ChannelPlan {
+        base_hz: t.u32(16, 32) as u64 * iden_up::BASE_FREQUENCY_HZ,
+        spacing_hz: spacing,
+        tx_offset_hz: if toff == iden_up::NO_STANDARD_OFFSET {
+            None
+        } else {
+            Some(iden_offset(toff, iden_up::TRANSMIT_OFFSET_BITS) * iden_up::TRANSMIT_OFFSET_HZ)
+        },
+        bandwidth_hz: bandwidth,
+        access: Access::Fdma,
+    })
+}
+
+/// A plan in the VHF/UHF layout: `IDEN_UP_VU`, or `IDEN_UP` in those bands
+/// (AABC-B Fig. 6.2.9-2, §6.2.29). A reserved BW VU gives a bandwidth of 0:
+/// it is informational, and the frequencies still stand.
+#[allow(clippy::cast_possible_wrap)] // the spacing is at most 10 bits × 125 Hz
+const fn vu_plan(t: &Fields<'_>) -> Option<ChannelPlan> {
+    let spacing = t.u32(48, 10) * iden_up::CHANNEL_SPACING_HZ;
+    if spacing == 0 {
+        return None;
+    }
+    let toff = field(t.0, 2, 58, iden_up::TRANSMIT_OFFSET_VU_BITS as usize);
+    Some(ChannelPlan {
+        base_hz: t.u32(16, 32) as u64 * iden_up::BASE_FREQUENCY_HZ,
+        spacing_hz: spacing,
+        tx_offset_hz: Some(iden_offset(toff, iden_up::TRANSMIT_OFFSET_VU_BITS) * spacing as i64),
+        bandwidth_hz: match t.u8(72, 4) {
+            iden_up::BW_VU_6_25_KHZ => 6_250,
+            iden_up::BW_VU_12_5_KHZ => 12_500,
+            _ => 0,
+        },
+        access: Access::Fdma,
+    })
+}
+
+/// An SCCB channel, unless its System Service Class is $00 (AABC-B §6.2.16).
+const fn secondary(channel: ChannelId, class: u8) -> Option<ChannelId> {
+    if class == 0 { None } else { Some(channel) }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -279,8 +371,14 @@ pub enum Osp {
         rx: ChannelId,
         target: u32,
     },
-    /// `ACK_RSP_FNE` (0x20).
-    Acknowledge { group: u16, target: u32 },
+    /// `ACK_RSP_FNE` (0x20): `info` is what octets 3–6 carry, by the AIV
+    /// and EX flags (AABC-B §6.2.1). trunk-recorder took octets 5–6 as a
+    /// group; no ACK carries one.
+    Acknowledge {
+        service: u8,
+        info: AckInfo,
+        target: u32,
+    },
     /// `GRP_AFF_RSP` (0x28).
     GroupAffiliation {
         response: Response,
@@ -311,11 +409,13 @@ pub enum Osp {
         tx: ChannelId,
         rx: ChannelId,
     },
-    /// SCCB (0x39): up to two secondary control channels.
+    /// SCCB (0x39): up to two secondary control channels. One whose System
+    /// Service Class is $00 is padding, not a valid secondary control
+    /// channel (AABC-B §6.2.16), and is `None`.
     SecondaryControl {
         rfss: u8,
         site: u8,
-        channels: [ChannelId; 2],
+        channels: [Option<ChannelId>; 2],
     },
     /// `RFSS_STS_BCST` (0x3a): the site this control channel belongs to.
     RfssStatus { site: Site, channel: ChannelId },
@@ -326,9 +426,14 @@ pub enum Osp {
         channel: ChannelId,
     },
     /// `ADJ_STS_BCST` (0x3c): a neighbouring site's control channel.
-    AdjacentStatus { site: Site, channel: ChannelId },
+    AdjacentStatus {
+        site: Site,
+        channel: ChannelId,
+        flags: SiteFlags,
+    },
     /// `IDEN_UP` (0x3d), `IDEN_UP_VU` (0x34), `IDEN_UP_TDMA` (0x33). No plan for
-    /// a reserved TDMA channel type.
+    /// a reserved TDMA channel type, nor for a reserved (zero) channel
+    /// spacing or BW (AABC-B §2.3.6, §2.3.10).
     IdenUpdate {
         iden: Iden,
         plan: Option<ChannelPlan>,
@@ -464,7 +569,15 @@ impl Osp {
                 target: t.u32(16, 24),
             },
             opcode::ACK_RSP_FNE => Self::Acknowledge {
-                group: t.u16(40, 16),
+                service: t.u8(72, 6),
+                info: match (t.u8(79, 1), t.u8(78, 1)) {
+                    (0, _) => AckInfo::None,
+                    (_, 0) => AckInfo::Source(t.u32(40, 24)),
+                    _ => AckInfo::System {
+                        wacn: t.u32(52, 20),
+                        system: t.u16(40, 12),
+                    },
+                },
                 target: t.u32(16, 24),
             },
             opcode::GRP_AFF_RSP => Self::GroupAffiliation {
@@ -496,44 +609,33 @@ impl Osp {
                 let toff = field(t.0, 2, 58, iden_up::TRANSMIT_OFFSET_TDMA_BITS as usize);
                 let spacing = t.u32(48, 10) * iden_up::CHANNEL_SPACING_HZ;
                 let plan = match ChannelPlan::tdma_channel_type(t.u8(72, 4)) {
-                    Some((access, bandwidth_hz)) => Some(ChannelPlan {
+                    Some((access, bandwidth_hz)) if spacing != 0 => Some(ChannelPlan {
                         base_hz: t.u32(16, 32) as u64 * iden_up::BASE_FREQUENCY_HZ,
                         spacing_hz: spacing,
-                        tx_offset_hz: iden_offset(toff, iden_up::TRANSMIT_OFFSET_TDMA_BITS)
-                            * spacing as i64,
+                        tx_offset_hz: Some(
+                            iden_offset(toff, iden_up::TRANSMIT_OFFSET_TDMA_BITS) * spacing as i64,
+                        ),
                         bandwidth_hz,
                         access,
                     }),
-                    None => None,
+                    _ => None,
                 };
                 Self::IdenUpdate {
                     iden: Iden::new(t.u8(76, 4)),
                     plan,
                 }
             }
-            opcode::IDEN_UP_VU => {
-                let toff = field(t.0, 2, 58, iden_up::TRANSMIT_OFFSET_VU_BITS as usize);
-                let spacing = t.u32(48, 10) * iden_up::CHANNEL_SPACING_HZ;
-                Self::IdenUpdate {
-                    iden: Iden::new(t.u8(76, 4)),
-                    plan: Some(ChannelPlan {
-                        base_hz: t.u32(16, 32) as u64 * iden_up::BASE_FREQUENCY_HZ,
-                        spacing_hz: spacing,
-                        tx_offset_hz: iden_offset(toff, iden_up::TRANSMIT_OFFSET_VU_BITS)
-                            * spacing as i64,
-                        bandwidth_hz: match t.u8(72, 4) {
-                            iden_up::BW_VU_6_25_KHZ => 6_250,
-                            iden_up::BW_VU_12_5_KHZ => 12_500,
-                            _ => 0,
-                        },
-                        access: Access::Fdma,
-                    }),
-                }
-            }
+            opcode::IDEN_UP_VU => Self::IdenUpdate {
+                iden: Iden::new(t.u8(76, 4)),
+                plan: vu_plan(t),
+            },
             opcode::SCCB => Self::SecondaryControl {
                 rfss: t.u8(72, 8),
                 site: t.u8(64, 8),
-                channels: [t.channel(48), t.channel(24)],
+                channels: [
+                    secondary(t.channel(48), t.u8(40, 8)),
+                    secondary(t.channel(24), t.u8(16, 8)),
+                ],
             },
             opcode::RFSS_STS_BCST => Self::RfssStatus {
                 site: Site {
@@ -555,19 +657,20 @@ impl Osp {
                     site: t.u8(40, 8),
                 },
                 channel: t.channel(24),
+                flags: SiteFlags {
+                    conventional: t.u8(71, 1) == 1,
+                    failed: t.u8(70, 1) == 1,
+                    valid: t.u8(69, 1) == 1,
+                    networked: t.u8(68, 1) == 1,
+                },
             },
             opcode::IDEN_UP => Self::IdenUpdate {
                 iden: Iden::new(t.u8(76, 4)),
-                plan: Some(ChannelPlan {
-                    base_hz: t.u32(16, 32) as u64 * iden_up::BASE_FREQUENCY_HZ,
-                    spacing_hz: t.u32(48, 10) * iden_up::CHANNEL_SPACING_HZ,
-                    tx_offset_hz: iden_offset(
-                        field(t.0, 2, 58, iden_up::TRANSMIT_OFFSET_BITS as usize),
-                        iden_up::TRANSMIT_OFFSET_BITS,
-                    ) * iden_up::TRANSMIT_OFFSET_HZ,
-                    bandwidth_hz: t.u32(67, 9) * iden_up::BW_HZ,
-                    access: Access::Fdma,
-                }),
+                plan: if iden_up::is_vhf_uhf(t.u32(16, 32)) {
+                    vu_plan(t)
+                } else {
+                    iden_up_plan(t)
+                },
             },
             _ => Self::Other { opcode, mfid },
         }
@@ -792,8 +895,8 @@ mod tests {
         assert_eq!(p.base_hz, 0x0915_7562 * 5);
         assert_eq!(p.spacing_hz, 100 * 125);
         // 700 MHz: mobiles transmit 30 MHz up.
-        assert_eq!(p.tx_offset_hz, 0x960 * 12_500);
-        assert_eq!(p.tx_offset_hz, 30_000_000);
+        assert_eq!(p.tx_offset_hz, Some(0x960 * 12_500));
+        assert_eq!(p.tx_offset_hz, Some(30_000_000));
     }
 
     #[test]
@@ -811,7 +914,105 @@ mod tests {
         assert_eq!(p.spacing_hz, 12_500);
         assert_eq!(p.bandwidth_hz, 12_500);
         // 900 MHz: mobiles transmit 39 MHz down.
-        assert_eq!(p.tx_offset_hz, -39_000_000);
+        assert_eq!(p.tx_offset_hz, Some(-39_000_000));
+    }
+
+    /// In the VHF and UHF bands an `IDEN_UP` takes Fig. 6.2.9-2's layout:
+    /// a 4-bit BW VU and a 14-bit offset in channel spacings.
+    #[test]
+    fn a_uhf_iden_update_is_read_in_the_vhf_uhf_layout() {
+        // Identifier 2, 12.5 kHz, +400 spacings, 12.5 kHz spacing, 450 MHz.
+        let Osp::IdenUpdate {
+            iden,
+            plan: Some(p),
+        } = Osp::from_tsbk(&tsbk("05e13d0025864064055d4a80"))
+        else {
+            panic!()
+        };
+        assert_eq!(iden, Iden::new(2));
+        assert_eq!(p.base_hz, 450_000_000);
+        assert_eq!(p.spacing_hz, 12_500);
+        assert_eq!(p.bandwidth_hz, 12_500);
+        assert_eq!(p.tx_offset_hz, Some(5_000_000));
+    }
+
+    /// `fdma_iden_update`'s with a reserved field: a zero spacing or BW is
+    /// no plan, and a $80 offset is none at all (AABC-B §2.3.6, §2.3.10,
+    /// §2.3.35).
+    #[test]
+    fn reserved_iden_update_fields() {
+        let plan = |hex| match Osp::from_tsbk(&tsbk(hex)) {
+            Osp::IdenUpdate { plan, .. } => plan,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(plan("05e13d00432270000b256e84"), None);
+        assert_eq!(plan("05e13d00400270640b256e84"), None);
+        let p = plan("05e13d00432200640b256e84").unwrap();
+        assert_eq!((p.spacing_hz, p.tx_offset_hz), (12_500, None));
+    }
+
+    /// An acknowledgement's octets 3–6 are by its AIV and EX flags a
+    /// source address or the target's WACN and system, never a group.
+    #[test]
+    fn an_acknowledgement_carries_its_additional_information() {
+        assert_eq!(
+            Osp::from_tsbk(&tsbk("05e12000a300fffffdc9535a")),
+            Osp::Acknowledge {
+                service: 0x23,
+                info: AckInfo::Source(0xff_fffd),
+                target: 0xc9_535a,
+            }
+        );
+        assert_eq!(
+            Osp::from_tsbk(&tsbk("05e12000e3bee005e4c9535a")),
+            Osp::Acknowledge {
+                service: 0x23,
+                info: AckInfo::System {
+                    wacn: 0xbee00,
+                    system: 0x5e4
+                },
+                target: 0xc9_535a,
+            }
+        );
+        assert!(matches!(
+            Osp::from_tsbk(&tsbk("05e120002300fffffdc9535a")),
+            Osp::Acknowledge {
+                info: AckInfo::None,
+                ..
+            }
+        ));
+    }
+
+    /// An SCCB channel of System Service Class $00 is padding.
+    #[test]
+    fn a_secondary_control_channel_of_class_zero_is_none() {
+        assert_eq!(
+            Osp::from_tsbk(&tsbk("05e139000101165804168800")),
+            Osp::SecondaryControl {
+                rfss: 1,
+                site: 1,
+                channels: [Some(ChannelId::new(0x1658)), None],
+            }
+        );
+    }
+
+    #[test]
+    fn adjacent_status_carries_the_sites_flags() {
+        let Osp::AdjacentStatus { site, flags, .. } =
+            Osp::from_tsbk(&tsbk("05e13c000035e40103161070"))
+        else {
+            panic!()
+        };
+        assert_eq!(site.system, 0x5e4);
+        assert_eq!(
+            flags,
+            SiteFlags {
+                conventional: false,
+                failed: false,
+                valid: true,
+                networked: true,
+            }
+        );
     }
 
     #[test]

@@ -142,9 +142,7 @@ impl From<&TrunkMessage> for TrTrunkMessage {
                 out.duplex = options.duplex;
                 out.mode = options.packet;
             }
-            K::Acknowledge { group, unit: u } => {
-                unit(&mut out, TrMessageType::Acknowledge, *group, *u);
-            }
+            K::Acknowledge { unit: u } => unit(&mut out, TrMessageType::Acknowledge, 0, *u),
             K::Affiliation { group, unit: u } => {
                 unit(&mut out, TrMessageType::Affiliation, *group, *u);
             }

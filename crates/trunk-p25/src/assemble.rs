@@ -442,12 +442,12 @@ const fn group_paging_len(len: u8) -> usize {
 }
 
 /// Group Voice Channel User, offsets from the opcode octet: group address
-/// octets 3–4, source address 5–7 (abbreviated), and in the extended format
-/// the Source SUID's source ID, octets 12–14 (BBAC §8.3.1.2 Figs. 8-13,
-/// 8-14, 8-11).
+/// octets 3–4, source address (the WUID) 5–7, in both formats (BBAC
+/// §8.3.1.2 Figs. 8-13, 8-14). The extended format adds the source's SUID,
+/// whose unit ID op25 takes as the source: for a roaming unit that is its
+/// home ID, not the address it is known by here.
 const GVCU_GROUP: usize = 2;
 const GVCU_SOURCE: usize = 4;
-const GVCU_SUID_SOURCE: usize = 11;
 
 /// Phase 2: op25's `p25p2_tdma`, for one logical channel.
 #[derive(Clone, Debug)]
@@ -603,10 +603,10 @@ impl Phase2Assembler {
             let op = b[p];
             let b1b2 = op >> B1B2_SHIFT;
             let mut mfid = 0;
-            let (grp, src, suid) = (p + GVCU_GROUP, p + GVCU_SOURCE, p + GVCU_SUID_SOURCE);
+            let (grp, src) = (p + GVCU_GROUP, p + GVCU_SOURCE);
             let len = match op {
                 NULL_INFORMATION => b.len() - p,
-                GRP_V_CH_USR_ABBREVIATED => {
+                GRP_V_CH_USR_ABBREVIATED | GRP_V_CH_USR_EXTENDED => {
                     let group = u16::from_be_bytes([at(grp), at(grp + 1)]);
                     let source = u32::from_be_bytes([0, at(src), at(src + 1), at(src + 2)]);
                     self.heard(i64::from(source), i64::from(group), now_ms, out);
@@ -614,12 +614,6 @@ impl Phase2Assembler {
                 }
                 INDIRECT_GROUP_PAGING => group_paging_len(at(p + 1) & PAGING_LEN_MASK),
                 INDIVIDUAL_PAGING => individual_paging_len(at(p + 1) & PAGING_LEN_MASK),
-                GRP_V_CH_USR_EXTENDED => {
-                    let group = u16::from_be_bytes([at(grp), at(grp + 1)]);
-                    let source = u32::from_be_bytes([0, at(suid), at(suid + 1), at(suid + 2)]);
-                    self.heard(i64::from(source), i64::from(group), now_ms, out);
-                    usize::from(MAC_MSG_LEN[usize::from(op)])
-                }
                 _ if b1b2 == B1B2_MANUFACTURER => {
                     mfid = at(p + MFR_MFID);
                     usize::from(at(p + MFR_LENGTH) & LENGTH_MASK)

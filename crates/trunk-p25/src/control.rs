@@ -19,7 +19,11 @@ use crate::symbols::LEVELS;
 use crate::trellis::{self, BLOCK_DIBITS, SoftBlock};
 use crate::types::{Nac, Recovery, Tsbk};
 
-/// MBT data blocks accepted after a header (our limit, not the spec's).
+/// MBT data blocks accepted after a header: our limit, not the spec's,
+/// which is 4 blocks with the header (TIA-102.AABB-B §6). Lenient on
+/// purpose: the header's CRC already vouches for its blocks-to-follow, and
+/// the packet CRC for the blocks, so a longer one is a manufacturer's or a
+/// later revision's and costs nothing to frame.
 const MAX_MBT_BLOCKS: usize = 8;
 /// Bytes in a decoded rate-1/2 trellis block: a PDU header or unconfirmed
 /// data block (BAAA-A §6.2, §6.3.1).

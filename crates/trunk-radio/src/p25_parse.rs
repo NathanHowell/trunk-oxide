@@ -35,8 +35,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use trunk_p25::trunking::{
-    ChannelId, ControlChannelPlans, GroupChannel, Osp, Resolution, Response, ServiceOptions,
-    SystemPlans,
+    AckInfo, ChannelId, ControlChannelPlans, GroupChannel, Osp, Resolution, Response,
+    ServiceOptions, SystemPlans,
 };
 use trunk_p25::{Message, Tsbk};
 
@@ -66,6 +66,9 @@ pub enum Divergence {
     SharedPlan,
     /// A grant held until its channel's plan arrived, or sent on then.
     Deferred,
+    /// An acknowledgement's additional information, which trunk-recorder
+    /// read as a group.
+    AcknowledgeGroup,
 }
 
 /// Per-system counters for metrics.
@@ -570,10 +573,14 @@ impl Context<'_> {
                     },
                 })]
             }
-            Osp::Acknowledge { group, target } => vec![self.msg(K::Acknowledge {
-                group,
-                unit: target,
-            })],
+            Osp::Acknowledge { info, target, .. } => {
+                // trunk-recorder took the additional information's last two
+                // octets as a group.
+                if !matches!(info, AckInfo::None) {
+                    (self.note)(Divergence::AcknowledgeGroup);
+                }
+                vec![self.msg(K::Acknowledge { unit: target })]
+            }
             Osp::GroupAffiliation {
                 response,
                 group,
@@ -612,11 +619,16 @@ impl Context<'_> {
                 self.control_channels(&[tx]).unwrap_or(unknown)
             }
             Osp::SecondaryControl { channels, .. } => {
-                let known = channels.map(|c| self.parser.plans.resolve(c, &self.system.plans));
-                if known.iter().any(|r| r.channel().is_none()) {
+                // trunk-recorder also offers a class $00 (padding) channel.
+                let valid: Vec<_> = channels.into_iter().flatten().collect();
+                let known = valid
+                    .iter()
+                    .map(|&c| self.parser.plans.resolve(c, &self.system.plans));
+                if valid.len() < channels.len() || known.into_iter().any(|r| r.channel().is_none())
+                {
                     (self.note)(Divergence::SecondaryControl);
                 }
-                self.control_channels(&channels).unwrap_or(unknown)
+                self.control_channels(&valid).unwrap_or(unknown)
             }
             Osp::RfssStatus { site, .. } => vec![self.msg(K::Site {
                 sys_id: site.system,

@@ -374,6 +374,23 @@ fn an_unknown_mac_message_is_skipped_by_its_length_not_the_rest_of_the_pdu() {
     assert_eq!(out, [CallEvent::Source(0xbeef), CallEvent::Group(0x0123)]);
 }
 
+/// The extended group voice channel user names the unit by its working
+/// address, as the abbreviated one does, not by its SUID's unit ID.
+#[test]
+fn an_extended_group_voice_channel_user_names_the_working_unit_id() {
+    let mut a = Phase2Assembler::new(0);
+    let mut out = Vec::new();
+    let mut active = [0u8; 21];
+    active[0] = 0x80; // MAC_ACTIVE
+    // Group 0x0123, WUID 0x00beef; SUID WACN 0xbee00, system 0x5e4, unit
+    // 0x123456 (a roaming unit's home ID).
+    active[1..15].copy_from_slice(&[
+        0x21, 0x00, 0x01, 0x23, 0x00, 0xbe, 0xef, 0xbe, 0xe0, 0x05, 0xe4, 0x12, 0x34, 0x56,
+    ]);
+    a.mac(&pdu(MacChannel::Sacch, &active), 0, &mut out);
+    assert_eq!(out, [CallEvent::Source(0xbeef), CallEvent::Group(0x0123)]);
+}
+
 #[test]
 fn mac_messages_name_units_and_carry_harris_aliases() {
     let mut a = Phase2Assembler::new(0);

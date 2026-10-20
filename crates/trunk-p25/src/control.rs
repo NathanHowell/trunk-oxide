@@ -367,6 +367,10 @@ impl ControlChannelDecoder {
             self.stats.other_frames += 1;
             return;
         };
+        if !carries_osp_opcode(&header) {
+            self.stats.other_frames += 1;
+            return;
+        }
         let data: Vec<u8> = blocks
             .take(n)
             .flat_map(|b| trellis::decode(b).data)
@@ -393,8 +397,16 @@ impl ControlChannelDecoder {
     }
 }
 
+/// Whether an MBT header is the alternate format, whose octet 7 is the OSP
+/// opcode (AABB-B §6.1 Fig. 6.1-2): in the unconfirmed format octet 7 is the
+/// pad octet count (Fig. 6.1-1), and one read as an OSP is made of unrelated
+/// fields. Every MBT OSP of AABC-B is the alternate format.
+fn carries_osp_opcode(h: &[u8; BLOCK_BYTES]) -> bool {
+    h[0] & 0x1f == FORMAT_MBT_ALTERNATE
+}
+
 /// Data blocks following an MBT header (alternate or unconfirmed trunking
-/// format, SAP 61), or `None` for any other PDU.
+/// format, SAP 61), or `None` for any other PDU; a frame's length either way.
 fn mbt_header_blocks(h: &[u8; BLOCK_BYTES]) -> Option<usize> {
     let fmt = h[0] & 0x1f;
     let sap = h[1] & 0x3f;
@@ -412,6 +424,21 @@ mod tests {
     use crate::testgen::{self, Channel, Rng};
 
     const NAC: Nac = Nac::new(0x38d).unwrap();
+
+    #[test]
+    fn only_an_alternate_format_mbt_has_an_osp_opcode() {
+        let mut h = [0u8; BLOCK_BYTES];
+        h[1] = SAP_TRUNKING_CONTROL;
+        h[6] = 1;
+        for (fmt, osp) in [
+            (FORMAT_MBT_ALTERNATE, true),
+            (FORMAT_MBT_UNCONFIRMED, false),
+        ] {
+            h[0] = fmt;
+            assert_eq!(mbt_header_blocks(&h), Some(1), "framed either way");
+            assert_eq!(carries_osp_opcode(&h), osp);
+        }
+    }
 
     fn decoder() -> ControlChannelDecoder {
         ControlChannelDecoder::new(DecoderConfig::new(DemodConfig::new(

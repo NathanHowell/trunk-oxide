@@ -333,10 +333,18 @@ channel_id = 123456789
         let tg865 = &tgs[&865];
         assert_eq!(tg865.id, 865);
         assert_eq!(tg865.mode, crate::TalkgroupMode::Digital);
-        assert_eq!(tg865.alpha_tag, "SMC SO Pat 1");
+        assert_eq!(tg865.alpha_tag, "SMC SO PatPri 1");
         assert_eq!(tg865.tag, "Law Dispatch");
         assert_eq!(tg865.group, "County Sheriff");
         assert_eq!(tg865.priority, Some(1));
+
+        let csv_path = Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../svrcs-talkgroups.csv"
+        ));
+        let tgs = crate::system::load_talkgroups_csv(csv_path).unwrap();
+        assert!(tgs.len() > 400, "expected 400+ talkgroups, got {}", tgs.len());
+        assert_eq!(tgs[&1551].mode, crate::TalkgroupMode::TrunkedEncrypted);
     }
 
     #[test]

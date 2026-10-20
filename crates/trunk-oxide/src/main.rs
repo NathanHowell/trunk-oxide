@@ -3,7 +3,6 @@
 //! audio and events over the gRPC EventBridge to downstream consumers.
 
 use std::sync::Arc;
-use std::sync::atomic::Ordering;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -142,7 +141,7 @@ fn main() -> Result<()> {
     let rt = tokio::runtime::Runtime::new()?;
 
     if meter_provider.is_some() {
-        let depth = scanner.event_channel_depth();
+        let events = scanner.event_queue();
         let meter = opentelemetry::global::meter(env!("CARGO_PKG_NAME"));
         // ── The process and its sources, for the chart to explain steps ──
         let started = i64::try_from(
@@ -235,19 +234,17 @@ fn main() -> Result<()> {
             .build();
         let _depth_gauge = meter
             .u64_observable_gauge("trunk.oxide.event_channel.depth")
-            .with_description("Number of GR events queued but not yet consumed")
+            .with_description("Radio events queued for the monitor loop")
             .with_callback({
-                let depth = Arc::clone(&depth);
-                move |observer| {
-                    observer.observe(depth.load(Ordering::Relaxed) as u64, &[]);
-                }
+                let events = events.clone();
+                move |observer| observer.observe(events.depth() as u64, &[])
             })
             .build();
         let _utilization_gauge = meter
             .f64_observable_gauge("trunk.oxide.event_channel.utilization")
             .with_description("Event channel utilization (0.0-1.0)")
             .with_callback(move |observer| {
-                observer.observe(depth.load(Ordering::Relaxed) as f64 / 256.0, &[]);
+                observer.observe(events.utilization(), &[]);
             })
             .build();
 

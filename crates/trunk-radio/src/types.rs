@@ -1,8 +1,5 @@
 //! What the radio and the call state machine say to each other.
 
-use std::sync::Arc;
-
-use std::sync::atomic::{AtomicUsize, Ordering};
 pub use trunk_p25::voice::Encryption;
 
 /// A unit's doing on the control channel, reported as an event.
@@ -343,27 +340,22 @@ pub enum RadioEvent {
 #[derive(Clone)]
 pub struct EventSender {
     tx: tokio::sync::mpsc::Sender<RadioEvent>,
-    pending: Arc<AtomicUsize>,
 }
 
 impl EventSender {
-    pub const fn new(tx: tokio::sync::mpsc::Sender<RadioEvent>, pending: Arc<AtomicUsize>) -> Self {
-        Self { tx, pending }
+    pub const fn new(tx: tokio::sync::mpsc::Sender<RadioEvent>) -> Self {
+        Self { tx }
     }
 
     /// Queue an event, waiting for room: a paced replay's markers must not be
     /// dropped. Not from an async context.
     pub fn send_blocking(&self, event: RadioEvent) {
-        if self.tx.blocking_send(event).is_ok() {
-            self.pending.fetch_add(1, Ordering::Relaxed);
-        }
+        let _ = self.tx.blocking_send(event);
     }
 
     /// Queue an event; dropped (and logged) if the loop has fallen 256 behind.
     pub fn send(&self, event: RadioEvent) {
-        if self.tx.try_send(event).is_ok() {
-            self.pending.fetch_add(1, Ordering::Relaxed);
-        } else {
+        if self.tx.try_send(event).is_err() {
             tracing::warn!("radio event dropped: the monitor loop is not keeping up");
         }
     }

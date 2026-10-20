@@ -14,7 +14,6 @@ mod fm_metrics;
 mod p25_metrics;
 pub mod proc_stats;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -400,6 +399,30 @@ const STREAM_BLOCK: usize = 32_768;
 /// drops blocks beyond that; a file player waits.
 const STREAM_QUEUE_SECS: f64 = 1.0;
 
+/// Radio events the monitor loop may fall behind by before the radio drops them.
+const EVENT_QUEUE: usize = 256;
+
+/// The radio's event queue as its gauges see it. How full it is comes from
+/// the channel itself, so no count is kept beside it.
+#[derive(Clone)]
+pub struct EventQueue(tokio::sync::mpsc::WeakSender<RadioEvent>);
+
+impl EventQueue {
+    /// Events queued and not yet taken by the monitor loop (none once the
+    /// radio is gone).
+    pub fn depth(&self) -> usize {
+        self.0
+            .upgrade()
+            .map_or(0, |tx| tx.max_capacity() - tx.capacity())
+    }
+
+    /// [`Self::depth`] as a fraction of the queue's room.
+    #[expect(clippy::cast_precision_loss, reason = "at most EVENT_QUEUE")]
+    pub fn utilization(&self) -> f64 {
+        self.depth() as f64 / EVENT_QUEUE as f64
+    }
+}
+
 /// Configures and initializes the radio without starting the call state
 /// machine.
 ///
@@ -408,7 +431,7 @@ const STREAM_QUEUE_SECS: f64 = 1.0;
 pub struct ScannerBuilder {
     radio: Arc<Radio>,
     event_rx: tokio::sync::mpsc::Receiver<RadioEvent>,
-    pending: Arc<AtomicUsize>,
+    event_queue: EventQueue,
     call_mgr_config: CallManagerConfig,
     bridge: Arc<EventBridge>,
     /// The call state machine's time ([`clock::Clock::system`] unless
@@ -476,7 +499,7 @@ pub struct Scanner {
     call_mgr_config: CallManagerConfig,
     bridge: Arc<EventBridge>,
     event_rx: tokio::sync::mpsc::Receiver<RadioEvent>,
-    pending: Arc<AtomicUsize>,
+    event_queue: EventQueue,
     clock: clock::Clock,
     pacer: Option<trunk_radio::Pacer>,
     /// Conventional channels whose calls the [`CallManager`] creates when
@@ -516,9 +539,9 @@ impl ScannerBuilder {
         let max_channels = rec
             .and_then(|r| r.max_channels)
             .context("set [recorder] max_channels: how many channels may be open at once")?;
-        let pending = Arc::new(AtomicUsize::new(0));
-        let (event_tx, event_rx) = tokio::sync::mpsc::channel(256);
-        let events = EventSender::new(event_tx, Arc::clone(&pending));
+        let (event_tx, event_rx) = tokio::sync::mpsc::channel(EVENT_QUEUE);
+        let event_queue = EventQueue(event_tx.downgrade());
+        let events = EventSender::new(event_tx);
         let conditioning = rec.map_or_else(ConditioningSettings::default, |r| {
             let c = &r.conditioner;
             ConditioningSettings {
@@ -847,7 +870,7 @@ impl ScannerBuilder {
         Ok(Self {
             radio,
             event_rx,
-            pending,
+            event_queue,
             call_mgr_config,
             bridge,
             clock: clock::Clock::system(),
@@ -881,7 +904,7 @@ impl ScannerBuilder {
             call_mgr_config: self.call_mgr_config,
             bridge: self.bridge,
             event_rx: self.event_rx,
-            pending: self.pending,
+            event_queue: self.event_queue,
             clock: self.clock,
             pacer: self.pacer,
             pending_conventional_calls,
@@ -891,9 +914,9 @@ impl ScannerBuilder {
 }
 
 impl Scanner {
-    /// Shared counter of events queued but not yet consumed by the monitor loop.
-    pub fn event_channel_depth(&self) -> Arc<AtomicUsize> {
-        Arc::clone(&self.pending)
+    /// The queue of radio events the monitor loop takes from, for its gauges.
+    pub fn event_queue(&self) -> EventQueue {
+        self.event_queue.clone()
     }
 
     /// Shared conventional-channel metrics snapshot.
@@ -966,7 +989,6 @@ impl Scanner {
                     return Ok(());
                 },
                 Some(event) = self.event_rx.recv() => {
-                    self.pending.fetch_sub(1, Ordering::Relaxed);
                     match event {
                         RadioEvent::TrunkMessages(messages) => {
                             let now = call_mgr.clock().now();
@@ -1058,5 +1080,27 @@ impl Scanner {
 impl Drop for Scanner {
     fn drop(&mut self) {
         self.radio.stop();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{EVENT_QUEUE, EventQueue};
+    use trunk_radio::{EventSender, RadioEvent};
+
+    #[test]
+    fn the_event_queues_depth_is_the_channels() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(EVENT_QUEUE);
+        let queue = EventQueue(tx.downgrade());
+        let events = EventSender::new(tx);
+        assert_eq!(queue.depth(), 0);
+        events.send(RadioEvent::TrunkMessages(Vec::new()));
+        events.send(RadioEvent::TrunkMessages(Vec::new()));
+        assert_eq!(queue.depth(), 2);
+        rx.try_recv().unwrap();
+        assert_eq!(queue.depth(), 1);
+        assert!((queue.utilization() - 1.0 / 256.0).abs() < f64::EPSILON);
+        drop(events);
+        assert_eq!(queue.depth(), 0);
     }
 }

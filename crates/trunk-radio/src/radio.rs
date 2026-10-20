@@ -612,7 +612,7 @@ mod tests {
 
     fn radio() -> (Radio, tokio::sync::mpsc::Receiver<RadioEvent>) {
         let (tx, rx) = tokio::sync::mpsc::channel(64);
-        let events = EventSender::new(tx, Arc::new(std::sync::atomic::AtomicUsize::new(0)));
+        let events = EventSender::new(tx);
         (
             Radio::new(RadioConfig::default(), Arc::new(NoAudio), events),
             rx,

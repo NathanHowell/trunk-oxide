@@ -61,6 +61,9 @@ struct Inner {
 struct State {
     /// Sources the run will have; none takes a turn until all have joined.
     expected: usize,
+    /// The monitor has opened what it opens at the start (control and
+    /// conventional channels); no source takes a turn before.
+    started: bool,
     sources: Vec<Clocked>,
     /// Time the monitor has been carried on to after the sources ended.
     coast: Duration,
@@ -81,12 +84,14 @@ impl State {
         active.unwrap_or(last).max(self.coast)
     }
 
-    /// Whether `slot` goes next: everyone has joined, the monitor has
+    /// Whether `slot` goes next: the monitor has started, everyone has
+    /// joined, the monitor has
     /// handled every source's last block (so nothing it does next can land
     /// in the middle of this one), and no source still playing is earlier.
     fn turn_of(&self, slot: usize) -> bool {
         let me = self.sources[slot];
-        self.sources.len() >= self.expected
+        self.started
+            && self.sources.len() >= self.expected
             && self.sources.iter().all(|s| s.acked >= s.at)
             && self
                 .sources
@@ -147,6 +152,13 @@ impl Pacer {
     /// The run will have `n` sources.
     pub fn expect(&self, n: usize) {
         self.update(|s| s.expected = n);
+    }
+
+    /// The monitor has opened its first channels: the sources may run.
+    /// Before, a source's first block could land before or after a channel
+    /// opened, and the channel start differently run to run.
+    pub fn start(&self) {
+        self.update(|s| s.started = true);
     }
 
     /// Where the markers go (the radio's event channel).
@@ -314,6 +326,8 @@ mod tests {
         let first = pacer.join();
         assert!(!pacer.state().turn_of(first), "the second has not joined");
         let second = pacer.join();
+        assert!(!pacer.state().turn_of(first), "the monitor has not started");
+        pacer.start();
         // Both at 0: the lower slot first.
         assert!(pacer.state().turn_of(first) && !pacer.state().turn_of(second));
         pacer.advanced(first, ms(10));

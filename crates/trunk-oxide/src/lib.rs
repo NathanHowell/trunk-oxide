@@ -932,6 +932,9 @@ impl Scanner {
             let channel = &self.call_mgr_config.systems[&sys_num].channels[channel_idx];
             call_mgr.add_conventional_call(channel, sys_num);
         }
+        if let Some(p) = &self.pacer {
+            p.start();
+        }
 
         // The same packet decoded by several control channel decoders arrives
         // within milliseconds; the control channel's own repeats (call

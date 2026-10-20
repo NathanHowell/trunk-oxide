@@ -17,12 +17,13 @@ the monitor loop handles everything a block caused, its clock moved to the
 capture time, before the next block runs; the 1 s tick and 200 s status fall
 due on capture time, and recording ages (write and grant timeouts) are capture
 time too. A source also waits while the event recorder is behind, so nothing is
-dropped. Channelizer overruns mean nothing at max speed. Against 1x, expect the
-same calls and audio but for the races 1x has with its wall clock (a timeout
-that fires a few ms either side of a new grant, say), and the first block or
-so of each control channel: at max each source's first block runs before the
-control channels open. Use max for A/B comparisons and iteration; use 1x to
-check a build keeps up in real time.
+dropped. No source runs a block until the monitor has opened the control and
+conventional channels (`Pacer::start`). Channelizer overruns mean nothing at
+max speed. Against 1x, expect the same calls and audio but for the races 1x
+has with its wall clock (a timeout that fires a few ms either side of a new
+grant, say), and the first block or so of each channel, which at 1x may play
+before it opens. Use max for A/B comparisons and iteration; use 1x to check a
+build keeps up in real time.
 
 ## Capture directory
 

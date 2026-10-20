@@ -14,8 +14,9 @@
 //!
 //! `VOCODER_CORPUS=<dir> cargo run --release -p trunk-p25 --example
 //! vocoder_ab -- <out dir> <test>...`, a test being
-//! `<name>:<phase>:<policy a>:<policy b>:<σ>,<σ>..` (policies `hard`,
-//! `soft`), e.g. `soft:1:hard:soft:0.4,0.6`.
+//! `<name>:<phase>:<policy a>:<policy b>:<σ>,<σ>..[:<clips a σ>]`
+//! (policies `hard`, `soft`; `PER_SIGMA` clips unless given), e.g.
+//! `soft:1:hard:soft:0.4,0.6`.
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 mod common;
 
@@ -40,10 +41,14 @@ const GAP_FRAMES: usize = 30;
 /// Each half fades in and out over this many samples (10 ms), so a cut
 /// mid-word does not click.
 const FADE: usize = 80;
-/// Clips per test and noise level: the calls that diverge most.
+/// Clips per test and noise level unless the test says: the calls that
+/// diverge most.
 const PER_SIGMA: usize = 2;
 /// Fewer frames differing than this and there is nothing to hear.
 const MIN_DIFFERING: usize = 10;
+/// Nor if the difference between the halves is this far below the audio
+/// (dB): spectra apart in frames too quiet, or by too little, to hear.
+const MIN_AUDIBLE_DB: f64 = -30.0;
 const RATE: u32 = 8000;
 
 /// One call under one noise level, both ways.
@@ -58,6 +63,8 @@ struct Candidate {
     differing: usize,
     /// Mean LSD of each policy from its own clean decoding, over the window.
     lsd: [f64; 2],
+    /// The difference between the halves' audio against the audio (dB).
+    audible_db: f64,
     pcm: [Vec<i16>; 2],
 }
 
@@ -118,14 +125,24 @@ fn candidate(call: usize, sigma: f64, frames: &[Frame]) -> Option<Candidate> {
         }
         pcm
     };
+    let pcm = [audio(0), audio(1)];
+    let energy = |x: &mut dyn Iterator<Item = f64>| x.map(|v| v * v).sum::<f64>();
+    let apart = energy(
+        &mut pcm[0]
+            .iter()
+            .zip(&pcm[1])
+            .map(|(&a, &b)| f64::from(a) - f64::from(b)),
+    );
+    let audio_energy = energy(&mut pcm[0].iter().chain(&pcm[1]).map(|&a| f64::from(a))) / 2.0;
     Some(Candidate {
         call,
         sigma,
         start,
         divergence,
+        audible_db: 10.0 * (apart / audio_energy.max(1.0)).max(1e-12).log10(),
         differing: window.iter().filter(|f| f.pcm[0] != f.pcm[1]).count(),
         lsd: [0, 1].map(|k| window.iter().map(|f| f.lsd[k]).sum::<f64>() / WINDOW as f64),
-        pcm: [audio(0), audio(1)],
+        pcm,
     })
 }
 
@@ -202,7 +219,7 @@ fn pick(mut all: Vec<Candidate>, most: usize) -> Vec<Candidate> {
     all.sort_by(|x, y| y.divergence.total_cmp(&x.divergence));
     let mut calls = Vec::new();
     all.into_iter()
-        .filter(|c| c.differing >= MIN_DIFFERING)
+        .filter(|c| c.differing >= MIN_DIFFERING && c.audible_db >= MIN_AUDIBLE_DB)
         .filter(|c| {
             let new = !calls.contains(&c.call);
             if new {
@@ -221,13 +238,18 @@ struct Test {
     names: [String; 2],
     policies: [Policy; 2],
     sigmas: Vec<f64>,
+    per_sigma: usize,
 }
 
 impl Test {
     fn parse(spec: &str) -> Self {
         let parts: Vec<&str> = spec.split(':').collect();
-        let [name, phase, a, b, sigmas] = parts[..] else {
-            panic!("a test is <name>:<phase>:<policy a>:<policy b>:<σ>,..: {spec}");
+        let (name, phase, a, b, sigmas, per_sigma) = match parts[..] {
+            [name, phase, a, b, sigmas] => (name, phase, a, b, sigmas, PER_SIGMA),
+            [name, phase, a, b, sigmas, n] => {
+                (name, phase, a, b, sigmas, n.parse().expect("a clip count"))
+            }
+            _ => panic!("a test is <name>:<phase>:<policy a>:<policy b>:<σ>,..[:<clips>]: {spec}"),
         };
         Self {
             name: name.to_owned(),
@@ -235,6 +257,7 @@ impl Test {
             names: [a.to_owned(), b.to_owned()],
             policies: [policy(a), policy(b)],
             sigmas: sigmas.split(',').map(|s| s.parse().expect("a σ")).collect(),
+            per_sigma,
         }
     }
 
@@ -277,7 +300,7 @@ impl Test {
                 lsd[1] / frames_in as f64,
                 unplayed[1],
             );
-            chosen.extend(pick(all, PER_SIGMA));
+            chosen.extend(pick(all, self.per_sigma));
         }
         chosen
     }
@@ -355,12 +378,13 @@ fn main() {
             if n + 1 < order.len() { "," } else { "" }
         );
         println!(
-            "{file}: {} σ {} call {} at {:.1} s, pair {i}; {} of {WINDOW} frames differ, LSD {} {:.2} {} {:.2}",
+            "{file}: {} σ {} call {} at {:.1} s, pair {i}; {} of {WINDOW} frames differ, {:.0} dB apart, LSD {} {:.2} {} {:.2}",
             t.name,
             c.sigma,
             c.call,
             c.start as f64 / 50.0,
             c.differing,
+            c.audible_db,
             t.names[0],
             c.lsd[0],
             t.names[1],

@@ -1,13 +1,13 @@
-//! The vocoders' rules. That their audio is op25's sample for sample is
-//! checked against op25 itself in trunk-recorder-sys (`p25_voice` tests).
+//! The vocoders' rules. Their audio is frozen in trunk-radio's `p25_voice`
+//! tests.
 
 use super::*;
 use crate::tdma::AmbeParams;
 use crate::testgen::{self, Rng};
 
-/// op25's `u` for IMBE parameters with b̂0 = `b0`.
+/// `u` as sent for IMBE parameters with b̂0 = `b0` (BABA §7.1).
 fn imbe_with_b0(rng: &mut Rng, b0: u32) -> [u32; 8] {
-    let mut u = testgen::random_imbe(rng).to_op25();
+    let mut u = testgen::random_imbe(rng).0.map(u32::from);
     u[0] = (u[0] & 0x3f) | ((b0 >> 2) << 6);
     u[7] = (u[7] & !0x6) | ((b0 & 3) << 1);
     u
@@ -19,10 +19,11 @@ fn dibits(p: AmbeParams) -> [u8; 36] {
     std::array::from_fn(|d| u8::from(cw.bit(2 * d)) * 2 + u8::from(cw.bit(2 * d + 1)))
 }
 
-/// AMBE+2 parameters with quantiser index b0 = `b0`.
+/// AMBE+2 parameters with quantiser index b0 = `b0`, never a tone frame
+/// (u0[11:6] = 63, so b0 ≥ 120 and u0 bit 6 set).
 fn ambe_with_b0(rng: &mut Rng, b0: u16) -> AmbeParams {
     let AmbeParams(mut u) = testgen::tdma::random_ambe(rng);
-    u[0] = (u[0] & !(0xf << 8)) | ((b0 >> 3) << 8);
+    u[0] = (u[0] & !(0xf << 8) & !(1 << 6)) | ((b0 >> 3) << 8);
     u[3] = (u[3] & !(0x7 << 9)) | ((b0 & 7) << 9);
     AmbeParams(u)
 }
@@ -180,10 +181,9 @@ use crate::voice::ImbeFrame;
 
 fn sure_imbe(rng: &mut Rng, b0: u32) -> ImbeFrame {
     ImbeFrame {
-        params: crate::voice::ImbeParams::from_op25(imbe_with_b0(rng, b0)),
+        params: crate::voice::ImbeParams(imbe_with_b0(rng, b0).map(|x| u16::try_from(x).unwrap())),
         errors: 0,
         errors_c0: 0,
-        errors_c4: 0,
         reliability: f32::INFINITY,
         unprotected: f32::INFINITY,
     }
@@ -257,9 +257,9 @@ fn soft_plays_trusted_frames_and_repeats_untrusted_ones() {
     assert_eq!(a.last(), Decision::Played);
 }
 
-/// Without the decoder's frame, `Soft` falls back to op25's rules.
+/// Without the decoder's frame, `Soft` falls back to `Hard`.
 #[test]
-fn soft_without_a_frame_is_op25() {
+fn soft_without_a_frame_is_hard() {
     let mut rng = Rng::new(8);
     let mut a = AmbeVocoder::with_policy(Policy::Soft);
     let mut b = AmbeVocoder::new();
@@ -269,152 +269,65 @@ fn soft_without_a_frame_is_op25() {
     }
 }
 
-// ── Policy::Standard ──
-
-/// A frame as decoded here, u7 as sent: b̂0 = `b0` by BABA §7.1.
-fn standard_imbe(rng: &mut Rng, b0: u16) -> ImbeFrame {
-    let mut f = sure_imbe(rng, 0);
-    let u = &mut f.params.0;
-    u[0] = (u[0] & 0x3f) | ((b0 >> 2) << 6);
-    u[7] = (u[7] & !0x6) | ((b0 & 3) << 1);
-    f
-}
+// ── Where op25 departs from the standards ──
 
 /// b̂0's low bits are u7's bits 2..1 as sent (BABA §7.1, Fig. 22), where
 /// op25 reads bits 1..0.
 #[test]
 #[allow(clippy::cast_possible_truncation)]
-fn standard_takes_the_pitch_from_u7_as_sent() {
+fn the_pitch_is_read_from_u7_as_sent() {
     let mut rng = Rng::new(9);
     for b0 in [100, 101, 102, 103] {
-        let mut v = ImbeVocoder::with_policy(Policy::Standard);
-        v.vocode(&standard_imbe(&mut rng, b0), 0, 0);
+        let mut v = ImbeVocoder::new();
+        v.vocode(&sure_imbe(&mut rng, b0), 0, 0);
         let w0 = (4.0 * std::f64::consts::PI / (f64::from(b0) + 39.5)) as f32;
         assert_eq!(v.spectrum().map(|s| s.w0), Some(w0), "b0 {b0}");
     }
 }
 
-/// The standard repeats a frame only when c0 failed (Eq. 97) and the frame
-/// has many errors (Eq. 98); op25 when either holds.
+/// A silence frame between two voice frames leaves the second predicted
+/// from the first (BABA-1 Eqs. 26, 43); op25 predicts it from the silence.
 #[test]
-fn standard_repeats_only_on_both_tests() {
-    let mut rng = Rng::new(10);
-    let mut frame = standard_imbe(&mut rng, 100);
-    let (mut standard, mut op25) = (
-        ImbeVocoder::with_policy(Policy::Standard),
-        ImbeVocoder::new(),
-    );
-    standard.vocode(&frame, 0, 0);
-    op25.vocode(&frame, 0, 0);
-    // c0 failed, few errors besides.
-    (frame.errors_c0, frame.errors) = (2, 2);
-    standard.vocode(&frame, 2, 2);
-    op25.vocode(&frame, 2, 2);
-    assert_eq!(
-        (standard.last(), op25.last()),
-        (Decision::Played, Decision::Repeated)
-    );
-    // Both.
-    (frame.errors_c0, frame.errors) = (3, 12);
-    standard.vocode(&frame, 3, 12);
-    assert_eq!(standard.last(), Decision::Repeated);
-}
-
-/// The standard plays a phase 1 frame by the decoder's own error counts,
-/// not the ones op25 is given.
-#[test]
-fn standard_counts_the_bits_it_corrected() {
-    let mut rng = Rng::new(11);
-    let mut frame = standard_imbe(&mut rng, 100);
-    let mut v = ImbeVocoder::with_policy(Policy::Standard);
-    v.vocode(&frame, 0, 0);
-    (frame.errors_c0, frame.errors) = (3, 12);
-    v.vocode(&frame, 0, 0);
-    assert_eq!(v.last(), Decision::Repeated);
-}
-
-/// τ<sub>M</sub> builds on the last frame's while errors persist, and `S_E`
-/// is a running average (BABA Eqs. 111, 115).
-#[test]
-fn standard_thresholds_carry_from_frame_to_frame() {
-    use super::synth::{Errors, Synthesizer};
-    let mut s = Synthesizer::new();
-    let noisy = Errors {
-        rate: 0.02,
-        total: 10.0,
-        c4: 1.0,
-    };
-    let rm0 = 1e6;
-    let mut se = 75000.0;
-    for tm in [23480.0, 26480.0, 29480.0] {
-        se = 0.95f32.mul_add(se, 0.05 * rm0);
-        let t = s.standard_thresholds(Some(rm0), noisy);
-        assert_eq!(t.amplitude(), tm);
-        let vm = 1.414 * f64::from(se).powf(0.375);
-        assert!(
-            (f64::from(t.voicing()) / vm - 1.0).abs() < 1e-5,
-            "{t:?} {vm}"
-        );
-    }
-    // A repeat keeps S_E; a clean frame resets τ_M.
-    let t = s.standard_thresholds(None, noisy);
-    assert!((f64::from(t.voicing()) / (1.414 * f64::from(se).powf(0.375)) - 1.0).abs() < 1e-5);
-    assert_eq!(
-        s.standard_thresholds(Some(rm0), Errors::default())
-            .amplitude(),
-        20480.0
-    );
-}
-
-/// Under the standard, a silence frame between two voice frames leaves the
-/// second predicted from the first (BABA-1 Eqs. 26, 43); op25 predicts it
-/// from the silence.
-#[test]
-fn standard_predicts_past_silence_from_the_last_voice_frame() {
+fn past_silence_the_prediction_is_the_last_voice_frame() {
     let mut rng = Rng::new(12);
     let (a, silence, b) = (
         dibits(ambe_with_b0(&mut rng, 60)),
         dibits(ambe_with_b0(&mut rng, 124)),
         dibits(ambe_with_b0(&mut rng, 70)),
     );
-    let after = |policy: Policy, frames: &[[u8; 36]]| {
-        let mut v = AmbeVocoder::with_policy(policy);
+    let after = |frames: &[[u8; 36]]| {
+        let mut v = AmbeVocoder::new();
         for f in frames {
             v.vocode(f, None);
         }
         v.spectrum()
     };
-    let direct = after(Policy::Standard, &[a, b]);
-    assert_eq!(after(Policy::Standard, &[a, silence, b]), direct);
-    assert_ne!(after(Policy::Op25, &[a, silence, b]), direct);
-    assert_eq!(after(Policy::Op25, &[a, b]), direct);
+    assert!(after(&[a, b]).is_some());
+    assert_eq!(after(&[a, silence, b]), after(&[a, b]));
 }
 
-/// The standard knows a tone by u0 alone: an error in u3[3:0], which is
-/// not protected, leaves it a tone (BABA-1 §7).
+/// A tone is known by u0 alone: an error in u3[3:0], which is not
+/// protected, leaves it a tone (BABA-1 §7). To op25 it was voice, b0 = 120:
+/// an erasure.
 #[test]
-fn standard_knows_a_tone_by_u0() {
+fn a_tone_is_known_by_u0() {
     let AmbeParams(mut u) = tone(129, 100);
     u[3] |= 1;
     let damaged = dibits(AmbeParams(u));
-    let mut standard = AmbeVocoder::with_policy(Policy::Standard);
+    let mut v = AmbeVocoder::new();
     let pcm: Vec<i16> = (0..10)
-        .flat_map(|_| standard.vocode(&damaged, None).expect("a tone"))
+        .flat_map(|_| v.vocode(&damaged, None).expect("a tone"))
         .collect();
-    assert!(standard.spectrum().is_none(), "played as a tone");
+    assert!(v.spectrum().is_none(), "played as a tone");
     assert!(power(&pcm, 1209.0) > 1000.0 * power(&pcm, 950.0));
-    let mut op25 = AmbeVocoder::new();
-    // To op25 it is voice, b0 = 120: an erasure.
-    op25.vocode(&damaged, None);
-    assert_eq!(op25.last(), Decision::Repeated);
 }
 
-/// The standard's tone amplitude is logarithmic: AD 127 is full scale,
-/// 0.711 dB down a step (BABA-1 §7.2).
+/// A tone's amplitude is logarithmic: AD 127 is full scale, 0.711 dB down
+/// a step (BABA-1 §7.2).
 #[test]
-fn standard_tone_amplitude_is_logarithmic() {
+fn a_tones_amplitude_is_logarithmic() {
     let peak = |ad: u16| {
-        let mut v = AmbeVocoder::with_policy(Policy::Standard);
+        let mut v = AmbeVocoder::new();
         // 1000 Hz (index 32), a single tone.
         let pcm: Vec<i16> = (0..5)
             .flat_map(|_| v.vocode(&dibits(tone(32, ad)), None).expect("a tone"))

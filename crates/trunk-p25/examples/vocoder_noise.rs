@@ -13,7 +13,7 @@
 //! corrected, else repeated (three times), then muted.
 //!
 //! Frames come from `VOCODER_CORPUS=<dir>` (`imbe.txt`, `ambe.txt`, as the
-//! trunk-recorder-sys `voice_capture` test writes them with
+//! trunk-radio `voice_capture` test writes them with
 //! `VOICE_CORPUS`): real speech, so a repeat is a real substitute. Without
 //! it, random parameters, where a repeat is as wrong as anything.
 //!
@@ -169,7 +169,7 @@ fn phase1(calls: &[Vec<ImbeParams>], sigma: f64, rng: &mut Rng) -> Vec<Score> {
             .collect();
         for p in call {
             let cw = p.encode();
-            clean.decode(&p.to_op25(), 0, 0);
+            clean.decode(&p.0.map(u32::from), 0, 0);
             let Some(reference) = clean.spectrum() else {
                 continue;
             };

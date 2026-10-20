@@ -65,9 +65,9 @@ pub const fn ambe_b0(p: AmbeParams) -> u16 {
     ((p.0[0] >> 5) & 0x78) + ((p.0[3] >> 9) & 0x7)
 }
 
+/// b̂0 from u7 as sent (BABA §7.1).
 pub const fn imbe_b0(p: &ImbeParams) -> u32 {
-    let u = p.to_op25();
-    ((u[0] >> 4) & 0xfc) | ((u[7] >> 1) & 0x3)
+    ((p.0[0] as u32 >> 4) & 0xfc) | ((p.0[7] as u32 >> 1) & 0x3)
 }
 
 /// Random AMBE+2 voice parameters (b0 < 120: a pitch, not a tone, silence
@@ -92,7 +92,7 @@ pub fn imbe_voice(rng: &mut Rng) -> ImbeParams {
 }
 
 /// The corpus `VOCODER_CORPUS=<dir>` names (`imbe.txt`, `ambe.txt`, as the
-/// trunk-recorder-sys `voice_capture` test writes them with
+/// trunk-radio `voice_capture` test writes them with
 /// `VOICE_CORPUS`): each call's clear frames as op25 framed them.
 pub struct Corpus {
     pub imbe: Vec<Vec<ImbeParams>>,

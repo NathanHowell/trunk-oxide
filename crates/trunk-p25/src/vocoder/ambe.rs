@@ -1,7 +1,9 @@
-//! Phase 2: AMBE+2 half-rate frames to audio, as op25 makes it
+//! Phase 2: AMBE+2 half-rate frames to audio, after op25
 //! (`p25p2_tdma::handle_voice_frame`): mbelib's dequantiser
 //! (`mbe_dequantizeAmbe2250Parms`, `mbe_dequantizeAmbeTone`) and op25's
 //! repeat and mute rules, synthesised by op25's software IMBE synthesiser.
+//! Where they depart from TIA-102.BABA-1 in what a silence or tone frame
+//! is, the standard's way is taken (by vote, trunk-oxide-13y).
 //!
 //! mbelib keeps a current and a previous model and copies one to the other
 //! after every frame, so between frames they are equal: one model is kept
@@ -39,9 +41,8 @@ pub struct AmbeVocoder {
     policy: Policy,
     /// The model last rendered.
     model: Model,
-    /// The model the next frame is predicted from: under
-    /// [`Policy::Standard`] the last voice frame's (BABA-1 Eqs. 26, 43),
-    /// otherwise `model`, as mbelib predicts from a silence frame too.
+    /// The model the next frame is predicted from: the last voice frame's
+    /// (BABA-1 Eqs. 26, 43), where mbelib predicts from a silence frame too.
     prediction: Model,
     tone: Tone,
     /// Running bit error rate; frames are muted above [`MAX_ERROR_RATE`].
@@ -111,8 +112,6 @@ const LOG_AMPLITUDE_SCALE: f32 = 0.693;
 const TONE_MARKER: u16 = 63;
 /// A single tone's frequency step, f1 = 31.25 ID Hz (BABA-1 Table 9).
 const SINGLE_TONE_STEP_HZ: f64 = 31.25;
-/// op25's linear tone amplitude, AD × 75, shared between a dual tone's two.
-const OP25_TONE_AMPLITUDE_SCALE: u16 = 75;
 /// BABA-1 §7.2: AD is a log amplitude, 127 the A-to-D's largest sinusoid
 /// (+3.17 dBm0, full scale) and 0 at −87.13 dBm0, so 0.711 dB a step. Each
 /// of a dual tone's two is at that level, as the AMBE-3000R plays them
@@ -134,9 +133,9 @@ impl Default for AmbeVocoder {
 }
 
 impl AmbeVocoder {
-    /// op25's rules ([`Policy::Op25`]).
+    /// [`Policy::Hard`].
     pub fn new() -> Self {
-        Self::with_policy(Policy::Op25)
+        Self::with_policy(Policy::Hard)
     }
 
     pub fn with_policy(policy: Policy) -> Self {
@@ -144,10 +143,7 @@ impl AmbeVocoder {
             policy,
             model: Model::MBELIB_INITIAL,
             prediction: Model::MBELIB_INITIAL,
-            tone: Tone {
-                logarithmic: policy == Policy::Standard,
-                ..Tone::default()
-            },
+            tone: Tone::default(),
             error_rate: 0.0,
             rejected: 0,
             tone_frame: false,
@@ -171,7 +167,8 @@ impl AmbeVocoder {
 
     /// One clear frame: its 36 descrambled dibits as op25 receives them,
     /// and the frame decoded here from the same burst, if there is one
-    /// (without it the policy is op25's). `None` if the frame is muted.
+    /// (without it the policy is [`Policy::Hard`]). `None` if the frame is
+    /// muted.
     pub fn vocode(&mut self, dibits: &[u8; 36], frame: Option<&AmbeFrame>) -> Option<Pcm> {
         match (self.policy, frame) {
             (Policy::Soft, Some(f)) => self.soft(f),
@@ -191,9 +188,8 @@ impl AmbeVocoder {
     }
 
     /// One frame as op25 takes it, its 36 descrambled dibits as received,
-    /// under op25's rules (but for [`Policy::Standard`]'s departures from
-    /// them). `None` if it is muted (silence) for errors or too many
-    /// repeats.
+    /// under op25's error rules. `None` if it is muted (silence) for errors
+    /// or too many repeats.
     pub fn decode(&mut self, dibits: &[u8; 36]) -> Option<Pcm> {
         let (u, errors) = self.receive(dibits);
         // op25's order: the frame is taken in (its model kept, the repeat
@@ -218,21 +214,15 @@ impl AmbeVocoder {
     /// Takes a frame in: a tone, voice, or neither (rejected, so repeated
     /// or muted). Whether anything is to be rendered.
     fn decide(&mut self, u: AmbeParams, errors: [u32; 2]) -> bool {
-        let standard = self.policy == Policy::Standard;
-        match ToneFrame::of(u, errors, standard) {
+        match ToneFrame::of(u, errors) {
             ToneFrame::Tone { id, amplitude } => {
                 self.tone.set(id, amplitude);
                 self.accept(true)
             }
             ToneFrame::Erased => self.reject(self.tone_frame),
             ToneFrame::Voice => {
-                let prediction = if standard {
-                    &self.prediction
-                } else {
-                    &self.model
-                };
                 let b = indices(u);
-                match prediction.dequantize(&b, errors) {
+                match self.prediction.dequantize(&b, errors) {
                     Some(model) => {
                         // mbelib predicts the next frame from a silence
                         // frame too; BABA-1 Eq. 26 and §4.4.3 from voice
@@ -300,7 +290,6 @@ impl AmbeVocoder {
         let errors = Errors {
             rate: OP25_SMOOTHING_ERROR_RATE,
             total: OP25_SMOOTHING_ERRORS,
-            c4: OP25_SMOOTHING_ERRORS,
         };
         s.smooth(Thresholds::op25(op25_energy(rm0), errors));
         let pcm = s.synthesize();
@@ -484,12 +473,11 @@ enum ToneFrame {
 }
 
 impl ToneFrame {
-    /// `standard`: by BABA-1 §7's test alone.
-    fn of(AmbeParams(u): AmbeParams, [e0, e1]: [u32; 2], standard: bool) -> Self {
-        // The marker is BABA-1 §7's test; u3[3:0] = 0 is mbelib's besides
-        // (§7 sends it, but detects a tone by u0 alone): with an error
-        // there, a tone frame falls through as voice (trunk-oxide-13y.3).
-        if (u[0] >> 6) & 0x3f != TONE_MARKER || (!standard && u[3] & 0xf != 0) {
+    fn of(AmbeParams(u): AmbeParams, [e0, e1]: [u32; 2]) -> Self {
+        // BABA-1 §7's test, u0 alone. mbelib also wants u3[3:0] = 0, which
+        // §7 sends but does not test, and with an error there plays the
+        // tone frame as voice (trunk-oxide-13y.3).
+        if (u[0] >> 6) & 0x3f != TONE_MARKER {
             return Self::Voice;
         }
         let amplitude = ((u[0] & 0x3f) << 1) + ((u[3] >> 4) & 0x1);
@@ -581,8 +569,6 @@ struct Tone {
     amplitude: u16,
     /// Samples played since it started.
     n: i32,
-    /// The amplitude is BABA-1's log AD, else op25's linear one.
-    logarithmic: bool,
 }
 
 impl Tone {
@@ -595,7 +581,9 @@ impl Tone {
         self.amplitude = amplitude;
     }
 
-    /// The next frame of the tone (op25's `decode_tone`).
+    /// The next frame of the tone (op25's `decode_tone`), at BABA-1's log
+    /// amplitude where op25's is linear (AD × 75, shared between a dual
+    /// tone's two).
     fn render(&mut self) -> Pcm {
         let (f1, f2) = tone_frequencies(self.id).unwrap_or((0.0, 0.0));
         if f1 == 0.0 && f2 == 0.0 {
@@ -603,23 +591,15 @@ impl Tone {
         }
         let step1 = (2.0 * PI * f64::from(f1) / 8000.0) as f32;
         let step2 = (2.0 * PI * f64::from(f2) / 8000.0) as f32;
-        if self.logarithmic {
-            let below = f64::from(TONE_AD_MAX - self.amplitude.min(TONE_AD_MAX));
-            let peak = (FULL_SCALE * 10f64.powf(-TONE_AD_STEP_DB * below / 20.0)) as f32;
-            #[allow(clippy::float_cmp, reason = "a single tone is sent as two equal ones")]
-            let dual = f1 != f2;
-            return std::array::from_fn(|_| {
-                let n = self.n as f32;
-                self.n += 1;
-                let second = if dual { (n * step2).sin() } else { 0.0 };
-                (peak * ((n * step1).sin() + second)) as i16
-            });
-        }
-        let amplitude = f32::from(self.amplitude * OP25_TONE_AMPLITUDE_SCALE);
+        let below = f64::from(TONE_AD_MAX - self.amplitude.min(TONE_AD_MAX));
+        let peak = (FULL_SCALE * 10f64.powf(-TONE_AD_STEP_DB * below / 20.0)) as f32;
+        #[allow(clippy::float_cmp, reason = "a single tone is sent as two equal ones")]
+        let dual = f1 != f2;
         std::array::from_fn(|_| {
             let n = self.n as f32;
             self.n += 1;
-            (amplitude * ((n * step1).sin() / 2.0 + (n * step2).sin() / 2.0)) as i16
+            let second = if dual { (n * step2).sin() } else { 0.0 };
+            (peak * ((n * step1).sin() + second)) as i16
         })
     }
 }

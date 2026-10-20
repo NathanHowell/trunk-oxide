@@ -1,5 +1,5 @@
-//! Blind A/B listening clips for two vocoder policies (op25's and the
-//! standard's unless named): a tapped call, clean or under injected noise,
+//! Blind A/B listening clips for two vocoder policies (hard and soft
+//! unless named): a tapped call, clean or under injected noise,
 //! vocoded both ways, both halves of one clip with a gap between, which
 //! half is which drawn at random and written to the key.
 //!
@@ -9,19 +9,16 @@
 //! diverge most, and only the few calls that diverge most, plus one typical
 //! of the rest, are written, clean and noisy apart. Where the policies
 //! agree there is nothing to hear. Each policy's distance from its own
-//! clean decoding of the call is reported beside it, and for phase 1 how
-//! smoothly the pitch b̂0 runs read either way (BABA §7.1: the standard's
-//! reading of u7 should be the smoother).
+//! clean decoding of the call is reported beside it.
 //!
 //! `VOCODER_CORPUS=<dir> cargo run --release -p trunk-p25 --example
-//! vocoder_ab -- <out dir> [<policy a> <policy b>]` (`op25`, `soft`,
-//! `standard`)
+//! vocoder_ab -- <out dir> [<policy a> <policy b>]` (`hard`, `soft`)
 #![allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
 mod common;
 
 use std::fmt::Write as _;
 
-use common::{Corpus, channel, imbe_b0, log_spectral_distance};
+use common::{Corpus, channel, log_spectral_distance};
 use trunk_p25::tdma::AmbeParams;
 use trunk_p25::tdma::ambe;
 use trunk_p25::testgen::Rng;
@@ -183,38 +180,9 @@ fn phase2(call: &[AmbeParams], sigma: f64, policies: [Policy; 2], rng: &mut Rng)
 
 fn policy(name: &str) -> Policy {
     match name {
-        "op25" => Policy::Op25,
+        "hard" => Policy::Hard,
         "soft" => Policy::Soft,
-        "standard" => Policy::Standard,
-        _ => panic!("no policy {name}: op25, soft or standard"),
-    }
-}
-
-/// Phase 1's pitch read both ways: the mean |Δb̂0| from frame to frame, over
-/// steps of at most `MAX_STEP` (a held pitch, not a new syllable).
-fn pitch_continuity(calls: &[Vec<ImbeParams>]) {
-    const MAX_STEP: u32 = 16;
-    let op25 = |p: &ImbeParams| imbe_b0(p);
-    let standard =
-        |p: &ImbeParams| ((u32::from(p.0[0]) >> 4) & 0xfc) | ((u32::from(p.0[7]) >> 1) & 3);
-    for (name, b0) in [
-        ("op25", &op25 as &dyn Fn(&ImbeParams) -> u32),
-        ("standard", &standard),
-    ] {
-        let (mut sum, mut n) = (0u64, 0u64);
-        for call in calls {
-            for w in call.windows(2) {
-                let d = b0(&w[0]).abs_diff(b0(&w[1]));
-                if d <= MAX_STEP {
-                    sum += u64::from(d);
-                    n += 1;
-                }
-            }
-        }
-        println!(
-            "phase 1 pitch, {name}'s reading of u7: mean |Δb̂0| {:.3} over {n} steps",
-            sum as f64 / n as f64
-        );
+        _ => panic!("no policy {name}: hard or soft"),
     }
 }
 
@@ -266,13 +234,12 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let out = args.get(1).expect("an output directory");
     let names = [
-        args.get(2).map_or("op25", String::as_str),
-        args.get(3).map_or("standard", String::as_str),
+        args.get(2).map_or("hard", String::as_str),
+        args.get(3).map_or("soft", String::as_str),
     ];
     let policies = names.map(policy);
     std::fs::create_dir_all(out).unwrap();
     let corpus = Corpus::load_frames(true).expect("VOCODER_CORPUS");
-    pitch_continuity(&corpus.imbe);
     let mut rng = Rng::new(21);
     let mut chosen = Vec::new();
     for (phase, most) in [(1u8, MOST_DIVERGENT[0]), (2, MOST_DIVERGENT[1])] {

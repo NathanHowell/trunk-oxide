@@ -124,7 +124,6 @@ fn ldu1(lc: [u8; 9]) -> Received<VoiceEvent> {
         params: ImbeParams::default(),
         errors: 0,
         errors_c0: 0,
-        errors_c4: 0,
         reliability: 1.0,
         unprotected: 1.0,
     };

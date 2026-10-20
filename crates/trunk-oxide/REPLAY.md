@@ -108,7 +108,8 @@ as it reads them), and the same `summary.json` but for `wall_seconds`. Taps are 
 trunk-p25 decodes all P25 in Rust: control channels, and voice all the way
 to audio — demodulator, decoders, the call assembler (`trunk_p25::assemble`)
 and the vocoders (`trunk_p25::vocoder`: op25's software IMBE decoder and
-mbelib's AMBE+2 dequantiser, ported sample for sample). op25's chains were
+mbelib's AMBE+2 dequantiser, ported sample for sample, then taking the
+standards' way where they won a vote, below). op25's chains were
 deleted once shadow mode had compared them live: control channels
 (trunk-p25 decoding everything op25 did and ~40% more), then the regenerator
 into op25's frame assembler against trunk-p25's assembler (c4086cf). The
@@ -147,28 +148,30 @@ decision class and log-spectral distance; `--example vocoder_ab -- <out>`
 cuts blind A/B clips from the calls where they diverge most, and
 `trunk-discord ab post <out>` / `ab tally <out>` puts them to a vote in the
 hourly thread. Verdict (2026-10-19, one listener): op25's policy 5, soft 1;
-phase 1 unanimous. Nothing shipped; the apparatus stays for the next idea.
+phase 1 unanimous. Soft was not shipped; the apparatus stays for the next idea.
 Also tried and dropped (bead q7f.7): taking AMBE+2's unprotected quantiser
 values as expectations under the bits' posteriors; by log-spectral distance
 never better than playing the soft decode as received.
 
-`Policy::Standard` is TIA-102.BABA and BABA-1 where op25 departs from them
-(beads 4hj, 13y): phase 1 reads u7 as sent (op25 reads b̂0's low bits one
-bit low) on the decoder's own error counts, with the standard's repeat
-rule and smoothing; phase 2 predicts past silence frames from the last
-voice frame, knows a tone by u0 alone and plays it at its log level.
-`vocoder_ab -- <out> op25 standard` cuts clips clean and under noise and
-prints how smoothly phase 1's pitch runs read either way.
+Where op25 departs from TIA-102.BABA and BABA-1 (beads 4hj, 13y), the
+standards' way was put to the same vote (2026-10-20, two listeners, 12
+clips): phase 2 went to the standard (it predicts past silence frames from
+the last voice frame, knows a tone by u0 alone and plays it at its log
+level), though every phase 2 vote fell on the right-hand clip; phase 1
+split, so it takes only the fix to how u7 is read (op25 reads b̂0's low
+bits one bit low; read as sent, the pitch on the tapped corpus moves 29%
+less from frame to frame) and keeps op25's repeat, mute and smoothing
+rules on op25's error counts. The standard's phase 1 error rules were
+deleted.
 
 The vocoders were checked frame by frame against op25's on random streams
 that reach every pitch, repeat, mute, tone and erasure, 16k frames a phase,
-and on every tapped call's frames; op25's audio is frozen as hashes in the
-trunk-radio `p25_voice` tests (`the_imbe_vocoder_is_op25s`,
-`the_ambe_vocoder_is_op25s`, the clean-call tests) and the C++ oracles are
-gone. The match needed op25's vocoder sources built with
-`-ffp-contract=off` (GCC fuses multiply-adds under `-march=znver2`, Rust
-never does), so op25's own binaries differ from these hashes in the last
-bit.
+and on every tapped call's frames, and the C++ oracles are gone. Their
+audio is frozen as hashes in the trunk-radio `p25_voice` tests
+(`the_imbe_vocoder_is_frozen`, `the_ambe_vocoder_is_frozen`, the
+clean-call tests), op25's until the vote and the vote's since. The match
+with op25 needed its vocoder sources built with `-ffp-contract=off` (GCC
+fuses multiply-adds under `-march=znver2`, Rust never does).
 
 Voice taps hold the conditioned IQ (`.out.cf32`) only; `.symbols.f32` is in
 taps from before the op25 chains were deleted (op25's demodulator output, or

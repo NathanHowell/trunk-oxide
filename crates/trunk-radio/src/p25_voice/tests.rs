@@ -1,9 +1,10 @@
-//! The voice pipeline and vocoders against op25, frozen: every fixture here
-//! was taken from op25's own frame assembler and vocoders (driven directly
-//! from C++, since deleted) while they were in the tree, and the Rust had
-//! matched them sample for sample on 16k random frames a phase and 375
-//! tapped calls. The hashes are of the 16-bit samples, little endian
-//! (FNV-1a 64).
+//! The voice pipeline and vocoders, frozen. The fixtures were taken from
+//! op25's own frame assembler and vocoders (driven directly from C++, since
+//! deleted) while they were in the tree, and the Rust had matched them
+//! sample for sample on 16k random frames a phase and 375 tapped calls;
+//! the audio hashes were taken again when the vocoders took the standards'
+//! way where op25 departs from them (trunk-oxide-4hj, trunk-oxide-13y).
+//! The hashes are of the 16-bit samples, little endian (FNV-1a 64).
 
 use std::collections::BTreeMap;
 
@@ -59,7 +60,6 @@ impl Input {
                     params: ImbeParams::from_op25(u),
                     errors: et,
                     errors_c0: e0,
-                    errors_c4: 0,
                     reliability: f32::INFINITY,
                     unprotected: f32::INFINITY,
                 },
@@ -128,7 +128,7 @@ fn phase1_call(rng: &mut Rng, algid: u8, superframes: usize) -> Vec<u8> {
 /// Three phase 1 calls (clear, encrypted, clear): op25 vocoded 126 frames
 /// (the encrypted ones silent), heard one source, saw three terminators.
 #[test]
-fn a_clean_phase1_call_sounds_as_op25_did() {
+fn a_clean_phase1_call_is_vocoded_as_op25_framed_it() {
     let mut rng = Rng::new(11);
     let mut d = phase1_call(&mut rng, ALGID_CLEAR, 4);
     d.extend(phase1_call(&mut rng, 0x84, 1));
@@ -140,7 +140,7 @@ fn a_clean_phase1_call_sounds_as_op25_did() {
     let us = call_of(&out);
     assert_eq!(us.pcm.len(), 7 * 18 * SAMPLES_PER_FRAME);
     assert_eq!(us.inputs.len(), 126);
-    assert_eq!(fnv(&us.pcm), 0xb149_104a_67e0_b4d9);
+    assert_eq!(fnv(&us.pcm), 0x2066_b489_06f5_4853);
     assert_eq!(us.sources, [0x12_3456]);
     assert_eq!(us.terminators, 3);
 }
@@ -148,7 +148,7 @@ fn a_clean_phase1_call_sounds_as_op25_did() {
 /// A phase 2 call: op25 acquired four frames after this pipeline and then
 /// vocoded the same 100 inputs; the same inputs make the same audio.
 #[test]
-fn a_clean_phase2_call_sounds_as_op25_did() {
+fn a_clean_phase2_call_is_vocoded_as_op25_framed_it() {
     let mut rng = Rng::new(12);
     let mut sent = testgen::tdma::Sent::default();
     let es = EncryptionSync {
@@ -164,7 +164,7 @@ fn a_clean_phase2_call_sounds_as_op25_did() {
     let us = call_of(&out);
     assert!(us.pcm.iter().any(|&s| s != 0));
     assert_eq!(us.inputs.len(), 104);
-    assert_eq!(fnv(&vocode_fresh(&us.inputs[4..])), 0x4531_1b30_91bd_37a2);
+    assert_eq!(fnv(&vocode_fresh(&us.inputs[4..])), 0x0086_0c13_e3d9_6c29);
     assert_eq!(us.sources, Vec::<i64>::new());
     assert_eq!(us.terminators, 0);
 }
@@ -218,7 +218,7 @@ fn dump_corpus(inputs: &[Input], phase2: bool) {
 }
 
 /// Every voice call of a tapped replay (`v_*.out.cf32`) through the
-/// pipeline: `TRUNK_P25_TAPS=<dir> cargo test -p trunk-recorder-sys
+/// pipeline: `TRUNK_P25_TAPS=<dir> cargo test -p trunk-radio
 /// --release --lib voice_capture -- --ignored --nocapture`. Reports what
 /// each made; with `VOICE_CORPUS` writes the speech corpus.
 #[test]
@@ -277,7 +277,7 @@ fn voice_capture_decodes() {
     assert!(calls[0] + calls[1] > 0);
 }
 
-// ── The vocoders against op25's, frozen ──
+// ── The vocoders, frozen ──
 
 /// How a run of frames is damaged.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -297,7 +297,7 @@ impl Channel {
 const RUN: usize = 40;
 const FRAMES: usize = 2000;
 
-/// Phase 1 frames (op25's `u`, e0, et) in runs of clean, noisy or bad;
+/// Phase 1 frames (`u` as sent, e0, et) in runs of clean, noisy or bad;
 /// only bad runs send b̂0 > 207, which is no pitch.
 fn imbe_frames(rng: &mut Rng, n: usize) -> Vec<([u32; 8], u32, u32)> {
     let mut out = Vec::new();
@@ -305,7 +305,7 @@ fn imbe_frames(rng: &mut Rng, n: usize) -> Vec<([u32; 8], u32, u32)> {
         let channel = Channel::pick(rng);
         for _ in 0..RUN {
             let u = loop {
-                let u = testgen::random_imbe(rng).to_op25();
+                let u = testgen::random_imbe(rng).0.map(u32::from);
                 let b0 = ((u[0] >> 4) & 0xfc) | ((u[7] >> 1) & 3);
                 if b0 <= 207 || channel == Channel::Bad {
                     break u;
@@ -323,21 +323,20 @@ fn imbe_frames(rng: &mut Rng, n: usize) -> Vec<([u32; 8], u32, u32)> {
     out
 }
 
-/// op25's audio of `imbe_frames` for seeds 100.., as (hash, audible
-/// frames).
+/// The audio of `imbe_frames` for seeds 100.., as (hash, audible frames).
 const IMBE_FIXTURES: [(u64, usize); 8] = [
-    (0x26fb_983b_b93b_2397, 1615),
-    (0x5b0e_8b95_4f66_698a, 1409),
-    (0xce30_5e75_32f6_8b61, 1441),
-    (0x527a_22fa_032a_bb40, 1526),
-    (0x5f7a_f43c_74eb_9a4a, 1345),
-    (0x15ee_0121_2d9f_c851, 1433),
-    (0xdc16_66a4_f7cd_200d, 1217),
-    (0xd9e0_30ce_b13b_08d5, 1306),
+    (0xc470_4cf9_acad_5ace, 1615),
+    (0x039f_4a20_344d_e6f7, 1409),
+    (0x36c8_cba8_2e92_bf76, 1441),
+    (0x5394_450c_91f7_ac07, 1526),
+    (0x4c91_6db9_01f0_9596, 1345),
+    (0x7c3e_63c1_1516_ba10, 1433),
+    (0xbd74_7d22_bfb4_4a60, 1217),
+    (0x897b_ece1_c633_de09, 1306),
 ];
 
 #[test]
-fn the_imbe_vocoder_is_op25s() {
+fn the_imbe_vocoder_is_frozen() {
     for (seed, &(hash, audible)) in IMBE_FIXTURES.iter().enumerate() {
         let mut rng = Rng::new(100 + seed as u64);
         let mut v = ImbeVocoder::new();
@@ -419,21 +418,21 @@ fn ambe_frames(rng: &mut Rng, n: usize) -> Vec<([u8; 36], bool)> {
     out
 }
 
-/// op25's audio of `ambe_frames` for seeds 200.., as (hash, frames op25
-/// did not mute, encrypted ones aside).
+/// The audio of `ambe_frames` for seeds 200.., as (hash, frames not
+/// muted, encrypted ones aside).
 const AMBE_FIXTURES: [(u64, usize); 8] = [
-    (0xb7f7_ff2e_4324_bcb5, 1526),
-    (0x7a65_4c36_6059_7eb1, 1573),
-    (0x0428_e840_702b_bfe6, 1517),
-    (0xfa8b_c05a_2e69_a510, 1610),
-    (0x47a0_d6da_675a_3a30, 1541),
-    (0x5138_e97a_d73f_ca00, 1583),
-    (0x18d7_1499_b578_acee, 1712),
-    (0x718a_9a25_a12b_3224, 1552),
+    (0x0b9b_f445_2985_3a2f, 1486),
+    (0xcac0_6b92_1985_d034, 1518),
+    (0x3845_7475_f7dc_9c0c, 1471),
+    (0xcf1d_85bb_561e_a1ff, 1573),
+    (0x84fb_9afd_8fc7_a2ab, 1532),
+    (0x15f4_3884_b70b_8bf6, 1555),
+    (0x2f79_eb07_c7d3_6be9, 1643),
+    (0xa350_3a2f_93cd_3318, 1525),
 ];
 
 #[test]
-fn the_ambe_vocoder_is_op25s() {
+fn the_ambe_vocoder_is_frozen() {
     // Frames played and muted by what op25 decodes them as: voice, silence,
     // erasure (b0 120–123, 126, 127) and tone.
     let mut heard: BTreeMap<&str, [usize; 2]> = BTreeMap::new();

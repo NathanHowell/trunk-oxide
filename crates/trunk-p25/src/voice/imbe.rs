@@ -130,8 +130,6 @@ pub struct ImbeFrame {
     pub errors: u32,
     /// Bits corrected in c0 alone.
     pub errors_c0: u32,
-    /// Bits corrected in c4 alone (BABA Eq. 112's ε<sub>4</sub>).
-    pub errors_c4: u32,
     /// The weakest vector decision's margin: low means the frame is suspect.
     pub reliability: f32,
     /// The least |LLR| among the unprotected bits (u7).
@@ -143,7 +141,6 @@ struct Hypothesis {
     params: ImbeParams,
     cost: f32,
     errors: u32,
-    errors_c4: u32,
     reliability: f32,
 }
 
@@ -171,7 +168,6 @@ fn follow(llr: &[f32; CODEWORD_BITS], u0: u16, c0: &Decision) -> Hypothesis {
     let flips0 = (GOLAY_23.encode(u32::from(u0)) ^ hard(vector(llr, 0))).count_ones();
     let (mut cost, mut errors) = (GOLAY_23.cost_of(vector(llr, 0), u32::from(u0)), flips0);
     let mut reliability = c0.margin;
-    let mut errors_c4 = 0;
     for v in 1..7 {
         let bits = vector(llr, v);
         let clear = descrambled(bits, masks[v]);
@@ -187,9 +183,6 @@ fn follow(llr: &[f32; CODEWORD_BITS], u0: u16, c0: &Decision) -> Hypothesis {
         }
         cost += d.cost;
         errors += d.flips;
-        if v == 4 {
-            errors_c4 = d.flips;
-        }
         reliability = reliability.min(d.margin);
     }
     #[allow(clippy::cast_possible_truncation)]
@@ -200,7 +193,6 @@ fn follow(llr: &[f32; CODEWORD_BITS], u0: u16, c0: &Decision) -> Hypothesis {
         params: ImbeParams(params),
         cost,
         errors,
-        errors_c4,
         reliability,
     }
 }
@@ -225,7 +217,6 @@ pub fn decode(llr: &[f32; CODEWORD_BITS]) -> ImbeFrame {
         params: chosen.params,
         errors: chosen.errors,
         errors_c0,
-        errors_c4: chosen.errors_c4,
         reliability: chosen.reliability,
         unprotected: vector(llr, 7)
             .iter()

@@ -49,36 +49,26 @@ const EPS_R_PER_ERROR: f64 = 0.000365;
 /// Frames are muted above this error rate (BABA §7.8).
 const MUTE_EPS_R: f64 = 0.0875;
 /// Frame repeat thresholds: `ε0 ≥ 2` (Eq. 97) and `ε_T ≥ 10 + 40 ε_R`
-/// (Eq. 98). The spec repeats when both hold; op25 when either does.
+/// (Eq. 98). The spec repeats when both hold; op25, and so this, when
+/// either does (kept by the vote of trunk-oxide-4hj).
 const REPEAT_EPS_0: u32 = 2;
 const REPEAT_EPS_T_BASE: f32 = 10.0;
 const REPEAT_EPS_T_PER_RATE: f32 = 40.0;
 /// op25 mutes rather than repeat a fourth frame in a row; BABA has no limit
-/// (both policies keep op25's, trunk-oxide-4hj.5).
+/// (trunk-oxide-4hj.5).
 const OP25_MAX_REPEATS: u32 = 3;
 
 /// b̂0 of a frame: the pitch, 0..=207 for voice. Its low two bits are u7's
-/// bits 2..1 (BABA §7.1, Fig. 22); op25's u7 is shifted left one bit, so
-/// op25's are bits 1..0 as sent.
+/// bits 2..1 as sent (BABA §7.1, Fig. 22). op25 shifts u7 left a bit
+/// first, and so reads bits 1..0.
 const fn b0(u: &[u32; 8]) -> u32 {
     ((u[0] >> 4) & 0xfc) | ((u[7] >> 1) & 0x3)
 }
 
-/// The rules a frame is taken under: op25's or the standard's
-/// ([`Policy::Standard`]).
-#[derive(Clone, Copy)]
-struct Rules {
-    standard: bool,
-    /// Bits corrected in c0, in c4 and in all.
-    e0: u32,
-    e4: u32,
-    et: u32,
-}
-
 impl ImbeVocoder {
-    /// op25's rules ([`Policy::Op25`]).
+    /// [`Policy::Hard`].
     pub fn new() -> Self {
-        Self::with_policy(Policy::Op25)
+        Self::with_policy(Policy::Hard)
     }
 
     pub fn with_policy(policy: Policy) -> Self {
@@ -109,24 +99,15 @@ impl ImbeVocoder {
     /// in c0 (`e0`) and in all (`et`). `None` if the frame is muted.
     pub fn vocode(&mut self, frame: &ImbeFrame, e0: u32, et: u32) -> Option<Pcm> {
         match self.policy {
-            Policy::Op25 => self.decode(&frame.params.to_op25(), e0, et),
+            Policy::Hard => self.decode(&frame.params.0.map(u32::from), e0, et),
             Policy::Soft => self.soft(frame),
-            Policy::Standard => self.take(
-                &frame.params.0.map(u32::from),
-                Rules {
-                    standard: true,
-                    e0: frame.errors_c0,
-                    e4: frame.errors_c4,
-                    et: frame.errors,
-                },
-            ),
         }
     }
 
     /// [`Policy::Soft`]: the frame as decoded if its decision had margin,
     /// else the last again (three times at most), else silence.
     fn soft(&mut self, frame: &ImbeFrame) -> Option<Pcm> {
-        let u = frame.params.to_op25();
+        let u = frame.params.0.map(u32::from);
         self.last = if frame.reliability >= PLAY_MARGIN && b0(&u) <= MAX_PITCH_INDEX {
             self.repeats = 0;
             self.decode_model(&u);
@@ -148,42 +129,16 @@ impl ImbeVocoder {
         pcm
     }
 
-    /// One frame as op25 takes it: its `u[0..8]` (u7 shifted left one bit)
-    /// and the bits corrected in c0 (`e0`) and in all (`et`), under op25's
-    /// rules whatever the policy. `None` if the frame is muted for errors
-    /// (silence).
+    /// One frame: its `u[0..8]` as sent and the bits corrected in c0
+    /// (`e0`) and in all (`et`), under op25's rules whatever the policy.
+    /// `None` if the frame is muted for errors (silence).
     pub fn decode(&mut self, u: &[u32; 8], e0: u32, et: u32) -> Option<Pcm> {
-        let rules = Rules {
-            standard: false,
-            e0,
-            e4: 0,
-            et,
-        };
-        self.take(u, rules)
-    }
-
-    /// One frame's `u` (u7 as the rules take it) under `rules`.
-    fn take(
-        &mut self,
-        u: &[u32; 8],
-        Rules {
-            standard,
-            e0,
-            e4,
-            et,
-        }: Rules,
-    ) -> Option<Pcm> {
         let b0 = b0(u);
         self.error_rate =
             (EPS_R_DECAY * f64::from(self.error_rate) + EPS_R_PER_ERROR * f64::from(et)) as f32;
         // Eqs. 97 and 98, which op25 takes either of.
-        let c0_failed = e0 >= REPEAT_EPS_0;
-        let many_errors = et as f32 >= REPEAT_EPS_T_BASE + REPEAT_EPS_T_PER_RATE * self.error_rate;
-        let invalid = if standard {
-            c0_failed && many_errors
-        } else {
-            c0_failed || many_errors
-        };
+        let invalid = e0 >= REPEAT_EPS_0
+            || et as f32 >= REPEAT_EPS_T_BASE + REPEAT_EPS_T_PER_RATE * self.error_rate;
         let mut rm0 = None;
         self.last = if f64::from(self.error_rate) > MUTE_EPS_R {
             // Muting (7.8).
@@ -207,15 +162,10 @@ impl ImbeVocoder {
             let errors = Errors {
                 rate: self.error_rate,
                 total: et as f32,
-                c4: e4 as f32,
             };
-            let thresholds = if standard {
-                self.synth.standard_thresholds(rm0, errors)
-            } else {
-                // op25's S_E is zero on a repeat.
-                Thresholds::op25(rm0.map_or(0.0, op25_energy), errors)
-            };
-            self.synth.smooth(thresholds);
+            // op25's S_E is zero on a repeat.
+            self.synth
+                .smooth(Thresholds::op25(rm0.map_or(0.0, op25_energy), errors));
             self.synth.synthesize()
         });
         self.synth.advance();
@@ -251,7 +201,7 @@ impl ImbeVocoder {
 
     /// The fundamental and L from b̂0, and the quantised values b̂ from u
     /// by the bit allocation for that L. u7's bits are where BABA §7.1 puts
-    /// them in u7 as sent; op25's shifted u7 reads them one bit low.
+    /// them in u7 as sent (op25's shifted u7 read them one bit low).
     fn rearrange(&mut self, u: &[u32; 8]) -> [i32; HARMONICS + 1] {
         let b0 = ((u[0] / 16) & 0xfc) | ((u[7] / 2) & 3);
         let s = &mut self.synth;

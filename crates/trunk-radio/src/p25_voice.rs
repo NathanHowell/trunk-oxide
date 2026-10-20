@@ -21,6 +21,7 @@ use crate::kind::{Cmd, Kind, OpenError, Opening, Tuning};
 use crate::p25::{VoiceShared, track_encryption};
 use crate::p25_calls;
 use crate::recording::{Accounting, Tape};
+use crate::tap::Tap;
 use crate::types::{CallCounts, CallId, ChannelNum, Decoded, RadioEvent, VoiceTag, VoiceTagKind};
 
 /// Conditioned rate of a P25 slot: 5 × 4800 (phase 1) = 4 × 6000 (phase 2).
@@ -160,6 +161,15 @@ impl VoicePipeline {
             self.shared.phase1(self.p1.stats());
         }
         self.finish(out);
+    }
+
+    /// The soft symbols the last [`Self::process`] demodulated.
+    pub fn symbols(&self) -> &[f32] {
+        if self.phase2 {
+            self.p2.symbols()
+        } else {
+            self.p1.symbols()
+        }
     }
 
     /// [`Self::process`] from demodulated symbols.
@@ -367,6 +377,11 @@ impl P25VoiceHandle {
         }
     }
 
+    /// The soft symbols the last [`Self::process`] demodulated.
+    pub fn symbols(&self) -> &[f32] {
+        self.pipeline.symbols()
+    }
+
     /// The phase 2 logical channel of the call in progress.
     pub const fn slot(&self) -> u8 {
         self.pipeline.a2.channel
@@ -446,11 +461,28 @@ impl Kind for P25Voice {
             at.call.channel.freq_hz,
             slot.map_or(0, i32::from),
         );
+        let tap = at.tap_dir.and_then(|dir| {
+            #[allow(clippy::cast_possible_truncation)]
+            let meta = serde_json::json!({
+                "format": "cf32",
+                "out_rate": NARROW_RATE,
+                "kind": "voice",
+                "decoder": "rust",
+                "system": at.system.short_name,
+                "talkgroup": at.call.talkgroup,
+                "freq": at.call.channel.freq_hz as i64,
+                "tdma": slot.is_some(),
+                "slot": slot.unwrap_or(0),
+                "modulation": if at.system.qpsk { "qpsk" } else { "fsk4" },
+            });
+            Tap::voice(dir, &at.system.short_name, at.call.talkgroup, meta)
+        });
         Ok(P25VoiceChannel {
             call: at.call.id,
             sys_num: at.system.sys_num,
             num: at.num,
             voice,
+            tap,
             tape,
             audio: Vec::new(),
             tags: Vec::new(),
@@ -477,6 +509,8 @@ pub struct P25VoiceChannel {
     sys_num: i32,
     num: ChannelNum,
     voice: P25VoiceHandle,
+    /// Its baseline tap, when they are taken.
+    tap: Option<Tap>,
     tape: Tape,
     audio: Vec<i16>,
     tags: Vec<VoiceTag>,
@@ -521,6 +555,10 @@ impl ChannelDecoder for P25VoiceChannel {
         self.audio.clear();
         self.tags.clear();
         self.voice.process(iq, &mut self.audio, &mut self.tags);
+        if let Some(tap) = &mut self.tap {
+            tap.iq(iq);
+            tap.symbols(self.voice.symbols());
+        }
         if let Some(encryption) = self.voice.take_crypto() {
             out.events.push(RadioEvent::Crypto {
                 call_id: self.call,

@@ -241,6 +241,11 @@ impl VoiceDecoder {
         self.soft = soft;
     }
 
+    /// The soft symbols the last [`Self::process`] demodulated.
+    pub fn symbols(&self) -> &[f32] {
+        &self.soft
+    }
+
     pub fn process_symbols(&mut self, soft: &[f32], out: &mut Vec<Received<VoiceEvent>>) {
         for &s in soft {
             self.symbol += 1;

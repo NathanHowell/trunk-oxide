@@ -23,6 +23,7 @@ pub mod radio;
 pub mod recording;
 pub mod registry;
 pub mod source;
+pub mod tap;
 pub mod types;
 
 pub use analog::{AnalogFm, AnalogParams};

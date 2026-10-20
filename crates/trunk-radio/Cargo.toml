@@ -8,15 +8,13 @@ rust-version.workspace = true
 [dependencies]
 anyhow.workspace = true
 num-complex.workspace = true
+serde_json.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
 trunk-channelizer.workspace = true
 trunk-fm.workspace = true
 trunk-p25.workspace = true
 trunk-sdr.workspace = true
-
-[dev-dependencies]
-serde_json.workspace = true
 
 [lints]
 workspace = true

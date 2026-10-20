@@ -368,6 +368,12 @@ impl TdmaDecoder {
 
     /// [`Self::process`], handing each burst to `f` with its event and the
     /// symbol index it completed at.
+    /// The soft symbols the last [`Self::process`] or [`Self::process_with`]
+    /// demodulated.
+    pub fn symbols(&self) -> &[f32] {
+        &self.soft
+    }
+
     pub fn process_with(&mut self, iq: &[Complex32], f: &mut dyn FnMut(&Burst, TdmaEvent, u64)) {
         let mut soft = std::mem::take(&mut self.soft);
         soft.clear();

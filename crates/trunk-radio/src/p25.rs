@@ -31,6 +31,7 @@ use crate::p25_parse::P25TrunkParser;
 use crate::p25_voice::{NARROW_RATE, p25_conditioning};
 use crate::recording::Tape;
 use crate::registry::{Entry, Registry};
+use crate::tap::Tap;
 use crate::types::{ChannelNum, Decoded, RadioEvent};
 
 /// A P25 control channel: decoded, parsed into trunking messages.
@@ -132,6 +133,8 @@ pub struct ControlSlot {
     decoder: ControlChannelDecoder,
     parser: P25TrunkParser,
     raw: Option<RawLog>,
+    /// Its conditioned IQ, when baselines are being taken.
+    tap: Option<Tap>,
     shared: Arc<Shared>,
     scratch: Vec<Received>,
 }
@@ -147,7 +150,7 @@ impl fmt::Debug for ControlSlot {
 impl ControlSlot {
     /// A decoder for `channel` at the slot's conditioned `rate`, parsing
     /// for system `sys_num`; with a `tap_base`, every message is also
-    /// written to `<tap_base>.msgs.jsonl`.
+    /// written to `<tap_base>.msgs.jsonl` and its IQ tapped there.
     pub(crate) fn new(
         channel: ControlChannel,
         modulation: Modulation,
@@ -161,6 +164,21 @@ impl ControlSlot {
         let raw = (!tap_base.is_empty())
             .then(|| RawLog::open(&format!("{tap_base}.msgs.jsonl")))
             .flatten();
+        #[allow(clippy::cast_possible_truncation)]
+        let tap = (!tap_base.is_empty())
+            .then(|| {
+                let meta = serde_json::json!({
+                    "format": "cf32",
+                    "out_rate": rate,
+                    "kind": "control_channel",
+                    "decoder": "rust",
+                    "system": channel.system,
+                    "freq": channel.freq_hz as i64,
+                    "modulation": if modulation == Modulation::Cqpsk { "qpsk" } else { "fsk4" },
+                });
+                Tap::control(tap_base, &meta)
+            })
+            .flatten();
         let shared = REGISTRY.register(Shared {
             channel,
             modulation,
@@ -170,6 +188,7 @@ impl ControlSlot {
             decoder,
             parser,
             raw,
+            tap,
             shared,
             scratch: Vec::new(),
         }
@@ -181,6 +200,9 @@ impl ChannelDecoder for ControlSlot {
     type Command = Cmd;
 
     fn process(&mut self, iq: &[Complex32], _: &Reading, out: &mut Decoded) {
+        if let Some(tap) = &mut self.tap {
+            tap.iq(iq);
+        }
         self.decoder.process(iq, &mut self.scratch);
         for r in self.scratch.drain(..) {
             if let Some(raw) = &mut self.raw {

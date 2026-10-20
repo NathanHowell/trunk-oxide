@@ -68,12 +68,14 @@ unless you set `recorder.adaptive_freq_correction=true`.
 
 ## Decoder baselines (`--tap`)
 
-`run --tap` also writes `RUN/taps/` — the inputs and outputs of the C++ signal
-chain, for testing Rust replacements offline and faster than real time (no
-wall-clock logic involved). `trunk-replay taps RUN/taps` writes `index.json`
-and prints a table. Per tap (`<base>` = `cc_<system>_<freq Hz>` for a control
-channel, `v_<call id>_<system>_<tg>` for a P25 voice call, `a_<call id>_<system>_<tg>`
-for an analog channel), with a `<base>.json` sidecar describing it:
+`run --tap` also writes `RUN/taps/` — what each decoder was given, for
+testing decoder changes offline and faster than real time (no wall-clock
+logic involved), byte-identical from run to run. `trunk-replay taps RUN/taps`
+writes `index.json` and prints a table. Per tap (`<base>` =
+`cc_<system>_<freq Hz>` for a control channel, `v_<n>_<system>_<tg>` for a
+P25 voice channel, numbered in the order channels open), with a
+`<base>.json` sidecar describing it. Analog channels are not tapped since
+GNU Radio went (`a_` taps are in older baselines only):
 
 | file | what | use |
 |---|---|---|

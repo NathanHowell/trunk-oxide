@@ -2,10 +2,12 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use opentelemetry::KeyValue;
+use opentelemetry::trace::{SpanContext, TraceContextExt as _};
 use proto::types::CallRowId;
 use serenity::model::id::{ChannelId, MessageId};
 use tokio::sync::{Mutex, mpsc};
 use tracing::Instrument;
+use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 use trunk_oxide_proto as proto;
 
 use trunk_database::Database;
@@ -68,7 +70,13 @@ pub enum CallMessage {
 /// no end marker: the worker exits when its job channel closes (the handler
 /// drops the sender at finalization), and that closure is the "done" signal.
 enum TranscribeJob {
-    Audio { audio: Vec<f32>, meta: SegmentMeta },
+    /// `origin` is the recorder-side span of the transmission the audio came
+    /// from, which the segment's span hangs off.
+    Audio {
+        audio: Vec<f32>,
+        meta: SegmentMeta,
+        origin: Option<SpanContext>,
+    },
     Boundary,
 }
 
@@ -146,8 +154,14 @@ pub struct CallHandler {
     /// The embed's trace in Jaeger, once the embed is sent (its title links
     /// there on every edit).
     trace_url: Option<String>,
+    /// The recorder-side span of the transmission now being heard: the parent
+    /// of the spans for its audio. Replaced as each coalesced transmission
+    /// starts.
+    origin: Option<SpanContext>,
+    /// Trace id of the embed's first transmission, which its title links to.
+    first_trace: Option<String>,
     /// Trace ids of the later transmissions coalesced into this embed, for
-    /// the flag registry (the first is the embed's own trace).
+    /// the flag registry.
     transmission_traces: Vec<String>,
 
     /// Per-channel serialized writer for this call's embed: send/edit/delete and
@@ -256,6 +270,9 @@ impl CallHandler {
             ogg_encoder,
             embed_message_id: None,
             trace_url: None,
+            origin: parse_traceparent(&call_info.traceparent),
+            first_trace: parse_traceparent(&call_info.traceparent)
+                .map(|sc| sc.trace_id().to_string()),
             transmission_traces: Vec::new(),
             writer,
             indicator_shown: false,
@@ -276,6 +293,11 @@ impl CallHandler {
     }
 
     pub async fn run(mut self) {
+        // The embed's span links to each transmission's recorder-side span, the
+        // first here and the rest as they start.
+        if let Some(origin) = &self.origin {
+            link_transmission(origin, 0);
+        }
         let effects = self.state.on_start();
         if let Err(e) = self.process_effects(effects).await {
             tracing::error!(error = %e, "failed to post call embed");
@@ -304,6 +326,7 @@ impl CallHandler {
             transcription_worker(
                 self.whisperer.clone(),
                 Arc::clone(&self.metrics),
+                current_span_context(),
                 TranscribeIdentity {
                     short_name: self.short_name.clone(),
                     is_conventional: self.is_conventional,
@@ -404,12 +427,13 @@ impl CallHandler {
                 }
             }
             CallMessage::PttStart(call_info) => {
-                // Later transmissions coalesced into this embed are separate
-                // traces on the recorder side; link the embed's span to each so
-                // every transmission is one click away in Jaeger.
-                if let Some(trace) =
-                    link_transmission(&call_info.traceparent, self.state.ptt_count())
-                {
+                // Each transmission coalesced into this embed is its own trace
+                // on the recorder side: the audio that follows hangs off it, and
+                // the embed's span links to it so it is one click away.
+                self.origin = parse_traceparent(&call_info.traceparent);
+                if let Some(origin) = &self.origin {
+                    link_transmission(origin, self.state.ptt_count());
+                    let trace = origin.trace_id().to_string();
                     if let Some(msg_id) = self.embed_message_id {
                         crate::reactions::FLAGS.add_transmission(msg_id, trace.clone());
                     }
@@ -434,7 +458,7 @@ impl CallHandler {
         while let Some(effect) = queue.pop_front() {
             match effect {
                 CallEffect::SendEmbed { mut embed } => {
-                    let trace_id = current_trace_id();
+                    let trace_id = self.first_trace.clone().unwrap_or_else(current_trace_id);
                     self.trace_url = self
                         .config
                         .jaeger_url
@@ -713,7 +737,12 @@ impl CallHandler {
         self.segment_offset_samples += samples as u64;
         self.dbg_kept_samples += samples as u64;
         self.dbg_kept_chunks += 1;
-        self.enqueue_job(TranscribeJob::Audio { audio, meta });
+        let origin = self.origin.clone();
+        self.enqueue_job(TranscribeJob::Audio {
+            audio,
+            meta,
+            origin,
+        });
         // Track it as in-flight so the executor shows the ⏳ reaction until
         // the matching result comes back via `apply_transcript`. Emits no
         // effect (reaction is reconciled after each batch).
@@ -856,24 +885,25 @@ impl CallHandler {
 async fn transcription_worker(
     whisperer: TranscriberConnection,
     metrics: Arc<Metrics>,
+    call: Option<SpanContext>,
     identity: TranscribeIdentity,
     mut job_rx: mpsc::UnboundedReceiver<TranscribeJob>,
     result_tx: mpsc::Sender<TranscribeResult>,
 ) {
     while let Some(job) = job_rx.recv().await {
         let result = match job {
-            TranscribeJob::Audio { audio, meta } => {
-                // One `segment` span per transmission segment, parented to the
-                // call span (the worker is instrumented with it). It carries the
-                // segment's place in the call (offset_s/index) and length, and
-                // is the parent of the downstream transcribe RPC
-                // spans — so a trace shows each segment's position and decode.
-                let span = tracing::info_span!(
-                    "segment",
-                    chunk_index = meta.index,
-                    offset_s = meta.offset_s,
-                    samples = meta.samples,
-                );
+            TranscribeJob::Audio {
+                audio,
+                meta,
+                origin,
+            } => {
+                // One `segment` span per chunk of a transmission's audio, a
+                // child of that transmission's recorder-side span (so the trace
+                // that began at the radio carries the decode) and linked to the
+                // embed's call span. It carries the chunk's place in the call
+                // (offset_s/index) and length, and is the parent of the
+                // downstream transcribe RPC spans.
+                let span = segment_span(origin.as_ref(), call.as_ref(), &meta);
                 let samples = audio.len();
                 let t = transcribe_one(&whisperer, &metrics, &identity, audio)
                     .instrument(span)
@@ -927,27 +957,23 @@ async fn transcribe_one(
     }
 }
 
-/// Trace id of the active span (shared with trunk-oxide's call span through
-/// the propagated `traceparent`), for linking a flagged call to its trace.
-fn current_trace_id() -> String {
-    use opentelemetry::trace::TraceContextExt;
-    use tracing_opentelemetry::OpenTelemetrySpanExt;
-    let cx = tracing::Span::current().context();
-    let span = cx.span();
-    let sc = span.span_context();
-    if sc.is_valid() {
-        sc.trace_id().to_string()
-    } else {
-        String::new()
-    }
+/// The span context of the active span; `None` when tracing is off.
+fn current_span_context() -> Option<SpanContext> {
+    let sc = tracing::Span::current()
+        .context()
+        .span()
+        .span_context()
+        .clone();
+    sc.is_valid().then_some(sc)
 }
 
-/// Link the current (embed) span to a later transmission's recorder-side call
-/// span, given its W3C `traceparent`, and return that trace's id. `None` when
-/// the traceparent is empty or invalid.
-fn link_transmission(traceparent: &str, index: u32) -> Option<String> {
-    use opentelemetry::trace::TraceContextExt;
-    use tracing_opentelemetry::OpenTelemetrySpanExt;
+/// Trace id of the active span, for linking a flagged call to its trace.
+fn current_trace_id() -> String {
+    current_span_context().map_or_else(String::new, |sc| sc.trace_id().to_string())
+}
+
+/// The span a W3C `traceparent` names; `None` when it is empty or invalid.
+fn parse_traceparent(traceparent: &str) -> Option<SpanContext> {
     if traceparent.is_empty() {
         return None;
     }
@@ -956,16 +982,49 @@ fn link_transmission(traceparent: &str, index: u32) -> Option<String> {
         carrier.insert("traceparent".to_string(), traceparent.to_string());
         prop.extract(&carrier)
     });
-    let span_context = cx.span().span_context().clone();
-    if !span_context.is_valid() {
-        return None;
-    }
-    let trace = span_context.trace_id().to_string();
+    let sc = cx.span().span_context().clone();
+    sc.is_valid().then_some(sc)
+}
+
+/// Link the active (embed) span to the recorder-side span of its `index`th
+/// transmission.
+fn link_transmission(origin: &SpanContext, index: u32) {
     tracing::Span::current().add_link_with_attributes(
-        span_context,
+        origin.clone(),
         vec![KeyValue::new("transmission", i64::from(index))],
     );
-    Some(trace)
+}
+
+/// The span for one chunk of a transmission's audio: a child of the
+/// transmission's recorder-side span `origin` when it has one (else of the
+/// active span), linked back to the embed's `call` span.
+fn segment_span(
+    origin: Option<&SpanContext>,
+    call: Option<&SpanContext>,
+    meta: &SegmentMeta,
+) -> tracing::Span {
+    let parent = if origin.is_some() {
+        None
+    } else {
+        tracing::Span::current().id()
+    };
+    let span = tracing::info_span!(
+        parent: parent,
+        "segment",
+        chunk_index = meta.index,
+        offset_s = meta.offset_s,
+        samples = meta.samples,
+    );
+    if let Some(origin) = origin
+        && let Err(e) =
+            span.set_parent(opentelemetry::Context::new().with_remote_span_context(origin.clone()))
+    {
+        tracing::debug!(?e, "failed to parent segment span to its transmission");
+    }
+    if let Some(call) = call {
+        span.add_link(call.clone());
+    }
+    span
 }
 
 fn shape_labels(short_name: &str, is_conventional: bool, tdma: bool) -> [KeyValue; 3] {
@@ -1054,4 +1113,91 @@ fn decode_audio(bytes: &[u8]) -> Vec<f32> {
         .iter()
         .map(|&pair| f32::from(i16::from_le_bytes(pair)) / 32768.0)
         .collect()
+}
+
+#[cfg(test)]
+mod trace_tests {
+    use std::sync::{Arc, Mutex};
+
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_sdk::error::OTelSdkResult;
+    use opentelemetry_sdk::trace::{SdkTracerProvider, SpanData, SpanExporter};
+    use tracing_subscriber::layer::SubscriberExt as _;
+
+    use super::*;
+
+    #[derive(Clone, Debug, Default)]
+    struct Collect(Arc<Mutex<Vec<SpanData>>>);
+
+    impl SpanExporter for Collect {
+        #[allow(clippy::unused_async_trait_impl)]
+        async fn export(&self, batch: Vec<SpanData>) -> OTelSdkResult {
+            self.0.lock().unwrap().extend(batch);
+            Ok(())
+        }
+    }
+
+    const TRACEPARENT: &str = "00-0af7651916cd43dd8448eb211c80319c-b7ad6b7169203331-01";
+
+    fn meta() -> SegmentMeta {
+        SegmentMeta {
+            index: 0,
+            offset_s: 0.0,
+            samples: 16000,
+            shape: None,
+        }
+    }
+
+    #[test]
+    fn a_segment_hangs_off_its_transmission_and_links_to_the_call() {
+        opentelemetry::global::set_text_map_propagator(
+            opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+        );
+        let spans = Collect::default();
+        let provider = SdkTracerProvider::builder()
+            .with_simple_exporter(spans.clone())
+            .build();
+        let subscriber = tracing_subscriber::registry()
+            .with(tracing_opentelemetry::layer().with_tracer(provider.tracer("test")));
+
+        let (call_id, call_trace) = tracing::subscriber::with_default(subscriber, || {
+            let call = tracing::info_span!(parent: None, "call");
+            let _in_call = call.enter();
+            let call_cx = current_span_context().unwrap();
+            let origin = parse_traceparent(TRACEPARENT).unwrap();
+            link_transmission(&origin, 0);
+            drop(segment_span(Some(&origin), Some(&call_cx), &meta()));
+            (call_cx.span_id(), call_cx.trace_id())
+        });
+
+        let spans = spans.0.lock().unwrap().clone();
+        let segment = spans.iter().find(|s| s.name == "segment").unwrap();
+        assert_eq!(
+            segment.span_context.trace_id().to_string(),
+            "0af7651916cd43dd8448eb211c80319c"
+        );
+        assert_eq!(segment.parent_span_id.to_string(), "b7ad6b7169203331");
+        assert_eq!(segment.links.iter().count(), 1);
+        assert_eq!(
+            segment.links.iter().next().unwrap().span_context.span_id(),
+            call_id
+        );
+
+        // The embed's span is a trace of its own, linked to the transmission.
+        let call = spans.iter().find(|s| s.name == "call").unwrap();
+        assert_eq!(call.span_context.trace_id(), call_trace);
+        assert_ne!(
+            call.span_context.trace_id().to_string(),
+            "0af7651916cd43dd8448eb211c80319c"
+        );
+        assert_eq!(call.parent_span_id, opentelemetry::trace::SpanId::INVALID);
+        let link = call.links.iter().next().unwrap();
+        assert_eq!(link.span_context.span_id().to_string(), "b7ad6b7169203331");
+    }
+
+    #[test]
+    fn a_bad_traceparent_is_no_origin() {
+        assert!(parse_traceparent("").is_none());
+        assert!(parse_traceparent("garbage").is_none());
+    }
 }

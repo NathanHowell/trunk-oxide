@@ -10,7 +10,6 @@ use serenity::model::id::ChannelId;
 use tokio::sync::{Mutex, mpsc};
 use tonic::Streaming;
 use tracing::Instrument;
-use tracing_opentelemetry::OpenTelemetrySpanExt;
 use trunk_oxide_proto as proto;
 
 use proto::types::Talkgroup;
@@ -346,27 +345,20 @@ impl DispatchPump {
 
                     let ctx = Arc::clone(&self.ctx);
                     let dead_call_tx = self.dead_call_tx.clone();
+                    // The embed's span is a root of its own: it covers every
+                    // transmission coalesced into the embed, so it can't be the
+                    // child of any one recorder-side call span. It links to each
+                    // (the handler adds the links from the `traceparent` that
+                    // rides each CallStart), and the work done for a
+                    // transmission hangs off that transmission's recorder span.
                     let span = tracing::info_span!(
+                        parent: None,
                         "call",
                         talkgroup = call.talkgroup,
                         system = %call.short_name,
                         freq = call.freq,
                         encrypted = call.encrypted,
                     );
-                    // Parent this call span to the recorder-side call span, whose
-                    // W3C context rode in on the CallStart event (the EventBridge
-                    // stream can't carry per-call gRPC metadata). Stitches one
-                    // trace: recorder → discord → transcribe.
-                    if !call.traceparent.is_empty() {
-                        let parent_cx = opentelemetry::global::get_text_map_propagator(|prop| {
-                            let mut carrier = std::collections::HashMap::new();
-                            carrier.insert("traceparent".to_string(), call.traceparent.clone());
-                            prop.extract(&carrier)
-                        });
-                        if let Err(e) = span.set_parent(parent_cx) {
-                            tracing::debug!(?e, "failed to parent call span to recorder trace");
-                        }
-                    }
                     tokio::spawn(run_call(ctx, call, rx, key, dead_call_tx).instrument(span));
                 }
 

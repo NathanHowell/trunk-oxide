@@ -62,7 +62,7 @@ impl TranscriberService for WhistleService {
             }));
         }
 
-        // One span per decode, parented to the discord call span and carrying
+        // One span per decode, parented to the discord segment span and carrying
         // the high-cardinality talkgroup (which is deliberately not a metric
         // label). Queue wait vs decode time is visible per-request in the trace.
         let span = tracing::info_span!(

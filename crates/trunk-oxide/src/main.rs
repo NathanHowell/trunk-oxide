@@ -70,8 +70,9 @@ fn main() -> Result<()> {
         .build();
 
     // W3C trace-context propagation: lets the per-call span's context be
-    // serialized into the CallStart event so trunk-discord parents its own call
-    // span (and the downstream transcribe span) to the recorder's trace.
+    // serialized into the CallStart event so trunk-discord hangs the work for
+    // each transmission (and the downstream transcribe span) off that call's
+    // span, and links its embed's span back to it.
     opentelemetry::global::set_text_map_propagator(
         opentelemetry_sdk::propagation::TraceContextPropagator::new(),
     );

@@ -544,7 +544,7 @@ impl CallManager {
                 Effect::EmitCallStart { call_id } => {
                     // Open the recorder-side call span here (held in `call_spans`,
                     // closed at conclude) and serialize its context into the
-                    // CallStart event so discord parents its call span to ours.
+                    // CallStart event: discord parents the work for this transmission to it.
                     let started = self.state.get_call_view(call_id).map(|view| {
                         let labels = [KeyValue::new("short_name", view.short_name().to_string())];
                         self.calls_started.add(1, &labels);

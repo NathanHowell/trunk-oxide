@@ -100,8 +100,13 @@ pub struct Corpus {
 }
 
 impl Corpus {
-    /// `None` without `VOCODER_CORPUS`.
+    /// `None` without `VOCODER_CORPUS`. Phase 2's voice frames only.
     pub fn load() -> Option<Self> {
+        Self::load_frames(false)
+    }
+
+    /// With `all_kinds`, phase 2's silence and tone frames too.
+    pub fn load_frames(all_kinds: bool) -> Option<Self> {
         let dir = std::env::var("VOCODER_CORPUS").ok()?;
         let calls = |file: &str| -> Vec<Vec<Vec<u32>>> {
             std::fs::read_to_string(format!("{dir}/{file}"))
@@ -138,7 +143,8 @@ impl Corpus {
                             .try_into()
                             .ok()?;
                         let (p, errors) = AmbeCodeword::from_dibits(&d).decode_op25();
-                        (errors == [0, 0] && ambe_b0(p) < 120).then_some(p)
+                        let b0 = ambe_b0(p);
+                        (errors == [0, 0] && (b0 < 120 || (all_kinds && b0 >= 124))).then_some(p)
                     })
                     .collect()
             })

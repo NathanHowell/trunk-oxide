@@ -151,6 +151,14 @@ Also tried and dropped (bead q7f.7): taking AMBE+2's unprotected quantiser
 values as expectations under the bits' posteriors; by log-spectral distance
 never better than playing the soft decode as received.
 
+`Policy::Standard` is TIA-102.BABA and BABA-1 where op25 departs from them
+(beads 4hj, 13y): phase 1 reads u7 as sent (op25 reads b̂0's low bits one
+bit low) on the decoder's own error counts, with the standard's repeat
+rule and smoothing; phase 2 predicts past silence frames from the last
+voice frame, knows a tone by u0 alone and plays it at its log level.
+`vocoder_ab -- <out> op25 standard` cuts clips clean and under noise and
+prints how smoothly phase 1's pitch runs read either way.
+
 The vocoders were checked frame by frame against op25's on random streams
 that reach every pitch, repeat, mute, tone and erasure, 16k frames a phase,
 and on every tapped call's frames; op25's audio is frozen as hashes in the

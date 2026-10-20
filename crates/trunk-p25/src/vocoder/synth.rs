@@ -75,10 +75,15 @@ const UNENHANCED_DIVISOR: usize = 8;
 /// Bounds on the enhancement weight `W_l` (Eq. 108).
 const W_MAX: f64 = 1.2;
 const W_MIN: f64 = 0.5;
-/// `S_E`'s weight on the frame energy `R_M0`, and its floor (Eq. 111).
-/// op25 keeps no `S_E(−1)` term, so `0.95 S_E(−1)` is missing.
+/// `S_E`'s weight on the frame energy `R_M0`, its weight on the last
+/// frame's `S_E`, and its floor (Eq. 111). op25 keeps no `S_E(−1)`, so its
+/// `S_E` is `0.05 R_M0` alone.
 const S_E_WEIGHT: f64 = 0.05;
+const S_E_DECAY: f64 = 0.95;
 const S_E_MIN: f32 = 10000.0;
+/// `S_E(−1)` and `τ_M(−1)` before the first frame (BABA Annex A; `τ_M`
+/// is not listed there, and starts where a clean frame puts it).
+const S_E_INITIAL: f32 = 75000.0;
 
 // Adaptive smoothing (TIA-102.BABA §9).
 
@@ -89,18 +94,18 @@ const EPS_T_CLEAN_VOICING: f32 = 4.0;
 const EPS_T_CLEAN_AMPLITUDE: f32 = 6.0;
 /// Eq. 112's `V_M = ∞`.
 const V_M_INFINITE: f32 = 1e38;
-/// Eq. 112's middle branch: `ε_R ≤ 0.0125` (and no errors), where
-/// `V_M = 45.255 S_E^0.375 / exp(277.26 ε_R)`. The spec prints `ε_4 = 0`
-/// for "no errors"; op25 tests `ε_T`.
+/// Eq. 112's middle branch: `ε_R ≤ 0.0125` and `ε_4 = 0` (no errors in
+/// û4), where `V_M = 45.255 S_E^0.375 / exp(277.26 ε_R)`. op25 tests
+/// `ε_T = 0` and has 277.6.
 const EPS_R_QUIET: f64 = 0.0125;
 const V_M_QUIET_SCALE: f64 = 45.255;
-/// op25's exponent rate; Eq. 112 has 277.26.
+const V_M_EPS_R_RATE: f64 = 277.26;
 const OP25_V_M_EPS_R_RATE: f64 = 277.6;
 /// Eq. 112's last branch: `V_M = 1.414 S_E^0.375`.
 const V_M_SCALE: f64 = 1.414;
 const V_M_EXPONENT: f32 = 0.375;
 /// Eq. 115's amplitude threshold `τ_M`: 20480 when clean, otherwise
-/// `6000 − 300 ε_T` (op25 drops the spec's `+ τ_M(−1)`).
+/// `6000 − 300 ε_T + τ_M(−1)` (op25 drops the `τ_M(−1)`).
 const TAU_M_CLEAN: f32 = 20480.0;
 const TAU_M_BASE: f32 = 6000.0;
 const TAU_M_PER_ERROR: f32 = 300.0;
@@ -126,6 +131,72 @@ pub(super) struct Synthesizer {
     old_uw: [f32; BLOCK],
     /// The white noise generator's window.
     noise: [u32; NOISE],
+    /// The standard's local energy `S_E` and amplitude threshold `τ_M`,
+    /// as of the last frame ([`Self::standard_thresholds`]).
+    energy: f32,
+    threshold: f32,
+}
+
+/// The adaptive smoothing's thresholds for a frame (BABA §9): bands louder
+/// than `voicing` (`V_M`) are made voiced, and the amplitudes are scaled
+/// down to sum to `amplitude` (`τ_M`) if they sum to more.
+#[derive(Clone, Copy, Debug)]
+pub(super) struct Thresholds {
+    voicing: f32,
+    amplitude: f32,
+}
+
+/// A frame's errors as the smoothing takes them: the running error rate
+/// ε<sub>R</sub>, and the bits corrected in all (ε<sub>T</sub>) and in û4
+/// (ε<sub>4</sub>).
+#[derive(Clone, Copy, Debug, Default)]
+pub(super) struct Errors {
+    pub rate: f32,
+    pub total: f32,
+    pub c4: f32,
+}
+
+/// op25's `S_E` from a frame's energy `R_M0`: this frame's alone.
+pub(super) fn op25_energy(rm0: f32) -> f32 {
+    let se = (S_E_WEIGHT * f64::from(rm0)) as f32;
+    if se < S_E_MIN { S_E_MIN } else { se }
+}
+
+impl Thresholds {
+    /// None: for a frame with no errors whatever its energy.
+    pub const CLEAN: Self = Self {
+        voicing: V_M_INFINITE,
+        amplitude: TAU_M_CLEAN,
+    };
+
+    /// op25's, from its `S_E` ([`op25_energy`]): no `τ_M(−1)`.
+    pub fn op25(se: f32, Errors { rate, total, .. }: Errors) -> Self {
+        let er64 = f64::from(rate);
+        let voicing: f32 = if er64 <= EPS_R_CLEAN && total <= EPS_T_CLEAN_VOICING {
+            V_M_INFINITE
+        } else if er64 <= EPS_R_QUIET && total == 0.0 {
+            (V_M_QUIET_SCALE * f64::from(se.powf(V_M_EXPONENT))
+                / (OP25_V_M_EPS_R_RATE * er64).exp()) as f32
+        } else {
+            (V_M_SCALE * f64::from(se.powf(V_M_EXPONENT))) as f32
+        };
+        let amplitude: f32 = if er64 <= EPS_R_CLEAN && total <= EPS_T_CLEAN_AMPLITUDE {
+            TAU_M_CLEAN
+        } else {
+            TAU_M_BASE - TAU_M_PER_ERROR * total
+        };
+        Self { voicing, amplitude }
+    }
+
+    #[cfg(test)]
+    pub const fn voicing(self) -> f32 {
+        self.voicing
+    }
+
+    #[cfg(test)]
+    pub const fn amplitude(self) -> f32 {
+        self.amplitude
+    }
 }
 
 /// Bins of the 256-point spectrum the unvoiced bands can reach (0..=128).
@@ -171,6 +242,8 @@ impl Synthesizer {
             psi1: 0.0,
             old_uw: [0.0; BLOCK],
             noise,
+            energy: S_E_INITIAL,
+            threshold: TAU_M_CLEAN,
         }
     }
 
@@ -201,8 +274,7 @@ impl Synthesizer {
     }
 
     /// Enhances the current frame's amplitudes (`mu` to `m`); returns the
-    /// frame's energy as the smoothing takes it (op25's SE, which starts
-    /// from zero each frame).
+    /// frame's energy `R_M0` (Eq. 105).
     pub fn enhance(&mut self) -> f32 {
         let (l, w0) = (self.l, self.w0);
         let cur = self.current();
@@ -233,36 +305,50 @@ impl Synthesizer {
         for ell in 1..=l {
             cur.m[ell] *= gain;
         }
-        let se = (S_E_WEIGHT * f64::from(rm0)) as f32;
-        if se < S_E_MIN { S_E_MIN } else { se }
+        rm0
     }
 
-    /// Adaptive smoothing: with error rate `er` and
-    /// `et` bits corrected, bands louder than a threshold become voiced and
-    /// the frame's total amplitude is capped.
-    pub fn smooth(&mut self, se: f32, er: f32, et: f32) {
-        let (er64, l) = (f64::from(er), self.l);
-        let vm: f32 = if er64 <= EPS_R_CLEAN && et <= EPS_T_CLEAN_VOICING {
+    /// The standard's thresholds (Eqs. 111, 112, 115): `S_E` and `τ_M`
+    /// carried on from the last frame. `rm0` is this frame's energy, or
+    /// `None` for a repeat, which keeps the last `S_E`.
+    pub fn standard_thresholds(&mut self, rm0: Option<f32>, e: Errors) -> Thresholds {
+        if let Some(rm0) = rm0 {
+            let se = (S_E_DECAY * f64::from(self.energy) + S_E_WEIGHT * f64::from(rm0)) as f32;
+            self.energy = se.max(S_E_MIN);
+        }
+        let (er64, se) = (f64::from(e.rate), self.energy);
+        let voicing: f32 = if er64 <= EPS_R_CLEAN && e.total <= EPS_T_CLEAN_VOICING {
             V_M_INFINITE
-        } else if er64 <= EPS_R_QUIET && et == 0.0 {
-            (V_M_QUIET_SCALE * f64::from(se.powf(V_M_EXPONENT))
-                / (OP25_V_M_EPS_R_RATE * er64).exp()) as f32
+        } else if er64 <= EPS_R_QUIET && e.c4 == 0.0 {
+            (V_M_QUIET_SCALE * f64::from(se.powf(V_M_EXPONENT)) / (V_M_EPS_R_RATE * er64).exp())
+                as f32
         } else {
             (V_M_SCALE * f64::from(se.powf(V_M_EXPONENT))) as f32
         };
+        self.threshold = if er64 <= EPS_R_CLEAN && e.total <= EPS_T_CLEAN_AMPLITUDE {
+            TAU_M_CLEAN
+        } else {
+            TAU_M_BASE - TAU_M_PER_ERROR * e.total + self.threshold
+        };
+        Thresholds {
+            voicing,
+            amplitude: self.threshold,
+        }
+    }
+
+    /// Adaptive smoothing (BABA §9): bands louder than the voicing
+    /// threshold become voiced and the frame's total amplitude is capped.
+    pub fn smooth(&mut self, Thresholds { voicing, amplitude }: Thresholds) {
+        let l = self.l;
         let cur = self.current();
         let mut am = 0f32;
         for ell in 1..=l {
-            if cur.m[ell] > vm {
+            if cur.m[ell] > voicing {
                 cur.voiced[ell] = true;
             }
             am += cur.m[ell];
         }
-        let tm: f32 = if er64 <= EPS_R_CLEAN && et <= EPS_T_CLEAN_AMPLITUDE {
-            TAU_M_CLEAN
-        } else {
-            TAU_M_BASE - TAU_M_PER_ERROR * et
-        };
+        let tm = amplitude;
         if tm <= am {
             let ym = tm / am;
             for ell in 1..=l {

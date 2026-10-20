@@ -50,6 +50,21 @@ pub enum Policy {
     /// unprotected bits wrong). Kept for the measurements, not used by the
     /// recorders.
     Soft,
+    /// The standards' (TIA-102.BABA, BABA-1) where op25 departs from them.
+    ///
+    /// Phase 1: u7 as sent, not shifted a bit low (BABA §7.1, Fig. 22:
+    /// b̂0's low bits, b̂2's LSB and the last scanned bits), the bits the
+    /// decoder here corrected (op25, given a regenerated frame, counts none),
+    /// a repeat only when both Eq. 97 and Eq. 98 hold, the local energy
+    /// `S_E` and amplitude threshold `τ_M` carried from frame to frame
+    /// (Eqs. 111, 115) and Eq. 112's 277.26.
+    ///
+    /// Phase 2: a silence frame is not the next frame's prediction (BABA-1
+    /// Eqs. 26, 43), a tone is told by u0 alone (§7), and its amplitude is
+    /// logarithmic (§7.2). Otherwise op25's, and its error counts.
+    ///
+    /// Being compared with op25's by ear (trunk-oxide-4hj, trunk-oxide-13y).
+    Standard,
 }
 
 /// `Policy::Soft`: the least margin (total |LLR|) of a frame's weakest

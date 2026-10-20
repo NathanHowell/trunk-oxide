@@ -59,6 +59,7 @@ impl Input {
                     params: ImbeParams::from_op25(u),
                     errors: et,
                     errors_c0: e0,
+                    errors_c4: 0,
                     reliability: f32::INFINITY,
                     unprotected: f32::INFINITY,
                 },

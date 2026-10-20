@@ -183,6 +183,7 @@ fn sure_imbe(rng: &mut Rng, b0: u32) -> ImbeFrame {
         params: crate::voice::ImbeParams::from_op25(imbe_with_b0(rng, b0)),
         errors: 0,
         errors_c0: 0,
+        errors_c4: 0,
         reliability: f32::INFINITY,
         unprotected: f32::INFINITY,
     }
@@ -266,4 +267,162 @@ fn soft_without_a_frame_is_op25() {
         let d = dibits(ambe_with_b0(&mut rng, 60));
         assert_eq!(a.vocode(&d, None), b.vocode(&d, None));
     }
+}
+
+// ── Policy::Standard ──
+
+/// A frame as decoded here, u7 as sent: b̂0 = `b0` by BABA §7.1.
+fn standard_imbe(rng: &mut Rng, b0: u16) -> ImbeFrame {
+    let mut f = sure_imbe(rng, 0);
+    let u = &mut f.params.0;
+    u[0] = (u[0] & 0x3f) | ((b0 >> 2) << 6);
+    u[7] = (u[7] & !0x6) | ((b0 & 3) << 1);
+    f
+}
+
+/// b̂0's low bits are u7's bits 2..1 as sent (BABA §7.1, Fig. 22), where
+/// op25 reads bits 1..0.
+#[test]
+#[allow(clippy::cast_possible_truncation)]
+fn standard_takes_the_pitch_from_u7_as_sent() {
+    let mut rng = Rng::new(9);
+    for b0 in [100, 101, 102, 103] {
+        let mut v = ImbeVocoder::with_policy(Policy::Standard);
+        v.vocode(&standard_imbe(&mut rng, b0), 0, 0);
+        let w0 = (4.0 * std::f64::consts::PI / (f64::from(b0) + 39.5)) as f32;
+        assert_eq!(v.spectrum().map(|s| s.w0), Some(w0), "b0 {b0}");
+    }
+}
+
+/// The standard repeats a frame only when c0 failed (Eq. 97) and the frame
+/// has many errors (Eq. 98); op25 when either holds.
+#[test]
+fn standard_repeats_only_on_both_tests() {
+    let mut rng = Rng::new(10);
+    let mut frame = standard_imbe(&mut rng, 100);
+    let (mut standard, mut op25) = (
+        ImbeVocoder::with_policy(Policy::Standard),
+        ImbeVocoder::new(),
+    );
+    standard.vocode(&frame, 0, 0);
+    op25.vocode(&frame, 0, 0);
+    // c0 failed, few errors besides.
+    (frame.errors_c0, frame.errors) = (2, 2);
+    standard.vocode(&frame, 2, 2);
+    op25.vocode(&frame, 2, 2);
+    assert_eq!(
+        (standard.last(), op25.last()),
+        (Decision::Played, Decision::Repeated)
+    );
+    // Both.
+    (frame.errors_c0, frame.errors) = (3, 12);
+    standard.vocode(&frame, 3, 12);
+    assert_eq!(standard.last(), Decision::Repeated);
+}
+
+/// The standard plays a phase 1 frame by the decoder's own error counts,
+/// not the ones op25 is given.
+#[test]
+fn standard_counts_the_bits_it_corrected() {
+    let mut rng = Rng::new(11);
+    let mut frame = standard_imbe(&mut rng, 100);
+    let mut v = ImbeVocoder::with_policy(Policy::Standard);
+    v.vocode(&frame, 0, 0);
+    (frame.errors_c0, frame.errors) = (3, 12);
+    v.vocode(&frame, 0, 0);
+    assert_eq!(v.last(), Decision::Repeated);
+}
+
+/// τ<sub>M</sub> builds on the last frame's while errors persist, and `S_E`
+/// is a running average (BABA Eqs. 111, 115).
+#[test]
+fn standard_thresholds_carry_from_frame_to_frame() {
+    use super::synth::{Errors, Synthesizer};
+    let mut s = Synthesizer::new();
+    let noisy = Errors {
+        rate: 0.02,
+        total: 10.0,
+        c4: 1.0,
+    };
+    let rm0 = 1e6;
+    let mut se = 75000.0;
+    for tm in [23480.0, 26480.0, 29480.0] {
+        se = 0.95f32.mul_add(se, 0.05 * rm0);
+        let t = s.standard_thresholds(Some(rm0), noisy);
+        assert_eq!(t.amplitude(), tm);
+        let vm = 1.414 * f64::from(se).powf(0.375);
+        assert!(
+            (f64::from(t.voicing()) / vm - 1.0).abs() < 1e-5,
+            "{t:?} {vm}"
+        );
+    }
+    // A repeat keeps S_E; a clean frame resets τ_M.
+    let t = s.standard_thresholds(None, noisy);
+    assert!((f64::from(t.voicing()) / (1.414 * f64::from(se).powf(0.375)) - 1.0).abs() < 1e-5);
+    assert_eq!(
+        s.standard_thresholds(Some(rm0), Errors::default())
+            .amplitude(),
+        20480.0
+    );
+}
+
+/// Under the standard, a silence frame between two voice frames leaves the
+/// second predicted from the first (BABA-1 Eqs. 26, 43); op25 predicts it
+/// from the silence.
+#[test]
+fn standard_predicts_past_silence_from_the_last_voice_frame() {
+    let mut rng = Rng::new(12);
+    let (a, silence, b) = (
+        dibits(ambe_with_b0(&mut rng, 60)),
+        dibits(ambe_with_b0(&mut rng, 124)),
+        dibits(ambe_with_b0(&mut rng, 70)),
+    );
+    let after = |policy: Policy, frames: &[[u8; 36]]| {
+        let mut v = AmbeVocoder::with_policy(policy);
+        for f in frames {
+            v.vocode(f, None);
+        }
+        v.spectrum()
+    };
+    let direct = after(Policy::Standard, &[a, b]);
+    assert_eq!(after(Policy::Standard, &[a, silence, b]), direct);
+    assert_ne!(after(Policy::Op25, &[a, silence, b]), direct);
+    assert_eq!(after(Policy::Op25, &[a, b]), direct);
+}
+
+/// The standard knows a tone by u0 alone: an error in u3[3:0], which is
+/// not protected, leaves it a tone (BABA-1 §7).
+#[test]
+fn standard_knows_a_tone_by_u0() {
+    let AmbeParams(mut u) = tone(129, 100);
+    u[3] |= 1;
+    let damaged = dibits(AmbeParams(u));
+    let mut standard = AmbeVocoder::with_policy(Policy::Standard);
+    let pcm: Vec<i16> = (0..10)
+        .flat_map(|_| standard.vocode(&damaged, None).expect("a tone"))
+        .collect();
+    assert!(standard.spectrum().is_none(), "played as a tone");
+    assert!(power(&pcm, 1209.0) > 1000.0 * power(&pcm, 950.0));
+    let mut op25 = AmbeVocoder::new();
+    // To op25 it is voice, b0 = 120: an erasure.
+    op25.vocode(&damaged, None);
+    assert_eq!(op25.last(), Decision::Repeated);
+}
+
+/// The standard's tone amplitude is logarithmic: AD 127 is full scale,
+/// 0.711 dB down a step (BABA-1 §7.2).
+#[test]
+fn standard_tone_amplitude_is_logarithmic() {
+    let peak = |ad: u16| {
+        let mut v = AmbeVocoder::with_policy(Policy::Standard);
+        // 1000 Hz (index 32), a single tone.
+        let pcm: Vec<i16> = (0..5)
+            .flat_map(|_| v.vocode(&dibits(tone(32, ad)), None).expect("a tone"))
+            .collect();
+        f64::from(pcm.iter().map(|s| s.unsigned_abs()).max().unwrap_or(0))
+    };
+    let db = |ad| 20.0 * (peak(ad) / 32767.0).log10();
+    assert!(db(127).abs() < 0.1, "{}", db(127));
+    assert!(63.0f64.mul_add(0.711, db(64)).abs() < 0.2, "{}", db(64));
+    assert!((db(0) + 90.3).abs() < 1.5, "{}", db(0));
 }

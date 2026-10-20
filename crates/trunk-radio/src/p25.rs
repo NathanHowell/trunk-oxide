@@ -210,7 +210,10 @@ impl ChannelDecoder for ControlSlot {
             }
             let parsed = self.parser.parse_message(&r.message);
             if !parsed.is_empty() {
-                out.events.push(RadioEvent::TrunkMessages(parsed));
+                out.events.push(RadioEvent::TrunkMessages {
+                    control_hz: self.shared.channel.freq_hz,
+                    messages: parsed,
+                });
             }
         }
         *self
@@ -394,7 +397,7 @@ mod tests {
         out.events
             .iter()
             .filter_map(|e| match e {
-                RadioEvent::TrunkMessages(m) => Some(m),
+                RadioEvent::TrunkMessages { messages, .. } => Some(messages),
                 _ => None,
             })
             .flatten()

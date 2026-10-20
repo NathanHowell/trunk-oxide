@@ -302,8 +302,12 @@ impl From<trunk_fm::gate::CloseReason> for CloseReason {
 
 /// Events from the DSP threads to the monitor loop.
 pub enum RadioEvent {
-    /// Parsed trunk messages from a control channel.
-    TrunkMessages(Vec<TrunkMessage>),
+    /// Parsed trunk messages from the control channel decoded at
+    /// `control_hz`.
+    TrunkMessages {
+        control_hz: f64,
+        messages: Vec<TrunkMessage>,
+    },
     /// A conventional channel's transmission detector (the power squelch
     /// of a digital channel, trunk-fm's gate on an analog one) opened or
     /// closed.

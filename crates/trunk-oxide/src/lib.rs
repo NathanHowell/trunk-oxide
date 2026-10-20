@@ -993,8 +993,11 @@ impl Scanner {
                 },
                 Some(event) = self.event_rx.recv() => {
                     match event {
-                        RadioEvent::TrunkMessages(messages) => {
+                        RadioEvent::TrunkMessages { control_hz, messages } => {
                             let now = call_mgr.clock().now();
+                            // Before the duplicates go: each control channel
+                            // is judged on what it decoded itself.
+                            call_mgr.control_heard(control_hz, &messages);
                             let messages: Vec<_> = messages
                                 .into_iter()
                                 .filter(|m| {
@@ -1097,8 +1100,12 @@ mod tests {
         let queue = EventQueue(tx.downgrade());
         let events = EventSender::new(tx);
         assert_eq!(queue.depth(), 0);
-        events.send(RadioEvent::TrunkMessages(Vec::new()));
-        events.send(RadioEvent::TrunkMessages(Vec::new()));
+        let empty = || RadioEvent::TrunkMessages {
+            control_hz: 0.0,
+            messages: Vec::new(),
+        };
+        events.send(empty());
+        events.send(empty());
         assert_eq!(queue.depth(), 2);
         rx.try_recv().unwrap();
         assert_eq!(queue.depth(), 1);

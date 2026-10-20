@@ -980,6 +980,22 @@ impl CallManager {
         self.state.clock()
     }
 
+    /// The control channel at `control_hz` decoded `messages`.
+    pub fn control_heard(&mut self, control_hz: f64, messages: &[TrunkMessage]) {
+        let Some(sys_num) = messages.first().map(|m| m.sys_num) else {
+            return;
+        };
+        let decoded = messages
+            .iter()
+            .filter(|m| m.kind != Trunking::Invalid)
+            .count();
+        self.state.on_control_heard(
+            sys_num,
+            control_hz,
+            u32::try_from(decoded).unwrap_or(u32::MAX),
+        );
+    }
+
     /// `msg` was dropped as a duplicate before reaching the state machine.
     pub fn note_duplicate(&self, msg: &TrunkMessage) {
         self.control_channel_duplicates.add(

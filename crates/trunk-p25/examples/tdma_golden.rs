@@ -280,8 +280,11 @@ impl Op25 {
                                     ((self.slot as i32 >> 1) + i32::from(pdu.offset()) + 1) % 5;
                             }
                             MacOpcode::Active => {
+                                // %101 is the sixth burst (BBAC-1 Table
+                                // 8-7), a whole voice cycle on, so the
+                                // first's place; %110 and %111 are reserved.
                                 let o = i32::from(pdu.offset());
-                                self.first_4v = if o > 4 { 0 } else { o };
+                                self.first_4v = if o > 5 { 0 } else { o % 5 };
                             }
                             MacOpcode::Hangtime => self.burst_id = -1,
                             _ => {}

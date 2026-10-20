@@ -2,7 +2,8 @@
 //! sent unscrambled as dibits 20, 57, 142 and 179 of the burst.
 //!
 //! op25 decodes it with a 256-entry table on hard bits (ambiguous words fail);
-//! here it is maximum likelihood over the burst types a voice channel uses.
+//! here it is maximum likelihood over the burst types a voice channel uses,
+//! which leaves out the two reserved values op25 reads as LCCH.
 
 use crate::fec::{BinaryCode, Decision};
 
@@ -71,16 +72,17 @@ impl BurstType {
         }
     }
 
-    /// The types with a meaning.
-    pub const DEFINED: [Self; 8] = [
+    /// The types BBAC Table 5-3 defines for a voice channel, the candidates
+    /// of [`decode`]. op25's LCCH values (4 and 13) are reserved there, and
+    /// as candidates would only crowd the voice channel's: two more
+    /// codewords to lose margin to.
+    pub const DEFINED: [Self; 6] = [
         Self::Voice4,
         Self::Voice2,
         Self::Sacch { scrambled: true },
         Self::Sacch { scrambled: false },
         Self::Facch { scrambled: true },
         Self::Facch { scrambled: false },
-        Self::Lcch { scrambled: true },
-        Self::Lcch { scrambled: false },
     ];
 
     pub const fn scrambled(self) -> bool {

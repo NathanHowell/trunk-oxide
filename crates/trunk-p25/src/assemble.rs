@@ -377,7 +377,11 @@ impl Phase1Assembler {
     }
 }
 
-/// op25's MAC message lengths by opcode, for those that carry none.
+/// op25's MAC message lengths by opcode, for those that carry none. Some
+/// are in neither BBAC nor BBAC-1 (0x48, 0x49, 0x71 = 29, 0xc7 = 32,
+/// 0xde = 40 among them), presumably op25's from BBAC-A, which is not to
+/// hand; they are kept. 0x80–0xbf are manufacturer messages, which give
+/// their own length ([`MFR_LENGTH`]), so their row is empty.
 const MAC_MSG_LEN: [u8; 256] = [
     0, 7, 8, 7, 0, 16, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, //
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, //
@@ -387,9 +391,9 @@ const MAC_MSG_LEN: [u8; 256] = [
     0, 0, 0, 0, 9, 7, 0, 0, 10, 0, 7, 0, 10, 8, 14, 7, //
     9, 9, 0, 0, 9, 0, 0, 9, 10, 0, 7, 10, 10, 7, 0, 9, //
     9, 29, 9, 9, 9, 9, 10, 13, 9, 9, 9, 11, 9, 9, 0, 0, //
-    8, 0, 0, 7, 11, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, //
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, //
-    16, 0, 0, 11, 13, 11, 11, 11, 10, 0, 0, 0, 0, 0, 0, 0, //
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, //
+    0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, //
     0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, //
     11, 0, 0, 8, 15, 12, 15, 32, 12, 12, 0, 27, 14, 29, 29, 32, //
     0, 0, 0, 0, 0, 0, 9, 0, 14, 29, 11, 27, 14, 0, 40, 11, //

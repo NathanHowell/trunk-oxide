@@ -138,7 +138,9 @@ pub enum MacOpcode {
 impl MacOpcode {
     pub const fn from_bits(v: u8) -> Self {
         match v & 7 {
-            // Reserved in BBAC Table 8-6; op25's MAC_SIGNAL.
+            // Reserved in BBAC Table 8-6, but op25's MAC_SIGNAL (from a
+            // later revision): kept, as reading it is harmless and its
+            // count stays comparable with op25's.
             0 => Self::Signal,
             MAC_PTT => Self::Ptt,
             MAC_END_PTT => Self::EndPtt,

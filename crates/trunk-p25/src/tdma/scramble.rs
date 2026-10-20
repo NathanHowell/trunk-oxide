@@ -17,9 +17,12 @@ const MASK: u64 = (1 << WIDTH) - 1;
 /// (BBAC §7.2.5 eq. 4).
 const TAPS: [u32; 6] = [40, 35, 29, 24, 10, 0];
 /// `seed_external` = WACN·2²⁴ + System ID·2¹² + CC (BBAC §7.2.5 eq. 5).
+/// Eq. 5 replaces an all-zero seed with 2⁴⁴ − 1, but the color code is the
+/// NAC, which is never 0 ([`Nac::new`]), so the seed never is.
 const WACN_SHIFT: u32 = 24;
 const SYSTEM_ID_SHIFT: u32 = 12;
-/// System ID is 12 bits (BBAC §7.2.5).
+/// WACN is 20 bits and System ID 12 (BBAC §7.2.5).
+const WACN_MASK: u64 = 0xf_ffff;
 const SYSTEM_ID_MASK: u64 = 0xfff;
 
 const fn feedback() -> u64 {
@@ -53,7 +56,7 @@ impl std::fmt::Debug for Scrambler {
 
 impl Scrambler {
     pub const fn new(wacn: u32, system: u16, nac: Nac) -> Self {
-        let id = ((wacn as u64) << WACN_SHIFT)
+        let id = ((wacn as u64 & WACN_MASK) << WACN_SHIFT)
             | ((system as u64 & SYSTEM_ID_MASK) << SYSTEM_ID_SHIFT)
             | nac.get() as u64;
         // The seed is the identity times (1 + Σ x^-(44−t)) over the taps.
@@ -115,6 +118,14 @@ mod tests {
             0,3,2,2,3,1,3,0,2,0,2,3,3,0,2,3,0,2,0,1,1,2,2,0,1,0,3,3,0,2,2,1,
         ];
         assert_eq!(S.dibits()[..128], expected);
+    }
+
+    /// Only the WACN's 20 bits and the System ID's 12 seed the sequence.
+    #[test]
+    fn the_seed_takes_the_fields_widths() {
+        let nac = Nac::new(0x5e1).unwrap();
+        let s = Scrambler::new(0xbee00, 0x5e4, nac);
+        assert_eq!(Scrambler::new(0xfffb_ee00, 0xf5e4, nac), s);
     }
 
     #[test]

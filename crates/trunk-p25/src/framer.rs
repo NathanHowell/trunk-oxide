@@ -8,7 +8,9 @@
 //! keeps working far below the BCH decoder's limit.
 
 use crate::bch;
-use crate::symbols::{FRAME_SYNC, FRAME_SYNC_MASK, LEVELS, SYNC_DIBITS, dist2, is_status, slice};
+use crate::symbols::{
+    FRAME_SYNC, FRAME_SYNC_MASK, LEVELS, STATUS_PERIOD, SYNC_DIBITS, dist2, is_status, slice,
+};
 use crate::trellis::BLOCK_DIBITS;
 use crate::types::Nac;
 
@@ -47,8 +49,9 @@ pub const TDU_DIBITS: usize = 72;
 /// §8.2.3).
 pub const TDULC_DIBITS: usize = 216;
 /// A TSDU of three TSBKs: ten micro-slots (AABB-B §5). One- and two-TSBK
-/// TSDUs are five and eight micro-slots, but every TSDU is framed at this
-/// length; a shorter one ends at the next sync.
+/// TSDUs are five and eight; a TSDU is framed at this length until its
+/// decoder finds the last TSBK earlier and shortens it
+/// ([`Framer::shorten_current`]).
 pub const TSDU_TRIPLE_DIBITS: usize = 360;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -111,11 +114,10 @@ impl Duid {
     }
 }
 
-/// Dibits (including status) a frame needs to carry `blocks` 98-dibit blocks.
-///
-/// This stops at the last data dibit (and a status dibit right after it); the
-/// trailing nulls that fill a packet out to its micro-slot (BAAA-A §8.2.4)
-/// are not counted.
+/// Dibits (including status) a frame of `blocks` 98-dibit blocks takes on
+/// the air: to its last data dibit, then the trailing nulls that fill it out
+/// to the next status symbol (BAAA-A §8.2.4), so 180, 288 and 360 for one,
+/// two and three blocks.
 pub const fn frame_dibits_for(blocks: usize) -> usize {
     let data = SYNC_DIBITS + NID_DIBITS + BLOCK_DIBITS * blocks;
     let mut total = 0;
@@ -126,11 +128,7 @@ pub const fn frame_dibits_for(blocks: usize) -> usize {
         }
         total += 1;
     }
-    // A status dibit that falls right after the data still belongs to it.
-    if is_status(total) {
-        total += 1;
-    }
-    total
+    total.div_ceil(STATUS_PERIOD) * STATUS_PERIOD
 }
 
 /// The 64-bit NID: BCH codeword of NAC and DUID, then the parity bit.
@@ -336,6 +334,13 @@ impl Framer {
     pub fn extend_current(&mut self, total_dibits: usize) {
         if let Some(cur) = &mut self.cur {
             cur.total = cur.total.max(total_dibits);
+        }
+    }
+
+    /// Shorten the frame in flight (a TSDU's last TSBK came early).
+    pub fn shorten_current(&mut self, total_dibits: usize) {
+        if let Some(cur) = &mut self.cur {
+            cur.total = cur.total.min(total_dibits);
         }
     }
 

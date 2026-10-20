@@ -8,8 +8,7 @@ use num_complex::Complex32;
 use crate::bch;
 use crate::crc;
 use crate::framer::{
-    Duid, HDU_DIBITS, LDU_DIBITS, NID_DIBITS, TDU_DIBITS, TDULC_DIBITS, TSDU_TRIPLE_DIBITS,
-    nid_word,
+    Duid, HDU_DIBITS, LDU_DIBITS, NID_DIBITS, TDU_DIBITS, TDULC_DIBITS, frame_dibits_for, nid_word,
 };
 use crate::symbols::{LEVELS, STATUS_PERIOD, sync_dibits};
 use crate::trellis;
@@ -101,7 +100,7 @@ pub fn tsdu(nac: Nac, tsbks: &[[u8; 10]]) -> Vec<u8> {
     for (i, t) in tsbks.iter().enumerate() {
         d.extend_from_slice(&trellis::encode(&tsbk_block(t, i + 1 == tsbks.len())));
     }
-    with_status(&d, TSDU_TRIPLE_DIBITS)
+    with_status(&d, frame_dibits_for(tsbks.len()))
 }
 
 fn dibits_of(bits: &[bool]) -> Vec<u8> {

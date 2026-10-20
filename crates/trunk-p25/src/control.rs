@@ -263,6 +263,17 @@ impl ControlChannelDecoder {
             {
                 self.framer.extend_current(frame_dibits_for(1 + blocks));
             }
+            // A TSDU of one or two TSBKs (AABB-B §5) ends with its last.
+            if let Some((Duid::Tsdu, body)) = self.framer.current()
+                && let n = body.len() / BLOCK_DIBITS
+                && body.len().is_multiple_of(BLOCK_DIBITS)
+                && (1..3).contains(&n)
+                && let Ok(last) = <&SoftBlock>::try_from(&body[(n - 1) * BLOCK_DIBITS..])
+                && let Some((data, _)) = self.block(last)
+                && Tsbk::new(data[..TSBK_BYTES].try_into().unwrap_or([0; TSBK_BYTES])).is_last()
+            {
+                self.framer.shorten_current(frame_dibits_for(n));
+            }
             let before = out.len();
             for frame in std::mem::take(&mut self.frames) {
                 self.handle(&frame, out);
@@ -424,6 +435,44 @@ mod tests {
     use crate::testgen::{self, Channel, Rng};
 
     const NAC: Nac = Nac::new(0x38d).unwrap();
+
+    #[test]
+    fn short_tsdus_end_at_their_last_tsbk_so_the_next_sync_is_expected() {
+        assert_eq!(
+            [1, 2, 3].map(frame_dibits_for),
+            [180, 288, 360],
+            "to the next status symbol"
+        );
+        let mut rng = Rng::new(5);
+        let sent = testgen::random_tsbks(&mut rng, 6);
+        let mut dibits = testgen::tsdu(NAC, &sent[..1]);
+        let second = dibits.len();
+        dibits.extend(testgen::tsdu(NAC, &sent[1..3]));
+        dibits.extend(testgen::tsdu(NAC, &sent[3..]));
+        dibits.extend(vec![0u8; 200]);
+        // 8 bit errors in the second sync: past the 6 a sync search takes,
+        // inside the 12 allowed where the last frame says one starts.
+        for d in &mut dibits[second..second + 4] {
+            *d ^= 3;
+        }
+        let mut dec = ControlChannelDecoder::new(DecoderConfig::new(DemodConfig::new(
+            24000.0,
+            Modulation::Cqpsk,
+        )));
+        let mut out = Vec::new();
+        dec.process_symbols(&crate::framer::ideal(&dibits), &mut out);
+        // All six, the last-block bit aside (each TSDU's last has it set).
+        let opcodes = |t: &[u8]| (t[0] & 0x7f, t[1..].to_vec());
+        let got: Vec<_> = tsbks(&out).iter().map(|t| opcodes(t.bytes())).collect();
+        let want: Vec<_> = sent.iter().map(|t| opcodes(t)).collect();
+        assert_eq!(got, want);
+        let f = dec.stats().framer;
+        assert_eq!(
+            (f.frames, f.truncated, f.flywheel_syncs),
+            (3, 0, 1),
+            "{f:?}"
+        );
+    }
 
     #[test]
     fn only_an_alternate_format_mbt_has_an_osp_opcode() {

@@ -22,6 +22,7 @@ pub mod pace;
 pub mod radio;
 pub mod recording;
 pub mod registry;
+pub mod snapshot;
 pub mod source;
 pub mod tap;
 pub mod types;

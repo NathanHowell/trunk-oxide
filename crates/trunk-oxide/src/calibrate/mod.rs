@@ -14,9 +14,11 @@
 //! Pre-flight acquisition lives in [`rtl`]; it opens each dongle
 //! standalone before the sources are built, so nothing is perturbed. [`cache`] keeps each device's last sweep across restarts and
 //! [`recheck`] decides whether it still stands; [`report`] hands the
-//! outcome to the metrics.
+//! outcome to the metrics, and [`live`] measures the floor again on the
+//! running stream.
 
 pub mod cache;
+pub mod live;
 pub mod measure;
 pub mod probe;
 pub mod report;
@@ -162,14 +164,8 @@ pub fn recheck(
     if !probe.supported_gains()?.contains(&cached.gain_db) {
         return Ok(unknown);
     }
-    let curve: Vec<(f64, f64)> = cached
-        .sweep
-        .iter()
-        .filter(|p| p.sat_frac <= policy.sat_limit)
-        .map(|p| (p.gain_db, p.noise_floor_db))
-        .collect();
-    let Some(model) = select::NoiseModel::fit(&curve).filter(|m| m.rms_db <= policy.max_fit_rms_db)
-    else {
+    let curve = unsaturated(policy, cached);
+    let Some(model) = model(policy, cached) else {
         return Ok(unknown);
     };
     let m = measure(&probe.capture(cached.gain_db)?, &policy.measure_params());
@@ -198,6 +194,24 @@ pub fn recheck(
         moved_db,
         penalty_db,
     })
+}
+
+/// A cached sweep's steps that did not saturate, as (gain, floor dB).
+fn unsaturated(policy: &CalibrationPolicy, cached: &cache::Cached) -> Vec<(f64, f64)> {
+    cached
+        .sweep
+        .iter()
+        .filter(|p| p.sat_frac <= policy.sat_limit)
+        .map(|p| (p.gain_db, p.noise_floor_db))
+        .collect()
+}
+
+/// The noise model fitted to a cached sweep, if it fits well enough to
+/// trust.
+#[must_use]
+pub fn model(policy: &CalibrationPolicy, cached: &cache::Cached) -> Option<select::NoiseModel> {
+    select::NoiseModel::fit(&unsaturated(policy, cached))
+        .filter(|m| m.rms_db <= policy.max_fit_rms_db)
 }
 
 /// Sweep every supported gain on `probe`, measure each, and select the best.

@@ -16,6 +16,7 @@ use crate::ChannelizerStats;
 use crate::correction::Correction;
 use crate::kind::Chz;
 use crate::pace::Pacer;
+use crate::snapshot::{Snapshots, Taker};
 use crate::types::{AudioSink, Decoded, DetectedSignal, EventSender, RadioEvent};
 
 /// How long a block read waits before the thread checks for a stop.
@@ -52,10 +53,11 @@ struct Thread {
     rate_hz: f64,
     device: String,
     pacer: Option<Pacer>,
+    snapshots: Option<Taker>,
 }
 
 impl Thread {
-    fn run(self) {
+    fn run(mut self) {
         let hop = self.chz.config().hop();
         let mut buf = vec![Complex32::ZERO; hop];
         let mut filled = 0;
@@ -78,6 +80,9 @@ impl Thread {
                 && !p.turn(slot, &self.stopping)
             {
                 break;
+            }
+            if let Some(t) = &mut self.snapshots {
+                t.block(&buf);
             }
             self.chz.run(&buf, &mut out);
             self.got_samples.store(true, Ordering::Relaxed);
@@ -134,6 +139,7 @@ pub struct SourceSpec {
     pub center_hz: f64,
     pub rate_hz: f64,
     pub pacer: Option<Pacer>,
+    pub snapshots: Option<Snapshots>,
 }
 
 /// One SDR (or file) and its channelizer, running.
@@ -185,6 +191,7 @@ impl Source {
             center_hz,
             rate_hz,
             pacer,
+            snapshots,
         } = spec;
         let cfg = trunk_channelizer::Config::standard(rate_hz)
             .with_context(|| format!("channelizer for {rate_hz} S/s"))?;
@@ -216,6 +223,7 @@ impl Source {
             rate_hz,
             device: device.clone(),
             pacer,
+            snapshots: snapshots.map(|s| Taker::new(s, idx, device.clone(), rate_hz)),
         };
         let thread = std::thread::Builder::new()
             .name(format!("source-{idx}"))

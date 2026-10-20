@@ -34,6 +34,8 @@ pub struct RadioConfig {
     /// A replay faster than real time: the sources keep capture time (see
     /// [`crate::pace`]). None live.
     pub pacer: Option<crate::pace::Pacer>,
+    /// Raw samples from every source now and then (see [`crate::snapshot`]).
+    pub snapshots: Option<crate::snapshot::Snapshots>,
 }
 
 /// What a system's channels are decoded with.
@@ -293,6 +295,7 @@ impl Radio {
                 center_hz: setup.center_hz,
                 rate_hz: setup.rate_hz,
                 pacer: self.cfg.pacer.clone(),
+                snapshots: self.cfg.snapshots.clone(),
             },
             setup.stream,
             setup.running,

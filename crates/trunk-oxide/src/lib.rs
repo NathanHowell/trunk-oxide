@@ -148,6 +148,8 @@ struct Calibrated {
     reason: &'static str,
     /// A fresh sweep, to cache.
     swept: Option<calibrate::Sweep>,
+    /// The noise model fitted to the device's sweep (fresh or cached).
+    model: Option<calibrate::select::NoiseModel>,
 }
 
 impl Calibrated {
@@ -157,6 +159,7 @@ impl Calibrated {
             noise_floor_db: None,
             reason: "configured",
             swept: None,
+            model: None,
         }
     }
 }
@@ -207,6 +210,7 @@ fn run_calibration(
                     noise_floor_db: Some(c.noise_floor_db),
                     reason: "cached",
                     swept: None,
+                    model: calibrate::model(policy, c),
                 };
             }
             Ok(r) => tracing::info!(
@@ -242,6 +246,7 @@ fn run_calibration(
                 noise_floor_db: sel.noise_floor_db.is_finite().then_some(sel.noise_floor_db),
                 reason: sel.reason.label(),
                 swept: Some(sweep),
+                model: None,
             }
         }
         Err(e) => {
@@ -291,7 +296,7 @@ fn calibrate_sources_parallel(
     let mut swept = false;
     for handle in handles {
         match handle.join() {
-            Ok((idx, device, c)) => {
+            Ok((idx, device, mut c)) => {
                 if let Some(sweep) = &c.swept
                     && sweep.selection.reason != calibrate::SelectReason::Fallback
                 {
@@ -318,6 +323,9 @@ fn calibrate_sources_parallel(
                         },
                     );
                     swept = true;
+                    c.model = cache
+                        .get(&device)
+                        .and_then(|k| calibrate::model(&policy, k));
                 }
                 gains.insert(idx, c);
             }
@@ -534,6 +542,10 @@ impl ScannerBuilder {
                 adaptive_correction: rec.is_some_and(|r| r.adaptive_freq_correction),
                 conditioning,
                 pacer: pacer.clone(),
+                snapshots: Some(
+                    calibrate::live::start(calibrate::CalibrationPolicy::default())
+                        .context("starting the live noise floor")?,
+                ),
             },
             sink,
             events,
@@ -563,6 +575,7 @@ impl ScannerBuilder {
                         gain_db: c.gain_db,
                         noise_floor_db: c.noise_floor_db,
                         reason: c.reason,
+                        model: c.model,
                     }
                 })
                 .collect(),

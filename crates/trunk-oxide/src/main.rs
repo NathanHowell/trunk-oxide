@@ -194,6 +194,45 @@ fn main() -> Result<()> {
                 }
             })
             .build();
+        let live_floor = |pick: fn(&trunk_oxide::calibrate::report::LiveFloor) -> Option<f64>| {
+            move |observer: &dyn opentelemetry::metrics::AsyncInstrument<f64>| {
+                for l in trunk_oxide::calibrate::report::live() {
+                    if let Some(v) = pick(&l) {
+                        observer.observe(
+                            v,
+                            &[
+                                KeyValue::new("device", l.device.clone()),
+                                KeyValue::new("source", i64::try_from(l.source).unwrap_or(-1)),
+                            ],
+                        );
+                    }
+                }
+            }
+        };
+        let _live_floor = meter
+            .f64_observable_gauge("trunk.oxide.source.live_floor_db")
+            .with_description(
+                "The noise floor measured on the running stream each minute (relative dB, the sweep's scale)",
+            )
+            .with_unit("dB")
+            .with_callback(live_floor(|l| Some(l.floor_db)))
+            .build();
+        let _floor_drift = meter
+            .f64_observable_gauge("trunk.oxide.source.floor_drift_db")
+            .with_description(
+                "How far the live noise floor moved from the gain calibration's at the same gain (heat drift)",
+            )
+            .with_unit("dB")
+            .with_callback(live_floor(|l| l.drift_db))
+            .build();
+        let _adc_penalty = meter
+            .f64_observable_gauge("trunk.oxide.source.adc_penalty_db")
+            .with_description(
+                "The SNR the ADC's noise takes at the running gain, by the calibration's noise model and the live floor",
+            )
+            .with_unit("dB")
+            .with_callback(live_floor(|l| l.penalty_db))
+            .build();
         let _depth_gauge = meter
             .u64_observable_gauge("trunk.oxide.event_channel.depth")
             .with_description("Number of GR events queued but not yet consumed")

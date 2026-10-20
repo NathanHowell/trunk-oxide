@@ -142,7 +142,7 @@ impl Corpus {
                             .collect::<Vec<u8>>()
                             .try_into()
                             .ok()?;
-                        let (p, errors) = AmbeCodeword::from_dibits(&d).decode_op25();
+                        let (p, errors) = AmbeCodeword::from_dibits(&d).decode();
                         let b0 = ambe_b0(p);
                         (errors == [0, 0] && (b0 < 120 || (all_kinds && b0 >= 124))).then_some(p)
                     })

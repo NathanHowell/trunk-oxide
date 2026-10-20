@@ -201,16 +201,41 @@ fn encrypted_frames_count_toward_the_error_rate() {
     let mut v = AmbeVocoder::new();
     for _ in 0..60 {
         let mut d = dibits(ambe_with_b0(&mut rng, 60));
-        // Sent bits 0, 4 and 8: c0's first three, which op25 counts as
-        // five errors, enough to hold its rate above the limit.
+        // Sent bits 0, 4 and 8, c0's first three, and 25 and 29, c1's
+        // first two: five corrected, which holds ε_R at 0.106, above the
+        // limit (BABA-1 Eq. 56).
         d[0] ^= 2;
         d[2] ^= 2;
         d[4] ^= 2;
+        d[12] ^= 1;
+        d[14] ^= 1;
         v.encrypted(&d);
     }
     assert!(v.decode(&dibits(ambe_with_b0(&mut rng, 60))).is_none());
     let recovered = (0..100).any(|_| v.decode(&dibits(ambe_with_b0(&mut rng, 60))).is_some());
     assert!(recovered);
+}
+
+/// Errors the codes corrected leave a frame's parameters as sent, but
+/// raise ε<sub>R</sub> and ε<sub>T</sub>, which the adaptive smoothing reacts to (BABA §9).
+#[test]
+fn corrected_errors_smooth_phase_2() {
+    let mut rng = Rng::new(6);
+    let frames: Vec<[u8; 36]> = (0..40)
+        .map(|_| dibits(ambe_with_b0(&mut rng, 60)))
+        .collect();
+    let (mut clean, mut noisy) = (AmbeVocoder::new(), AmbeVocoder::new());
+    let mut differ = false;
+    for d in &frames {
+        let mut e = *d;
+        // Sent bits 25 and 29: c1's first two, corrected (ε_T = 2).
+        e[12] ^= 1;
+        e[14] ^= 1;
+        let (a, b) = (clean.decode(d), noisy.decode(&e));
+        assert!(a.is_some() && b.is_some());
+        differ |= a != b;
+    }
+    assert!(differ);
 }
 
 /// A DTMF tone frame plays both of its tones, continuing across frames.

@@ -3,7 +3,9 @@
 //! (`mbe_dequantizeAmbe2250Parms`, `mbe_dequantizeAmbeTone`) and op25's
 //! repeat and mute rules, synthesised by op25's software IMBE synthesiser.
 //! Where they depart from TIA-102.BABA-1 in what a silence or tone frame
-//! is, the standard's way is taken (by vote, trunk-oxide-13y).
+//! is, the standard's way is taken (by vote, trunk-oxide-13y), and so it
+//! is for the error counts the rules take and for adaptive smoothing,
+//! which op25 runs as if no frame had errors.
 //!
 //! mbelib keeps a current and a previous model and copies one to the other
 //! after every frame, so between frames they are equal: one model is kept
@@ -26,9 +28,7 @@
 use std::f64::consts::{LN_2, PI, SQRT_2};
 use std::ops::RangeInclusive;
 
-use super::synth::{
-    Errors, HARMONICS, Pcm, SAMPLES_PER_FRAME, Synthesizer, Thresholds, op25_energy,
-};
+use super::synth::{Errors, HARMONICS, Pcm, SAMPLES_PER_FRAME, Synthesizer};
 use super::tables::{
     AMBE_BLOCKS, AMBE_GAIN, AMBE_HOC5, AMBE_HOC6, AMBE_HOC7, AMBE_HOC8, AMBE_L, AMBE_PRBA24,
     AMBE_PRBA58, AMBE_VUV, AMBE_W0,
@@ -47,6 +47,8 @@ pub struct AmbeVocoder {
     tone: Tone,
     /// Running bit error rate; frames are muted above [`MAX_ERROR_RATE`].
     error_rate: f64,
+    /// The last frame's ε0 and ε1.
+    errors: [u32; 2],
     /// Frames rejected in a row.
     rejected: u32,
     /// Whether the last frame rendered was a tone.
@@ -87,9 +89,6 @@ const REPEAT_E0_WITH_TOTAL: u32 = 2;
 const REPEAT_TOTAL: u32 = 6;
 
 /// Whether a frame's error counts call for a frame repeat (BABA-1 §5.6).
-/// The thresholds are the spec's; the counts given them are op25's, not
-/// the bits corrected or detected (trunk-oxide-13y.2, see
-/// [`crate::tdma::ambe`]'s `op25_golay_23`).
 const fn repeat_for_errors(e0: u32, e1: u32) -> bool {
     e0 >= REPEAT_E0 || (e0 >= REPEAT_E0_WITH_TOTAL && e0 + e1 >= REPEAT_TOTAL)
 }
@@ -120,12 +119,6 @@ const TONE_AD_MAX: u16 = 127;
 const TONE_AD_STEP_DB: f64 = (3.17 + 87.13) / 127.0;
 const FULL_SCALE: f64 = 32767.0;
 
-/// The error rate and errors op25 gives the adaptive smoothing for phase
-/// 2: none, so it never reacts to errors (trunk-oxide-13y.5; BABA §9 takes
-/// ε<sub>R</sub> and ε<sub>T</sub>).
-const OP25_SMOOTHING_ERROR_RATE: f32 = 0.0;
-const OP25_SMOOTHING_ERRORS: f32 = 0.0;
-
 impl Default for AmbeVocoder {
     fn default() -> Self {
         Self::new()
@@ -145,6 +138,7 @@ impl AmbeVocoder {
             prediction: Model::MBELIB_INITIAL,
             tone: Tone::default(),
             error_rate: 0.0,
+            errors: [0, 0],
             rejected: 0,
             tone_frame: false,
             last: Decision::Played,
@@ -179,6 +173,7 @@ impl AmbeVocoder {
     /// [`Policy::Soft`]: the frame as decoded if its decision had margin,
     /// else the last again (three times at most), else silence.
     fn soft(&mut self, frame: &AmbeFrame) -> Option<Pcm> {
+        self.errors = [0, 0];
         let render = if frame.reliability >= PLAY_MARGIN {
             self.decide(frame.params, [0, 0])
         } else {
@@ -188,7 +183,7 @@ impl AmbeVocoder {
     }
 
     /// One frame as op25 takes it, its 36 descrambled dibits as received,
-    /// under op25's error rules. `None` if it is muted (silence) for errors
+    /// under the error rules with the bits the decision corrected. `None` if it is muted (silence) for errors
     /// or too many repeats.
     pub fn decode(&mut self, dibits: &[u8; 36]) -> Option<Pcm> {
         let (u, errors) = self.receive(dibits);
@@ -245,9 +240,10 @@ impl AmbeVocoder {
     }
 
     fn receive(&mut self, dibits: &[u8; 36]) -> (AmbeParams, [u32; 2]) {
-        let (u, errors) = AmbeCodeword::from_dibits(dibits).decode_op25();
+        let (u, errors) = AmbeCodeword::from_dibits(dibits).decode();
         self.error_rate = ERROR_RATE_DECAY * self.error_rate
             + ERROR_RATE_PER_ERROR * f64::from(errors[0] + errors[1]);
+        self.errors = errors;
         (u, errors)
     }
 
@@ -277,7 +273,8 @@ impl AmbeVocoder {
         }
     }
 
-    /// The model through op25's synthesiser (`decode_tap`).
+    /// The model through op25's synthesiser (`decode_tap`), smoothed by
+    /// BABA §9 on ε<sub>R</sub> and ε<sub>T</sub> (BABA-1 §5).
     fn render(&mut self) -> Pcm {
         let m = &self.model;
         let s = &mut self.synth;
@@ -287,12 +284,18 @@ impl AmbeVocoder {
         cur.voiced[1..=m.l].copy_from_slice(&m.voiced[1..=m.l]);
         cur.mu[1..=m.l].copy_from_slice(&m.ml[1..=m.l]);
         let rm0 = s.enhance();
+        let total = (self.errors[0] + self.errors[1]) as f32;
         let errors = Errors {
-            rate: OP25_SMOOTHING_ERROR_RATE,
-            total: OP25_SMOOTHING_ERRORS,
-            c4: OP25_SMOOTHING_ERRORS,
+            rate: self.error_rate as f32,
+            total,
+            // BABA-1 has no ε4: its quiet voicing threshold (BABA Eq. 112)
+            // is taken on ε_T = 0, as op25 reads it.
+            c4: total,
         };
-        s.smooth(Thresholds::op25(op25_energy(rm0), errors));
+        // A repeat keeps the last S_E, as phase 1's does.
+        let played = (self.last == Decision::Played).then_some(rm0);
+        let thresholds = s.thresholds(played, errors);
+        s.smooth(thresholds);
         let pcm = s.synthesize();
         s.advance();
         pcm

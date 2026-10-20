@@ -165,7 +165,13 @@ read as sent, the pitch on the tapped corpus moves 29% less from frame to
 frame) and repeats, mutes and smooths by the standard on the bits the
 decoder here corrected (op25 was given a regenerated frame and counted
 none); phase 2 predicts past silence frames from the last voice frame,
-knows a tone by u0 alone and plays it at its log level.
+knows a tone by u0 alone and plays it at its log level. Phase 2 then took
+the standard's error counts (c0 as the [24,12] code, so four errors are
+detected; the bits corrected, where op25 counted an information bit
+twice) and smoothed on its ε_R and ε_T, which op25 passed as zero. On the
+tapped corpus at σ 0.5, 0.6 and 0.7 (`vocoder_noise`) the log-spectral
+distance fell from 1.4, 3.1 and 7.3 dB to 1.2, 2.4 and 4.7, and repeats
+from 1.1, 8.3 and 22.6% to 0.2, 3.1 and 14.1%; clean audio is unchanged.
 
 The vocoders were checked frame by frame against op25's on random streams
 that reach every pitch, repeat, mute, tone and erasure, 16k frames a phase,

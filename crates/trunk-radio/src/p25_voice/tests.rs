@@ -430,19 +430,19 @@ fn ambe_frames(rng: &mut Rng, n: usize) -> Vec<([u8; 36], bool)> {
 /// The audio of `ambe_frames` for seeds 200.., as (hash, frames not
 /// muted, encrypted ones aside).
 const AMBE_FIXTURES: [(u64, usize); 8] = [
-    (0x0b9b_f445_2985_3a2f, 1486),
-    (0xcac0_6b92_1985_d034, 1518),
-    (0x3845_7475_f7dc_9c0c, 1471),
-    (0xcf1d_85bb_561e_a1ff, 1573),
-    (0x84fb_9afd_8fc7_a2ab, 1532),
-    (0x15f4_3884_b70b_8bf6, 1555),
-    (0x2f79_eb07_c7d3_6be9, 1643),
-    (0xa350_3a2f_93cd_3318, 1525),
+    (0x158b_b5e2_fbb2_4351, 1485),
+    (0x90e6_819a_da99_7af9, 1525),
+    (0x8a73_8f2e_6650_6120, 1472),
+    (0xca5c_70a9_b691_3b67, 1577),
+    (0xc1cc_4fc9_4381_cf3e, 1537),
+    (0x1e43_bfbe_846a_f1da, 1563),
+    (0xde5a_6935_e181_4244, 1654),
+    (0x71a0_27d2_43fd_1c85, 1528),
 ];
 
 #[test]
 fn the_ambe_vocoder_is_frozen() {
-    // Frames played and muted by what op25 decodes them as: voice, silence,
+    // Frames played and muted by what the hard decision decodes them as: voice, silence,
     // erasure (b0 120–123, 126, 127) and tone.
     let mut heard: BTreeMap<&str, [usize; 2]> = BTreeMap::new();
     for (seed, &(hash, audible)) in AMBE_FIXTURES.iter().enumerate() {
@@ -459,7 +459,7 @@ fn the_ambe_vocoder_is_frozen() {
             };
             played += usize::from(got.is_some());
             if !encrypted {
-                let (AmbeParams(u), _) = AmbeCodeword::from_dibits(&dibits).decode_op25();
+                let (AmbeParams(u), _) = AmbeCodeword::from_dibits(&dibits).decode();
                 let b0 = ((u[0] >> 5) & 0x78) + ((u[3] >> 9) & 0x7);
                 let kind = match b0 {
                     _ if (u[0] >> 6) & 0x3f == 63 && u[3] % 16 == 0 => "tone",

@@ -6,9 +6,9 @@
 //! later harmonic's phase, and the vocoder's output is a model, not a
 //! waveform). The measurement behind `Policy::Soft` and its thresholds.
 //!
-//! `op25` is the path as shipped (`Policy::Hard`): phase 1 the frame as
-//! decoded here under the standard's rules on its corrected bits, phase 2
-//! op25's hard decoding of the received dibits. Each
+//! `hard` is the path as shipped (`Policy::Hard`): phase 1 the frame as
+//! decoded here, phase 2 the hard decoding of the received dibits, each
+//! under the standard's rules on the bits it corrected. Each
 //! `soft m/u/e` row is the decoder's own frame played when its weakest
 //! vector margin ≥ m, its weakest unprotected |LLR| ≥ u and ≤ e bits were
 //! corrected, else repeated (three times), then muted.
@@ -121,7 +121,7 @@ fn phase2(calls: &[Vec<AmbeParams>], sigma: f64, rng: &mut Rng) -> Vec<Score> {
     let mut scores: Vec<Score> = (0..=GATES.len()).map(|_| Score::default()).collect();
     for call in calls {
         let mut clean = AmbeVocoder::new();
-        let mut op25 = AmbeVocoder::new();
+        let mut shipped = AmbeVocoder::new();
         let mut soft: Vec<AmbeVocoder> = GATES
             .iter()
             .map(|_| AmbeVocoder::with_policy(Policy::Soft))
@@ -137,12 +137,12 @@ fn phase2(calls: &[Vec<AmbeParams>], sigma: f64, rng: &mut Rng) -> Vec<Score> {
             let dibits: [u8; 36] = dibits.try_into().unwrap();
             let frame = ambe::decode(&llr);
 
-            op25.decode(&dibits);
-            let (heard, _) = AmbeCodeword::from_dibits(&dibits).decode_op25();
+            shipped.decode(&dibits);
+            let (heard, _) = AmbeCodeword::from_dibits(&dibits).decode();
             scores[0].add(
-                op25.last(),
+                shipped.last(),
                 ambe_truth(heard, *p),
-                op25.spectrum().as_ref(),
+                shipped.spectrum().as_ref(),
                 &reference,
             );
             for (k, g) in GATES.iter().enumerate() {
@@ -163,7 +163,7 @@ fn phase1(calls: &[Vec<ImbeParams>], sigma: f64, rng: &mut Rng) -> Vec<Score> {
     let mut scores: Vec<Score> = (0..=GATES.len()).map(|_| Score::default()).collect();
     for call in calls {
         let mut clean = ImbeVocoder::new();
-        let mut op25 = ImbeVocoder::new();
+        let mut shipped = ImbeVocoder::new();
         let mut soft: Vec<ImbeVocoder> = GATES
             .iter()
             .map(|_| ImbeVocoder::with_policy(Policy::Soft))
@@ -179,8 +179,13 @@ fn phase1(calls: &[Vec<ImbeParams>], sigma: f64, rng: &mut Rng) -> Vec<Score> {
             let truth = imbe_truth(&frame.params, p);
 
             // As shipped.
-            op25.vocode(&frame);
-            scores[0].add(op25.last(), truth, op25.spectrum().as_ref(), &reference);
+            shipped.vocode(&frame);
+            scores[0].add(
+                shipped.last(),
+                truth,
+                shipped.spectrum().as_ref(),
+                &reference,
+            );
             for (k, g) in GATES.iter().enumerate() {
                 soft[k].vocode(&gated_imbe(&frame, *g));
                 scores[k + 1].add(
@@ -200,7 +205,7 @@ fn report(name: &str, source: &str, frames: usize, mut run: impl FnMut(f64) -> V
     for sigma in SIGMAS {
         let scores = run(sigma);
         println!("  sigma {sigma:.1}");
-        println!("    op25           {}", scores[0].line());
+        println!("    hard           {}", scores[0].line());
         for (k, (m, u, e)) in GATES.iter().enumerate() {
             let e = if *e == u32::MAX {
                 "-".to_string()

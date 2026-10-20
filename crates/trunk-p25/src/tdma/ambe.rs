@@ -7,8 +7,9 @@
 //! first and one after another, fill the four columns in turn and are sent
 //! row by row.
 //!
-//! As for IMBE, op25 decodes u0 and then u1 on hard bits; here both are soft
-//! and u0 is chosen jointly with u1.
+//! The hard decision is TIA-102.BABA-1's (§5.3–5.5): u0 and then u1 on
+//! hard bits, with the bits each code corrected or detected. The soft one
+//! decodes both on soft bits and chooses u0 jointly with u1.
 
 use crate::fec::{Decision, GOLAY_23, GOLAY_24};
 use crate::voice::imbe::pn_masks;
@@ -71,37 +72,25 @@ impl AmbeCodeword {
         Self(c)
     }
 
-    /// op25's decision (`p25p2_vf::process_vcw`): hard, u0 first, c0 as
-    /// Golay(23) without its parity bit. The parameters and op25's error
-    /// counts for c0 and c1 ([`op25_golay_23`]).
+    /// The hard decision (BABA-1 §5.3–5.5): c0 as the [24,12] code, then
+    /// c1 unmodulated by u0's mask. The parameters and ε0, ε1: the bits each
+    /// code corrected, or 4 for c0 when it detects four it cannot correct
+    /// (then u0, and so u1, are a guess, and the frame is repeated).
     ///
-    /// Not TIA-102.BABA-1's ε0 and ε1 (§5.5, the bits corrected or
-    /// detected, c0 as the [24,12] code): c0's parity bit is neither
-    /// checked nor counted, so four errors go undetected, and the counts are
-    /// op25's (trunk-oxide-13y.2). The vocoder's repeat and mute thresholds
-    /// take these.
-    pub const fn decode_op25(self) -> (AmbeParams, [u32; 2]) {
+    /// op25 (`p25p2_vf::process_vcw`) decodes c0 as Golay(23) without its
+    /// parity bit, so four errors pass undetected, and counts an
+    /// information bit error twice and two parity bit errors once.
+    pub const fn decode(self) -> (AmbeParams, [u32; 2]) {
         let c = self.0;
-        let (u0, e0) = op25_golay_23(c[0] >> 1);
+        let d0 = GOLAY_24.decode_hard(c[0]);
         #[allow(clippy::cast_possible_truncation)]
-        let (u1, e1) = op25_golay_23(c[1] ^ pn_masks(u0 as u16)[1]);
+        let d1 = GOLAY_23.decode_hard(c[1] ^ pn_masks(d0.info as u16)[1]);
         #[allow(clippy::cast_possible_truncation)]
         (
-            AmbeParams([u0 as u16, u1 as u16, c[2] as u16, c[3] as u16]),
-            [e0, e1],
+            AmbeParams([d0.info as u16, d1.info as u16, c[2] as u16, c[3] as u16]),
+            [d0.flips, d1.flips],
         )
     }
-}
-
-/// op25's Golay(23) decoder (`gly23127Dec`): the information bits and what
-/// it counts as corrected. Its correction table holds each error pattern's
-/// information bits and, where the parity bits would be, the pattern's
-/// weight; it counts the set bits of that. So two errors among the parity
-/// bits count as one, and one among the information bits as two.
-const fn op25_golay_23(word: u32) -> (u32, u32) {
-    let d = GOLAY_23.decode_hard(word);
-    let e = word ^ d.codeword;
-    (d.info, (e >> 11).count_ones() + d.flips.count_ones())
 }
 
 /// A decoded frame.
@@ -198,12 +187,11 @@ fn least(llr: &[f32]) -> f32 {
     llr.iter().fold(f32::INFINITY, |m, &l| m.min(l.abs()))
 }
 
-/// op25's decoder ([`AmbeCodeword::decode_op25`]) on the LLRs' signs: the
-/// parameters and its error count.
+/// The hard decision ([`AmbeCodeword::decode`]) on the LLRs' signs: the
+/// parameters and ε<sub>T</sub>.
 pub fn decode_hard(llr: &[f32; CODEWORD_BITS]) -> (AmbeParams, u32) {
     let s = vectors(llr);
-    let (params, [e0, e1]) =
-        AmbeCodeword(std::array::from_fn(|v| hard(vector(&s, v)))).decode_op25();
+    let (params, [e0, e1]) = AmbeCodeword(std::array::from_fn(|v| hard(vector(&s, v)))).decode();
     (params, e0 + e1)
 }
 
@@ -280,34 +268,54 @@ mod tests {
         }
     }
 
-    /// op25 counts no error in c0's parity bit, decoding c0 as Golay(23),
-    /// and counts the rest its own way ([`op25_golay_23`]).
+    /// ε0 and ε1 are the bits corrected, c0's parity bit included.
     #[test]
-    fn op25_counts_errors_its_own_way() {
+    fn the_errors_are_the_bits_corrected() {
         let p = AmbeParams([2748, 291, 1445, 12047]);
         let mut cw = p.encode();
         cw.0[0] ^= 1;
-        assert_eq!(cw.decode_op25(), (p, [0, 0]));
-        // Two parity bit errors in c0, one information bit error in c1.
+        assert_eq!(cw.decode(), (p, [1, 0]));
+        // Two more in c0's parity, one in c1's information bits.
         cw.0[0] ^= 0b110;
         cw.0[1] ^= 1 << 22;
-        assert_eq!(cw.decode_op25(), (p, [1, 2]));
-        // Three information bit errors: 3 + popcount(3).
+        assert_eq!(cw.decode(), (p, [3, 1]));
+        // And two more in c1.
         cw.0[1] ^= 0b11 << 20;
-        assert_eq!(cw.decode_op25(), (p, [1, 5]));
+        assert_eq!(cw.decode(), (p, [3, 3]));
+    }
+
+    /// Four errors in c0 are detected, whichever bits they fall on (BABA-1
+    /// §5.6 then repeats the frame), where op25 corrects three of them
+    /// into a wrong u0 when the fourth is the parity bit.
+    #[test]
+    fn four_errors_in_c0_are_detected() {
+        let mut rng = Rng::new(74);
+        for _ in 0..300 {
+            let p = random_params(&mut rng);
+            let mut cw = p.encode();
+            let mut flipped = 0;
+            while flipped < 4 {
+                let bit = 1 << (rng.next_u64() % 24);
+                if cw.0[0] & bit == p.encode().0[0] & bit {
+                    cw.0[0] ^= bit;
+                    flipped += 1;
+                }
+            }
+            assert_eq!(cw.decode().1[0], 4);
+        }
     }
 
     #[test]
-    fn soft_joint_decoding_recovers_more_frames_than_op25() {
+    fn soft_joint_decoding_recovers_more_frames_than_hard() {
         let mut rng = Rng::new(72);
-        let (mut soft, mut op25) = (0, 0);
+        let (mut soft, mut hard) = (0, 0);
         let trials = 3000;
         for _ in 0..trials {
             let p = random_params(&mut rng);
             let llr = llrs(&p.encode(), 0.65, &mut rng);
             soft += usize::from(decode(&llr).params.0[..2] == p.0[..2]);
-            op25 += usize::from(decode_hard(&llr).0.0[..2] == p.0[..2]);
+            hard += usize::from(decode_hard(&llr).0.0[..2] == p.0[..2]);
         }
-        assert!(soft > op25 + trials / 20, "soft {soft} op25 {op25}");
+        assert!(soft > hard + trials / 20, "soft {soft} hard {hard}");
     }
 }

@@ -76,8 +76,7 @@ const UNENHANCED_DIVISOR: usize = 8;
 const W_MAX: f64 = 1.2;
 const W_MIN: f64 = 0.5;
 /// `S_E`'s weight on the frame energy `R_M0`, its weight on the last
-/// frame's `S_E`, and its floor (Eq. 111). op25 keeps no `S_E(−1)`, so its
-/// `S_E` is `0.05 R_M0` alone.
+/// frame's `S_E`, and its floor (Eq. 111).
 const S_E_WEIGHT: f64 = 0.05;
 const S_E_DECAY: f64 = 0.95;
 const S_E_MIN: f32 = 10000.0;
@@ -95,17 +94,15 @@ const EPS_T_CLEAN_AMPLITUDE: f32 = 6.0;
 /// Eq. 112's `V_M = ∞`.
 const V_M_INFINITE: f32 = 1e38;
 /// Eq. 112's middle branch: `ε_R ≤ 0.0125` and `ε_4 = 0` (no errors in
-/// û4), where `V_M = 45.255 S_E^0.375 / exp(277.26 ε_R)`. op25 tests
-/// `ε_T = 0` and has 277.6.
+/// û4), where `V_M = 45.255 S_E^0.375 / exp(277.26 ε_R)`.
 const EPS_R_QUIET: f64 = 0.0125;
 const V_M_QUIET_SCALE: f64 = 45.255;
 const V_M_EPS_R_RATE: f64 = 277.26;
-const OP25_V_M_EPS_R_RATE: f64 = 277.6;
 /// Eq. 112's last branch: `V_M = 1.414 S_E^0.375`.
 const V_M_SCALE: f64 = 1.414;
 const V_M_EXPONENT: f32 = 0.375;
 /// Eq. 115's amplitude threshold `τ_M`: 20480 when clean, otherwise
-/// `6000 − 300 ε_T + τ_M(−1)` (op25 drops the `τ_M(−1)`).
+/// `6000 − 300 ε_T + τ_M(−1)`.
 const TAU_M_CLEAN: f32 = 20480.0;
 const TAU_M_BASE: f32 = 6000.0;
 const TAU_M_PER_ERROR: f32 = 300.0;
@@ -156,37 +153,12 @@ pub(super) struct Errors {
     pub c4: f32,
 }
 
-/// op25's `S_E` from a frame's energy `R_M0`: this frame's alone.
-pub(super) fn op25_energy(rm0: f32) -> f32 {
-    let se = (S_E_WEIGHT * f64::from(rm0)) as f32;
-    if se < S_E_MIN { S_E_MIN } else { se }
-}
-
 impl Thresholds {
     /// None: for a frame with no errors whatever its energy.
     pub const CLEAN: Self = Self {
         voicing: V_M_INFINITE,
         amplitude: TAU_M_CLEAN,
     };
-
-    /// op25's, from its `S_E` ([`op25_energy`]): no `τ_M(−1)`.
-    pub fn op25(se: f32, Errors { rate, total, .. }: Errors) -> Self {
-        let er64 = f64::from(rate);
-        let voicing: f32 = if er64 <= EPS_R_CLEAN && total <= EPS_T_CLEAN_VOICING {
-            V_M_INFINITE
-        } else if er64 <= EPS_R_QUIET && total == 0.0 {
-            (V_M_QUIET_SCALE * f64::from(se.powf(V_M_EXPONENT))
-                / (OP25_V_M_EPS_R_RATE * er64).exp()) as f32
-        } else {
-            (V_M_SCALE * f64::from(se.powf(V_M_EXPONENT))) as f32
-        };
-        let amplitude: f32 = if er64 <= EPS_R_CLEAN && total <= EPS_T_CLEAN_AMPLITUDE {
-            TAU_M_CLEAN
-        } else {
-            TAU_M_BASE - TAU_M_PER_ERROR * total
-        };
-        Self { voicing, amplitude }
-    }
 
     #[cfg(test)]
     pub const fn voicing(self) -> f32 {

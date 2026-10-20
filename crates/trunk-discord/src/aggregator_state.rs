@@ -130,6 +130,7 @@ fn setup_embed(title: &str, description: &str) -> EmbedData {
         description: Some(description.into()),
         fields: vec![],
         footer: String::new(),
+        url: None,
     }
 }
 
@@ -320,6 +321,7 @@ impl AggregatorState {
             description: Some(table),
             fields: vec![],
             footer: String::new(),
+            url: None,
         }
     }
 
@@ -382,6 +384,7 @@ impl AggregatorState {
             description: None,
             fields,
             footer: String::new(),
+            url: None,
         }
     }
 }

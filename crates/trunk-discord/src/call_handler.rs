@@ -114,6 +114,8 @@ pub struct CallHandlerConfig {
     pub tone_detection: bool,
     pub tone_detection_duration_s: f32,
     pub audio_attachment: bool,
+    /// Base URL of the Jaeger UI, for the embed's link to its trace.
+    pub jaeger_url: Option<&'static str>,
 }
 
 pub struct CallHandler {
@@ -141,6 +143,9 @@ pub struct CallHandler {
     ogg_encoder: Option<OggOpusEncoder>,
 
     embed_message_id: Option<MessageId>,
+    /// The embed's trace in Jaeger, once the embed is sent (its title links
+    /// there on every edit).
+    trace_url: Option<String>,
     /// Trace ids of the later transmissions coalesced into this embed, for
     /// the flag registry (the first is the embed's own trace).
     transmission_traces: Vec<String>,
@@ -250,6 +255,7 @@ impl CallHandler {
             post_channel,
             ogg_encoder,
             embed_message_id: None,
+            trace_url: None,
             transmission_traces: Vec::new(),
             writer,
             indicator_shown: false,
@@ -427,7 +433,14 @@ impl CallHandler {
         let mut queue: std::collections::VecDeque<CallEffect> = effects.into();
         while let Some(effect) = queue.pop_front() {
             match effect {
-                CallEffect::SendEmbed { embed } => {
+                CallEffect::SendEmbed { mut embed } => {
+                    let trace_id = current_trace_id();
+                    self.trace_url = self
+                        .config
+                        .jaeger_url
+                        .filter(|_| !trace_id.is_empty())
+                        .map(|base| format!("{}/trace/{trace_id}", base.trim_end_matches('/')));
+                    embed.url.clone_from(&self.trace_url);
                     // The one writer call the handler awaits: it needs the new
                     // message id for subsequent edits/attach. Sends ride the fast
                     // create bucket, so this is brief.
@@ -442,7 +455,7 @@ impl CallHandler {
                             is_conventional: self.is_conventional,
                             tdma: self.tdma,
                             talkgroup: self.talkgroup,
-                            trace_id: current_trace_id(),
+                            trace_id,
                             transmission_traces: self.transmission_traces.clone(),
                         },
                     );
@@ -450,7 +463,9 @@ impl CallHandler {
                 // Prompt and throttled edits are identical now: the writer
                 // coalesces per-channel (latest-wins per message) and paces
                 // itself to the edit bucket, so there is no debounce here.
-                CallEffect::EditEmbed { embed } | CallEffect::EditEmbedThrottled { embed } => {
+                CallEffect::EditEmbed { mut embed }
+                | CallEffect::EditEmbedThrottled { mut embed } => {
+                    embed.url.clone_from(&self.trace_url);
                     if let Some(msg_id) = self.embed_message_id {
                         self.writer.edit_embed(msg_id, embed);
                     }

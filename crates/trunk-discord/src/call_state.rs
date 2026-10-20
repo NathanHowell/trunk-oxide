@@ -62,6 +62,8 @@ pub struct EmbedData {
     pub description: Option<String>,
     pub fields: Vec<EmbedField>,
     pub footer: String,
+    /// Where the title links to.
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -557,6 +559,7 @@ impl CallState {
                 self.short_name,
                 self.start_time.format("%H:%M:%S UTC"),
             ),
+            url: None,
         }
     }
 

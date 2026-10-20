@@ -351,6 +351,11 @@ async fn main() -> Result<()> {
         config.audio.tone_detection,
         config.audio.tone_detection_duration_s,
         config.audio.audio_attachment,
+        // Leaked once: the handlers' config is Copy.
+        discord_config
+            .jaeger_url
+            .clone()
+            .map(|u| &*Box::leak(u.into_boxed_str())),
         config.audio.coalesce_timeout_ms,
         Arc::clone(&db),
         args.db_path,

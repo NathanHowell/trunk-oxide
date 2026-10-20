@@ -10,6 +10,10 @@ pub struct DiscordConfig {
     pub monitoring_channel_id: Option<NonZeroU64>,
     #[serde(default)]
     pub guild_id: Option<u64>,
+    /// Base URL of the Jaeger UI (`http://host:16686`): a call's embed title
+    /// links to its trace there. Unset: no links.
+    #[serde(default)]
+    pub jaeger_url: Option<String>,
     #[serde(default)]
     pub groups: Vec<ChannelGroup>,
 }

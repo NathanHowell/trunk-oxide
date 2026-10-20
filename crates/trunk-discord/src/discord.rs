@@ -23,6 +23,9 @@ pub(crate) fn embed_data_to_serenity(data: &EmbedData) -> CreateEmbed {
     if let Some(desc) = &data.description {
         embed = embed.description(desc);
     }
+    if let Some(url) = &data.url {
+        embed = embed.url(url);
+    }
 
     for field in &data.fields {
         embed = embed.field(&field.name, &field.value, field.inline);

@@ -1,0 +1,15 @@
+[package]
+name = "trunk-sh"
+description = "A /bin/sh for the distroless images that runs `sh -c COMMAND` and nothing else, so podman-compose's shell-wrapped healthchecks work."
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "sh"
+path = "src/main.rs"
+
+[dependencies]
+
+[lints]
+workspace = true

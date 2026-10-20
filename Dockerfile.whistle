@@ -43,8 +43,9 @@ COPY . .
 RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry \
     --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git \
     --mount=type=cache,target=/build/target,id=target-whistle \
-    cargo build --release -p trunk-whistle \
-    && cp target/release/trunk-whistle /usr/local/bin/trunk-whistle
+    cargo build --release -p trunk-whistle -p trunk-sh \
+    && cp target/release/trunk-whistle /usr/local/bin/trunk-whistle \
+    && cp target/release/sh /usr/local/bin/trunk-sh
 
 # Runtime — distroless for minimal attack surface
 FROM ghcr.io/grpc-ecosystem/grpc-health-probe:v0.4.45 AS health-probe
@@ -53,5 +54,7 @@ FROM gcr.io/distroless/cc-debian13:nonroot
 
 COPY --from=health-probe /ko-app/grpc-health-probe /usr/local/bin/grpc_health_probe
 COPY --from=builder /usr/local/bin/trunk-whistle /usr/local/bin/trunk-whistle
+# podman-compose runs every healthcheck through /bin/sh -c; trunk-sh is just enough of one
+COPY --from=builder /usr/local/bin/trunk-sh /bin/sh
 
 ENTRYPOINT ["/usr/local/bin/trunk-whistle"]

@@ -18,6 +18,7 @@ members = [
     "crates/trunk-rtlsdr-sys",
     "crates/trunk-sdr",
     "crates/trunk-radio",
+    "crates/trunk-sh",
 ]
 default-members = [
     "crates/trunk-oxide-proto",
@@ -113,3 +114,9 @@ sha2 = "0.10"
 
 [profile.release]
 debug = 2
+
+# The healthcheck shell is copied into every distroless image; keep it small.
+[profile.release.package.trunk-sh]
+opt-level = "z"
+debug = 0
+strip = true

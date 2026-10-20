@@ -3821,6 +3821,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "trunk-sh"
+version = "0.1.0"
+
+[[package]]
 name = "trunk-solver"
 version = "0.1.0"
 dependencies = [

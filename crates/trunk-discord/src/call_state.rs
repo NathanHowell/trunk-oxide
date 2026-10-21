@@ -3,7 +3,6 @@ use std::time::Duration;
 use proto::types::{Freq, SignalDb};
 use trunk_oxide_proto as proto;
 
-use crate::signalling::{self, Line};
 use crate::tone_detect::DetectedTone;
 
 /// Max chars for embed description before we truncate from the front.
@@ -110,7 +109,7 @@ pub struct CallState {
     events: Vec<String>,
     /// What the call's transmissions carried in-band, and how many times each
     /// was heard (a radio IDs itself at every key-up).
-    signalling: Vec<(Line, u32)>,
+    signalling: Vec<(proto::InBandSignal, u32)>,
     call_ended: bool,
 
     /// Whether any audio segment cleared the silence gate (i.e. was kept for
@@ -501,10 +500,10 @@ impl CallState {
 
     /// Fold a transmission's in-band signalling into the call's.
     fn absorb_signalling(&mut self, data: &proto::CallData) {
-        for line in signalling::fold(&data.signalling) {
-            match self.signalling.iter_mut().find(|(l, _)| *l == line) {
+        for line in &data.signalling {
+            match self.signalling.iter_mut().find(|(l, _)| l == line) {
                 Some((_, heard)) => *heard += 1,
-                None => self.signalling.push((line, 1)),
+                None => self.signalling.push((line.clone(), 1)),
             }
         }
     }
@@ -647,7 +646,11 @@ impl CallState {
                 .signalling
                 .iter()
                 .map(|(line, heard)| {
-                    let flag = if line.alert { "⚠️ " } else { "" };
+                    let flag = if line.alert() == proto::SignalAlert::None {
+                        ""
+                    } else {
+                        "⚠️ "
+                    };
                     let times = if *heard > 1 {
                         format!(" ×{heard}")
                     } else {
@@ -1408,14 +1411,12 @@ mod tests {
         assert_eq!(ptts_field.unwrap().value, "2");
     }
 
-    fn heard_mdc(unit: u32, op: proto::MdcOp) -> proto::InBandSignal {
+    fn heard_mdc(unit: u32, op: &str, alert: proto::SignalAlert) -> proto::InBandSignal {
         proto::InBandSignal {
-            signal: Some(proto::in_band_signal::Signal::Mdc(proto::MdcPacket {
-                unit,
-                op: op.into(),
-                other_op: 0,
-                arg: 0,
-            })),
+            scheme: "mdc1200".into(),
+            text: format!("MDC-1200 unit {unit:04X} {op}"),
+            unit: Some(unit),
+            alert: alert.into(),
         }
     }
 
@@ -1432,7 +1433,7 @@ mod tests {
         let mut s = make_state();
         s.on_start();
         for _ in 0..2 {
-            let id = with_signalling(vec![heard_mdc(0x1234, proto::MdcOp::PttId)]);
+            let id = with_signalling(vec![heard_mdc(0x1234, "PTT ID", proto::SignalAlert::None)]);
             s.on_ptt_boundary(Some(&id));
             s.on_ptt_start(&test_call_info());
         }
@@ -1450,8 +1451,8 @@ mod tests {
         let mut s = make_state();
         s.on_start();
         let data = with_signalling(vec![
-            heard_mdc(0x1234, proto::MdcOp::PttId),
-            heard_mdc(0x1234, proto::MdcOp::Emergency),
+            heard_mdc(0x1234, "PTT ID", proto::SignalAlert::None),
+            heard_mdc(0x1234, "emergency", proto::SignalAlert::Emergency),
         ]);
         s.on_ptt_boundary(Some(&data));
         let embed = s.build_embed();
@@ -1470,7 +1471,7 @@ mod tests {
     fn a_silent_call_that_carried_signalling_keeps_its_embed() {
         let mut s = make_state();
         s.on_start();
-        let data = with_signalling(vec![heard_mdc(0x1234, proto::MdcOp::PttId)]);
+        let data = with_signalling(vec![heard_mdc(0x1234, "PTT ID", proto::SignalAlert::None)]);
         let effects = s.on_end(Some(&data), None);
         assert!(
             effects

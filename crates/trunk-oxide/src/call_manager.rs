@@ -1542,10 +1542,9 @@ impl CallManager {
             phase2_tdma: view.phase2_tdma(),
             segments,
             is_conventional,
-            signalling: view
-                .heard()
+            signalling: trunk_radio::signalling::fold(view.heard())
                 .iter()
-                .map(|h| in_band_signal(&h.signal))
+                .map(in_band_signal)
                 .collect(),
             ..Default::default()
         }
@@ -1621,32 +1620,21 @@ fn prost_duration(d: std::time::Duration) -> prost_types::Duration {
 }
 
 /// A recording's accounting as the wire lists it.
-/// A decoded signal as the wire says it.
-fn in_band_signal(signal: &trunk_radio::Signal) -> proto::InBandSignal {
-    use proto::in_band_signal::Signal as Wire;
-    use trunk_radio::{MdcOp, Signal};
-    let signal = match *signal {
-        Signal::Mdc { unit, op, arg } => {
-            let (op, other_op) = match op {
-                MdcOp::PttId => (proto::MdcOp::PttId, 0),
-                MdcOp::Emergency => (proto::MdcOp::Emergency, 0),
-                MdcOp::RadioCheck => (proto::MdcOp::RadioCheck, 0),
-                MdcOp::CallAlert => (proto::MdcOp::CallAlert, 0),
-                MdcOp::Other(code) => (proto::MdcOp::Other, u32::from(code)),
-            };
-            Wire::Mdc(proto::MdcPacket {
-                unit,
-                op: op.into(),
-                other_op,
-                arg: u32::from(arg),
-            })
-        }
-        Signal::Dtmf(key) => Wire::Dtmf(proto::DtmfKey {
-            key: key.to_string(),
-        }),
+/// A line of what a transmission carried, as the wire says it.
+fn in_band_signal(line: &trunk_radio::signalling::Line) -> proto::InBandSignal {
+    use proto::SignalAlert;
+    use trunk_radio::Alert;
+    let alert = match line.alert {
+        None => SignalAlert::None,
+        Some(Alert::Emergency) => SignalAlert::Emergency,
+        Some(Alert::RadioCheck) => SignalAlert::RadioCheck,
+        Some(Alert::CallAlert) => SignalAlert::CallAlert,
     };
     proto::InBandSignal {
-        signal: Some(signal),
+        scheme: line.scheme.to_owned(),
+        text: line.text.clone(),
+        unit: line.unit,
+        alert: alert.into(),
     }
 }
 
@@ -1665,8 +1653,8 @@ fn proto_transmission(t: &trunk_radio::Transmission) -> proto::Transmission {
 #[cfg(test)]
 mod tests {
     use super::{Ended, VoiceCounters, in_band_signal};
-    use trunk_oxide_grpc::proto::{self, in_band_signal::Signal as Wire};
-    use trunk_radio::{MdcOp, Signal};
+    use trunk_oxide_grpc::proto;
+    use trunk_radio::{Heard, MdcOp, Signal};
 
     fn tx(error_count: i64, spike_count: i64, sample_count: i64) -> trunk_radio::Transmission {
         trunk_radio::Transmission {
@@ -1684,28 +1672,29 @@ mod tests {
     }
 
     #[test]
-    fn signals_go_on_the_wire_as_what_they_are() {
-        let packet = |op| match in_band_signal(&Signal::Mdc {
-            unit: 0x1234,
-            op,
-            arg: 7,
-        })
-        .signal
-        {
-            Some(Wire::Mdc(p)) => p,
-            other => panic!("{other:?}"),
-        };
-        let p = packet(MdcOp::Emergency);
+    fn a_transmissions_signalling_goes_on_the_wire_already_read() {
+        let heard = |signal| Heard { span: 0..1, signal };
+        let lines = trunk_radio::signalling::fold(&[
+            heard(Signal::Mdc {
+                unit: 0x1234,
+                op: MdcOp::Emergency,
+                arg: 7,
+            }),
+            heard(Signal::Dtmf('#')),
+        ]);
+        let wire: Vec<_> = lines.iter().map(in_band_signal).collect();
         assert_eq!(
-            (p.unit, p.op(), p.arg),
-            (0x1234, proto::MdcOp::Emergency, 7)
+            wire[0],
+            proto::InBandSignal {
+                scheme: "mdc1200".into(),
+                text: "MDC-1200 unit 1234 emergency (arg 0x07)".into(),
+                unit: Some(0x1234),
+                alert: proto::SignalAlert::Emergency.into(),
+            }
         );
-        let p = packet(MdcOp::Other(0x61));
-        assert_eq!((p.op(), p.other_op), (proto::MdcOp::Other, 0x61));
-        assert_eq!(
-            in_band_signal(&Signal::Dtmf('#')).signal,
-            Some(Wire::Dtmf(proto::DtmfKey { key: "#".into() }))
-        );
+        assert_eq!(wire[1].text, "DTMF #");
+        assert_eq!(wire[1].unit, None);
+        assert_eq!(wire[1].alert(), proto::SignalAlert::None);
     }
 
     #[test]

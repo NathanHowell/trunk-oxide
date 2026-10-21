@@ -223,31 +223,21 @@ message CallData {
 
 // ── In-band signalling ──
 
-// One thing decoded from an analog channel's audio (not the control channel).
+// One line of what a transmission's audio carried in-band (not the control
+// channel), already read: the consumer interprets no scheme.
 message InBandSignal {
-  oneof signal {
-    MdcPacket mdc = 1;
-    DtmfKey dtmf = 2;
-  }
+  string scheme = 1;        // the decoder it came from, e.g. "dtmf", "fleetsync"
+  string text = 2;          // how it reads
+  optional uint32 unit = 3; // the radio it names, as a unit alias key
+  SignalAlert alert = 4;
 }
 
-enum MdcOp {
-  MDC_OP_OTHER = 0; // see MdcPacket.other_op
-  MDC_OP_PTT_ID = 1;
-  MDC_OP_EMERGENCY = 2;
-  MDC_OP_RADIO_CHECK = 3;
-  MDC_OP_CALL_ALERT = 4;
-}
-
-message MdcPacket {
-  uint32 unit = 1;
-  MdcOp op = 2;
-  uint32 other_op = 3; // the opcode, when op is MDC_OP_OTHER
-  uint32 arg = 4;
-}
-
-message DtmfKey {
-  string key = 1; // one of 0-9 A-D * #
+// Why a transmission is worth a second look.
+enum SignalAlert {
+  SIGNAL_ALERT_NONE = 0;
+  SIGNAL_ALERT_EMERGENCY = 1;
+  SIGNAL_ALERT_RADIO_CHECK = 2;
+  SIGNAL_ALERT_CALL_ALERT = 3;
 }
 
 message Transmission {

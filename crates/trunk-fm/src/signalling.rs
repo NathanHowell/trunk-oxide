@@ -7,8 +7,10 @@
 //! ([`Signal::alert`]), and how it reads ([`fmt::Display`]). A decoder that
 //! joins the enum is a new variant and a new arm in each of those; the
 //! compiler finds the rest. What a call shows of the signals it carried
-//! (the digits dialled, a sequence of tones) is a fold over its `Heard`s,
-//! not something the decoders assemble.
+//! (the digits dialled, a sequence of tones) is a fold over its `Heard`s
+//! ([`fold`]), not something the decoders assemble. The fold's [`Line`]s are
+//! the erased form that leaves this crate: consumers need no knowledge of any
+//! scheme.
 
 use std::fmt;
 use std::ops::Range;
@@ -110,7 +112,14 @@ impl fmt::Display for Signal {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Mdc { unit, op, arg } => {
-                write!(f, "MDC-1200 unit {unit:04X} {op} (arg 0x{arg:02x})")
+                write!(f, "MDC-1200 unit {unit:04X} {op}")?;
+                // The argument of a PTT ID tells pre- from post-amble, which
+                // is no news worth a line of its own.
+                if *op == MdcOp::PttId {
+                    Ok(())
+                } else {
+                    write!(f, " (arg 0x{arg:02x})")
+                }
             }
             Self::Dtmf(key) => write!(f, "DTMF {key}"),
         }
@@ -132,6 +141,52 @@ impl Heard {
     pub fn starts_at(&self) -> std::time::Duration {
         std::time::Duration::from_secs_f64(self.span.start as f64 / crate::AUDIO_RATE)
     }
+}
+
+/// One line of what a call carried, in a form no consumer need interpret.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Line {
+    /// As [`Signal::scheme`].
+    pub scheme: &'static str,
+    /// How it reads.
+    pub text: String,
+    /// The radio it names, if it does.
+    pub unit: Option<u32>,
+    pub alert: Option<Alert>,
+}
+
+/// What a call shows of the signals it carried, in the order heard:
+/// consecutive DTMF keys read as one number, every other signal as itself.
+#[must_use]
+pub fn fold(heard: &[Heard]) -> Vec<Line> {
+    fn flush(keys: &mut String, lines: &mut Vec<Line>) {
+        if !keys.is_empty() {
+            lines.push(Line {
+                scheme: Signal::Dtmf(' ').scheme(),
+                text: format!("DTMF {keys}"),
+                unit: None,
+                alert: None,
+            });
+            keys.clear();
+        }
+    }
+    let mut lines = Vec::new();
+    let mut keys = String::new();
+    for h in heard {
+        if let Signal::Dtmf(key) = h.signal {
+            keys.push(key);
+            continue;
+        }
+        flush(&mut keys, &mut lines);
+        lines.push(Line {
+            scheme: h.signal.scheme(),
+            text: h.signal.to_string(),
+            unit: h.signal.unit(),
+            alert: h.signal.alert(),
+        });
+    }
+    flush(&mut keys, &mut lines);
+    lines
 }
 
 #[cfg(test)]
@@ -164,12 +219,45 @@ mod tests {
 
     #[test]
     fn signals_read_as_their_scheme_would() {
+        assert_eq!(MDC(MdcOp::PttId).to_string(), "MDC-1200 unit 1234 PTT ID");
         assert_eq!(
-            MDC(MdcOp::PttId).to_string(),
-            "MDC-1200 unit 1234 PTT ID (arg 0x00)"
+            MDC(MdcOp::Other(0x61)).to_string(),
+            "MDC-1200 unit 1234 op 0x61 (arg 0x00)"
         );
         assert_eq!(Signal::Dtmf('*').to_string(), "DTMF *");
         assert_eq!(MDC(MdcOp::PttId).scheme(), "mdc1200");
         assert_eq!(Signal::Dtmf('*').scheme(), "dtmf");
+    }
+    fn heard(signal: Signal) -> Heard {
+        Heard { span: 0..1, signal }
+    }
+
+    #[test]
+    fn dtmf_keys_in_a_row_read_as_one_number() {
+        let log = [
+            heard(Signal::Dtmf('5')),
+            heard(Signal::Dtmf('5')),
+            heard(Signal::Dtmf('1')),
+            heard(MDC(MdcOp::PttId)),
+            heard(Signal::Dtmf('#')),
+        ];
+        let lines: Vec<_> = fold(&log).into_iter().map(|l| l.text).collect();
+        assert_eq!(lines, ["DTMF 551", "MDC-1200 unit 1234 PTT ID", "DTMF #"]);
+    }
+
+    #[test]
+    fn a_line_carries_what_its_signal_says() {
+        let lines = fold(&[heard(MDC(MdcOp::Emergency)), heard(Signal::Dtmf('1'))]);
+        assert_eq!(
+            lines[0],
+            Line {
+                scheme: "mdc1200",
+                text: "MDC-1200 unit 1234 emergency (arg 0x00)".into(),
+                unit: Some(0x1234),
+                alert: Some(Alert::Emergency),
+            }
+        );
+        assert_eq!((lines[1].unit, lines[1].alert), (None, None));
+        assert_eq!(fold(&[]), Vec::<Line>::new());
     }
 }

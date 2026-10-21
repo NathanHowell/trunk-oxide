@@ -37,6 +37,7 @@ pub use recording::Accounting;
 pub use registry::Entry;
 pub use trunk_channelizer::passband;
 pub use trunk_fm::denoise::Level as NoiseSuppression;
+pub use trunk_fm::signalling;
 pub use trunk_fm::{Alert, Heard, MdcOp, Signal};
 pub use types::*;
 

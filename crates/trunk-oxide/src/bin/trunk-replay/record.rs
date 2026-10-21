@@ -343,6 +343,7 @@ impl Recorder {
                         "reason": reason, "channel": d.channel, "kind": d.kind,
                         "transmissions": d.transmissions.len(),
                         "signalling": d.signalling.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
+                        "signalling_alerts": d.signalling.iter().filter(|s| s.alert() != proto::SignalAlert::None).map(|s| s.alert().as_str_name()).collect::<Vec<_>>(),
                     }),
                 );
             }

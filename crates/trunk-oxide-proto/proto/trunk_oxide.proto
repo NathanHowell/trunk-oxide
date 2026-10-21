@@ -238,6 +238,7 @@ enum SignalAlert {
   SIGNAL_ALERT_EMERGENCY = 1;
   SIGNAL_ALERT_RADIO_CHECK = 2;
   SIGNAL_ALERT_CALL_ALERT = 3;
+  SIGNAL_ALERT_UNRECOGNISED = 4; // a message of a scheme we cannot name, not a routine one
 }
 
 message Transmission {

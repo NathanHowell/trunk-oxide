@@ -33,6 +33,10 @@ pub enum Alert {
     Emergency,
     RadioCheck,
     CallAlert,
+    /// A message of a scheme whose messages are not all named, that is not
+    /// one of the ones that are: what a radio sends routinely is known, so
+    /// anything else is worth a look.
+    Unrecognised,
 }
 
 impl Alert {
@@ -43,6 +47,7 @@ impl Alert {
             Self::Emergency => "emergency",
             Self::RadioCheck => "radio_check",
             Self::CallAlert => "call_alert",
+            Self::Unrecognised => "unrecognised",
         }
     }
 }
@@ -95,6 +100,7 @@ impl Signal {
                 op: MdcOp::CallAlert,
                 ..
             } => Some(Alert::CallAlert),
+            Self::FleetSync(message) if !message.is_routine() => Some(Alert::Unrecognised),
             Self::Mdc { .. } | Self::Dtmf(_) | Self::FleetSync(_) => None,
         }
     }
@@ -297,5 +303,38 @@ mod tests {
             ..message
         });
         assert_eq!(anonymous.unit(), None);
+    }
+    #[test]
+    fn a_fleetsync_message_that_is_not_routine_is_flagged_unrecognised() {
+        use crate::fleetsync::{Id, Message};
+        let id = Id {
+            fleet: 120,
+            unit: 2182,
+        };
+        let message = |kind, code| {
+            Signal::FleetSync(Message {
+                kind,
+                code,
+                from: id,
+                to: id,
+            })
+        };
+        assert_eq!(message(0x80, 0xFC).alert(), None);
+        for (kind, code) in [(0x80, 0x00), (0x20, 0xFC), (0x42, 0x10)] {
+            assert_eq!(message(kind, code).alert(), Some(Alert::Unrecognised));
+        }
+        let line = &fold(&[
+            Heard {
+                span: 0..1,
+                signal: message(0x20, 0x00),
+            },
+            Heard {
+                span: 2..3,
+                signal: message(0x80, 0xFC),
+            },
+        ]);
+        assert_eq!(line[0].alert, Some(Alert::Unrecognised));
+        assert_eq!(line[1].alert, None);
+        assert_eq!(Alert::Unrecognised.as_str(), "unrecognised");
     }
 }

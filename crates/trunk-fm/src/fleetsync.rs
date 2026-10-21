@@ -99,6 +99,28 @@ pub struct Message {
 }
 
 impl Message {
+    /// The `(kind, code)` pairs a radio sends as a matter of course. Only
+    /// the one this was written from is known: a handset's identification at
+    /// every key-up, `0x80`/`0xfc`, self-addressed (Atherton PD, 2026-10-21;
+    /// seen at the start of each of ten transmissions). The rest of the
+    /// table is not published anywhere found, so anything else is flagged
+    /// as unrecognised; add a pair here when one proves routine.
+    const ROUTINE: &'static [(u8, u8)] = &[(0x80, 0xFC)];
+
+    /// Whether it is one of the messages [`Self::ROUTINE`] knows.
+    #[must_use]
+    pub const fn is_routine(&self) -> bool {
+        let mut i = 0;
+        while i < Self::ROUTINE.len() {
+            let (kind, code) = Self::ROUTINE[i];
+            if kind == self.kind && code == self.code {
+                return true;
+            }
+            i += 1;
+        }
+        false
+    }
+
     /// Bytes a message with this second byte takes.
     const fn len_for(second: u8) -> usize {
         if second & 1 == 1 {
@@ -541,6 +563,17 @@ mod tests {
         }
         audio.extend((0..trail).map(|_| hiss()));
         audio
+    }
+
+    #[test]
+    fn only_the_identification_this_was_written_from_is_routine() {
+        let mut message = atherton_message();
+        assert!(message.is_routine());
+        message.code = 0x00;
+        assert!(!message.is_routine());
+        message.code = 0xFC;
+        message.kind = 0x42;
+        assert!(!message.is_routine());
     }
 
     #[test]

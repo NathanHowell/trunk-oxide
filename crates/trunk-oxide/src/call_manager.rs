@@ -1648,6 +1648,7 @@ fn in_band_signal(line: &trunk_radio::signalling::Line) -> proto::InBandSignal {
         Some(Alert::Emergency) => SignalAlert::Emergency,
         Some(Alert::RadioCheck) => SignalAlert::RadioCheck,
         Some(Alert::CallAlert) => SignalAlert::CallAlert,
+        Some(Alert::Unrecognised) => SignalAlert::Unrecognised,
     };
     proto::InBandSignal {
         scheme: line.scheme.to_owned(),
@@ -1710,6 +1711,16 @@ mod tests {
                 unit: Some(0x1234),
                 alert: proto::SignalAlert::Emergency.into(),
             }
+        );
+        let unrecognised = trunk_radio::signalling::Line {
+            scheme: "fleetsync",
+            text: "FleetSync 120-2182 (type 0x20, code 0x00)".into(),
+            unit: Some(1_202_182),
+            alert: Some(trunk_radio::Alert::Unrecognised),
+        };
+        assert_eq!(
+            in_band_signal(&unrecognised).alert(),
+            proto::SignalAlert::Unrecognised
         );
         assert_eq!(wire[1].text, "DTMF #");
         assert_eq!(wire[1].unit, None);

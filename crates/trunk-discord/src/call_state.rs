@@ -1473,6 +1473,26 @@ mod tests {
     }
 
     #[test]
+    fn an_unrecognised_message_is_flagged_on_the_embed() {
+        let mut s = make_state();
+        s.on_start();
+        let line = proto::InBandSignal {
+            scheme: "fleetsync".into(),
+            text: "FleetSync 120-2182 (type 0x20, code 0x00)".into(),
+            unit: Some(1_202_182),
+            alert: proto::SignalAlert::Unrecognised.into(),
+        };
+        s.on_ptt_boundary(Some(&with_signalling(vec![line])));
+        let embed = s.build_embed();
+        let field = embed
+            .fields
+            .iter()
+            .find(|f| f.name == "Signalling")
+            .unwrap();
+        assert_eq!(field.value, "⚠️ FleetSync 120-2182 (type 0x20, code 0x00)");
+    }
+
+    #[test]
     fn a_silent_call_that_carried_signalling_keeps_its_embed() {
         let mut s = make_state();
         s.on_start();

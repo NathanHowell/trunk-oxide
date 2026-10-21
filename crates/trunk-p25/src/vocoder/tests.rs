@@ -240,7 +240,9 @@ fn an_erasure_after_a_tone_repeats_it() {
     let mut v = AmbeVocoder::new();
     let tone_pcm = (0..3).map(|_| v.decode(&dibits(tone(129, 100)))).last();
     assert!(tone_pcm.flatten().is_some());
-    let repeat = v.decode(&dibits(ambe_with_b0(&mut rng, 121))).expect("a repeat");
+    let repeat = v
+        .decode(&dibits(ambe_with_b0(&mut rng, 121)))
+        .expect("a repeat");
     assert_eq!(v.last(), Decision::Repeated);
     assert!(power(&repeat, 1209.0) > 100.0 * power(&repeat, 950.0));
 }
@@ -256,7 +258,10 @@ fn comfort_noise_is_uniform_on_five() {
         }
     }
     let n = 100 * SAMPLES_PER_FRAME / 11;
-    assert!(counts.iter().all(|&c| c > n * 9 / 10 && c < n * 11 / 10), "{counts:?}");
+    assert!(
+        counts.iter().all(|&c| c > n * 9 / 10 && c < n * 11 / 10),
+        "{counts:?}"
+    );
 }
 
 /// A DTMF tone frame plays both of its tones, continuing across frames.

@@ -343,7 +343,11 @@ channel_id = 123456789
             "/../../svrcs-talkgroups.csv"
         ));
         let tgs = crate::system::load_talkgroups_csv(csv_path).unwrap();
-        assert!(tgs.len() > 400, "expected 400+ talkgroups, got {}", tgs.len());
+        assert!(
+            tgs.len() > 400,
+            "expected 400+ talkgroups, got {}",
+            tgs.len()
+        );
         assert_eq!(tgs[&1551].mode, crate::TalkgroupMode::TrunkedEncrypted);
     }
 

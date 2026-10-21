@@ -76,6 +76,28 @@ impl<const N: usize, const K: usize> ReedSolomon<N, K> {
         Gf64::alpha(N - 1 - j)
     }
 
+    /// X⁻¹ for each position, where the Chien search evaluates Λ.
+    const LOCATOR_INVERSES: [Gf64; N] = {
+        let mut x = [Gf64::ZERO; N];
+        let mut j = 0;
+        while j < N {
+            x[j] = Self::locator_of(j).inv();
+            j += 1;
+        }
+        x
+    };
+
+    /// The syndrome points α^(`FIRST_ROOT` + i), the code's roots.
+    const ROOTS: [Gf64; 64] = {
+        let mut roots = [Gf64::ZERO; 64];
+        let mut i = 0;
+        while i < Self::R {
+            roots[i] = Gf64::alpha(FIRST_ROOT + i);
+            i += 1;
+        }
+        roots
+    };
+
     fn polynomial(word: &[Gf64]) -> Poly {
         word.iter().rev().copied().collect()
     }
@@ -107,8 +129,9 @@ impl<const N: usize, const K: usize> ReedSolomon<N, K> {
     /// S(x) = Σ c(α^(`FIRST_ROOT` + i)) xⁱ; zero for a codeword.
     fn syndromes(word: &[Gf64]) -> Poly {
         let c = Self::polynomial(word);
-        (FIRST_ROOT..FIRST_ROOT + Self::R)
-            .map(|i| c.eval(Gf64::alpha(i)))
+        Self::ROOTS[..Self::R]
+            .iter()
+            .map(|&root| c.eval(root))
             .collect()
     }
 
@@ -118,14 +141,25 @@ impl<const N: usize, const K: usize> ReedSolomon<N, K> {
 
     /// Correct `word` in place, treating the positions in `erasures` as
     /// unknown. Returns the number of symbols changed.
-    #[allow(clippy::many_single_char_names)] // the textbook's Λ, B, L, S, r
     pub fn decode(&self, word: &mut [Gf64; N], erasures: &[usize]) -> Result<usize, RsFailure> {
+        let s = Self::syndromes(word);
+        self.decode_with(word, &s, erasures)
+    }
+
+    /// [`Self::decode`] given the syndromes `s` of `word`, which several
+    /// erasure sets of one word share.
+    #[allow(clippy::many_single_char_names)] // the textbook's Λ, B, L, S, r
+    fn decode_with(
+        &self,
+        word: &mut [Gf64; N],
+        s: &Poly,
+        erasures: &[usize],
+    ) -> Result<usize, RsFailure> {
         let r = Self::R;
         if erasures.len() > r {
             return Err(RsFailure::TooManyErasures);
         }
-        let s = Self::syndromes(word);
-        if s == Poly::default() {
+        if *s == Poly::default() {
             return Ok(0);
         }
 
@@ -134,7 +168,7 @@ impl<const N: usize, const K: usize> ReedSolomon<N, K> {
             &g * &Poly::locator(Self::locator_of(j))
         });
         let f = erasures.len();
-        let mut lambda = gamma.clone();
+        let mut lambda = gamma;
         let mut b = gamma;
         let mut l = f;
         for step in f..r {
@@ -160,12 +194,12 @@ impl<const N: usize, const K: usize> ReedSolomon<N, K> {
         }
 
         // Chien search over the (shortened) positions, then Forney.
-        let omega = (&s * &lambda).truncate(r);
+        let omega = s.mul_truncated(&lambda, r);
         let dlambda = lambda.derivative();
         let mut changed = 0;
         let mut roots = 0;
         for (j, symbol) in word.iter_mut().enumerate() {
-            let x_inv = Self::locator_of(j).inv();
+            let x_inv = Self::LOCATOR_INVERSES[j];
             if !lambda.eval(x_inv).is_zero() {
                 continue;
             }
@@ -197,10 +231,11 @@ impl<const N: usize, const K: usize> ReedSolomon<N, K> {
         let alpha = normalised(reliability);
         let mut order: [usize; N] = std::array::from_fn(|j| j);
         order.sort_by(|&a, &b| alpha[a].total_cmp(&alpha[b]));
+        let s = Self::syndromes(word);
         let mut best: Option<([Gf64; N], Decoded)> = None;
         for erased in (0..=Self::R).step_by(2) {
             let mut trial = *word;
-            if let Ok(changed) = self.decode(&mut trial, &order[..erased]) {
+            if let Ok(changed) = self.decode_with(&mut trial, &s, &order[..erased]) {
                 let distance = generalised_distance(word, &trial, &alpha);
                 #[allow(clippy::cast_precision_loss)] // R ≤ 62
                 let d_min = (Self::R + 1) as f32;

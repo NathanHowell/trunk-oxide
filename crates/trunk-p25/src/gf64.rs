@@ -159,115 +159,204 @@ pub fn eval(poly: &[Gf64], x: Gf64) -> Gf64 {
     poly.iter().rev().fold(Gf64::ZERO, |acc, &c| acc * x + c)
 }
 
+/// The most coefficients a [`Poly`] holds.
+///
+/// Berlekamp–Massey's auxiliary polynomial reaches twice the parity count
+/// (a code has at most 62 parity symbols) before the checks that reject a
+/// word; a product that is kept is far shorter.
+const CAPACITY: usize = 128;
+
 /// A polynomial over GF(64), lowest degree first, never with a zero leading
 /// coefficient (the zero polynomial is empty).
-#[derive(Clone, Default, PartialEq, Eq, Debug)]
-pub struct Poly(Vec<Gf64>);
+///
+/// It lives on the stack, so the decoders that build many of them in a word
+/// allocate nothing; an operation that would outgrow [`CAPACITY`] panics.
+#[derive(Clone, Copy)]
+pub struct Poly {
+    /// Zero beyond `len`.
+    c: [Gf64; CAPACITY],
+    len: usize,
+}
+
+impl Default for Poly {
+    fn default() -> Self {
+        Self::ZERO
+    }
+}
+
+impl PartialEq for Poly {
+    fn eq(&self, o: &Self) -> bool {
+        self.coefficients() == o.coefficients()
+    }
+}
+
+impl Eq for Poly {}
+
+impl fmt::Debug for Poly {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_list().entries(self.coefficients()).finish()
+    }
+}
 
 impl Poly {
-    #[must_use]
-    pub fn new(mut coefficients: Vec<Gf64>) -> Self {
-        while coefficients.last().is_some_and(|c| c.is_zero()) {
-            coefficients.pop();
+    /// The zero polynomial.
+    pub const ZERO: Self = Self {
+        c: [Gf64::ZERO; CAPACITY],
+        len: 0,
+    };
+
+    /// Drops leading zero coefficients.
+    const fn trimmed(mut self) -> Self {
+        while self.len > 0 && self.c[self.len - 1].is_zero() {
+            self.len -= 1;
         }
-        Self(coefficients)
+        self
     }
 
     #[must_use]
-    pub fn one() -> Self {
-        Self(vec![Gf64::ONE])
+    pub fn new(coefficients: &[Gf64]) -> Self {
+        let mut p = Self::ZERO;
+        p.c[..coefficients.len()].copy_from_slice(coefficients);
+        p.len = coefficients.len();
+        p.trimmed()
+    }
+
+    #[must_use]
+    pub const fn one() -> Self {
+        let mut p = Self::ZERO;
+        p.c[0] = Gf64::ONE;
+        p.len = 1;
+        p
     }
 
     /// `c · x^d`.
     #[must_use]
-    pub fn monomial(c: Gf64, d: usize) -> Self {
-        let mut v = vec![Gf64::ZERO; d + 1];
-        v[d] = c;
-        Self::new(v)
+    pub const fn monomial(c: Gf64, d: usize) -> Self {
+        let mut p = Self::ZERO;
+        p.c[d] = c;
+        p.len = d + 1;
+        p.trimmed()
     }
 
     /// `1 + a·x`, the locator factor of a root at a⁻¹.
     #[must_use]
-    pub fn locator(a: Gf64) -> Self {
-        Self::new(vec![Gf64::ONE, a])
+    pub const fn locator(a: Gf64) -> Self {
+        let mut p = Self::ZERO;
+        p.c[0] = Gf64::ONE;
+        p.c[1] = a;
+        p.len = 2;
+        p.trimmed()
     }
 
     pub const fn degree(&self) -> Option<usize> {
-        self.0.len().checked_sub(1)
+        self.len.checked_sub(1)
     }
 
     pub fn coef(&self, i: usize) -> Gf64 {
-        self.0.get(i).copied().unwrap_or(Gf64::ZERO)
+        // zero beyond `len`, so no bounds test of that
+        self.c.get(i).copied().unwrap_or(Gf64::ZERO)
     }
 
     pub fn coefficients(&self) -> &[Gf64] {
-        &self.0
+        &self.c[..self.len]
     }
 
     pub fn eval(&self, x: Gf64) -> Gf64 {
-        eval(&self.0, x)
+        eval(self.coefficients(), x)
     }
 
     /// Formal derivative: in characteristic 2 only the odd terms survive.
     #[must_use]
     pub fn derivative(&self) -> Self {
-        Self::new(
-            self.0
-                .iter()
-                .enumerate()
-                .skip(1)
-                .map(|(i, &c)| if i % 2 == 1 { c } else { Gf64::ZERO })
-                .collect(),
-        )
+        let mut p = Self::ZERO;
+        for i in (1..self.len).step_by(2) {
+            p.c[i - 1] = self.c[i];
+        }
+        p.len = self.len.saturating_sub(1);
+        p.trimmed()
     }
 
     /// `self mod x^n`.
     #[must_use]
     pub fn truncate(&self, n: usize) -> Self {
-        Self::new(self.0.iter().copied().take(n).collect())
+        let mut p = *self;
+        if n < p.len {
+            p.c[n..p.len].fill(Gf64::ZERO);
+            p.len = n;
+        }
+        p.trimmed()
     }
 
     #[must_use]
     pub fn scale(&self, c: Gf64) -> Self {
-        Self::new(self.0.iter().map(|&a| a * c).collect())
+        let mut p = *self;
+        p.c[..p.len].iter_mut().for_each(|a| *a *= c);
+        p.trimmed()
     }
 
     /// `self · x^d`.
     #[must_use]
     pub fn shift(&self, d: usize) -> Self {
-        let mut v = vec![Gf64::ZERO; d];
-        v.extend_from_slice(&self.0);
-        Self::new(v)
+        if self.len == 0 {
+            return Self::ZERO;
+        }
+        let mut p = Self::ZERO;
+        p.c[d..d + self.len].copy_from_slice(self.coefficients());
+        p.len = d + self.len;
+        p
+    }
+
+    /// `(self · o) mod x^n`, without forming the terms the reduction drops.
+    #[must_use]
+    pub fn mul_truncated(&self, o: &Self, n: usize) -> Self {
+        let mut p = Self::ZERO;
+        for (i, &a) in self.coefficients().iter().enumerate().take(n) {
+            for (j, &b) in o.coefficients().iter().enumerate().take(n - i) {
+                p.c[i + j] += a * b;
+            }
+        }
+        p.len = (self.len + o.len).saturating_sub(1).min(n);
+        p.trimmed()
     }
 }
 
 impl FromIterator<Gf64> for Poly {
     fn from_iter<I: IntoIterator<Item = Gf64>>(iter: I) -> Self {
-        Self::new(iter.into_iter().collect())
+        let mut p = Self::ZERO;
+        for c in iter {
+            p.c[p.len] = c;
+            p.len += 1;
+        }
+        p.trimmed()
     }
 }
 
 impl Add for &Poly {
     type Output = Poly;
     fn add(self, o: &Poly) -> Poly {
-        let n = self.0.len().max(o.0.len());
-        (0..n).map(|i| self.coef(i) + o.coef(i)).collect()
+        let mut p = *self;
+        for (a, &b) in p.c.iter_mut().zip(o.coefficients()) {
+            *a += b;
+        }
+        p.len = self.len.max(o.len);
+        p.trimmed()
     }
 }
 
 impl Mul for &Poly {
     type Output = Poly;
     fn mul(self, o: &Poly) -> Poly {
-        if self.0.is_empty() || o.0.is_empty() {
-            return Poly::default();
+        if self.len == 0 || o.len == 0 {
+            return Poly::ZERO;
         }
-        let mut v = vec![Gf64::ZERO; self.0.len() + o.0.len() - 1];
-        for (i, &a) in self.0.iter().enumerate() {
-            for (j, &b) in o.0.iter().enumerate() {
-                v[i + j] += a * b;
+        let mut p = Poly::ZERO;
+        for (i, &a) in self.coefficients().iter().enumerate() {
+            for (j, &b) in o.coefficients().iter().enumerate() {
+                p.c[i + j] += a * b;
             }
         }
-        Poly::new(v)
+        p.len = self.len + o.len - 1;
+        p.trimmed()
     }
 }
 
@@ -275,19 +364,20 @@ impl std::ops::Rem for &Poly {
     type Output = Poly;
     fn rem(self, divisor: &Poly) -> Poly {
         let d = divisor.degree().expect("division by the zero polynomial");
-        let lead = divisor.0[d].inv();
-        let mut r = self.0.clone();
-        while r.len() > d {
-            let top = r.len() - 1;
-            let q = r[top] * lead;
+        let lead = divisor.c[d].inv();
+        let mut r = *self;
+        while r.len > d {
+            let top = r.len - 1;
+            let q = r.c[top] * lead;
             if !q.is_zero() {
-                for (i, &c) in divisor.0.iter().enumerate() {
-                    r[top - d + i] += q * c;
+                for (i, &c) in divisor.coefficients().iter().enumerate() {
+                    r.c[top - d + i] += q * c;
                 }
             }
-            r.pop();
+            r.c[top] = Gf64::ZERO;
+            r.len -= 1;
         }
-        Poly::new(r)
+        r.trimmed()
     }
 }
 
@@ -313,7 +403,7 @@ mod tests {
 
     #[test]
     fn polynomial_ring_identities() {
-        let a = Poly::new(vec![Gf64::new(3), Gf64::ZERO, Gf64::new(7)]);
+        let a = Poly::new(&[Gf64::new(3), Gf64::ZERO, Gf64::new(7)]);
         let b = Poly::locator(Gf64::alpha(5));
         let p = &a * &b;
         assert_eq!(p.degree(), Some(3));

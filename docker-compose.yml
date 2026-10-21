@@ -223,6 +223,32 @@ services:
       retries: 3
       start_period: 15s
 
+  # The #monitoring dashboard, apart from trunk-discord: a chart of
+  # VictoriaMetrics, edited in place. It reports healthy only while that
+  # keeps succeeding, so a dashboard that has gone stale shows here.
+  trunk-monitor:
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: Dockerfile.monitor
+    user: "0:0"
+    volumes:
+      - monitor-socket:/run/service
+      - ./config-monitor.toml:/etc/trunk-monitor/config.toml:ro
+    secrets:
+      - discord_token
+    command: ["--discord-token", "@/run/secrets/discord_token"]
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://jaeger:4318
+      - OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://victoriametrics:8428/opentelemetry/api/v1/push
+      - RUST_LOG=info
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr", "unix:///run/service/grpc.sock"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+
   jaeger:
     image: cr.jaegertracing.io/jaegertracing/jaeger:2.15.0
     # Badger storage on a volume (48h TTL) instead of the in-memory default.
@@ -255,6 +281,7 @@ volumes:
   oxide-socket:
   whisperer-socket:
   discord-socket:
+  monitor-socket:
   whisper-models:
   parakeet-models:
   whistle-models:

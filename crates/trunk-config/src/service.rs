@@ -81,6 +81,29 @@ const fn default_transcription_timeout_s() -> f64 {
     30.0
 }
 
+/// The monitoring dashboard service (`trunk-monitor`).
+#[derive(Debug, Deserialize)]
+pub struct MonitorConfig {
+    #[serde(default)]
+    pub bot_token: String,
+    /// Channel the dashboard is posted in.
+    pub channel_id: crate::discord::NonZeroU64,
+    /// `VictoriaMetrics` to chart.
+    #[serde(default = "default_victoriametrics_url")]
+    pub victoriametrics_url: String,
+    /// Seconds between refreshes of the dashboard.
+    #[serde(default = "default_refresh_secs")]
+    pub refresh_secs: u64,
+}
+
+fn default_victoriametrics_url() -> String {
+    "http://victoriametrics:8428".to_string()
+}
+
+const fn default_refresh_secs() -> u64 {
+    300
+}
+
 #[derive(Debug, Deserialize)]
 pub struct GrpcConfig {
     #[serde(default = "default_grpc_listen_path")]

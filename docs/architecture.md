@@ -50,6 +50,7 @@ Workspace lints (`Cargo.toml`): `unsafe_code = "deny"` and `unused_must_use = "d
 | `trunk-config` | `Config::load`, `SourceConfig`, `SystemConfig`, `TalkgroupConfig`, `ChannelConfig`, `RecorderConfig`, `OxideConfig`, `AudioConfig`, `DiscordConfig` |
 | `trunk-database` | `Database::open_hourly`, `insert_call`, `update_call`, `get_thread` / `set_thread` |
 | `trunk-discord` | `DispatchPump`, `DispatcherState`, `CallHandler`, `ChannelWriters`, `Aggregator`, `TranscriberConnection`, `OggOpusEncoder` |
+| `trunk-monitor` | `Dashboard` (refresh, recover), `StatsClient` (the chart), `Channel` (the Discord message), `health::watchdog` |
 | `trunk-whisperer`, `trunk-parakeet`, `trunk-whistle` | a `Transcriber` gRPC service each, behind a `PrioritySemaphore` |
 | `trunk-solver` | `solve`, `max_channels`, `SolverConfig` (binary `trunk-solver`) |
 | `trunk-sh` | binary `sh` (`sh -c COMMAND` only) |
@@ -296,7 +297,7 @@ It consumes `RadioEvent` (section 2) and emits through `EventBridge`. Outbound t
      conventional channels, calibration/live floor)
      │ OTLP/HTTP, PeriodicReader        OTLP/HTTP spans, batch exporter
      ▼                                          ▼
-  VictoriaMetrics  ◄── trunk-discord stats_chart (VM_QUERY_URL; PNG to the monitoring channel)      Jaeger
+  VictoriaMetrics  ◄── trunk-monitor chart (`[monitor] victoriametrics_url`; PNG to #monitoring)      Jaeger
 ```
 
 Exporters turn on from the environment: `OTEL_EXPORTER_OTLP_ENDPOINT` enables traces and metrics; `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT` metrics alone (`main.rs`). With neither, instruments are no-ops. The scanner keeps no history; the only stores are VictoriaMetrics and Jaeger. Metric names are `trunk.oxide.*` (`calls_started`, `calls_ended`, `channelizer.*`, `source.*`, `channel_waits`, `channel_evictions`, `channels_held`, `event_channel.depth`, `broadcast.utilization`, `conventional.*`, plus the `p25` and `fm` decoders'). Each call has a span opened at `EmitCallStart` and closed in `exec_conclude_call` with the stop reason, audio and voice age, channelizer overruns during the call, and decoder counts; its `traceparent` rides `CallInfo` so `trunk-discord` and the transcriber join one trace. `trunk-discord`'s `reactions.rs` closes the loop for audio quality: a reaction emoji on a call's embed becomes a "flagged" metric and a log line carrying the call's trace id.

@@ -5,8 +5,8 @@
 
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
-# The two services whose images come from this tree.
-services := "trunk-oxide trunk-discord"
+# The services whose images come from this tree.
+services := "trunk-oxide trunk-discord trunk-monitor"
 
 # How long `verify` waits for both to report healthy.
 healthy_within := "180"
@@ -17,9 +17,9 @@ default:
 # Cold, the Rust toolchain and the dependencies build first and it takes 10
 # minutes or more.
 
-# Build both images from the working tree.
-build:
-    podman-compose build {{ services }}
+# Build the images from the working tree: all of them, or the services named.
+build *which=services:
+    podman-compose build {{ which }}
 
 # trunk-oxide exits at startup unless the user slice outweighs terminal
 # scopes (deploy/systemd/user.slice.d). A restart of the user manager drops
@@ -40,16 +40,18 @@ check-cpu-weight:
 # compose config, not the image, so without it an unchanged config keeps the
 # old container. The scanner is off the air from here until it is healthy.
 
-# Recreate both services from the images just built.
-up: check-cpu-weight
-    podman-compose up -d --no-deps --no-build --force-recreate {{ services }}
+# Naming the services lets a change to one leave the scanner on the air.
 
-# Wait for both services to report healthy; on a timeout show why.
-verify:
+# Recreate the services from the images just built: all of them, or those named.
+up *which=services: check-cpu-weight
+    podman-compose up -d --no-deps --no-build --force-recreate {{ which }}
+
+# Wait for the services to report healthy; on a timeout show why.
+verify *which=services:
     #!/usr/bin/env bash
     set -euo pipefail
     deadline=$((SECONDS + {{ healthy_within }}))
-    for name in {{ services }}; do
+    for name in {{ which }}; do
         container=trunk-oxide_${name}_1
         until [ "$(podman inspect "$container" --format '{{{{.State.Health.Status}}')" = healthy ]; do
             if [ "$SECONDS" -ge "$deadline" ]; then
@@ -83,7 +85,10 @@ restore:
     set -euo pipefail
     for name in {{ services }}; do
         image=localhost/trunk-oxide_${name}
-        podman tag "$image:previous" "$image:latest"
+        # a service added since the last deploy has nothing to go back to
+        if podman image exists "$image:previous"; then
+            podman tag "$image:previous" "$image:latest"
+        fi
     done
 
 # Snapshot, build, replace and check. The whole deploy.

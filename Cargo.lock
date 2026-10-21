@@ -330,9 +330,9 @@ checksum = "5d20789868f4b01b2f2caec9f5c4e0213b41e3e5702a50157d699ae31ced2fcb"
 
 [[package]]
 name = "bytemuck"
-version = "1.25.0"
+version = "1.25.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c8efb64bd706a16a1bdde310ae86b351e4d21550d98d056f22f8a7f7a2183fec"
+checksum = "95832e849adfb21180ccb6826a99da14e5d266ae5c2e668e1602cf234f153797"
 
 [[package]]
 name = "byteorder"
@@ -2344,9 +2344,9 @@ dependencies = [
 
 [[package]]
 name = "pxfm"
-version = "0.1.29"
+version = "0.1.30"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e0c5ccf5294c6ccd63a74f1565028353830a9c2f5eb0c682c355c471726a6e3f"
+checksum = "d55d956fa96f5ec02be2e13af0e20391a5aa83d6a074e3ad368959d0fab299ea"
 
 [[package]]
 name = "quick-error"
@@ -3660,15 +3660,12 @@ dependencies = [
  "chrono",
  "clap",
  "hyper-util",
- "image",
  "ogg",
  "opentelemetry",
  "opentelemetry-otlp",
  "opentelemetry_sdk",
  "pid1",
- "plotters",
  "prost",
- "reqwest",
  "rubato",
  "serde",
  "serde_json",
@@ -3696,6 +3693,35 @@ dependencies = [
  "num-complex",
  "sonora-ns",
  "trunk-channelizer",
+]
+
+[[package]]
+name = "trunk-monitor"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argfile",
+ "chrono",
+ "clap",
+ "image",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "pid1",
+ "plotters",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "serenity",
+ "tokio",
+ "tokio-stream",
+ "tonic",
+ "tonic-health",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "trunk-config",
+ "wild",
 ]
 
 [[package]]

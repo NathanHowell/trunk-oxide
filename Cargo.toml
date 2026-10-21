@@ -11,6 +11,7 @@ members = [
     "crates/trunk-database",
     "crates/trunk-config",
     "crates/trunk-discord",
+    "crates/trunk-monitor",
     "crates/trunk-solver",
     "crates/trunk-channelizer",
     "crates/trunk-p25",
@@ -29,6 +30,7 @@ default-members = [
     "crates/trunk-parakeet",
     "crates/trunk-config",
     "crates/trunk-discord",
+    "crates/trunk-monitor",
     "crates/trunk-solver",
 ]
 

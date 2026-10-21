@@ -9,15 +9,7 @@ use trunk_oxide_proto as proto;
 use crate::aggregator_state::{AggEffect, AggMessage, AggregatorState, EmbedTarget};
 use crate::call_state::EmbedData;
 use crate::discord::DiscordClient;
-use crate::stats_chart::StatsClient;
 use trunk_database::Database;
-
-/// Filename the stats embed references via `attachment://`.
-const STATS_FILENAME: &str = "stats.png";
-/// How often the `VictoriaMetrics` stats chart is refreshed.
-// `from_mins` is not stable on our MSRV (1.94); keep `from_secs`.
-#[allow(clippy::duration_suboptimal_units)]
-const STATS_REFRESH: Duration = Duration::from_secs(300);
 
 #[derive(Debug)]
 pub enum AggregatorMessage {
@@ -39,8 +31,6 @@ impl Aggregator {
         discord: Arc<DiscordClient>,
         channel_id: ChannelId,
         db: Arc<Mutex<Database>>,
-        stats: Option<StatsClient>,
-        monitoring_channel_id: Option<ChannelId>,
     ) -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
 
@@ -50,12 +40,9 @@ impl Aggregator {
             channel_id,
             rx,
             db,
-            stats,
-            monitoring_channel_id,
             current_thread_id: None,
             recorder_embed_id: None,
             activity_embed_id: None,
-            stats_message_id: None,
         };
 
         tokio::spawn(inner.run());
@@ -74,22 +61,14 @@ struct AggregatorExecutor {
     channel_id: ChannelId,
     rx: mpsc::UnboundedReceiver<AggregatorMessage>,
     db: Arc<Mutex<Database>>,
-    /// `None` when the `VictoriaMetrics` stats chart feature is disabled.
-    stats: Option<StatsClient>,
-    /// Channel the stats dashboard is posted to; `None` disables it.
-    monitoring_channel_id: Option<ChannelId>,
     current_thread_id: Option<ChannelId>,
     recorder_embed_id: Option<MessageId>,
     activity_embed_id: Option<MessageId>,
-    /// Dashboard message in the monitoring channel: posted once per process
-    /// start, then edited in place.
-    stats_message_id: Option<MessageId>,
 }
 
 impl AggregatorExecutor {
     async fn run(mut self) {
         let mut flush_interval = time::interval(Duration::from_secs(60));
-        let mut stats_interval = time::interval(STATS_REFRESH);
 
         loop {
             tokio::select! {
@@ -102,52 +81,7 @@ impl AggregatorExecutor {
                     let effects = self.state.on_flush(Utc::now().timestamp());
                     self.process_effects(effects).await;
                 }
-                _ = stats_interval.tick() => {
-                    self.update_stats().await;
-                }
             }
-        }
-    }
-
-    /// Render the `VictoriaMetrics` stats chart and post (or update) it in the
-    /// monitoring channel. No-op when the feature is disabled; logs and moves
-    /// on if VM is unreachable or rendering fails, so a flaky chart never
-    /// wedges the aggregator loop.
-    async fn update_stats(&mut self) {
-        let Some(stats) = self.stats.as_ref() else {
-            return;
-        };
-        let Some(channel_id) = self.monitoring_channel_id else {
-            return;
-        };
-
-        let png = match stats.render_chart().await {
-            Ok(png) => png,
-            Err(e) => {
-                tracing::warn!(error = %e, "failed to render stats chart");
-                return;
-            }
-        };
-
-        let embed = build_stats_embed();
-        match self.stats_message_id {
-            Some(msg_id) => {
-                if let Err(e) = self
-                    .discord
-                    .edit_embed_with_image(channel_id, msg_id, embed, png, STATS_FILENAME)
-                    .await
-                {
-                    tracing::warn!(error = %e, "failed to edit stats embed");
-                }
-            }
-            None => match self
-                .discord
-                .send_embed_with_image(channel_id, embed, png, STATS_FILENAME)
-                .await
-            {
-                Ok(msg_id) => self.stats_message_id = Some(msg_id),
-                Err(e) => tracing::warn!(error = %e, "failed to post stats embed"),
-            },
         }
     }
 
@@ -237,19 +171,6 @@ fn convert_message(msg: AggregatorMessage) -> AggMessage {
         AggregatorMessage::SetupSystem(e) => AggMessage::SetupSystem(e),
         AggregatorMessage::SetupConfig(e) => AggMessage::SetupConfig(e),
     }
-}
-
-/// Build the embed wrapping the stats chart. References the attached PNG via
-/// `attachment://`, which Discord renders inline.
-fn build_stats_embed() -> serenity::all::CreateEmbed {
-    use serenity::all::{CreateEmbed, CreateEmbedFooter};
-
-    let footer = format!("updated {}", Utc::now().format("%Y-%m-%d %H:%M:%S UTC"));
-    CreateEmbed::new()
-        .title("📊 Monitoring — last 6 h (UTC)")
-        .colour(0x0034_98db)
-        .image(format!("attachment://{STATS_FILENAME}"))
-        .footer(CreateEmbedFooter::new(footer))
 }
 
 fn embed_data_to_serenity(data: &EmbedData) -> serenity::all::CreateEmbed {

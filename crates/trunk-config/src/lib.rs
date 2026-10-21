@@ -13,7 +13,7 @@ use serde::Deserialize;
 
 pub use discord::{ChannelGroup, ChannelMapping, DiscordConfig, NonZeroU64, TalkgroupSelector};
 pub use recorder::{ConditionerConfig, ConditionerReset, DefaultMode, RecorderConfig};
-pub use service::{AudioConfig, GrpcConfig, OxideConfig, WhispererConfig};
+pub use service::{AudioConfig, GrpcConfig, MonitorConfig, OxideConfig, WhispererConfig};
 pub use source::{SourceConfig, SourceDriver};
 pub use system::{
     ChannelConfig, Modulation, SystemConfig, SystemType, TalkgroupConfig, TalkgroupMode,
@@ -36,6 +36,8 @@ pub struct Config {
     pub whisperer: Option<WhispererConfig>,
     #[serde(default)]
     pub discord: Option<DiscordConfig>,
+    #[serde(default)]
+    pub monitor: Option<MonitorConfig>,
     #[serde(default)]
     pub audio: AudioConfig,
     #[serde(default)]
@@ -116,20 +118,27 @@ channel_id = 123456789
         let discord = config.discord.unwrap();
         assert_eq!(discord.channel_id.get(), 123_456_789);
         assert!(discord.guild_id.is_none());
-        assert!(discord.monitoring_channel_id.is_none());
         assert!(discord.groups.is_empty());
     }
 
     #[test]
-    fn parse_discord_monitoring_channel() {
+    fn parse_monitor() {
         let toml = r#"
-[discord]
-channel_id = 123456789
-monitoring_channel_id = 555
+[monitor]
+channel_id = 555
 "#;
         let config: Config = toml::from_str(toml).unwrap();
-        let discord = config.discord.unwrap();
-        assert_eq!(discord.monitoring_channel_id.map(|c| c.get()), Some(555));
+        let monitor = config.monitor.unwrap();
+        assert_eq!(monitor.channel_id.get(), 555);
+        // the rest is what the compose network has
+        assert_eq!(monitor.victoriametrics_url, "http://victoriametrics:8428");
+        assert_eq!(monitor.refresh_secs, 300);
+        assert!(monitor.bot_token.is_empty());
+    }
+
+    #[test]
+    fn a_monitor_needs_its_channel() {
+        assert!(toml::from_str::<Config>("[monitor]\nrefresh_secs = 60\n").is_err());
     }
 
     #[test]

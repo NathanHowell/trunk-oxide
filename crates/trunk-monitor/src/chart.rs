@@ -1,5 +1,5 @@
 //! Renders a PNG chart of key metrics pulled from `VictoriaMetrics` for posting
-//! into the #monitoring channel.
+//! into the #monitoring channel by [`crate::dashboard`].
 //!
 //! `VictoriaMetrics` has no server-side image rendering (its `/render` is a
 //! Graphite *data* subset), so we query its JSON API (`/api/v1/query_range`)
@@ -32,8 +32,6 @@ const WINDOW_SECS: i64 = 6 * 3600;
 const STEP_SECS: i64 = 120;
 /// Per-request timeout for VM queries.
 const HTTP_TIMEOUT: Duration = Duration::from_secs(20);
-
-const DEFAULT_BASE_URL: &str = "http://victoriametrics:8428";
 
 /// Register the bundled font as the default "sans-serif" family. Idempotent in
 /// practice; call once at startup before any chart is rendered. Without this,
@@ -308,27 +306,20 @@ fn parse_response(body: &str) -> Result<Vec<VmResult>> {
 // ── Client ──────────────────────────────────────────────────────────────────
 
 /// Queries `VictoriaMetrics` and renders the hourly stats chart.
+#[derive(Clone)]
 pub struct StatsClient {
     http: reqwest::Client,
     base_url: String,
 }
 
 impl StatsClient {
-    /// Build a client from the `VM_QUERY_URL` env var. Unset → default
-    /// (`http://victoriametrics:8428`, reachable on the compose network);
-    /// set-but-empty → `None` (feature disabled). Returns `None` if the HTTP
-    /// client can't be built.
-    pub fn from_env() -> Option<Self> {
-        let base_url = match std::env::var("VM_QUERY_URL") {
-            Ok(s) if s.trim().is_empty() => return None,
-            Ok(s) => s,
-            Err(_) => DEFAULT_BASE_URL.to_string(),
-        };
+    /// A client for the `VictoriaMetrics` at `base_url`.
+    pub fn new(base_url: &str) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(HTTP_TIMEOUT)
             .build()
-            .ok()?;
-        Some(Self {
+            .context("building the HTTP client")?;
+        Ok(Self {
             http,
             base_url: base_url.trim_end_matches('/').to_string(),
         })
@@ -389,13 +380,24 @@ impl StatsClient {
     }
 
     /// Fetch all panels and render the chart to PNG bytes.
+    ///
+    /// The panels are fetched at the same time, so a slow `VictoriaMetrics`
+    /// costs one panel's queries and not all of them, and the drawing, which
+    /// is CPU work, runs off the async runtime.
     pub async fn render_chart(&self) -> Result<Vec<u8>> {
         let end = chrono::Utc::now().timestamp();
         let start = end - WINDOW_SECS;
-        let mut panels = Vec::with_capacity(PANELS.len());
-        for spec in PANELS {
-            panels.push(self.fetch_panel(spec, start, end).await);
+        let mut fetches = tokio::task::JoinSet::new();
+        for (i, spec) in PANELS.iter().enumerate() {
+            let client = self.clone();
+            fetches.spawn(async move { (i, client.fetch_panel(spec, start, end).await) });
         }
+        let mut panels: Vec<Option<Panel>> = PANELS.iter().map(|_| None).collect();
+        while let Some(done) = fetches.join_next().await {
+            let (i, panel) = done.context("fetching a panel")?;
+            panels[i] = Some(panel);
+        }
+        let panels: Vec<Panel> = panels.into_iter().flatten().collect();
         let restarts = match self.query_range(RESTART_QUERY, start, end).await {
             Ok(results) => restarts(&results),
             Err(e) => {
@@ -403,7 +405,15 @@ impl StatsClient {
                 Vec::new()
             }
         };
-        render(&panels, &restarts, start, end)
+        tokio::task::spawn_blocking(move || render(&panels, &restarts, start, end))
+            .await
+            .context("drawing the chart")?
+    }
+}
+
+impl crate::dashboard::Chart for StatsClient {
+    async fn render(&self) -> Result<Vec<u8>> {
+        self.render_chart().await
     }
 }
 
@@ -603,7 +613,7 @@ mod tests {
 
         // NaN value is dropped; the two valid points survive.
         let points = parse_points(&results[0].values);
-        assert_eq!(points, vec![(1781110920, 0.024), (1781110980, -3.5)]);
+        assert_eq!(points, vec![(1_781_110_920, 0.024), (1_781_110_980, -3.5)]);
     }
 
     /// A restart is where the start-time gauge changes, not where it
@@ -672,12 +682,13 @@ mod tests {
     }
 
     /// Render the dashboard against a live `VictoriaMetrics`:
-    /// `VM_QUERY_URL=http://localhost:8428 STATS_PNG_OUT=/tmp/x.png cargo test -p trunk-discord live_render -- --ignored`
+    /// `VM_QUERY_URL=http://localhost:8428 STATS_PNG_OUT=/tmp/x.png cargo test -p trunk-monitor live_render -- --ignored`
     #[tokio::test]
     #[ignore = "needs a live VictoriaMetrics"]
     async fn live_render() {
         register_font();
-        let client = StatsClient::from_env().expect("VM_QUERY_URL");
+        let client = StatsClient::new(&std::env::var("VM_QUERY_URL").expect("VM_QUERY_URL"))
+            .expect("client");
         let png = client.render_chart().await.expect("render");
         let out = std::env::var("STATS_PNG_OUT").unwrap_or_else(|_| "/tmp/stats_live.png".into());
         std::fs::write(out, png).expect("write png");

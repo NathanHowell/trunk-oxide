@@ -36,6 +36,7 @@ cargo fmt
 - **trunk-config** — TOML config parser with CSV overlay support for talkgroups/channels.
 - **trunk-database** — SQLite storage with hourly rotating database files and schema versioning via SHA256.
 - **trunk-discord** — Discord bot that subscribes to gRPC events, posts call embeds, manages threads, encodes OGG audio.
+- **trunk-monitor** — Keeps the #monitoring dashboard (a chart of VictoriaMetrics, drawn with plotters) up to date in Discord. Its own container and its own gRPC health check, which reports NotServing once the dashboard has gone stale (three missed refreshes), and exits for a restart if its loop wedges. Config `config-monitor.toml` (`[monitor]`).
 - **trunk-whisperer** — Speech-to-text service using whisper-rs (whisper.cpp FFI). Optional CUDA feature. Serves `Transcriber`.
 - **trunk-parakeet** — Speech-to-text service using parakeet-rs (NVIDIA Parakeet ASR via ONNX Runtime). Drop-in replacement for trunk-whisperer — serves the same `Transcriber` gRPC service on the same Unix socket; backends are swapped at the container/image level, not via trunk-discord config.
 - **trunk-whistle** — Speech-to-text service using Cactus Whistle (16.9 MB CPU-only model) via the prebuilt `libneedle.a` C engine (FFI in `needle.rs`, the only `allow(unsafe_code)` outside the sys crates). Same `Transcriber` gRPC service/socket as the other two backends. Not in `default-members`: building needs `NEEDLE_LIB_DIR` (+ libc++ ≥ 21 static libs); use `Dockerfile.whistle` / `--profile whistle`.
@@ -52,7 +53,7 @@ cargo fmt
 
 **Configuration hierarchy**: TOML config files with CSV overlays for talkgroups and channels. trunk-solver can auto-generate optimal SDR assignments.
 
-**Deployment**: Docker multi-stage builds produce three services (trunk-oxide, trunk-discord, trunk-whisperer) communicating via gRPC over Unix sockets.
+**Deployment**: Docker multi-stage builds produce the services (trunk-oxide, trunk-discord, trunk-monitor, trunk-whisperer) communicating via gRPC over Unix sockets. `just deploy` builds and replaces trunk-oxide, trunk-discord and trunk-monitor (see the `deploy-stack` skill).
 
 ## Key Conventions
 

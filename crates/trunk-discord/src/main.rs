@@ -15,7 +15,6 @@ mod metrics;
 mod ogg_encoder;
 mod reactions;
 mod resampler;
-mod stats_chart;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -314,21 +313,10 @@ async fn main() -> Result<()> {
     let discord_client = Arc::new(discord::DiscordClient::new(discord_config));
     let channel_lookup = init_channel_manager(&discord_client, discord_config).await;
 
-    // Register the bundled font before any chart renders (distroless has none).
-    stats_chart::register_font();
-    let stats_client = stats_chart::StatsClient::from_env();
-    if stats_client.is_none() {
-        tracing::info!("VM_QUERY_URL set empty; stats chart disabled");
-    }
-
     let aggregator = Arc::new(aggregator::Aggregator::new(
         Arc::clone(&discord_client),
         fallback_channel_id,
         Arc::clone(&db),
-        stats_client,
-        discord_config
-            .monitoring_channel_id
-            .map(|id| ChannelId::from(id.get())),
     ));
 
     let meter = opentelemetry::global::meter("trunk-discord");

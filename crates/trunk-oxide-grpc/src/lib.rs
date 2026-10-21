@@ -4,7 +4,7 @@ use std::sync::{Arc, RwLock};
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::ReceiverStream;
 use tonic::{Request, Response, Status};
-use trunk_radio::{AudioSink, CallId, ChannelNum, TrunkMessage, UnitEventType};
+use trunk_radio::{AudioSink, CallId, TrunkMessage, UnitEventType};
 
 pub use trunk_oxide_proto as proto;
 
@@ -23,13 +23,6 @@ pub struct TalkgroupMeta {
 }
 
 // ── Conversion helpers ──
-
-fn recorder_info(channel: ChannelNum, freq_error: i32) -> proto::RecorderInfo {
-    proto::RecorderInfo {
-        id: i32::try_from(channel.0).unwrap_or(i32::MAX),
-        freq_error,
-    }
-}
 
 /// A trunk message on the wire: trunk-recorder's flat form, with the fields
 /// the message's kind fills in.
@@ -352,15 +345,6 @@ impl EventBridge {
         self.send_event(proto::plugin_event::Event::CallsActive(
             proto::CallsActiveEvent {
                 calls: infos.into_iter().map(|i| self.enrich(i)).collect(),
-            },
-        ));
-    }
-
-    /// A channel opened or closed (with the FLL's error it closed on).
-    pub fn setup_recorder(&self, channel: ChannelNum, freq_error: i32) {
-        self.send_event(proto::plugin_event::Event::SetupRecorder(
-            proto::SetupRecorderEvent {
-                recorder: Some(recorder_info(channel, freq_error)),
             },
         ));
     }

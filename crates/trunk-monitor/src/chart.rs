@@ -171,6 +171,30 @@ const PANELS: &[PanelSpec] = &[
         ],
     },
     PanelSpec {
+        title: "Clock correction per source",
+        y_desc: "Hz",
+        zero_floor: false,
+        queries: &[QuerySpec {
+            query: "trunk.oxide.freq_correction_hz",
+            label: Label::Tagged {
+                prefix: "source",
+                tag: "source",
+            },
+        }],
+    },
+    PanelSpec {
+        title: "Clock error at call end (mean)",
+        y_desc: "Hz",
+        zero_floor: false,
+        queries: &[QuerySpec {
+            query: "sum by (source)(rate(trunk.oxide.freq_error_hz_sum[30m]))/sum by (source)(rate(trunk.oxide.freq_error_hz_count[30m]))",
+            label: Label::Tagged {
+                prefix: "source",
+                tag: "source",
+            },
+        }],
+    },
+    PanelSpec {
         title: "Active channels per source",
         y_desc: "channels",
         zero_floor: true,

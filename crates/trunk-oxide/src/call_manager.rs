@@ -576,7 +576,6 @@ impl CallManager {
                 Effect::Open { call_id } => self.exec_open(call_id),
                 Effect::Close { call_id } => {
                     if let Some(report) = self.radio.close(call_id) {
-                        self.bridge.setup_recorder(report.num, report.freq_error);
                         self.channel_ended(call_id, report);
                     }
                 }

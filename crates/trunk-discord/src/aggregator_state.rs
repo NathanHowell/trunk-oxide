@@ -13,7 +13,7 @@ use crate::call_state::EmbedField;
 pub enum AggEffect {
     /// Post a new embed into the current hourly thread.
     PostEmbed { embed: EmbedData },
-    /// Edit an existing pinned embed (recorder table or activity summary).
+    /// Edit an existing pinned embed (the activity summary).
     EditEmbed {
         target: EmbedTarget,
         embed: EmbedData,
@@ -26,7 +26,6 @@ pub enum AggEffect {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmbedTarget {
-    Recorder,
     Activity,
 }
 
@@ -109,20 +108,6 @@ fn format_unit_type(r#type: i32) -> String {
     )
 }
 
-fn build_recorder_table(recorders: &HashMap<i32, proto::RecorderInfo>) -> String {
-    let mut ids: Vec<i32> = recorders.keys().copied().collect();
-    ids.sort_unstable();
-
-    let mut table = String::from("```\n");
-    let _ = writeln!(table, "{:<4} {:>10}", "ID", "Freq Err");
-    for id in ids {
-        let rec = &recorders[&id];
-        let _ = writeln!(table, "{:<4} {:>+10}", rec.id, rec.freq_error);
-    }
-    table.push_str("```");
-    table
-}
-
 fn setup_embed(title: &str, description: &str) -> EmbedData {
     EmbedData {
         title: title.into(),
@@ -145,10 +130,6 @@ pub struct AggregatorState {
     last_setup_config: Option<String>,
     last_setup_system: HashMap<String, String>,
 
-    // Recorder table: single embed edited in place
-    recorder_state: HashMap<i32, proto::RecorderInfo>,
-    has_recorder_embed: bool,
-
     // System activity: single embed edited in place
     has_activity_embed: bool,
 
@@ -168,8 +149,6 @@ impl AggregatorState {
         Self {
             last_setup_config: None,
             last_setup_system: HashMap::new(),
-            recorder_state: HashMap::new(),
-            has_recorder_embed: false,
             has_activity_embed: false,
             signal_counts: HashMap::new(),
             trunk_message_counts: HashMap::new(),
@@ -206,21 +185,6 @@ impl AggregatorState {
                     effects.push(AggEffect::PostEmbed {
                         embed: setup_embed("System", &text),
                     });
-                }
-            }
-            AggMessage::SetupRecorder(e) => {
-                if let Some(rec) = e.recorder {
-                    self.recorder_state.insert(rec.id, rec);
-                    let embed = self.build_recorder_embed();
-                    if self.has_recorder_embed {
-                        effects.push(AggEffect::EditEmbed {
-                            target: EmbedTarget::Recorder,
-                            embed,
-                        });
-                    } else {
-                        self.has_recorder_embed = true;
-                        effects.push(AggEffect::PostEmbed { embed });
-                    }
                 }
             }
             AggMessage::Signal(e) => {
@@ -285,8 +249,6 @@ impl AggregatorState {
     pub fn on_thread_created(&mut self, hour: String) {
         self.current_hour = hour;
         self.has_thread = true;
-        self.has_recorder_embed = false;
-        self.recorder_state.clear();
         self.has_activity_embed = false;
     }
 
@@ -311,18 +273,6 @@ impl AggregatorState {
     fn needs_new_thread(&self) -> bool {
         let now_hour = chrono::Utc::now().format("%Y-%m-%d %H:00").to_string();
         !self.has_thread || self.current_hour != now_hour
-    }
-
-    fn build_recorder_embed(&self) -> EmbedData {
-        let table = build_recorder_table(&self.recorder_state);
-        EmbedData {
-            title: "Recorders".into(),
-            colour: 0x0034_98db,
-            description: Some(table),
-            fields: vec![],
-            footer: String::new(),
-            url: None,
-        }
     }
 
     fn build_activity_embed(&mut self) -> EmbedData {
@@ -397,7 +347,6 @@ pub enum AggMessage {
     TrunkMessage(proto::TrunkMessageEvent),
     Unit(proto::UnitEvent),
     CallsActive(proto::CallsActiveEvent),
-    SetupRecorder(proto::SetupRecorderEvent),
     SetupSystem(proto::SetupSystemEvent),
     SetupConfig(proto::SetupConfigEvent),
 }
@@ -463,39 +412,6 @@ mod tests {
         // Same key, same content — deduped
         let e3 = s.on_message(AggMessage::SetupSystem(event1));
         assert!(e3.is_empty());
-    }
-
-    // ── Recorder embed ───────────────────────────────────────────────────
-
-    #[test]
-    fn recorder_first_posts_then_edits() {
-        let mut s = make_state();
-        let event1 = proto::SetupRecorderEvent {
-            recorder: Some(proto::RecorderInfo {
-                id: 1,
-                ..Default::default()
-            }),
-        };
-
-        let effects = s.on_message(AggMessage::SetupRecorder(event1));
-        assert_eq!(effects.len(), 1);
-        assert!(matches!(&effects[0], AggEffect::PostEmbed { .. }));
-
-        let event2 = proto::SetupRecorderEvent {
-            recorder: Some(proto::RecorderInfo {
-                id: 2,
-                ..Default::default()
-            }),
-        };
-        let effects = s.on_message(AggMessage::SetupRecorder(event2));
-        assert_eq!(effects.len(), 1);
-        assert!(matches!(
-            &effects[0],
-            AggEffect::EditEmbed {
-                target: EmbedTarget::Recorder,
-                ..
-            }
-        ));
     }
 
     // ── Counter aggregation ──────────────────────────────────────────────
@@ -602,20 +518,10 @@ mod tests {
     #[test]
     fn thread_created_resets_embeds() {
         let mut s = make_state();
-        s.has_recorder_embed = true;
         s.has_activity_embed = true;
-        s.recorder_state.insert(
-            1,
-            proto::RecorderInfo {
-                id: 1,
-                ..Default::default()
-            },
-        );
 
         s.on_thread_created("2025-01-01 13:00".into());
 
-        assert!(!s.has_recorder_embed);
         assert!(!s.has_activity_embed);
-        assert!(s.recorder_state.is_empty());
     }
 }

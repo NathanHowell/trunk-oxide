@@ -140,9 +140,6 @@ impl DispatcherState {
             Event::TrunkMessage(e) => vec![DispatchEffect::ForwardToAggregator {
                 message: AggregatorMessage::TrunkMessage(e),
             }],
-            Event::SetupRecorder(e) => vec![DispatchEffect::ForwardToAggregator {
-                message: AggregatorMessage::SetupRecorder(e),
-            }],
             Event::SetupSystem(e) => vec![DispatchEffect::ForwardToAggregator {
                 message: AggregatorMessage::SetupSystem(e),
             }],

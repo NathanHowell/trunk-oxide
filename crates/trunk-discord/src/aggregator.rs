@@ -17,7 +17,6 @@ pub enum AggregatorMessage {
     TrunkMessage(proto::TrunkMessageEvent),
     Unit(proto::UnitEvent),
     CallsActive(proto::CallsActiveEvent),
-    SetupRecorder(proto::SetupRecorderEvent),
     SetupSystem(proto::SetupSystemEvent),
     SetupConfig(proto::SetupConfigEvent),
 }
@@ -41,7 +40,6 @@ impl Aggregator {
             rx,
             db,
             current_thread_id: None,
-            recorder_embed_id: None,
             activity_embed_id: None,
         };
 
@@ -62,7 +60,6 @@ struct AggregatorExecutor {
     rx: mpsc::UnboundedReceiver<AggregatorMessage>,
     db: Arc<Mutex<Database>>,
     current_thread_id: Option<ChannelId>,
-    recorder_embed_id: Option<MessageId>,
     activity_embed_id: Option<MessageId>,
 }
 
@@ -97,7 +94,6 @@ impl AggregatorExecutor {
                         Ok(thread_id) => {
                             let hour_key = Utc::now().format("%Y-%m-%d %H:00").to_string();
                             self.current_thread_id = Some(thread_id);
-                            self.recorder_embed_id = None;
                             self.activity_embed_id = None;
                             self.state.on_thread_created(hour_key);
                             tracing::info!(thread = %thread_id, "created hourly summary thread");
@@ -109,7 +105,6 @@ impl AggregatorExecutor {
                 }
                 AggEffect::PostEmbed { embed } => {
                     if let Some(thread_id) = self.current_thread_id {
-                        let is_recorder = embed.title == "Recorders";
                         let is_activity = embed.title == "System Activity";
                         match self
                             .discord
@@ -117,9 +112,7 @@ impl AggregatorExecutor {
                             .await
                         {
                             Ok(msg_id) => {
-                                if is_recorder {
-                                    self.recorder_embed_id = Some(msg_id);
-                                } else if is_activity {
+                                if is_activity {
                                     self.activity_embed_id = Some(msg_id);
                                 }
                             }
@@ -131,7 +124,6 @@ impl AggregatorExecutor {
                 }
                 AggEffect::EditEmbed { target, embed } => {
                     let (thread_id, msg_id) = match target {
-                        EmbedTarget::Recorder => (self.current_thread_id, self.recorder_embed_id),
                         EmbedTarget::Activity => (self.current_thread_id, self.activity_embed_id),
                     };
                     if let (Some(tid), Some(mid)) = (thread_id, msg_id)
@@ -167,7 +159,6 @@ fn convert_message(msg: AggregatorMessage) -> AggMessage {
         AggregatorMessage::TrunkMessage(e) => AggMessage::TrunkMessage(e),
         AggregatorMessage::Unit(e) => AggMessage::Unit(e),
         AggregatorMessage::CallsActive(e) => AggMessage::CallsActive(e),
-        AggregatorMessage::SetupRecorder(e) => AggMessage::SetupRecorder(e),
         AggregatorMessage::SetupSystem(e) => AggMessage::SetupSystem(e),
         AggregatorMessage::SetupConfig(e) => AggMessage::SetupConfig(e),
     }

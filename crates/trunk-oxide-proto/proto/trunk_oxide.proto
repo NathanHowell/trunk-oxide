@@ -39,6 +39,7 @@ message AudioSample {
 
 message PluginEvent {
   reserved 7, 10, 11; // were system_rates, setup_systems, setup_sources: never sent
+  reserved 8;         // was setup_recorder: the channel table, now trunk.oxide.freq_error_hz
   oneof event {
     SignalEvent signal = 1;
     CallStartEvent call_start = 2;
@@ -46,7 +47,6 @@ message PluginEvent {
     CallsActiveEvent calls_active = 4;
     TrunkMessageEvent trunk_message = 5;
     UnitEvent unit = 6;
-    SetupRecorderEvent setup_recorder = 8;
     SetupSystemEvent setup_system = 9;
     SetupConfigEvent setup_config = 12;
     UnitAliasEvent unit_alias = 13;
@@ -166,23 +166,6 @@ message SystemInfo {
   reserved 14, 15; // were message_count, decode_rate, never filled
 }
 
-// ── Recorder info ──
-
-// A channel (a channelizer slot the radio has used).
-message RecorderInfo {
-  int32 id = 1; // the channel number
-  reserved 2;  // was type
-  reserved 3;  // was freq, now known in Rust CallEntry
-  int32 freq_error = 4; // the FLL's error (Hz) when the channel last closed
-  reserved 5;  // was talkgroup, now known in Rust CallEntry
-  reserved 6;  // was wav_hz, now cached in Rust AudioMeta
-  reserved 7;  // was is_analog, now known in Rust CallEntry
-  reserved 8;  // was is_conventional, now known in Rust CallEntry
-  reserved 9;  // was is_active, now known in Rust CallEntry
-  reserved 10; // was is_idle, now known in Rust CallEntry
-  reserved 11; // was current_length, now computed in Rust
-}
-
 // ── Call data (at call end) ──
 
 message CallData {
@@ -192,7 +175,7 @@ message CallData {
   reserved 4, 5, 6, 7, 8; // removed: talkgroup descriptive fields
   int64 call_num = 9;
   double freq = 10;
-  int32 freq_error = 11;
+  int32 freq_error = 11; // the FLL's error (Hz) when the channel closed
   reserved 12; // was source_num, never filled
   optional uint32 channel = 13; // the channel it ended on, if it had one
   optional double signal = 14;
@@ -379,10 +362,6 @@ message UnitEvent {
   int64 source_id = 3;
   int64 talkgroup = 4; // only set for affiliation, answer_request, location
   string source_alias = 5; // OTA-discovered friendly name, if known
-}
-
-message SetupRecorderEvent {
-  RecorderInfo recorder = 1;
 }
 
 message SetupSystemEvent {

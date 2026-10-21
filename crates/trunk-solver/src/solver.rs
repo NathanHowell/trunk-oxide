@@ -3,7 +3,7 @@ use trunk_channelizer::passband;
 use z3::ast::{Bool, Int};
 
 use crate::device::{Device, SampleRate};
-use crate::{CHANNEL_HALFWIDTH, Channel, Source};
+use crate::{CHANNEL_HALFWIDTH, Channel, Signal, Source};
 
 /// The guard each side of a band sampled at `rate`: what lies past
 /// [`passband::USABLE`] of Nyquist, where the RTL's filter rolls off. A
@@ -83,7 +83,7 @@ fn build_problem(opt: &z3::Optimize, channels: &[Channel], devices: &[Device]) -
             .zip(devices.iter())
             .map(|(((l, u), r), device)| {
                 // Per-rate disjuncts, each with its rate's guard.
-                let rate_disjuncts: Vec<Bool> = valid_rates(device)
+                let rate_disjuncts: Vec<Bool> = valid_rates(device, channel.signal)
                     .map(|rate| {
                         let guard = Int::from_i64(roll_off_guard(rate));
                         let rate_z3 = Int::from_i64(rate);
@@ -136,16 +136,25 @@ fn build_problem(opt: &z3::Optimize, channels: &[Channel], devices: &[Device]) -
     }
 }
 
-/// Every sample rate a device supports and the channelizer can run cheaply:
-/// at a rate whose decimation is a large prime (2.472 MS/s is 103 x 24 kHz)
-/// its FFT costs several times what a neighbouring rate's does.
-fn valid_rates(device: &Device) -> impl Iterator<Item = i64> + '_ {
-    supported_rates(device).filter(|&rate| channelizer_is_fast(rate))
+/// Every sample rate a device supports that suits a `signal` channel: one
+/// the channelizer runs cheaply and whose channel needs no resampling. A rate
+/// whose decimation is a large prime (2.472 MS/s is 103 x 24 kHz) costs
+/// several times a neighbouring rate's FFT, and an analog channel is exactly
+/// 96 kS/s only at a multiple of 96 kHz.
+fn valid_rates(device: &Device, signal: Signal) -> impl Iterator<Item = i64> + '_ {
+    supported_rates(device).filter(move |&rate| channelizer_suits(rate, signal))
 }
 
 #[allow(clippy::cast_precision_loss)]
-fn channelizer_is_fast(rate: i64) -> bool {
-    trunk_channelizer::Config::standard(rate as f64).is_ok_and(|c| c.is_fast())
+fn channelizer_suits(rate: i64, signal: Signal) -> bool {
+    use trunk_channelizer::{NARROW, WIDE};
+    trunk_channelizer::Config::standard(rate as f64).is_ok_and(|c| {
+        c.is_fast()
+            && c.is_exact(match signal {
+                Signal::Digital => NARROW,
+                Signal::Analog => WIDE,
+            })
+    })
 }
 
 /// Every sample rate a device supports.
@@ -420,12 +429,37 @@ mod tests {
     #[test]
     fn rates_with_a_slow_channelizer_fft_are_not_offered() {
         // 2.472 MS/s is 103 x 24 kHz: its FFT needs a 103-point stage.
-        let rates: Vec<i64> = valid_rates(&Device::rtlsdr()).collect();
+        let rates: Vec<i64> = valid_rates(&Device::rtlsdr(), Signal::Digital).collect();
         assert!(!rates.contains(&2_472_000));
         for fast in [2_496_000, 2_400_000, 1_872_000, 912_000] {
             assert!(rates.contains(&fast), "{fast} S/s");
         }
-        assert!(rates.iter().all(|&r| channelizer_is_fast(r)));
+        assert!(rates.iter().all(|&r| channelizer_suits(r, Signal::Digital)));
+    }
+
+    #[test]
+    fn an_analog_channel_is_only_offered_rates_that_need_no_resampling() {
+        let rates: Vec<i64> = valid_rates(&Device::rtlsdr(), Signal::Analog).collect();
+        assert!(rates.contains(&960_000));
+        assert!(!rates.contains(&912_000), "9.5 x 96 kHz");
+        assert!(rates.iter().all(|r| r % 96_000 == 0), "{rates:?}");
+    }
+
+    #[test]
+    fn a_source_with_an_analog_channel_is_planned_on_a_96_khz_multiple() {
+        // Two conventional channels a little under 0.8 MHz apart: 912 kS/s
+        // would reach, but it resamples; the next multiple of 96 kHz is 960.
+        let analog = |f: i64| Channel {
+            frequency: f,
+            signal: Signal::Analog,
+            tag: None,
+            system: None,
+        };
+        let channels = vec![analog(488_337_500), analog(489_087_500)];
+        let sources = solve(&channels, &[Device::rtlsdr()]).expect("should find a solution");
+        assert_all_covered(&channels, &sources);
+        assert_eq!(sources.len(), 1);
+        assert_eq!(sources[0].rate % 96_000, 0, "{} S/s", sources[0].rate);
     }
 
     #[test]

@@ -209,6 +209,18 @@ impl Config {
         Duration::from_secs_f64(self.hop() as f64 / self.sample_rate)
     }
 
+    /// Whether profile `p`'s output rate is exactly its consumer's
+    /// ([`ProfileSpec::NARROW`] 24 kS/s, [`ProfileSpec::WIDE`] 96 kS/s), so
+    /// its slots have nothing to resample. False if the config has no such
+    /// profile.
+    #[must_use]
+    pub fn is_exact(&self, p: ProfileId) -> bool {
+        let target = [ProfileSpec::NARROW, ProfileSpec::WIDE]
+            .get(p)
+            .map(|s| s.target_rate);
+        self.profiles.get(p).is_some() && target.is_some_and(|t| (self.out_rate(p) - t).abs() < 0.5)
+    }
+
     /// Whether the forward FFT, the one every block pays, is made only of
     /// radices rustfft has a butterfly for. A larger prime factor of `n` (a
     /// decimation that is a large prime, say) goes through Rader's algorithm,
@@ -375,6 +387,17 @@ mod tests {
         for fs in [2_496_000.0, 2_400_000.0, 1_872_000.0, 912_000.0] {
             assert!(Config::standard(fs).unwrap().is_fast(), "fs={fs}");
         }
+    }
+
+    #[test]
+    fn a_rate_is_exact_for_a_profile_when_it_is_a_multiple_of_the_target() {
+        let c = Config::standard(960_000.0).unwrap();
+        assert!(c.is_exact(NARROW) && c.is_exact(WIDE));
+        // 912 kS/s = 9.5 x 96 kHz: the wide profile runs at 101.3 kS/s.
+        let c = Config::standard(912_000.0).unwrap();
+        assert!(c.is_exact(NARROW) && !c.is_exact(WIDE));
+        // No wide profile at all.
+        assert!(!Config::standard(150_000.0).unwrap().is_exact(WIDE));
     }
 
     #[test]

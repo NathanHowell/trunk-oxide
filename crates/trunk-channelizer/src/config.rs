@@ -208,6 +208,34 @@ impl Config {
     pub fn block_duration(&self) -> Duration {
         Duration::from_secs_f64(self.hop() as f64 / self.sample_rate)
     }
+
+    /// Whether the forward FFT, the one every block pays, is made only of
+    /// radices rustfft has a butterfly for. A larger prime factor of `n` (a
+    /// decimation that is a large prime, say) goes through Rader's algorithm,
+    /// which at 103 cost 2.8x a smooth size of the same length. Every
+    /// profile's inverse size divides `n`, so `n` alone decides.
+    #[must_use]
+    pub const fn is_fast(&self) -> bool {
+        largest_prime_factor(self.n) <= MAX_BUTTERFLY_PRIME
+    }
+}
+
+/// The largest prime rustfft has a hard-coded butterfly for.
+const MAX_BUTTERFLY_PRIME: usize = 31;
+
+const fn largest_prime_factor(mut n: usize) -> usize {
+    let (mut p, mut largest) = (2, 1);
+    while n > 1 {
+        if p * p > n {
+            return n;
+        }
+        while n.is_multiple_of(p) {
+            n /= p;
+            largest = p;
+        }
+        p += 1;
+    }
+    largest
 }
 
 /// Decimations giving `target_rate..=max_rate`, highest decimation first.
@@ -338,6 +366,25 @@ mod tests {
         let p25 = Config::p25(2_496_000.0).unwrap();
         assert_eq!(c.profile(WIDE).decim, 26);
         assert_eq!((c.n, c.overlap_in), (p25.n, p25.overlap_in));
+    }
+
+    #[test]
+    fn a_prime_decimation_is_a_slow_forward_fft() {
+        // 2.472 MS/s = 103 x 24 kS/s: the forward FFT needs a 103-point stage.
+        assert!(!Config::standard(2_472_000.0).unwrap().is_fast());
+        for fs in [2_496_000.0, 2_400_000.0, 1_872_000.0, 912_000.0] {
+            assert!(Config::standard(fs).unwrap().is_fast(), "fs={fs}");
+        }
+    }
+
+    #[test]
+    fn largest_prime_factors() {
+        assert_eq!(largest_prime_factor(1), 1);
+        assert_eq!(largest_prime_factor(2), 2);
+        assert_eq!(largest_prime_factor(26_624), 13);
+        assert_eq!(largest_prime_factor(30_900), 103);
+        assert_eq!(largest_prime_factor(10_944), 19);
+        assert_eq!(largest_prime_factor(97), 97);
     }
 
     #[test]

@@ -136,8 +136,20 @@ fn build_problem(opt: &z3::Optimize, channels: &[Channel], devices: &[Device]) -
     }
 }
 
-/// Every sample rate a device supports.
+/// Every sample rate a device supports and the channelizer can run cheaply:
+/// at a rate whose decimation is a large prime (2.472 MS/s is 103 x 24 kHz)
+/// its FFT costs several times what a neighbouring rate's does.
 fn valid_rates(device: &Device) -> impl Iterator<Item = i64> + '_ {
+    supported_rates(device).filter(|&rate| channelizer_is_fast(rate))
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn channelizer_is_fast(rate: i64) -> bool {
+    trunk_channelizer::Config::standard(rate as f64).is_ok_and(|c| c.is_fast())
+}
+
+/// Every sample rate a device supports.
+fn supported_rates(device: &Device) -> impl Iterator<Item = i64> + '_ {
     device.sample_rates.iter().flat_map(move |sr| {
         let mul = device.rate_multiple;
         match *sr {
@@ -403,6 +415,17 @@ mod tests {
         assert_all_covered(&channels, &sources);
         // Rate should be minimal — smallest valid RTL-SDR rate (multiple of 24k, in 225001..300000)
         assert!(sources[0].rate <= 300_000);
+    }
+
+    #[test]
+    fn rates_with_a_slow_channelizer_fft_are_not_offered() {
+        // 2.472 MS/s is 103 x 24 kHz: its FFT needs a 103-point stage.
+        let rates: Vec<i64> = valid_rates(&Device::rtlsdr()).collect();
+        assert!(!rates.contains(&2_472_000));
+        for fast in [2_496_000, 2_400_000, 1_872_000, 912_000] {
+            assert!(rates.contains(&fast), "{fast} S/s");
+        }
+        assert!(rates.iter().all(|&r| channelizer_is_fast(r)));
     }
 
     #[test]

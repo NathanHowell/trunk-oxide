@@ -195,6 +195,14 @@ impl Source {
         } = spec;
         let cfg = trunk_channelizer::Config::standard(rate_hz)
             .with_context(|| format!("channelizer for {rate_hz} S/s"))?;
+        if !cfg.is_fast() {
+            tracing::warn!(
+                source = idx,
+                rate_hz,
+                fft = cfg.fft_size(),
+                "this rate needs a large-prime FFT stage, several times the cost of a nearby rate"
+            );
+        }
         let channelizer = Arc::new(Chz::with_conditioning(cfg, conditioning)?);
         {
             let mut reg = CHANNELIZERS.lock().unwrap_or_else(PoisonError::into_inner);

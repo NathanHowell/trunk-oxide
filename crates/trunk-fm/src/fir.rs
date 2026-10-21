@@ -1,6 +1,32 @@
 //! Real FIR filter with integer decimation, evaluated as `fir_filter_fff`
 //! does: `y[n] = sum_k taps[k] x[n - k]` at `n = 0, decim, 2 decim, ...`,
 //! with zeros before the first sample.
+//!
+//! The dot product runs in [`LANES`] independent sums, which is what lets it
+//! be vectorised and keeps the multiplies from waiting on one another. (One
+//! running sum of fused multiply-adds, as `fir_filter_fff` writes it, is a
+//! chain: each step waits for the last, and where the build target has no
+//! FMA instruction each is a call to libm. For the 641-tap high-pass that
+//! was 1.2 ns a tap, a fiftieth of a core per channel.) The sums differ from
+//! one running sum in the last bits of an `f32`, well inside what the
+//! reference test allows.
+
+/// Independent partial sums in a dot product.
+const LANES: usize = 8;
+
+/// `sum(x[k] * t[k])` over equal-length slices, as [`LANES`] partial sums.
+fn dot(x: &[f32], t: &[f32]) -> f32 {
+    let mut lanes = [0.0f32; LANES];
+    let (x_blocks, x_rest) = x.as_chunks::<LANES>();
+    let (t_blocks, t_rest) = t.as_chunks::<LANES>();
+    for (x, t) in x_blocks.iter().zip(t_blocks) {
+        for ((lane, x), t) in lanes.iter_mut().zip(x).zip(t) {
+            *lane += x * t;
+        }
+    }
+    let tail: f32 = x_rest.iter().zip(t_rest).map(|(x, t)| x * t).sum();
+    lanes.iter().sum::<f32>() + tail
+}
 
 /// A causal FIR filter over `f32` samples.
 #[derive(Clone, Debug)]
@@ -46,12 +72,7 @@ impl Fir {
         // `decim - phase` inputs into the block (immediately at phase 0).
         let mut i = keep + ((self.decim - self.phase) % self.decim);
         while i < buf.len() {
-            let window = &buf[i + 1 - n..=i];
-            let mut acc = 0.0f32;
-            for (x, t) in window.iter().zip(&self.taps_rev) {
-                acc = t.mul_add(*x, acc);
-            }
-            out.push(acc);
+            out.push(dot(&buf[i + 1 - n..=i], &self.taps_rev));
             i += self.decim;
         }
         self.phase = (self.phase + input.len()) % self.decim;
@@ -100,5 +121,61 @@ mod tests {
             split.process(chunk, &mut b);
         }
         assert_eq!(a, b);
+    }
+    #[test]
+    fn the_dot_product_is_the_sum_to_within_rounding_at_every_length() {
+        let mut state = 7u64;
+        let mut rnd = move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            (state >> 40) as f32 / (1u64 << 24) as f32 - 0.5
+        };
+        for len in [1, 2, 7, 8, 9, 15, 16, 17, 65, 641, 1000] {
+            let x: Vec<f32> = (0..len).map(|_| rnd()).collect();
+            let t: Vec<f32> = (0..len).map(|_| rnd()).collect();
+            let exact: f64 = x
+                .iter()
+                .zip(&t)
+                .map(|(a, b)| f64::from(*a) * f64::from(*b))
+                .sum();
+            let got = f64::from(dot(&x, &t));
+            assert!((got - exact).abs() < 1e-4, "len {len}: {got} vs {exact}");
+        }
+    }
+    #[test]
+    fn the_voice_high_pass_matches_a_direct_sum_to_far_inside_what_the_reference_allows() {
+        // the recording's 300 Hz high-pass, 641 taps, over 4 s of audio-like
+        // input fed in the blocks a channel sees, against the plain sum in f64
+        let taps =
+            crate::design::high_pass(1.0, 16_000.0, 300.0, 50.0, crate::design::Window::Hann);
+        assert_eq!(taps.len(), 641);
+        let mut state = 99u64;
+        let x: Vec<f32> = (0..64_000)
+            .map(|n| {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                let hiss = (state >> 40) as f32 / (1u64 << 24) as f32 - 0.5;
+                0.3 * (n as f32 * 0.21).sin() + 0.1 * hiss
+            })
+            .collect();
+        let mut fir = Fir::new(&taps, 1);
+        let mut got = Vec::new();
+        for block in x.chunks(143) {
+            fir.process(block, &mut got);
+        }
+        let mut worst = 0.0f64;
+        for (n, &g) in got.iter().enumerate() {
+            let exact: f64 = taps
+                .iter()
+                .enumerate()
+                .filter(|&(k, _)| k <= n)
+                .map(|(k, &t)| f64::from(t) * f64::from(x[n - k]))
+                .sum();
+            worst = worst.max((f64::from(g) - exact).abs());
+        }
+        // the reference test allows 2e-5 of the band-passed audio
+        assert!(worst < 2e-6, "worst error {worst}");
     }
 }

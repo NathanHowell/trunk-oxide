@@ -17,6 +17,18 @@ pub enum SourceDriver {
     Iqfile,
 }
 
+/// What a source's channelizer may spend on its forward FFT.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Fft {
+    /// Refuse to start at a rate whose FFT has a large prime stage (say
+    /// 2.472 MS/s, 103 x 24 kHz, where the FFT cost 2.8x a smooth size).
+    #[default]
+    Fast,
+    /// Start at any rate.
+    Slow,
+}
+
 fn default_iq_format() -> String {
     "cf32".to_string()
 }
@@ -62,6 +74,10 @@ pub struct SourceConfig {
     pub agc: bool,
     #[serde(default)]
     pub signal_detector_threshold: Option<f32>,
+    /// `"fast"` (the default) fails startup if `rate` makes the channelizer's
+    /// forward FFT slow; `"slow"` accepts it. `trunk-solver` plans fast rates.
+    #[serde(default)]
+    pub fft: Fft,
     #[serde(default)]
     pub enabled: Option<bool>,
     /// `iqfile` driver only: sample format of the file, `cf32` (interleaved

@@ -137,7 +137,7 @@ use call_manager::CallManager;
 use std::collections::{BTreeMap, HashMap};
 
 use trunk_config::{
-    ConditionerReset, Config, DefaultMode, Modulation, SourceConfig, SourceDriver, SystemType,
+    ConditionerReset, Config, DefaultMode, Fft, Modulation, SourceConfig, SourceDriver, SystemType,
 };
 use trunk_oxide_grpc::EventBridge;
 
@@ -387,6 +387,27 @@ fn configured_gain(src: &SourceConfig) -> f64 {
     src.gain.fixed().unwrap_or(DEFAULT_GAIN_DB)
 }
 
+/// Refuses a source whose rate gives its channelizer a slow forward FFT (a
+/// large prime stage; see [`trunk_radio::ChannelizerConfig::is_fast`]) unless
+/// it says `fft = "slow"`. `trunk-solver` only plans fast rates.
+fn check_fft(sources: &[SourceConfig]) -> anyhow::Result<()> {
+    for src in sources
+        .iter()
+        .filter(|s| s.enabled != Some(false) && s.fft == Fft::Fast)
+    {
+        let geometry = trunk_radio::ChannelizerConfig::standard(src.rate)
+            .with_context(|| format!("source '{}' at {} S/s", src.device, src.rate))?;
+        anyhow::ensure!(
+            geometry.is_fast(),
+            "source '{}': {} S/s gives a {}-point channelizer FFT with a large prime stage, several times the cost of a smooth size; plan the source with trunk-solver or set fft = \"slow\"",
+            src.device,
+            src.rate,
+            geometry.fft_size()
+        );
+    }
+    Ok(())
+}
+
 fn rtl_tuning(src: &SourceConfig, gain: trunk_sdr::Gain) -> trunk_sdr::Tuning {
     trunk_sdr::Tuning {
         center_hz: src.center + src.error,
@@ -576,6 +597,8 @@ impl ScannerBuilder {
             sink,
             events,
         ));
+
+        check_fft(&config.source)?;
 
         // ── Sources ──
         // Pre-flight gain calibration for every gain = "auto" source runs first, in
@@ -1098,8 +1121,32 @@ impl Drop for Scanner {
 
 #[cfg(test)]
 mod tests {
-    use super::{EVENT_QUEUE, EventQueue};
+    use super::{EVENT_QUEUE, EventQueue, check_fft};
+    use trunk_config::Config;
     use trunk_radio::{EventSender, RadioEvent};
+
+    fn sources(toml: &str) -> Vec<trunk_config::SourceConfig> {
+        toml::from_str::<Config>(toml).unwrap().source
+    }
+
+    #[test]
+    fn a_slow_fft_rate_is_refused_unless_the_source_allows_it() {
+        // 2.472 MS/s is 103 x 24 kHz.
+        let slow = "[[source]]\ndriver = \"rtlsdr\"\ndevice = \"rtl=1\"\nrate = 2472000.0\n";
+        let err = check_fft(&sources(slow)).unwrap_err().to_string();
+        assert!(
+            err.contains("rtl=1") && err.contains("30900-point"),
+            "{err}"
+        );
+        assert!(check_fft(&sources(&format!("{slow}fft = \"slow\"\n"))).is_ok());
+        assert!(check_fft(&sources(&format!("{slow}enabled = false\n"))).is_ok());
+    }
+
+    #[test]
+    fn a_smooth_rate_needs_no_say_so() {
+        let fast = "[[source]]\ndriver = \"rtlsdr\"\nrate = 2496000.0\n[[source]]\ndriver = \"rtlsdr\"\nrate = 912000.0\n";
+        assert!(check_fft(&sources(fast)).is_ok());
+    }
 
     #[test]
     fn the_event_queues_depth_is_the_channels() {

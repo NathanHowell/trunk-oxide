@@ -37,6 +37,7 @@ pub use radio::{ChannelReport, Radio, RadioConfig, SourceSetup, SystemSetup};
 pub use recording::Accounting;
 pub use registry::Entry;
 pub use shape::{AudioShape, ShapeMeter};
+pub use trunk_channelizer::Config as ChannelizerConfig;
 pub use trunk_channelizer::passband;
 pub use trunk_fm::denoise::Level as NoiseSuppression;
 pub use trunk_fm::signalling;

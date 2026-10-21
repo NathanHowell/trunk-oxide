@@ -14,7 +14,7 @@ use serde::Deserialize;
 pub use discord::{ChannelGroup, ChannelMapping, DiscordConfig, NonZeroU64, TalkgroupSelector};
 pub use recorder::{ConditionerConfig, ConditionerReset, DefaultMode, RecorderConfig};
 pub use service::{AudioConfig, GrpcConfig, MonitorConfig, OxideConfig, WhispererConfig};
-pub use source::{SourceConfig, SourceDriver};
+pub use source::{Fft, SourceConfig, SourceDriver};
 pub use system::{
     ChannelConfig, Modulation, SystemConfig, SystemType, TalkgroupConfig, TalkgroupMode,
 };
@@ -233,6 +233,19 @@ gain = 36.0
         assert_eq!(src.driver, SourceDriver::Osmosdr);
         assert_eq!(src.device, "rtl=0");
         assert_eq!(src.gain, crate::Tunable::Fixed(36.0));
+    }
+
+    #[test]
+    fn a_source_wants_a_fast_fft_unless_it_says_otherwise() {
+        let parse = |extra: &str| {
+            let toml = format!("[[source]]\ndriver = \"rtlsdr\"\nrate = 2472000.0\n{extra}");
+            toml::from_str::<Config>(&toml).unwrap().source[0].fft
+        };
+        assert_eq!(parse(""), crate::Fft::Fast);
+        assert_eq!(parse("fft = \"fast\""), crate::Fft::Fast);
+        assert_eq!(parse("fft = \"slow\""), crate::Fft::Slow);
+        let bad = "[[source]]\ndriver = \"rtlsdr\"\nfft = \"any\"\n";
+        assert!(toml::from_str::<Config>(bad).is_err());
     }
 
     #[test]

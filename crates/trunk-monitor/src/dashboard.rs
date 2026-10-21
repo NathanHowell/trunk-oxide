@@ -28,6 +28,9 @@ pub trait Board {
     async fn find_previous(&self) -> Result<Option<MessageId>>;
     async fn post(&self, png: Vec<u8>) -> Result<MessageId>;
     async fn edit(&self, id: MessageId, png: Vec<u8>) -> Result<()>;
+    /// Delete every other dashboard in the channel's recent history, as
+    /// leftovers of runs that no longer update them. How many were deleted.
+    async fn clean(&self, keep: MessageId) -> Result<usize>;
 }
 
 /// Why a refresh failed, for the metric.
@@ -51,6 +54,8 @@ pub struct Dashboard<C, B> {
     board: B,
     /// The message to edit, once known.
     message: Option<MessageId>,
+    /// Whether the channel has been cleared of stale dashboards since start.
+    cleaned: bool,
 }
 
 impl<C: Chart, B: Board> Dashboard<C, B> {
@@ -59,6 +64,7 @@ impl<C: Chart, B: Board> Dashboard<C, B> {
             chart,
             board,
             message: None,
+            cleaned: false,
         }
     }
 
@@ -89,6 +95,25 @@ impl<C: Chart, B: Board> Dashboard<C, B> {
         };
         self.message = Some(id);
         Ok(())
+    }
+
+    /// Once per run, after the dashboard is shown: delete the stale ones the
+    /// channel holds. A failure is only logged, and tried again next time: a
+    /// channel with leftovers is untidy, not broken, so it never touches health.
+    pub async fn clean_once(&mut self) {
+        if self.cleaned {
+            return;
+        }
+        let Some(keep) = self.message else {
+            return;
+        };
+        match self.board.clean(keep).await {
+            Ok(deleted) => {
+                self.cleaned = true;
+                tracing::info!(deleted, "cleared stale dashboards from the channel");
+            }
+            Err(e) => tracing::warn!(error = %e, "could not clear stale dashboards; will retry"),
+        }
     }
 
     /// Forget the message, as after a refresh that was abandoned part way.
@@ -129,6 +154,10 @@ pub async fn run<C: Chart, B: Board>(
             }
         };
         metrics.refreshed(result, started.elapsed());
+        if result == "ok" {
+            // bounded like a refresh, and not counted as one
+            let _ = timeout(cycle, dashboard.clean_once()).await;
+        }
     }
 }
 
@@ -144,6 +173,8 @@ mod tests {
     struct Fake {
         /// The message the channel really holds.
         holds: RefCell<Option<MessageId>>,
+        /// Older dashboards the channel still holds.
+        stale: RefCell<Vec<MessageId>>,
         calls: RefCell<Vec<String>>,
         /// Fail the next calls of these kinds.
         fail: RefCell<VecDeque<&'static str>>,
@@ -177,6 +208,13 @@ mod tests {
             let id = MessageId::new(*self.next_id.borrow());
             *self.holds.borrow_mut() = Some(id);
             Ok(id)
+        }
+
+        async fn clean(&self, keep: MessageId) -> Result<usize> {
+            self.call(&format!("clean {keep}"))?;
+            let deleted = self.stale.borrow().len();
+            self.stale.borrow_mut().clear();
+            Ok(deleted)
         }
 
         async fn edit(&self, id: MessageId, _: Vec<u8>) -> Result<()> {
@@ -260,6 +298,68 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn the_stale_dashboards_of_earlier_runs_are_deleted_once_and_the_live_one_kept() {
+        let fake = Fake::default();
+        *fake.holds.borrow_mut() = Some(MessageId::new(7));
+        *fake.stale.borrow_mut() = vec![MessageId::new(3), MessageId::new(5)];
+        let mut dash = dashboard(&fake);
+        dash.refresh().await.unwrap();
+        dash.clean_once().await;
+        assert_eq!(fake.calls(), ["find", "edit 7", "clean 7"]);
+        assert!(fake.stale.borrow().is_empty());
+        assert_eq!(*fake.holds.borrow(), Some(MessageId::new(7)));
+        // and not again: that was the once
+        dash.refresh().await.unwrap();
+        dash.clean_once().await;
+        assert_eq!(fake.calls(), ["find", "edit 7", "clean 7", "edit 7"]);
+    }
+
+    #[tokio::test]
+    async fn a_channel_with_no_live_dashboard_gets_one_and_loses_the_rest() {
+        let fake = Fake::default();
+        *fake.stale.borrow_mut() = vec![MessageId::new(1), MessageId::new(2)];
+        let mut dash = dashboard(&fake);
+        dash.refresh().await.unwrap();
+        dash.clean_once().await;
+        assert_eq!(fake.calls(), ["find", "post", "clean 1"]);
+        assert!(fake.stale.borrow().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_cleaning_that_fails_is_tried_again_and_never_fails_the_refresh() {
+        let fake = Fake::default();
+        *fake.holds.borrow_mut() = Some(MessageId::new(7));
+        *fake.stale.borrow_mut() = vec![MessageId::new(3)];
+        fake.fail.borrow_mut().push_back("clean");
+        let mut dash = dashboard(&fake);
+        dash.refresh().await.unwrap();
+        dash.clean_once().await;
+        assert_eq!(fake.stale.borrow().len(), 1, "the first try failed");
+        dash.refresh().await.unwrap();
+        dash.clean_once().await;
+        assert!(fake.stale.borrow().is_empty(), "the second did it");
+        dash.clean_once().await;
+        assert_eq!(
+            fake.calls()
+                .iter()
+                .filter(|c| c.starts_with("clean"))
+                .count(),
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn nothing_is_cleaned_before_a_dashboard_is_shown() {
+        let fake = Fake::default();
+        *fake.stale.borrow_mut() = vec![MessageId::new(3)];
+        let mut dash = Dashboard::new(Drawing(Err("no font")), &fake);
+        assert!(dash.refresh().await.is_err());
+        dash.clean_once().await;
+        assert!(fake.calls().is_empty());
+        assert_eq!(fake.stale.borrow().len(), 1);
+    }
+
+    #[tokio::test]
     async fn a_chart_that_cannot_be_drawn_leaves_discord_alone() {
         let fake = Fake::default();
         let mut dash = Dashboard::new(Drawing(Err("no font")), &fake);
@@ -280,8 +380,12 @@ mod tests {
             Metrics::new(&meter),
             health,
         );
-        // three refreshes' worth of schedule
+        // three refreshes' worth of schedule: the first posts and, being the
+        // run's first success, clears the channel of stale ones, once
         let _ = timeout(Duration::from_secs(650), run).await;
-        assert_eq!(fake.calls(), ["find", "post", "edit 1", "edit 1"]);
+        assert_eq!(
+            fake.calls(),
+            ["find", "post", "clean 1", "edit 1", "edit 1"]
+        );
     }
 }

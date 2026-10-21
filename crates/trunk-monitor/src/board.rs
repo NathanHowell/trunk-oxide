@@ -21,6 +21,10 @@ const FILENAME: &str = "stats.png";
 const TITLE: &str = "📊 Monitoring";
 /// How far back in the channel to look for it.
 const LOOK_BACK: u8 = 50;
+/// Messages a page of history holds, and how many pages the cleaner reads:
+/// the last thousand messages of the channel.
+const PAGE: u8 = 100;
+const MAX_PAGES: usize = 10;
 /// Hard cap on one call. Discord rate-limits per channel and serenity sleeps
 /// on a 429 with no bound, so without one a call could hold the loop for ever.
 // `from_mins` is not stable on our MSRV (1.94); keep `from_secs`.
@@ -52,6 +56,16 @@ fn embed() -> CreateEmbed {
         .colour(0x0034_98db)
         .image(format!("attachment://{FILENAME}"))
         .footer(CreateEmbedFooter::new(format!("updated {updated}")))
+}
+
+/// Whether `message` is a dashboard `me` posted.
+fn is_mine(me: UserId, message: &serenity::model::channel::Message) -> bool {
+    message.author.id == me
+        && message
+            .embeds
+            .first()
+            .and_then(|e| e.title.as_deref())
+            .is_some_and(is_dashboard)
 }
 
 /// The dashboard message in one channel.
@@ -93,16 +107,50 @@ impl Board for Channel {
         )
         .await?;
         // newest first
-        Ok(recent
-            .iter()
-            .find(|m| {
-                m.author.id == me
-                    && m.embeds
-                        .first()
-                        .and_then(|e| e.title.as_deref())
-                        .is_some_and(is_dashboard)
-            })
-            .map(|m| m.id))
+        Ok(recent.iter().find(|m| is_mine(me, m)).map(|m| m.id))
+    }
+
+    /// Deletes every other dashboard this bot left in the last thousand
+    /// messages of the channel. A restart used to post a new message and
+    /// leave the last, so a channel can hold dozens that no longer update.
+    async fn clean(&self, keep: MessageId) -> Result<usize> {
+        let me = self.me().await?;
+        let mut stale = Vec::new();
+        let mut before = None;
+        for _ in 0..MAX_PAGES {
+            let mut page = GetMessages::new().limit(PAGE);
+            if let Some(oldest) = before {
+                page = page.before(oldest);
+            }
+            let messages = bounded("get_messages", self.id.messages(&self.http, page)).await?;
+            // newest first, so the last is the oldest
+            before = messages.last().map(|m| m.id);
+            stale.extend(
+                messages
+                    .iter()
+                    .filter(|m| m.id != keep && is_mine(me, m))
+                    .map(|m| m.id),
+            );
+            if messages.len() < usize::from(PAGE) {
+                break;
+            }
+        }
+        let mut deleted = 0;
+        let mut failed = 0;
+        for id in stale {
+            match bounded("delete_message", self.id.delete_message(&self.http, id)).await {
+                Ok(()) => deleted += 1,
+                Err(e) => {
+                    tracing::warn!(error = %e, message = %id, "could not delete a stale dashboard");
+                    failed += 1;
+                }
+            }
+        }
+        anyhow::ensure!(
+            failed == 0,
+            "{failed} stale dashboards could not be deleted"
+        );
+        Ok(deleted)
     }
 
     async fn post(&self, png: Vec<u8>) -> Result<MessageId> {

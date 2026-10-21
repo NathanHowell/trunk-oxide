@@ -27,7 +27,9 @@ use std::fmt;
 
 use num_complex::Complex64;
 
+use crate::biquad::HighPass;
 use crate::signalling::{Heard, Signal};
+use crate::tap::AudioTap;
 
 const BAUD: f64 = 1_200.0;
 /// Samples in a symbol, which is not a whole number.
@@ -167,40 +169,6 @@ impl fmt::Display for Message {
 /// Corner of the high-pass ahead of the tone energies, above every CTCSS
 /// tone (67 to 254 Hz) and well below the data's 1200 Hz.
 const HIGH_PASS_HZ: f64 = 700.0;
-
-/// A second-order section.
-#[derive(Clone, Copy, Default)]
-struct Biquad {
-    b: [f64; 3],
-    a: [f64; 2],
-    z: [f64; 2],
-}
-
-impl Biquad {
-    /// A high-pass at `hz` with the given Q.
-    fn high_pass(hz: f64, q: f64) -> Self {
-        let w = std::f64::consts::TAU * hz / crate::AUDIO_RATE;
-        let (sin, cos) = w.sin_cos();
-        let alpha = sin / (2.0 * q);
-        let a0 = 1.0 + alpha;
-        Self {
-            b: [
-                f64::midpoint(1.0, cos) / a0,
-                -(1.0 + cos) / a0,
-                f64::midpoint(1.0, cos) / a0,
-            ],
-            a: [-2.0 * cos / a0, (1.0 - alpha) / a0],
-            z: [0.0; 2],
-        }
-    }
-
-    fn run(&mut self, x: f64) -> f64 {
-        let y = self.b[0] * x + self.z[0];
-        self.z[0] = self.b[1] * x - self.a[0] * y + self.z[1];
-        self.z[1] = self.b[2] * x - self.a[1] * y;
-        y
-    }
-}
 
 /// The CRC's shift register after the first 48 bits of a block.
 fn register(bits48: u64) -> u16 {
@@ -355,7 +323,7 @@ pub struct FleetSync {
     /// Samples fed since the last reset.
     n: u64,
     /// A fourth-order Butterworth high-pass.
-    high_pass: [Biquad; 2],
+    high_pass: HighPass,
     /// `exp(-2πjft)` at 1200 and 1800 Hz over a [`PERIOD`].
     tones: Box<[[Complex64; PERIOD]; 2]>,
     /// The last [`WINDOW`] samples mixed down by each tone.
@@ -386,18 +354,13 @@ impl FleetSync {
         };
         Self {
             n: 0,
-            high_pass: Self::high_pass(),
+            high_pass: HighPass::new(HIGH_PASS_HZ),
             tones: Box::new([tone(1_200.0), tone(1_800.0)]),
             mixed: [[Complex64::default(); WINDOW]; 2],
             sums: [Complex64::default(); 2],
             phases: std::array::from_fn(|p| Phase::new(Self::first_read(p))),
             reader: None,
         }
-    }
-
-    fn high_pass() -> [Biquad; 2] {
-        // the Qs of a fourth-order Butterworth
-        [0.541_196_1, 1.306_563].map(|q| Biquad::high_pass(HIGH_PASS_HZ, q))
     }
 
     fn first_read(phase: usize) -> f64 {
@@ -407,7 +370,7 @@ impl FleetSync {
     /// Forget the audio so far, as for a retuned channel. Spans count from here.
     pub fn reset(&mut self) {
         self.n = 0;
-        self.high_pass = Self::high_pass();
+        self.high_pass.reset();
         self.mixed = [[Complex64::default(); WINDOW]; 2];
         self.sums = [Complex64::default(); 2];
         for (p, phase) in self.phases.iter_mut().enumerate() {
@@ -419,10 +382,7 @@ impl FleetSync {
     /// Feeds `audio`, appending each message that is whole by its end.
     pub fn process(&mut self, audio: &[f32], out: &mut Vec<Heard>) {
         for &x in audio {
-            let x = self
-                .high_pass
-                .iter_mut()
-                .fold(f64::from(x), |x, f| f.run(x));
+            let x = self.high_pass.run(f64::from(x));
             let slot = (self.n % WINDOW as u64) as usize;
             let k = (self.n % PERIOD as u64) as usize;
             for (tone, (mixed, sum)) in self.mixed.iter_mut().zip(&mut self.sums).enumerate() {
@@ -473,6 +433,16 @@ impl FleetSync {
                 Step::Lost => self.reader = None,
             }
         }
+    }
+}
+
+impl AudioTap for FleetSync {
+    fn process(&mut self, audio: &[f32], out: &mut Vec<Heard>) {
+        Self::process(self, audio, out);
+    }
+
+    fn reset(&mut self) {
+        Self::reset(self);
     }
 }
 

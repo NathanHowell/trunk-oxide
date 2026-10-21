@@ -18,16 +18,21 @@
 )]
 
 mod atan;
+mod biquad;
 pub mod demod;
 pub mod denoise;
 pub mod design;
 pub mod detect;
+pub mod dtmf;
 pub mod fir;
 pub mod fleetsync;
 pub mod gate;
+mod goertzel;
 pub mod io;
 pub mod mute;
 pub mod signalling;
+pub mod tap;
+pub mod tones;
 
 use num_complex::Complex32;
 
@@ -38,6 +43,7 @@ pub use fir::Fir;
 pub use gate::{CloseReason, Event, Gate};
 pub use mute::Mute;
 pub use signalling::{Alert, Heard, MdcOp, Signal};
+pub use tap::AudioTap;
 
 /// Peak deviation the demodulator is scaled to (`analog_recorder`'s
 /// `d_max_dev`).

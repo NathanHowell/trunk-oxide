@@ -61,6 +61,22 @@ pub enum Signal {
     Dtmf(char),
     /// A `FleetSync` message.
     FleetSync(crate::fleetsync::Message),
+    /// A page of two tones, one straight after the other. Frequencies are in
+    /// tenths of a hertz, the resolution they are specified to.
+    TwoTone {
+        first_dhz: u32,
+        second_dhz: u32,
+        first_ms: u32,
+        second_ms: u32,
+    },
+    /// One tone held for seconds.
+    LongTone { dhz: u32, ms: u32 },
+    /// Two tones taking turns, fast.
+    Warble {
+        high_dhz: u32,
+        low_dhz: u32,
+        ms: u32,
+    },
 }
 
 impl Signal {
@@ -71,6 +87,9 @@ impl Signal {
             Self::Mdc { .. } => "mdc1200",
             Self::Dtmf(_) => "dtmf",
             Self::FleetSync(_) => "fleetsync",
+            Self::TwoTone { .. } => "two_tone",
+            Self::LongTone { .. } => "long_tone",
+            Self::Warble { .. } => "warble",
         }
     }
 
@@ -80,7 +99,11 @@ impl Signal {
         match self {
             Self::Mdc { unit, .. } => Some(*unit),
             Self::FleetSync(message) if message.from.is_set() => Some(message.from.key()),
-            Self::Dtmf(_) | Self::FleetSync(_) => None,
+            Self::Dtmf(_)
+            | Self::FleetSync(_)
+            | Self::TwoTone { .. }
+            | Self::LongTone { .. }
+            | Self::Warble { .. } => None,
         }
     }
 
@@ -101,7 +124,12 @@ impl Signal {
                 ..
             } => Some(Alert::CallAlert),
             Self::FleetSync(message) if !message.is_routine() => Some(Alert::Unrecognised),
-            Self::Mdc { .. } | Self::Dtmf(_) | Self::FleetSync(_) => None,
+            Self::Mdc { .. }
+            | Self::Dtmf(_)
+            | Self::FleetSync(_)
+            | Self::TwoTone { .. }
+            | Self::LongTone { .. }
+            | Self::Warble { .. } => None,
         }
     }
 }
@@ -133,8 +161,43 @@ impl fmt::Display for Signal {
             }
             Self::Dtmf(key) => write!(f, "DTMF {key}"),
             Self::FleetSync(message) => message.fmt(f),
+            Self::TwoTone {
+                first_dhz,
+                second_dhz,
+                first_ms,
+                second_ms,
+            } => write!(
+                f,
+                "Two-tone {} then {} ({}, {})",
+                hz(*first_dhz),
+                hz(*second_dhz),
+                seconds(*first_ms),
+                seconds(*second_ms)
+            ),
+            Self::LongTone { dhz, ms } => write!(f, "Tone {} for {}", hz(*dhz), seconds(*ms)),
+            Self::Warble {
+                high_dhz,
+                low_dhz,
+                ms,
+            } => write!(
+                f,
+                "Warble {}/{} for {}",
+                hz(*high_dhz),
+                hz(*low_dhz),
+                seconds(*ms)
+            ),
         }
     }
+}
+
+/// A frequency given in tenths of a hertz, as it reads.
+fn hz(dhz: u32) -> String {
+    format!("{}.{} Hz", dhz / 10, dhz % 10)
+}
+
+/// A duration given in milliseconds, as it reads.
+fn seconds(ms: u32) -> String {
+    format!("{}.{} s", ms / 1_000, ms % 1_000 / 100)
 }
 
 /// A [`Signal`] and where it was heard.

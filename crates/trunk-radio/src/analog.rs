@@ -9,9 +9,13 @@ use std::sync::Arc;
 use num_complex::Complex32;
 use trunk_channelizer::{ChannelDecoder, ConditioningSpec, Reading, WIDE};
 use trunk_fm::denoise::Denoiser;
+use trunk_fm::dtmf::Dtmf;
 use trunk_fm::fleetsync::FleetSync;
 use trunk_fm::gate::{Config as GateConfig, Event as GateEvent, Gate};
-use trunk_fm::{Audio, Decimation, Detector, FmDemod, Heard, Measurement, Mute, TAU_US, Tone};
+use trunk_fm::tones::Tones;
+use trunk_fm::{
+    Audio, AudioTap, Decimation, Detector, FmDemod, Heard, Measurement, Mute, TAU_US, Tone,
+};
 
 use crate::fm;
 use crate::kind::{Cmd, Kind, OpenError, Opening, Tuning};
@@ -90,7 +94,11 @@ impl Kind for AnalogFm {
             voice_delay: demod.voice_delay() as u64,
             demod,
             detector: Detector::new(),
-            fleetsync: FleetSync::new(),
+            taps: vec![
+                Box::new(FleetSync::new()),
+                Box::new(Dtmf::new()),
+                Box::new(Tones::new()),
+            ],
             raw_samples: 0,
             gate_pos: 0,
             heard: Vec::new(),
@@ -132,7 +140,7 @@ pub struct AnalogFmChannel {
     demod: FmDemod,
     detector: Detector,
     /// In-band signalling is read from the same raw audio the detector sees.
-    fleetsync: FleetSync,
+    taps: Vec<Box<dyn AudioTap>>,
     /// Samples the recording lags the raw audio by.
     voice_delay: u64,
     /// Samples of raw audio the signalling decoders have been fed.
@@ -192,7 +200,11 @@ impl ChannelDecoder for AnalogFmChannel {
         }
         let total = first_fresh + self.audio.voice.len() as u64;
         self.mutes.retain(|mute| mute.window().end > total);
-        self.fleetsync.process(&self.audio.raw, &mut self.heard);
+        for tap in &mut self.taps {
+            tap.process(&self.audio.raw, &mut self.heard);
+        }
+        // in the order they happened, not the taps'
+        self.heard.sort_by_key(|heard| heard.span.start);
         self.raw_samples += self.audio.raw.len() as u64;
         self.blank_bursts(total);
         if self.measurements.is_empty() {
@@ -276,7 +288,9 @@ impl ChannelDecoder for AnalogFmChannel {
     fn retune(&mut self) {
         self.demod.reset();
         self.detector.reset();
-        self.fleetsync.reset();
+        for tap in &mut self.taps {
+            tap.reset();
+        }
         self.raw_samples = 0;
         self.gate_pos = 0;
         self.mutes.clear();
@@ -583,6 +597,42 @@ mod tests {
         );
         assert!(original > 0.0 && (speech / original - 1.0).abs() < 0.01);
         assert_eq!(heard.pcm.len(), unread.pcm.len());
+    }
+
+    #[test]
+    fn dtmf_keys_at_key_up_are_reported_behind_the_open_and_blanked_from_the_recording() {
+        // 0.2 s of nothing, then 5, 1 and 9 as 100 ms of tone and 100 ms
+        // of nothing each, as an autodialler sends them
+        let mut keys = vec![0.0f32; 3_200];
+        for (low, high) in [(770.0, 1_336.0), (697.0, 1_209.0), (852.0, 1_477.0)] {
+            keys.extend((0..1_600).map(|n| {
+                let t = f64::from(n) / 16_000.0;
+                (0.4 * ((std::f64::consts::TAU * low * t).sin()
+                    + (std::f64::consts::TAU * high * t).sin())
+                    / 2.0) as f32
+            }));
+            keys.extend(vec![0.0f32; 1_600]);
+        }
+        let sent = transmit(None, 9, Some(&keys));
+        assert_eq!(
+            sent.events,
+            ["open", "DTMF 5", "DTMF 1", "DTMF 9", "close"],
+            "{:?}",
+            sent.muted
+        );
+        assert!(sent.muted.iter().all(|m| m.late == 0 && m.blanked > 1_500));
+
+        // what is recorded across the keys (after the start-of-transmission
+        // thump) is nothing, beside the 800 Hz that stands in for speech
+        let rms = |pcm: &[i16]| {
+            (pcm.iter().map(|&x| f64::from(x).powi(2)).sum::<f64>() / pcm.len() as f64).sqrt()
+        };
+        let keyed = rms(&sent.pcm[800..keys.len()]);
+        let speech = rms(&sent.pcm[keys.len() + 3_200..keys.len() + 11_200]);
+        assert!(
+            speech > 1_000.0 && keyed < 0.05 * speech,
+            "{keyed} vs {speech}"
+        );
     }
 
     #[test]

@@ -1,6 +1,7 @@
-//! Blanking a stretch of audio that is on its way into a recording, as for
-//! the in-band signalling burst a decoder has just read: a squawk the
-//! listener should not have to hear, taken out before it is recorded.
+//! Blanking a stretch of audio that is on its way into a recording.
+//!
+//! It is for the in-band signalling burst a decoder has just read: a squawk
+//! the listener should not have to hear, taken out before it is recorded.
 //!
 //! The stretch is silent, and the audio either side of it is faded to meet
 //! it, so a blanked burst neither clicks nor takes more than `fade` samples
@@ -41,7 +42,7 @@ impl Mute {
 
     /// The samples it changes: the span and its fades.
     #[must_use]
-    pub fn window(&self) -> Range<u64> {
+    pub const fn window(&self) -> Range<u64> {
         self.span.start.saturating_sub(self.fade as u64)..self.span.end + self.fade as u64
     }
 

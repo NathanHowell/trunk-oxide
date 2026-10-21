@@ -16,6 +16,11 @@
 //! None can be known until it ends, which is after the start of it has gone
 //! into the recording; the span says where it was.
 
+use std::sync::Arc;
+
+use rustfft::num_complex::Complex;
+use rustfft::{Fft, FftPlanner};
+
 use crate::AUDIO_RATE;
 use crate::biquad::HighPass;
 use crate::goertzel::tone_power;
@@ -75,7 +80,7 @@ impl Segment {
         self.windows as f64 * HOP_S
     }
 
-    fn start(&self) -> u64 {
+    const fn start(&self) -> u64 {
         self.first_end.saturating_sub(WINDOW as u64)
     }
 }
@@ -84,8 +89,14 @@ impl Segment {
 /// fed in.
 pub struct Tones {
     high_pass: HighPass,
+    /// The audio not yet shifted out: at least a window's worth when there
+    /// is a decision to make.
     window: Vec<f32>,
+    /// Sample at which the window being decided ended.
     n: u64,
+    /// Samples shifted out of `window` so far.
+    base: u64,
+    spectrum: Spectrum,
     /// The segment still going.
     current: Option<Segment>,
     /// Segments one after another that have ended.
@@ -128,12 +139,48 @@ fn refine(window: &[f32], hz: f64) -> f64 {
     f64::midpoint(low, high)
 }
 
+/// The bank's powers, by one FFT of the window. The window is
+/// `AUDIO_RATE / WINDOW` = 25 Hz to a bin, which is the bank's step, so the
+/// bank's frequencies are bins of the transform and one FFT gives what 131
+/// Goertzel filters would, at a small fraction of the work.
+struct Spectrum {
+    fft: Arc<dyn Fft<f32>>,
+    bins: Vec<Complex<f32>>,
+    scratch: Vec<Complex<f32>>,
+}
+
+/// The bank's frequencies, 250 to 3500 Hz in 25 Hz steps.
+const BANK_STEPS: usize = ((BANK_END_HZ - BANK_START_HZ) / BANK_STEP_HZ) as usize + 1;
+/// The bin the bank starts at.
+const BANK_FIRST_BIN: usize = (BANK_START_HZ / BANK_STEP_HZ) as usize;
+
+impl Spectrum {
+    fn new() -> Self {
+        let fft = FftPlanner::<f32>::new().plan_fft_forward(WINDOW);
+        let scratch = vec![Complex::default(); fft.get_inplace_scratch_len()];
+        Self {
+            fft,
+            bins: vec![Complex::default(); WINDOW],
+            scratch,
+        }
+    }
+
+    /// The bank's powers, as the square of the amplitude of a sine at each
+    /// frequency (as [`tone_power`] gives).
+    fn bank(&mut self, window: &[f32]) -> [f64; BANK_STEPS] {
+        for (bin, &x) in self.bins.iter_mut().zip(window) {
+            *bin = Complex::new(x, 0.0);
+        }
+        self.fft
+            .process_with_scratch(&mut self.bins, &mut self.scratch);
+        let scale = (WINDOW as f64 / 2.0).powi(2);
+        std::array::from_fn(|i| f64::from(self.bins[BANK_FIRST_BIN + i].norm_sqr()) / scale)
+    }
+}
+
 /// The tone in a window, if it holds one.
-fn tone_in(window: &[f32]) -> Option<f64> {
-    let steps = ((BANK_END_HZ - BANK_START_HZ) / BANK_STEP_HZ) as usize + 1;
-    let powers: Vec<f64> = (0..steps)
-        .map(|i| tone_power(window, BANK_START_HZ + i as f64 * BANK_STEP_HZ))
-        .collect();
+fn tone_in(spectrum: &mut Spectrum, window: &[f32]) -> Option<f64> {
+    let powers = spectrum.bank(window);
     let (peak, &top) = powers
         .iter()
         .enumerate()
@@ -152,8 +199,10 @@ impl Tones {
     pub fn new() -> Self {
         Self {
             high_pass: HighPass::new(HIGH_PASS_HZ),
-            window: Vec::with_capacity(WINDOW + HOP),
+            window: Vec::with_capacity(WINDOW + 2 * HOP),
             n: 0,
+            base: 0,
+            spectrum: Spectrum::new(),
             current: None,
             chain: Vec::new(),
         }
@@ -164,23 +213,25 @@ impl Tones {
         self.high_pass.reset();
         self.window.clear();
         self.n = 0;
+        self.base = 0;
         self.current = None;
         self.chain.clear();
     }
 
     /// Feeds `audio`, appending each tone once it has ended.
     pub fn process(&mut self, audio: &[f32], out: &mut Vec<Heard>) {
-        for &x in audio {
-            let x = self.high_pass.run(f64::from(x)) as f32;
-            if self.window.len() == WINDOW {
-                self.window.remove(0);
-            }
-            self.window.push(x);
-            self.n += 1;
-            if self.n.is_multiple_of(HOP as u64) && self.window.len() == WINDOW {
-                let tone = tone_in(&self.window);
-                self.step(tone, out);
-            }
+        let high_pass = &mut self.high_pass;
+        self.window
+            .extend(audio.iter().map(|&x| high_pass.run(f64::from(x)) as f32));
+        // a decision every hop once there is a window, and the window moves
+        // on by a hop at a time (not by a sample, which is a shift of the
+        // whole window for each)
+        while self.window.len() >= WINDOW {
+            self.n = self.base + WINDOW as u64;
+            let tone = tone_in(&mut self.spectrum, &self.window[..WINDOW]);
+            self.step(tone, out);
+            self.window.drain(..HOP);
+            self.base += HOP as u64;
         }
     }
 

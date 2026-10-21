@@ -73,10 +73,13 @@ struct Run {
 /// Reads DTMF keys out of 16 kHz audio, whatever the block sizes it is fed in.
 pub struct Dtmf {
     high_pass: HighPass,
-    /// The last [`WINDOW`] samples, or fewer at the start.
+    /// The audio not yet shifted out: at least a window's worth when there
+    /// is a decision to make.
     window: Vec<f32>,
-    /// Samples fed since the last reset.
+    /// Sample at which the window being decided ended.
     n: u64,
+    /// Samples shifted out of `window` so far.
+    base: u64,
     run: Option<Run>,
 }
 
@@ -90,12 +93,14 @@ impl Default for Dtmf {
 /// allow 1.5 %.
 const TOLERANCE: f64 = 0.015;
 
-/// Power of a key's tone at `hz`, allowing for the tolerance of the sender.
-fn key_tone_power(samples: &[f32], hz: f64) -> f64 {
-    [1.0 - TOLERANCE, 1.0, 1.0 + TOLERANCE]
+/// Power of a key's tone at `hz`, allowing for the tolerance of the sender:
+/// the greater of `nominal` (the power at `hz`, already known) and that at
+/// the two ends of the tolerance.
+fn key_tone_power(samples: &[f32], hz: f64, nominal: f64) -> f64 {
+    [1.0 - TOLERANCE, 1.0 + TOLERANCE]
         .into_iter()
         .map(|scale| tone_power(samples, hz * scale))
-        .fold(0.0, f64::max)
+        .fold(nominal, f64::max)
 }
 
 /// The strongest of `powers` and how many times it exceeds the next.
@@ -114,10 +119,27 @@ fn standout(powers: &[f64; 4]) -> (usize, f64, f64) {
     (best, top, top / next.max(f64::MIN_POSITIVE))
 }
 
+/// Share of a window's power the nominal tones must hold for it to be worth
+/// looking at closely. A key's own tones, up to the tolerance off their
+/// nominal frequencies, still give a pair at least 0.4 of the final
+/// [`CONCENTRATION`] there, so a window below this cannot be a key, and
+/// speech and hiss nearly all are: it is decided by eight filters, not by
+/// twenty-five.
+const SCREEN: f64 = 0.2;
+
 /// The key a window holds, if it holds one.
 fn key_in(window: &[f32]) -> Option<char> {
-    let low = LOW.map(|hz| key_tone_power(window, hz));
-    let high = HIGH.map(|hz| key_tone_power(window, hz));
+    // a sine of amplitude a has a mean square of a^2 / 2, so two tones of
+    // the same amplitude hold all of 2 * mean square
+    let total = window.iter().map(|&x| f64::from(x).powi(2)).sum::<f64>() / window.len() as f64;
+    let nominal_low = LOW.map(|hz| tone_power(window, hz));
+    let nominal_high = HIGH.map(|hz| tone_power(window, hz));
+    let best = |p: &[f64; 4]| p.iter().copied().fold(0.0, f64::max);
+    if best(&nominal_low) + best(&nominal_high) < SCREEN * 2.0 * total {
+        return None;
+    }
+    let low = std::array::from_fn(|i| key_tone_power(window, LOW[i], nominal_low[i]));
+    let high = std::array::from_fn(|i| key_tone_power(window, HIGH[i], nominal_high[i]));
     let (l, low_power, low_standout) = standout(&low);
     let (h, high_power, high_standout) = standout(&high);
     let floor = FLOOR * FLOOR;
@@ -127,9 +149,6 @@ fn key_in(window: &[f32]) -> Option<char> {
     if low_standout < DOMINANCE || high_standout < DOMINANCE {
         return None;
     }
-    // a sine of amplitude a has a mean square of a^2 / 2, so two tones of
-    // the same amplitude hold all of 2 * mean square
-    let total = window.iter().map(|&x| f64::from(x).powi(2)).sum::<f64>() / window.len() as f64;
     if low_power + high_power < CONCENTRATION * 2.0 * total {
         return None;
     }
@@ -148,8 +167,9 @@ impl Dtmf {
     pub fn new() -> Self {
         Self {
             high_pass: HighPass::new(HIGH_PASS_HZ),
-            window: Vec::with_capacity(WINDOW + HOP),
+            window: Vec::with_capacity(WINDOW + 2 * HOP),
             n: 0,
+            base: 0,
             run: None,
         }
     }
@@ -159,22 +179,24 @@ impl Dtmf {
         self.high_pass.reset();
         self.window.clear();
         self.n = 0;
+        self.base = 0;
         self.run = None;
     }
 
     /// Feeds `audio`, appending each key once it has ended.
     pub fn process(&mut self, audio: &[f32], out: &mut Vec<Heard>) {
-        for &x in audio {
-            let x = self.high_pass.run(f64::from(x)) as f32;
-            if self.window.len() == WINDOW {
-                self.window.remove(0);
-            }
-            self.window.push(x);
-            self.n += 1;
-            if self.n.is_multiple_of(HOP as u64) && self.window.len() == WINDOW {
-                let key = key_in(&self.window);
-                self.step(key, out);
-            }
+        let high_pass = &mut self.high_pass;
+        self.window
+            .extend(audio.iter().map(|&x| high_pass.run(f64::from(x)) as f32));
+        // a decision every hop once there is a window, and the window moves
+        // on by a hop at a time (not by a sample, which is a shift of the
+        // whole window for each)
+        while self.window.len() >= WINDOW {
+            self.n = self.base + WINDOW as u64;
+            let key = key_in(&self.window[..WINDOW]);
+            self.step(key, out);
+            self.window.drain(..HOP);
+            self.base += HOP as u64;
         }
     }
 

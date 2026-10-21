@@ -494,7 +494,7 @@ impl CallState {
     /// "Audible" means at least one segment cleared the silence gate
     /// (`audio_kept`); a transcript over otherwise-silent audio is treated as a
     /// hallucination and does not count, so dead-air calls are still dropped.
-    fn has_content(&self) -> bool {
+    const fn has_content(&self) -> bool {
         self.audio_kept || !self.events.is_empty() || !self.signalling.is_empty()
     }
 

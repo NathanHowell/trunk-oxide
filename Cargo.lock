@@ -3691,6 +3691,7 @@ name = "trunk-fm"
 version = "0.1.0"
 dependencies = [
  "num-complex",
+ "rustfft",
  "sonora-ns",
  "trunk-channelizer",
 ]

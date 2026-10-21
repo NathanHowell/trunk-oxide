@@ -185,7 +185,7 @@ mod tests {
         const SR: usize = 16_000;
         let n = 4 * SR;
         let hiss = noise(n, 0.05, 9);
-        let on = |i: usize| i >= SR && (i / (SR / 5)) % 2 == 0;
+        let on = |i: usize| i >= SR && (i / (SR / 5)).is_multiple_of(2);
         let input: Vec<f32> = (0..n)
             .map(|i| {
                 let tone = if on(i) {

@@ -54,6 +54,8 @@ pub enum Signal {
     Mdc { unit: u32, op: MdcOp, arg: u8 },
     /// A DTMF key.
     Dtmf(char),
+    /// A `FleetSync` message.
+    FleetSync(crate::fleetsync::Message),
 }
 
 impl Signal {
@@ -63,6 +65,7 @@ impl Signal {
         match self {
             Self::Mdc { .. } => "mdc1200",
             Self::Dtmf(_) => "dtmf",
+            Self::FleetSync(_) => "fleetsync",
         }
     }
 
@@ -71,7 +74,8 @@ impl Signal {
     pub const fn unit(&self) -> Option<u32> {
         match self {
             Self::Mdc { unit, .. } => Some(*unit),
-            Self::Dtmf(_) => None,
+            Self::FleetSync(message) if message.from.is_set() => Some(message.from.key()),
+            Self::Dtmf(_) | Self::FleetSync(_) => None,
         }
     }
 
@@ -91,7 +95,7 @@ impl Signal {
                 op: MdcOp::CallAlert,
                 ..
             } => Some(Alert::CallAlert),
-            Self::Mdc { .. } | Self::Dtmf(_) => None,
+            Self::Mdc { .. } | Self::Dtmf(_) | Self::FleetSync(_) => None,
         }
     }
 }
@@ -122,6 +126,7 @@ impl fmt::Display for Signal {
                 }
             }
             Self::Dtmf(key) => write!(f, "DTMF {key}"),
+            Self::FleetSync(message) => message.fmt(f),
         }
     }
 }
@@ -259,5 +264,38 @@ mod tests {
         );
         assert_eq!((lines[1].unit, lines[1].alert), (None, None));
         assert_eq!(fold(&[]), Vec::<Line>::new());
+    }
+    #[test]
+    fn a_fleetsync_message_names_its_sender_as_an_alias_key() {
+        use crate::fleetsync::{Id, Message};
+        let id = |fleet, unit| Id { fleet, unit };
+        let message = Message {
+            kind: 0x80,
+            code: 0xFC,
+            from: id(120, 2182),
+            to: id(120, 2182),
+        };
+        let signal = Signal::FleetSync(message);
+        assert_eq!(signal.unit(), Some(1_202_182));
+        assert_eq!(signal.alert(), None);
+        assert_eq!(signal.scheme(), "fleetsync");
+        assert_eq!(
+            signal.to_string(),
+            "FleetSync 120-2182 (type 0x80, code 0xfc)"
+        );
+        let to_another = Signal::FleetSync(Message {
+            to: id(121, 1001),
+            ..message
+        });
+        assert_eq!(
+            to_another.to_string(),
+            "FleetSync 120-2182 to 121-1001 (type 0x80, code 0xfc)"
+        );
+        // a packet that names nobody attributes nobody
+        let anonymous = Signal::FleetSync(Message {
+            from: id(99, 999),
+            ..message
+        });
+        assert_eq!(anonymous.unit(), None);
     }
 }

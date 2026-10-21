@@ -9,8 +9,9 @@ use std::sync::Arc;
 use num_complex::Complex32;
 use trunk_channelizer::{ChannelDecoder, ConditioningSpec, Reading, WIDE};
 use trunk_fm::denoise::Denoiser;
+use trunk_fm::fleetsync::FleetSync;
 use trunk_fm::gate::{Config as GateConfig, Event as GateEvent, Gate};
-use trunk_fm::{Audio, Decimation, Detector, FmDemod, Measurement, TAU_US, Tone};
+use trunk_fm::{Audio, Decimation, Detector, FmDemod, Heard, Measurement, TAU_US, Tone};
 
 use crate::fm;
 use crate::kind::{Cmd, Kind, OpenError, Opening, Tuning};
@@ -78,6 +79,10 @@ impl Kind for AnalogFm {
             call: at.call.id,
             demod: FmDemod::new(WIDE_RATE, TAU_US, Decimation::AntiAliased),
             detector: Detector::new(),
+            fleetsync: FleetSync::new(),
+            raw_samples: 0,
+            heard: Vec::new(),
+            held: Vec::new(),
             gate: Gate::new(GateConfig::for_tone(tone)),
             audio: Audio::default(),
             measurements: Vec::new(),
@@ -113,6 +118,15 @@ pub struct AnalogFmChannel {
     call: CallId,
     demod: FmDemod,
     detector: Detector,
+    /// In-band signalling is read from the same raw audio the detector sees.
+    fleetsync: FleetSync,
+    /// Samples of raw audio the signalling decoders have been fed.
+    raw_samples: u64,
+    heard: Vec<Heard>,
+    /// What was heard before the gate opened for it: the gate holds a
+    /// transmission's first moments back, so a burst at key-up is decoded
+    /// ahead of the open it belongs to.
+    held: Vec<Heard>,
     gate: Gate,
     audio: Audio,
     measurements: Vec<Measurement>,
@@ -146,6 +160,9 @@ impl ChannelDecoder for AnalogFmChannel {
         self.measurements.clear();
         self.detector
             .process(&self.audio.raw, &mut self.measurements);
+        self.fleetsync.process(&self.audio.raw, &mut self.heard);
+        self.raw_samples += self.audio.raw.len() as u64;
+        self.held.append(&mut self.heard);
         self.voice_pending.extend_from_slice(&self.audio.voice);
         if self.measurements.is_empty() {
             return;
@@ -180,6 +197,25 @@ impl ChannelDecoder for AnalogFmChannel {
                 power_db,
             });
         }
+        // Signalling goes out behind the open it belongs to, and only while
+        // a transmission is on; what is heard outside one, and not about to
+        // be inside it, is dropped rather than credited to the next.
+        let opened = self
+            .gate_events
+            .iter()
+            .any(|e| matches!(e, GateEvent::Open { .. }));
+        if opened || self.gate.is_open() {
+            out.events
+                .extend(self.held.drain(..).map(|heard| RadioEvent::Signalling {
+                    call_id: self.call,
+                    heard,
+                }));
+        } else {
+            let oldest = self
+                .raw_samples
+                .saturating_sub((self.gate.delay_samples() + 2 * trunk_fm::detect::HOP) as u64);
+            self.held.retain(|h| h.span.end >= oldest);
+        }
         let voice = if let Some(d) = &mut self.denoise {
             self.cleaned.clear();
             d.process(&self.gated, &mut self.cleaned);
@@ -204,6 +240,9 @@ impl ChannelDecoder for AnalogFmChannel {
     fn retune(&mut self) {
         self.demod.reset();
         self.detector.reset();
+        self.fleetsync.reset();
+        self.raw_samples = 0;
+        self.held.clear();
         self.gate.reset();
         self.voice_pending.clear();
     }
@@ -218,13 +257,37 @@ mod tests {
     use crate::types::{Channel, ChannelNum, CloseReason};
     use trunk_channelizer::SharedChannelizer;
 
-    /// Records 2 s of PL'd carrier between noise on slot `port`, checks the
-    /// gate opened and closed once, and returns the samples recorded.
-    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
+    /// What a transmission came to.
+    struct Transmitted {
+        /// Samples recorded.
+        audio: usize,
+        /// The open, the in-band signalling and the close, in the order the
+        /// monitor loop would see them.
+        events: Vec<String>,
+    }
+
     fn record_one_transmission(
         noise_suppression: Option<crate::NoiseSuppression>,
         port: usize,
     ) -> usize {
+        transmit(noise_suppression, port, None).audio
+    }
+
+    /// Records 2 s of PL'd carrier between noise on slot `port`, checks the
+    /// gate opened and closed once, and reports what came of it. `burst`
+    /// (16 kHz audio) is sent as the first thing on the carrier, before
+    /// the talking.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::too_many_lines
+    )]
+    fn transmit(
+        noise_suppression: Option<crate::NoiseSuppression>,
+        port: usize,
+        burst: Option<&[f32]>,
+    ) -> Transmitted {
         let cfg = trunk_channelizer::Config::standard(912_000.0).unwrap();
         let chz: Chz = SharedChannelizer::new(cfg.clone()).unwrap();
         let center = 488_661_750.0;
@@ -294,8 +357,16 @@ mod tests {
         for n in 0..(4.0 * rate) as usize {
             let t = n as f64 / rate;
             if (1.0..3.0).contains(&t) {
+                let at = ((t - 1.0) * 16_000.0) as usize;
                 let m = 700.0 * (std::f64::consts::TAU * 162.2 * t).sin()
-                    + 2_000.0 * (std::f64::consts::TAU * 800.0 * t).sin();
+                    + match burst {
+                        Some(b) if at < b.len() => 2_000.0 * f64::from(b[at]),
+                        Some(b) => {
+                            let _ = b;
+                            2_000.0 * (std::f64::consts::TAU * 800.0 * t).sin()
+                        }
+                        None => 2_000.0 * (std::f64::consts::TAU * 800.0 * t).sin(),
+                    };
                 phase += std::f64::consts::TAU * (100_000.0 + m) / rate;
             } else {
                 phase += std::f64::consts::TAU * f64::from(rnd() - 0.5);
@@ -304,21 +375,32 @@ mod tests {
         }
         let mut out = Decoded::default();
         let (mut opened, mut closed, mut audio) = (0, 0, 0);
+        let mut events = Vec::new();
         for block in iq.chunks_exact(cfg.hop()) {
             chz.run(block, &mut out);
             for e in out.events.drain(..) {
-                if let RadioEvent::Squelch {
-                    call_id, squelch, ..
-                } = e
-                {
-                    assert_eq!(call_id, CallId(42));
-                    match squelch {
-                        Squelch::Open => opened += 1,
-                        Squelch::Close(r) => {
-                            assert_eq!(r, CloseReason::Quieting);
-                            closed += 1;
+                match e {
+                    RadioEvent::Squelch {
+                        call_id, squelch, ..
+                    } => {
+                        assert_eq!(call_id, CallId(42));
+                        match squelch {
+                            Squelch::Open => {
+                                opened += 1;
+                                events.push("open".to_owned());
+                            }
+                            Squelch::Close(r) => {
+                                assert_eq!(r, CloseReason::Quieting);
+                                closed += 1;
+                                events.push("close".to_owned());
+                            }
                         }
                     }
+                    RadioEvent::Signalling { call_id, heard } => {
+                        assert_eq!(call_id, CallId(42));
+                        events.push(heard.signal.to_string());
+                    }
+                    _ => {}
                 }
             }
             for (id, pcm) in out.audio.drain(..) {
@@ -337,7 +419,7 @@ mod tests {
         let (acct, tail) = tape.close().unwrap();
         assert_eq!(audio, acct.sample_count as usize);
         assert!(tail.is_empty());
-        audio
+        Transmitted { audio, events }
     }
 
     #[test]
@@ -345,6 +427,22 @@ mod tests {
         let plain = record_one_transmission(None, 1);
         // about 2 s of 16 kHz audio came out under the call id
         assert!((28_000..=36_000).contains(&plain), "{plain}");
+    }
+
+    #[test]
+    fn a_fleetsync_burst_at_key_up_is_reported_behind_the_open() {
+        let burst: Vec<f32> =
+            include_bytes!("../../trunk-fm/tests/data/fleetsync_atherton_burst.s16")
+                .chunks_exact(2)
+                .map(|b| f32::from(i16::from_le_bytes([b[0], b[1]])) / 32768.0)
+                .collect();
+        let sent = transmit(None, 4, Some(&burst));
+        assert_eq!(
+            sent.events,
+            ["open", "FleetSync 120-2182 (type 0x80, code 0xfc)", "close"]
+        );
+        // and a transmission without one reports none
+        assert_eq!(transmit(None, 5, None).events, ["open", "close"]);
     }
 
     #[test]

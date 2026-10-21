@@ -23,6 +23,7 @@ pub mod denoise;
 pub mod design;
 pub mod detect;
 pub mod fir;
+pub mod fleetsync;
 pub mod gate;
 pub mod io;
 pub mod signalling;

@@ -128,6 +128,7 @@ fn main() -> Result<()> {
     tracing::info!(config = %config_path, "starting trunk-oxide");
 
     let config = trunk_config::Config::load(config_path).context("failed to load TOML config")?;
+    trunk_oxide::plan::check(&config.source).context("the sources are not planned")?;
 
     let min_cpu_weight = config.oxide.as_ref().map_or_else(
         || trunk_config::OxideConfig::default().min_cpu_weight,

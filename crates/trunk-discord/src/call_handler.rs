@@ -20,7 +20,6 @@ use crate::grpc_transcriber::{TranscriberConnection, Transcription};
 use crate::metrics::Metrics;
 use crate::ogg_encoder::OggOpusEncoder;
 use crate::resampler::Resampler;
-use crate::tone_detect::{DetectedTone, NotchFilter, ToneDetector};
 
 /// Keeps the `unfinalized_handlers` gauge incremented for as long as a handler's
 /// embed is grey (started but not finalized). [`Self::finalized`] decrements it
@@ -119,8 +118,6 @@ struct TranscribeIdentity {
 #[derive(Clone, Copy)]
 pub struct CallHandlerConfig {
     pub max_segment_ms: u64,
-    pub tone_detection: bool,
-    pub tone_detection_duration_s: f32,
     pub audio_attachment: bool,
     /// Base URL of the Jaeger UI, for the embed's link to its trace.
     pub jaeger_url: Option<&'static str>,
@@ -145,8 +142,6 @@ pub struct CallHandler {
     config: CallHandlerConfig,
     audio_buffer: Vec<f32>,
     resampler: Option<Resampler>,
-    tone_detector: Option<ToneDetector>,
-    notch_filter: Option<NotchFilter>,
     post_channel: ChannelId,
     ogg_encoder: Option<OggOpusEncoder>,
 
@@ -214,20 +209,6 @@ impl CallHandler {
         metrics: Arc<Metrics>,
         writers: &ChannelWriters,
     ) -> Result<Self> {
-        let detect_ctcss = config.tone_detection && call_info.is_conventional;
-        // Conventional channels only. On trunked P25 the detector's DTMF
-        // matcher false-fires on speech and then strips up to the detection
-        // window (median ~1.7 s) from the start of the transcription audio.
-        let tone_detector = if config.tone_detection && call_info.is_conventional {
-            Some(if detect_ctcss {
-                ToneDetector::with_ctcss(16000, config.tone_detection_duration_s, true)
-            } else {
-                ToneDetector::new(16000, config.tone_detection_duration_s)
-            })
-        } else {
-            None
-        };
-
         let ogg_encoder = if config.audio_attachment {
             Some(OggOpusEncoder::new()?)
         } else {
@@ -264,8 +245,6 @@ impl CallHandler {
             config,
             audio_buffer: Vec::new(),
             resampler: None,
-            tone_detector,
-            notch_filter: None,
             post_channel,
             ogg_encoder,
             embed_message_id: None,
@@ -591,24 +570,6 @@ impl CallHandler {
             resampler.process(&decoded)?
         };
 
-        if let Some(detector) = &mut self.tone_detector {
-            detector.process(&samples);
-
-            // Check for CTCSS early-fire to start notch filtering as soon as possible
-            if let Some(ctcss_freq) = detector.take_early_ctcss()
-                && self.notch_filter.is_none()
-            {
-                tracing::info!(freq = ctcss_freq, "CTCSS early-fire, starting notch filter");
-                let filter = NotchFilter::new(16000, ctcss_freq, 30.0);
-                self.notch_filter = Some(filter);
-            }
-        }
-
-        let mut samples = samples;
-        if let Some(filter) = &mut self.notch_filter {
-            filter.process(&mut samples);
-        }
-
         let sample_count: u32 = samples.len().try_into().expect("audio chunk exceeds u32");
 
         if let Some(enc) = &mut self.ogg_encoder {
@@ -617,14 +578,6 @@ impl CallHandler {
 
         self.audio_buffer.extend_from_slice(&samples);
         self.dbg_audio_samples += u64::from(sample_count);
-
-        if self
-            .tone_detector
-            .as_ref()
-            .is_some_and(ToneDetector::is_complete)
-        {
-            self.finish_tone_detection().await?;
-        }
 
         // Normally we do NOT flush mid-transmission: the whole transmission is
         // transcribed as one request at the PTT/squelch boundary (handle_ptt_end)
@@ -641,58 +594,6 @@ impl CallHandler {
 
         let effects = self.state.on_audio_processed(buffer_len, audio_drain);
         self.process_effects(effects).await?;
-
-        Ok(())
-    }
-
-    async fn finish_tone_detection(&mut self) -> Result<()> {
-        let Some(detector) = self.tone_detector.take() else {
-            return Ok(());
-        };
-
-        let result = detector.finish();
-
-        if !result.tones.is_empty() {
-            // Extract CTCSS freq before moving tones
-            let ctcss_freq = result.tones.iter().find_map(|t| match t {
-                DetectedTone::Ctcss { freq } => Some(*freq),
-                _ => None,
-            });
-
-            let tones = result.tones;
-
-            // Strip dispatch tone samples from the front of the audio buffer
-            let strip = result.tone_end_sample.min(self.audio_buffer.len());
-
-            // A false-positive tone eats the start of the speech, so count what
-            // was found and how much audio was removed because of it.
-            let labels = self.labels();
-            for tone in &tones {
-                let kind = [KeyValue::new("kind", tone_kind(tone))];
-                self.metrics
-                    .tones_detected
-                    .add(1, &[&labels[..], &kind[..]].concat());
-            }
-            self.metrics
-                .tone_strip_seconds
-                .record(strip as f64 / 16000.0, &labels);
-            if strip > 0 {
-                self.audio_buffer.drain(..strip);
-            }
-
-            // If CTCSS detected and notch filter not already active (via early-fire),
-            // create one and retroactively filter buffered audio
-            if let Some(freq) = ctcss_freq
-                && self.notch_filter.is_none()
-            {
-                let mut filter = NotchFilter::new(16000, freq, 30.0);
-                filter.process(&mut self.audio_buffer);
-                self.notch_filter = Some(filter);
-            }
-
-            let effects = self.state.on_tones_detected(tones);
-            self.process_effects(effects).await?;
-        }
 
         Ok(())
     }
@@ -749,21 +650,15 @@ impl CallHandler {
         self.state.on_transcription_enqueued()
     }
 
-    /// Flush the resampler tail and force-finish tone detection into
-    /// `audio_buffer`. Shared by the PTT-boundary and call-end paths.
-    async fn flush_dsp(&mut self) -> Result<()> {
+    /// Flush the resampler tail into `audio_buffer`. Shared by the
+    /// PTT-boundary and call-end paths.
+    fn flush_dsp(&mut self) -> Result<()> {
         if let Some(resampler) = &mut self.resampler {
-            let mut flushed = resampler.flush()?;
-            if let Some(filter) = &mut self.notch_filter {
-                filter.process(&mut flushed);
-            }
+            let flushed = resampler.flush()?;
             if let Some(enc) = &mut self.ogg_encoder {
                 enc.process(&flushed)?;
             }
             self.audio_buffer.extend_from_slice(&flushed);
-        }
-        if self.tone_detector.is_some() {
-            self.finish_tone_detection().await?;
         }
         Ok(())
     }
@@ -782,7 +677,7 @@ impl CallHandler {
     /// later — after the worker has transcribed this PTT's audio — so the PTT
     /// separator lands after that PTT's text, preserving ordering.
     async fn handle_ptt_end(&mut self, call_data: Option<Box<proto::CallData>>) -> Result<()> {
-        if let Err(e) = self.flush_dsp().await {
+        if let Err(e) = self.flush_dsp() {
             tracing::warn!(error = %e, "PTT-end flush failed");
         }
         // Bumps the in-flight count; the `on_ptt_boundary` render below already
@@ -811,7 +706,7 @@ impl CallHandler {
     /// backlog. Dropping `job_tx` lets the worker drain its queue and exit;
     /// late transcript text then edits the already-final embed in phase 2.
     async fn finalize_now(&mut self, call_data: Option<Box<proto::CallData>>) {
-        if let Err(e) = self.flush_dsp().await {
+        if let Err(e) = self.flush_dsp() {
             tracing::warn!(error = %e, "pre-finalization flush failed, proceeding to end call");
         }
         // Bumps the in-flight count; `finalize`'s `on_end` render reflects it.
@@ -1049,17 +944,6 @@ fn record_audio_shape(metrics: &Metrics, labels: &[KeyValue; 3], s: &AudioShape)
         metrics
             .audio_longest_gap_ms
             .record(s.longest_gap_s * 1000.0, labels);
-    }
-}
-
-/// Stable, low-cardinality name for a detected tone.
-const fn tone_kind(tone: &DetectedTone) -> &'static str {
-    match tone {
-        DetectedTone::TwoTone { .. } => "two_tone",
-        DetectedTone::LongTone { .. } => "long_tone",
-        DetectedTone::HiLowWarble { .. } => "hi_low_warble",
-        DetectedTone::Dtmf { .. } => "dtmf",
-        DetectedTone::Ctcss { .. } => "ctcss",
     }
 }
 

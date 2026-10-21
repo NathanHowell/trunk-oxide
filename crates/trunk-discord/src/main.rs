@@ -16,7 +16,6 @@ mod ogg_encoder;
 mod reactions;
 mod resampler;
 mod stats_chart;
-mod tone_detect;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -348,8 +347,6 @@ async fn main() -> Result<()> {
         config.audio.max_segment_ms,
         fallback_channel_id,
         channel_lookup,
-        config.audio.tone_detection,
-        config.audio.tone_detection_duration_s,
         config.audio.audio_attachment,
         // Leaked once: the handlers' config is Copy.
         discord_config

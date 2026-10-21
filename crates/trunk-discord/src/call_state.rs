@@ -3,8 +3,6 @@ use std::time::Duration;
 use proto::types::{Freq, SignalDb};
 use trunk_oxide_proto as proto;
 
-use crate::tone_detect::DetectedTone;
-
 /// Max chars for embed description before we truncate from the front.
 const MAX_DESCRIPTION_LEN: usize = 3800;
 
@@ -16,7 +14,7 @@ pub enum CallEffect {
     /// Post a new embed to Discord.
     SendEmbed { embed: EmbedData },
     /// Edit the existing embed in place, promptly (call-state changes the user
-    /// must see right away: first content, finalization, tones, events).
+    /// must see right away: first content, finalization, signalling, events).
     EditEmbed { embed: EmbedData },
     /// Edit the existing embed, but coalesced/debounced by the executor.
     ///
@@ -105,7 +103,6 @@ pub struct CallState {
     // Mutable state
     has_embed: bool,
     transcription_text: String,
-    detected_tones: Vec<DetectedTone>,
     events: Vec<String>,
     /// What the call's transmissions carried in-band, and how many times each
     /// was heard (a radio IDs itself at every key-up).
@@ -166,7 +163,6 @@ impl CallState {
             config,
             has_embed: false,
             transcription_text: String::new(),
-            detected_tones: Vec::new(),
             events: Vec::new(),
             signalling: Vec::new(),
             call_ended: false,
@@ -180,7 +176,7 @@ impl CallState {
     }
 
     /// Called when the call starts. Embed creation is deferred until we have
-    /// content worth showing (transcription, interesting tones, or events).
+    /// content worth showing (transcription, signalling, or events).
     #[allow(
         clippy::unused_self,
         clippy::needless_pass_by_ref_mut,
@@ -193,12 +189,12 @@ impl CallState {
     /// Sum of per-transmission `recording_length` values accumulated so far
     /// (what drives the embed Duration). Exposed for audio-vs-duration debug
     /// instrumentation.
-    pub(crate) fn accumulated_duration(&self) -> Duration {
+    pub(crate) const fn accumulated_duration(&self) -> Duration {
         self.accumulated_duration
     }
 
     /// Number of coalesced PTTs counted so far. Exposed for debug logging.
-    pub(crate) fn ptt_count(&self) -> u32 {
+    pub(crate) const fn ptt_count(&self) -> u32 {
         self.ptt_count
     }
 
@@ -224,19 +220,19 @@ impl CallState {
     /// reconciles the reaction, so this emits no embed effect (and never an
     /// edit per enqueued chunk — that churn is what jammed the edit bucket).
     /// Never creates an embed on its own — pending work alone is not content.
-    pub fn on_transcription_enqueued(&mut self) -> Vec<CallEffect> {
+    pub const fn on_transcription_enqueued(&mut self) -> Vec<CallEffect> {
         // A kept segment is the definition of "this call has audible audio",
         // used by `has_content` and the attachment gate.
         self.audio_kept = true;
         self.pending_transcriptions = self.pending_transcriptions.saturating_add(1);
-        vec![]
+        Vec::new()
     }
 
     /// Whether the executor should be showing the "transcription in flight"
     /// reaction. The executor reconciles the actual reaction against this after
     /// each batch of effects (it owns the embed message id), so the pure state
     /// machine never touches Discord.
-    pub fn wants_transcribing_indicator(&self) -> bool {
+    pub const fn wants_transcribing_indicator(&self) -> bool {
         self.pending_transcriptions > 0
     }
 
@@ -244,7 +240,7 @@ impl CallState {
     /// transcription results are lost (e.g. the worker task dies) before the
     /// count drains to zero, so the executor drops a stale reaction at exit.
     /// Emits no effect: the reaction is reconciled by the executor.
-    pub fn on_transcription_drained(&mut self) {
+    pub const fn on_transcription_drained(&mut self) {
         self.pending_transcriptions = 0;
     }
 
@@ -285,29 +281,6 @@ impl CallState {
             vec![CallEffect::SendEmbed {
                 embed: self.build_embed(),
             }]
-        }
-    }
-
-    /// Handle completed tone detection results.
-    pub fn on_tones_detected(&mut self, tones: Vec<DetectedTone>) -> Vec<CallEffect> {
-        if tones.is_empty() {
-            return vec![];
-        }
-        self.detected_tones = tones;
-
-        if !self.has_embed && self.has_interesting_tones() {
-            self.has_embed = true;
-            return vec![CallEffect::SendEmbed {
-                embed: self.build_embed(),
-            }];
-        }
-
-        if self.has_embed {
-            vec![CallEffect::EditEmbed {
-                embed: self.build_embed(),
-            }]
-        } else {
-            vec![]
         }
     }
 
@@ -443,7 +416,7 @@ impl CallState {
         // Check if the call produced useful content
         if !self.has_content() {
             effects.push(CallEffect::Log {
-                message: "no audible audio, tones, or events".into(),
+                message: "no audible audio, signalling, or events".into(),
             });
             if self.has_embed {
                 effects.push(CallEffect::DeleteEmbed);
@@ -513,13 +486,6 @@ impl CallState {
         }
     }
 
-    /// Are there non-CTCSS tones (dispatch tones, two-tone sequences)?
-    fn has_interesting_tones(&self) -> bool {
-        self.detected_tones
-            .iter()
-            .any(|t| !matches!(t, DetectedTone::Ctcss { .. }))
-    }
-
     /// Does this call have content worth posting?
     ///
     /// Audible audio is content on its own — the call is a real transmission and
@@ -529,10 +495,7 @@ impl CallState {
     /// (`audio_kept`); a transcript over otherwise-silent audio is treated as a
     /// hallucination and does not count, so dead-air calls are still dropped.
     fn has_content(&self) -> bool {
-        self.audio_kept
-            || self.has_interesting_tones()
-            || !self.events.is_empty()
-            || !self.signalling.is_empty()
+        self.audio_kept || !self.events.is_empty() || !self.signalling.is_empty()
     }
 
     /// Build a pure embed representation from current state.
@@ -624,16 +587,6 @@ impl CallState {
             fields.push(EmbedField {
                 name: "Encrypted".into(),
                 value: "Yes".into(),
-                inline: true,
-            });
-        }
-
-        if !self.detected_tones.is_empty() {
-            let tones_str: Vec<String> =
-                self.detected_tones.iter().map(|t| format!("{t}")).collect();
-            fields.push(EmbedField {
-                name: "Tones".into(),
-                value: tones_str.join(", "),
                 inline: true,
             });
         }
@@ -730,10 +683,16 @@ impl CallState {
             } else {
                 Some(self.transcription_text.clone())
             },
-            tones: if self.detected_tones.is_empty() {
+            // the column the dispatch tones, DTMF and CTCSS used to fill
+            tones: if self.signalling.is_empty() {
                 None
             } else {
-                Some(self.detected_tones.iter().map(|t| format!("{t}")).collect())
+                Some(
+                    self.signalling
+                        .iter()
+                        .map(|(l, _)| l.text.clone())
+                        .collect(),
+                )
             },
             events: if self.events.is_empty() {
                 None
@@ -991,54 +950,6 @@ mod tests {
         assert!(matches!(&effects[0], CallEffect::Transcribe { .. }));
     }
 
-    // ── on_tones_detected ────────────────────────────────────────────────
-
-    #[test]
-    fn tones_empty_no_effect() {
-        let mut s = make_state();
-        s.on_start();
-        let effects = s.on_tones_detected(vec![]);
-        assert!(effects.is_empty());
-    }
-
-    #[test]
-    fn interesting_tones_create_embed() {
-        let mut s = make_state();
-        s.on_start();
-        let tones = vec![DetectedTone::LongTone {
-            freq: 1000.0,
-            duration: 3.0,
-        }];
-        let effects = s.on_tones_detected(tones);
-        assert_eq!(effects.len(), 1);
-        assert!(matches!(&effects[0], CallEffect::SendEmbed { .. }));
-        assert!(s.has_embed);
-    }
-
-    #[test]
-    fn ctcss_only_tones_do_not_create_embed() {
-        let mut s = make_state();
-        s.on_start();
-        let tones = vec![DetectedTone::Ctcss { freq: 131.8 }];
-        let effects = s.on_tones_detected(tones);
-        assert!(effects.is_empty());
-        assert!(!s.has_embed);
-    }
-
-    #[test]
-    fn tones_on_existing_embed_emit_edit() {
-        let mut s = make_state();
-        s.on_start();
-        s.on_transcription("hello"); // creates embed
-        let tones = vec![DetectedTone::LongTone {
-            freq: 1000.0,
-            duration: 3.0,
-        }];
-        let effects = s.on_tones_detected(tones);
-        assert_eq!(effects.len(), 1);
-        assert!(matches!(&effects[0], CallEffect::EditEmbed { .. }));
-    }
-
     // ── on_event ─────────────────────────────────────────────────────────
 
     #[test]
@@ -1176,54 +1087,26 @@ mod tests {
     }
 
     #[test]
-    fn end_with_tones_and_silent_audio_skips_attachment() {
+    fn end_with_signalling_and_silent_audio_skips_attachment() {
         let mut s = make_state();
         s.on_start();
-        s.on_tones_detected(vec![DetectedTone::TwoTone {
-            tone_a: 500.0,
-            tone_b: 800.0,
-            duration_a: 1.0,
-            duration_b: 3.0,
-        }]);
-        let effects = s.on_end(None, Some(vec![0; 127]));
+        let data = with_signalling(vec![heard_mdc(0x1234, "PTT ID", proto::SignalAlert::None)]);
+        let effects = s.on_end(Some(&data), Some(vec![0; 127]));
         assert!(
             !effects
                 .iter()
                 .any(|e| matches!(e, CallEffect::AttachAudio { .. }))
         );
-        assert!(
-            effects
-                .iter()
-                .any(|e| matches!(e, CallEffect::UpdateDb { .. }))
-        );
-    }
-
-    #[test]
-    fn end_with_dispatch_tones_keeps_embed() {
-        let mut s = make_state();
-        s.on_start();
-        s.on_tones_detected(vec![DetectedTone::TwoTone {
-            tone_a: 500.0,
-            tone_b: 800.0,
-            duration_a: 1.0,
-            duration_b: 3.0,
-        }]);
-        let effects = s.on_end(None, None);
-        assert!(!effects.iter().any(|e| matches!(e, CallEffect::DeleteEmbed)));
-    }
-
-    #[test]
-    fn end_with_only_ctcss_no_embed() {
-        let mut s = make_state();
-        s.on_start();
-        s.on_tones_detected(vec![DetectedTone::Ctcss { freq: 131.8 }]);
-        let effects = s.on_end(None, None);
-        // CTCSS-only doesn't create an embed, so no delete needed
-        assert!(!effects.iter().any(|e| matches!(e, CallEffect::DeleteEmbed)));
-        assert!(
-            !effects
-                .iter()
-                .any(|e| matches!(e, CallEffect::SendEmbed { .. }))
+        // and its signalling is what the database keeps in the tones column
+        let Some(CallEffect::UpdateDb { update }) = effects
+            .iter()
+            .find(|e| matches!(e, CallEffect::UpdateDb { .. }))
+        else {
+            panic!("expected UpdateDb");
+        };
+        assert_eq!(
+            update.tones.as_deref(),
+            Some(&["MDC-1200 unit 1234 PTT ID".to_owned()][..])
         );
     }
 

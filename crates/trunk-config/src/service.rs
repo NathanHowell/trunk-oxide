@@ -46,10 +46,6 @@ pub struct AudioConfig {
     /// decode latency. Not the normal segmentation unit.
     #[serde(default = "default_max_segment_ms")]
     pub max_segment_ms: u64,
-    #[serde(default = "default_tone_detection")]
-    pub tone_detection: bool,
-    #[serde(default = "default_tone_detection_duration_s")]
-    pub tone_detection_duration_s: f32,
     #[serde(default = "default_audio_attachment")]
     pub audio_attachment: bool,
     #[serde(default = "default_coalesce_timeout_ms")]
@@ -65,8 +61,6 @@ impl Default for AudioConfig {
     fn default() -> Self {
         Self {
             max_segment_ms: default_max_segment_ms(),
-            tone_detection: default_tone_detection(),
-            tone_detection_duration_s: default_tone_detection_duration_s(),
             audio_attachment: default_audio_attachment(),
             coalesce_timeout_ms: default_coalesce_timeout_ms(),
             transcription_timeout_s: default_transcription_timeout_s(),
@@ -76,12 +70,6 @@ impl Default for AudioConfig {
 
 const fn default_max_segment_ms() -> u64 {
     120_000
-}
-const fn default_tone_detection() -> bool {
-    true
-}
-const fn default_tone_detection_duration_s() -> f32 {
-    5.0
 }
 const fn default_audio_attachment() -> bool {
     true

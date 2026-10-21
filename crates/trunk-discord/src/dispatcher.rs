@@ -104,8 +104,6 @@ impl DispatchPump {
         max_segment_ms: u64,
         channel_id: ChannelId,
         channel_lookup: ChannelLookup,
-        tone_detection: bool,
-        tone_detection_duration_s: f32,
         audio_attachment: bool,
         jaeger_url: Option<&'static str>,
         coalesce_timeout_ms: u64,
@@ -129,8 +127,6 @@ impl DispatchPump {
                 aggregator,
                 config: CallHandlerConfig {
                     max_segment_ms,
-                    tone_detection,
-                    tone_detection_duration_s,
                     audio_attachment,
                     jaeger_url,
                 },

@@ -42,10 +42,6 @@ pub struct Metrics {
     /// Digital-silence holes (>= 40 ms) inside speech, and the longest (ms).
     pub audio_gaps: Histogram<f64>,
     pub audio_longest_gap_ms: Histogram<f64>,
-    /// Tone detection: tones found (by kind) and audio stripped from the front
-    /// because of them. A false positive here eats the start of the speech.
-    pub tones_detected: Counter<u64>,
-    pub tone_strip_seconds: Histogram<f64>,
     /// Transcription coverage: when the model's first/last text lands vs the
     /// audio's own onset/end. Positive leading gap = text starts later than
     /// the speech does.
@@ -156,15 +152,6 @@ impl Metrics {
                 .f64_histogram("trunk.discord.audio_longest_gap_ms")
                 .with_description("Longest digital-silence hole inside speech, per segment (ms)")
                 .with_boundaries(vec![40.0, 60.0, 80.0, 120.0, 200.0, 400.0, 800.0])
-                .build(),
-            tones_detected: meter
-                .u64_counter("trunk.discord.tones_detected")
-                .with_description("Tones found by the detector, by kind")
-                .build(),
-            tone_strip_seconds: meter
-                .f64_histogram("trunk.discord.tone_strip_seconds")
-                .with_description("Audio stripped from the call start because of detected tones")
-                .with_boundaries(SECONDS_BOUNDARIES.to_vec())
                 .build(),
             transcript_first_text_offset: meter
                 .f64_histogram("trunk.discord.transcript_first_text_offset_seconds")

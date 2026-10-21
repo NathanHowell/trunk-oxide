@@ -28,6 +28,9 @@ pub use crate::call_state::{
 /// Serialize a span's trace context to a W3C `traceparent` string via the global
 /// propagator. Empty when tracing is disabled (no exporter/propagator), which is
 /// the correct "no parent" signal for the consumer.
+/// Bucket edges for per-recording durations in seconds.
+const SECONDS_BOUNDARIES: [f64; 11] = [0.0, 0.1, 0.2, 0.4, 0.6, 0.8, 1.0, 1.5, 2.0, 3.0, 5.0];
+
 fn traceparent_of(span: &tracing::Span) -> String {
     let cx = span.context();
     let mut carrier = HashMap::<String, String>::new();
@@ -162,6 +165,16 @@ pub struct CallManager {
     freq_correction_gauge: Gauge<f64>,
     calls_started: Counter<u64>,
     calls_ended: Counter<u64>,
+    /// How each finished recording's audio began, ended and held together,
+    /// as it left the radio: a clipped tail or a trimmed lead-in shows here.
+    audio_leading_silence: Histogram<f64>,
+    audio_trailing_silence: Histogram<f64>,
+    audio_end_level_db: Histogram<f64>,
+    /// Recordings whose speech ends while still loud (a clipped tail).
+    audio_abrupt_ends: Counter<u64>,
+    /// Digital-silence holes inside speech, and the longest (ms).
+    audio_gaps: Histogram<f64>,
+    audio_longest_gap_ms: Histogram<f64>,
     /// In-band signalling decoded from analog audio, by scheme and alert.
     signalling_heard: Counter<u64>,
     /// Errored / spiked voice codewords reported by the P25 voice decoder,
@@ -307,6 +320,37 @@ impl CallManager {
             calls_ended: meter
                 .u64_counter("trunk.oxide.calls_ended")
                 .with_description("Total calls ended")
+                .build(),
+            audio_leading_silence: meter
+                .f64_histogram("trunk.oxide.audio_leading_silence_seconds")
+                .with_description("Seconds before the first voiced frame in a recording")
+                .with_boundaries(SECONDS_BOUNDARIES.to_vec())
+                .build(),
+            audio_trailing_silence: meter
+                .f64_histogram("trunk.oxide.audio_trailing_silence_seconds")
+                .with_description("Seconds after the last voiced frame in a recording")
+                .with_boundaries(SECONDS_BOUNDARIES.to_vec())
+                .build(),
+            audio_end_level_db: meter
+                .f64_histogram("trunk.oxide.audio_end_level_db")
+                .with_description("Last voiced frame level relative to the recording's peak (dB)")
+                .with_boundaries(vec![
+                    -30.0, -24.0, -20.0, -18.0, -15.0, -12.0, -9.0, -6.0, -3.0, 0.0,
+                ])
+                .build(),
+            audio_abrupt_ends: meter
+                .u64_counter("trunk.oxide.audio_abrupt_ends")
+                .with_description("Recordings whose speech ends while still loud (clipped tail)")
+                .build(),
+            audio_gaps: meter
+                .f64_histogram("trunk.oxide.audio_gaps")
+                .with_description("Digital-silence holes (>= 40 ms) inside speech, per recording")
+                .with_boundaries(vec![0.0, 1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0])
+                .build(),
+            audio_longest_gap_ms: meter
+                .f64_histogram("trunk.oxide.audio_longest_gap_ms")
+                .with_description("Longest digital-silence hole inside speech, per recording (ms)")
+                .with_boundaries(vec![40.0, 60.0, 80.0, 120.0, 200.0, 400.0, 800.0])
                 .build(),
             signalling_heard: meter
                 .u64_counter("trunk.oxide.signalling")
@@ -602,6 +646,12 @@ impl CallManager {
                             alg_id = tracing::field::Empty,
                             key_id = tracing::field::Empty,
                             crypto_after_ms = tracing::field::Empty,
+                            // The shape of the audio the last finished recording
+                            // sent (see trunk_radio::AudioShape).
+                            audio_onset_s = tracing::field::Empty,
+                            audio_trailing_s = tracing::field::Empty,
+                            audio_end_db = tracing::field::Empty,
+                            audio_gaps = tracing::field::Empty,
                         );
                         let traceparent = traceparent_of(&span);
                         let info = self.build_call_info_from_view(&view);
@@ -806,6 +856,9 @@ impl CallManager {
         let freq_error = last.map_or(0, |r| r.freq_error);
         let channel = last.map(|r| r.num);
         let mut transmissions = std::mem::take(&mut tally.transmissions);
+        // Recordings that are over: a live one is still being written, and
+        // is reported again, finished, when its call ends.
+        let finished = transmissions.len();
         if let Some(live) = &live {
             transmissions.extend(live.transmissions());
         }
@@ -836,6 +889,18 @@ impl CallManager {
                 self.calls_cut.add(1, &labels);
             }
         }
+        let shape_labels = [
+            KeyValue::new("short_name", view.short_name().to_string()),
+            KeyValue::new("is_conventional", view.is_conventional()),
+            KeyValue::new("tdma", view.phase2_tdma()),
+        ];
+        let shapes: Vec<trunk_radio::AudioShape> = transmissions[..finished]
+            .iter()
+            .filter_map(|t| t.shape)
+            .collect();
+        for shape in &shapes {
+            self.record_audio_shape(&shape_labels, shape);
+        }
         let recorded = last.is_some();
         let final_freq = view.freq();
         let is_conventional = view.is_conventional();
@@ -845,6 +910,12 @@ impl CallManager {
             .as_secs_f64();
         let elapsed = self.state.clock().since(view.start_time()).as_secs();
         if let Some(s) = &span {
+            if let Some(shape) = shapes.last() {
+                s.record("audio_onset_s", shape.onset_s);
+                s.record("audio_trailing_s", shape.trailing_silence_s);
+                s.record("audio_end_db", shape.end_level_db);
+                s.record("audio_gaps", u64::from(shape.gaps));
+            }
             s.record("refreshes", view.refreshes());
             s.record("encrypted", view.encrypted());
             s.record(
@@ -1296,6 +1367,22 @@ impl CallManager {
         self.process_effects(effects);
     }
 
+    /// A finished recording's audio shape, as metrics.
+    fn record_audio_shape(&self, labels: &[KeyValue; 3], s: &trunk_radio::AudioShape) {
+        self.audio_leading_silence.record(s.onset_s, labels);
+        self.audio_trailing_silence
+            .record(s.trailing_silence_s, labels);
+        self.audio_end_level_db.record(s.end_level_db, labels);
+        if s.abrupt_end() {
+            self.audio_abrupt_ends.add(1, labels);
+        }
+        self.audio_gaps.record(f64::from(s.gaps), labels);
+        if s.gaps > 0 {
+            self.audio_longest_gap_ms
+                .record(s.longest_gap_s * 1000.0, labels);
+        }
+    }
+
     /// An analog channel decoded in-band signalling in a call's audio. Counted
     /// and traced as heard; the call keeps it for its end, and a unit it
     /// names is credited with the transmission.
@@ -1667,6 +1754,13 @@ fn proto_transmission(t: &trunk_radio::Transmission) -> proto::Transmission {
         spike_count: t.spike_count,
         error_count: t.error_count,
         freq: t.freq,
+        shape: t.shape.map(|s| proto::AudioShape {
+            onset_s: s.onset_s,
+            trailing_silence_s: s.trailing_silence_s,
+            end_level_db: s.end_level_db,
+            gaps: s.gaps,
+            longest_gap_s: s.longest_gap_s,
+        }),
     }
 }
 
@@ -1688,6 +1782,7 @@ mod tests {
             ended_by: [0; 4],
             after_term_samples: 0,
             freq: 0.0,
+            shape: None,
         }
     }
 

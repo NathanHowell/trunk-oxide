@@ -12,7 +12,6 @@ use trunk_oxide_proto as proto;
 
 use trunk_database::Database;
 
-use crate::audio_shape::{self, AudioShape};
 use crate::call_state::{CallEffect, CallState, CallStateConfig};
 use crate::channel_writer::{ChannelWriterHandle, ChannelWriters, WriteIdentity};
 use crate::discord::{DiscordClient, TRANSCRIBING_EMOJI};
@@ -91,8 +90,9 @@ struct SegmentMeta {
     offset_s: f64,
     /// Segment length in samples (16 kHz).
     samples: usize,
-    /// Where speech starts/ends in this segment (None if no voiced frame).
-    shape: Option<AudioShape>,
+    /// Where speech starts/ends in this segment, as the radio measured it
+    /// (None if it sent no shape, or no voiced frame).
+    shape: Option<proto::AudioShape>,
 }
 
 /// Result handed back from the transcription worker, applied in FIFO order by
@@ -141,6 +141,9 @@ pub struct CallHandler {
     discord: Arc<DiscordClient>,
     config: CallHandlerConfig,
     audio_buffer: Vec<f32>,
+    /// The radio's measurement of the transmission whose audio is about to
+    /// be enqueued, from its end's call data.
+    pending_shape: Option<proto::AudioShape>,
     resampler: Option<Resampler>,
     post_channel: ChannelId,
     ogg_encoder: Option<OggOpusEncoder>,
@@ -244,6 +247,7 @@ impl CallHandler {
             discord,
             config,
             audio_buffer: Vec::new(),
+            pending_shape: None,
             resampler: None,
             post_channel,
             ogg_encoder,
@@ -598,11 +602,6 @@ impl CallHandler {
         Ok(())
     }
 
-    /// Metric facets for the audio-shape series (low cardinality).
-    fn labels(&self) -> [KeyValue; 3] {
-        shape_labels(&self.short_name, self.is_conventional, self.tdma)
-    }
-
     /// Enqueue a job for the transcription worker. The channel is unbounded so
     /// this never blocks; if the worker's input has been closed at finalization
     /// (or the worker exited), the job is dropped.
@@ -622,11 +621,10 @@ impl CallHandler {
         if samples == 0 {
             return Vec::new();
         }
-        // Shape metrics: a clipped lead-in or tail shows here.
-        let shape = audio_shape::analyze(&audio);
-        if let Some(s) = &shape {
-            record_audio_shape(&self.metrics, &self.labels(), s);
-        }
+        // The radio measured the shape of what it sent (see its audio_*
+        // metrics); this only needs where the speech is, to set the
+        // transcript's coverage against.
+        let shape = self.pending_shape.take();
 
         let meta = SegmentMeta {
             index: self.segment_index,
@@ -682,6 +680,7 @@ impl CallHandler {
         }
         // Bumps the in-flight count; the `on_ptt_boundary` render below already
         // rebuilds the embed with it, so discard this effect.
+        self.pending_shape = last_shape(call_data.as_deref());
         let _ = self.enqueue_remaining_audio();
 
         // Account for this transmission *now* — duration, PTT count, signal —
@@ -710,6 +709,7 @@ impl CallHandler {
             tracing::warn!(error = %e, "pre-finalization flush failed, proceeding to end call");
         }
         // Bumps the in-flight count; `finalize`'s `on_end` render reflects it.
+        self.pending_shape = last_shape(call_data.as_deref());
         let _ = self.enqueue_remaining_audio();
         self.job_tx = None; // close worker input → it drains then exits
         self.finalize(call_data).await;
@@ -922,29 +922,17 @@ fn segment_span(
     span
 }
 
+/// The shape the radio measured of the transmission a call's data ends with.
+fn last_shape(data: Option<&proto::CallData>) -> Option<proto::AudioShape> {
+    data?.transmissions.last()?.shape
+}
+
 fn shape_labels(short_name: &str, is_conventional: bool, tdma: bool) -> [KeyValue; 3] {
     [
         KeyValue::new("short_name", short_name.to_string()),
         KeyValue::new("is_conventional", is_conventional),
         KeyValue::new("tdma", tdma),
     ]
-}
-
-fn record_audio_shape(metrics: &Metrics, labels: &[KeyValue; 3], s: &AudioShape) {
-    metrics.audio_leading_silence.record(s.onset_s, labels);
-    metrics
-        .audio_trailing_silence
-        .record(s.trailing_silence_s, labels);
-    metrics.audio_end_level_db.record(s.end_level_db, labels);
-    if s.abrupt_end() {
-        metrics.audio_abrupt_ends.add(1, labels);
-    }
-    metrics.audio_gaps.record(f64::from(s.gaps), labels);
-    if s.gaps > 0 {
-        metrics
-            .audio_longest_gap_ms
-            .record(s.longest_gap_s * 1000.0, labels);
-    }
 }
 
 /// Compare where the model put its text against where the audio's speech is.

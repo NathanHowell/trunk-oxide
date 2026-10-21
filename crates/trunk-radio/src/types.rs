@@ -156,6 +156,8 @@ pub struct Transmission {
     pub ended_by: [i64; 4],
     pub after_term_samples: i64,
     pub freq: f64,
+    /// The shape of the audio sent downstream, if any was.
+    pub shape: Option<crate::shape::AudioShape>,
 }
 
 /// A call as the state machine numbers it: what audio and in-band events

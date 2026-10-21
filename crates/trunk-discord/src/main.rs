@@ -1,7 +1,6 @@
 mod ab;
 mod aggregator;
 mod aggregator_state;
-mod audio_shape;
 mod call_handler;
 mod call_state;
 mod channel_manager;

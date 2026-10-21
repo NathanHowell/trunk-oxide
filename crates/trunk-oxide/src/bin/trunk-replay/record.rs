@@ -342,6 +342,11 @@ impl Recorder {
                         "encrypted": d.encrypted, "tdma": d.phase2_tdma, "slot": d.tdma_slot,
                         "reason": reason, "channel": d.channel, "kind": d.kind,
                         "transmissions": d.transmissions.len(),
+                        "audio_shape": d.transmissions.iter().filter_map(|t| t.shape.as_ref()).map(|s| json!({
+                            "onset_s": round(s.onset_s, 3), "trailing_silence_s": round(s.trailing_silence_s, 3),
+                            "end_level_db": round(s.end_level_db, 1), "gaps": s.gaps,
+                            "longest_gap_s": round(s.longest_gap_s, 3),
+                        })).collect::<Vec<_>>(),
                         "signalling": d.signalling.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
                         "signalling_alerts": d.signalling.iter().filter(|s| s.alert() != proto::SignalAlert::None).map(|s| s.alert().as_str_name()).collect::<Vec<_>>(),
                     }),

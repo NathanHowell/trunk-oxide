@@ -9,6 +9,7 @@ use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use crate::audible::Hold;
+use crate::shape::{AudioShape, ShapeMeter};
 use crate::types::{CallCounts, CallReport, Transmission};
 
 /// A sample at or above this is voice, not digital silence (~-66 dBFS).
@@ -39,6 +40,8 @@ pub struct Accounting {
     pub counts: CallCounts,
     /// Units heard in band, in order of first appearance (P25).
     pub sources: Vec<u32>,
+    /// The shape of the audio sent downstream so far (see [`ShapeMeter`]).
+    pub shape: Option<AudioShape>,
 }
 
 impl Accounting {
@@ -61,6 +64,7 @@ impl Accounting {
             after_term_samples: 0,
             counts: CallCounts::default(),
             sources: Vec::new(),
+            shape: None,
         }
     }
 
@@ -122,6 +126,7 @@ impl Accounting {
             ended_by: self.ended_by,
             after_term_samples: self.after_term_samples,
             freq: self.freq,
+            shape: self.shape,
         })
     }
 
@@ -155,13 +160,25 @@ impl Accounting {
 pub struct Recording {
     pub acct: Accounting,
     hold: Hold,
+    /// Measures what leaves the hold.
+    meter: ShapeMeter,
 }
 
 impl Recording {
     #[must_use]
     pub fn new(acct: Accounting) -> Self {
         let hold = Hold::new(acct.rate);
-        Self { acct, hold }
+        let meter = ShapeMeter::new(acct.rate);
+        Self { acct, hold, meter }
+    }
+
+    /// The accounting so far, with the shape of what has been sent.
+    #[must_use]
+    pub fn accounting(&self) -> Accounting {
+        Accounting {
+            shape: self.meter.shape(),
+            ..self.acct.clone()
+        }
     }
 
     /// Account for `audio` and return what of it goes out now (see
@@ -169,7 +186,9 @@ impl Recording {
     pub fn deliver(&mut self, audio: &[i16]) -> Vec<i16> {
         let voice = audio.iter().any(|&s| s.abs() >= VOICE_THRESHOLD);
         self.acct.wrote(audio.len(), voice);
-        self.hold.push(audio)
+        let out = self.hold.push(audio);
+        self.meter.push(&out);
+        out
     }
 
     /// The recording is over: its accounting, and the audio still to send
@@ -188,6 +207,8 @@ impl Recording {
                 Vec::new()
             }
         };
+        self.meter.push(&tail);
+        self.acct.shape = self.meter.shape();
         (self.acct, tail)
     }
 }
@@ -220,7 +241,7 @@ impl Tape {
 
     #[must_use]
     pub fn accounting(&self) -> Option<Accounting> {
-        self.lock().as_ref().map(|r| r.acct.clone())
+        self.lock().as_ref().map(Recording::accounting)
     }
 
     /// End the recording and start the next: the ended one's accounting
@@ -269,6 +290,37 @@ mod tests {
         );
         assert_eq!(tape.deliver(&loud), Vec::<i16>::new(), "closed");
         assert!(tape.accounting().is_none() && tape.close().is_none());
+    }
+
+    #[test]
+    fn a_recording_reports_the_shape_of_what_it_sent_and_nothing_for_what_it_held() {
+        // 8 kHz: 0.6 s of quiet (held, never audible), then 0.2 s of nothing
+        // and 1 s of speech-level tone (released), then 0.1 s of nothing
+        let tone = |n: usize| -> Vec<i16> {
+            (0..n)
+                .map(|i| (6_000.0 * (i as f64 * 0.5).sin()) as i16)
+                .collect()
+        };
+        let tape = Tape::new(Some(Recording::new(acct())));
+        assert_eq!(tape.deliver(&vec![40i16; 4_800]), Vec::<i16>::new());
+        assert_eq!(tape.accounting().unwrap().shape, None, "nothing sent yet");
+        let mut speech = vec![0i16; 1_600];
+        speech.extend(tone(8_000));
+        speech.extend(vec![0i16; 800]);
+        assert!(!tape.deliver(&speech).is_empty());
+        let (done, tail) = tape.close().unwrap();
+        assert!(tail.is_empty());
+        let shape = done.shape.expect("it sent audio");
+        // what was sent includes the held quiet: 0.6 s of it, then the 0.2 s
+        // gap, so speech begins 0.8 s in (to the frame) and ends 0.1 s early
+        assert!((shape.onset_s - 0.8).abs() < 0.03, "{shape:?}");
+        assert!((shape.trailing_silence_s - 0.1).abs() < 0.03, "{shape:?}");
+        assert_eq!(done.transmission().unwrap().shape, Some(shape));
+
+        // a recording that never became audible sent nothing, so has no shape
+        let quiet = Tape::new(Some(Recording::new(acct())));
+        quiet.deliver(&vec![40i16; 4_000]);
+        assert_eq!(quiet.close().unwrap().0.shape, None);
     }
 
     #[test]

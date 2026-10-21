@@ -27,21 +27,9 @@ pub struct Metrics {
     pub transcriptions_timed_out: Counter<u64>,
     pub active_calls: Gauge<u64>,
 
-    // ── Audio shape / transcription coverage (clipping + missing-lead-in diagnosis) ──
+    // ── Transcription coverage (clipping + missing-lead-in diagnosis) ──
+    // The audio's own shape is measured by the radio (`trunk.oxide.audio_*`).
     // All labelled short_name / is_conventional / tdma, per transmission segment.
-    /// Seconds of leading non-speech before the first voiced frame.
-    pub audio_leading_silence: Histogram<f64>,
-    /// Seconds after the last voiced frame.
-    pub audio_trailing_silence: Histogram<f64>,
-    /// Peak 0.5 s-window RMS of each segment (linear, full scale 1.0); the
-    /// value the silence gate compares against `SILENCE_RMS_THRESHOLD`.
-    /// Level of the last voiced frame relative to the segment peak (dB, <= 0).
-    pub audio_end_level_db: Histogram<f64>,
-    /// Segments whose speech ends while still loud (a clipped tail).
-    pub audio_abrupt_ends: Counter<u64>,
-    /// Digital-silence holes (>= 40 ms) inside speech, and the longest (ms).
-    pub audio_gaps: Histogram<f64>,
-    pub audio_longest_gap_ms: Histogram<f64>,
     /// Transcription coverage: when the model's first/last text lands vs the
     /// audio's own onset/end. Positive leading gap = text starts later than
     /// the speech does.
@@ -121,37 +109,6 @@ impl Metrics {
             transcriptions_timed_out: meter
                 .u64_counter("trunk.discord.transcriptions_timed_out")
                 .with_description("Transcription requests abandoned after exceeding the timeout")
-                .build(),
-            audio_leading_silence: meter
-                .f64_histogram("trunk.discord.audio_leading_silence_seconds")
-                .with_description("Seconds before the first voiced frame in a transmission segment")
-                .with_boundaries(SECONDS_BOUNDARIES.to_vec())
-                .build(),
-            audio_trailing_silence: meter
-                .f64_histogram("trunk.discord.audio_trailing_silence_seconds")
-                .with_description("Seconds after the last voiced frame in a transmission segment")
-                .with_boundaries(SECONDS_BOUNDARIES.to_vec())
-                .build(),
-            audio_end_level_db: meter
-                .f64_histogram("trunk.discord.audio_end_level_db")
-                .with_description("Last voiced frame level relative to segment peak (dB)")
-                .with_boundaries(vec![
-                    -30.0, -24.0, -20.0, -18.0, -15.0, -12.0, -9.0, -6.0, -3.0, 0.0,
-                ])
-                .build(),
-            audio_abrupt_ends: meter
-                .u64_counter("trunk.discord.audio_abrupt_ends")
-                .with_description("Segments whose speech ends while still loud (clipped tail)")
-                .build(),
-            audio_gaps: meter
-                .f64_histogram("trunk.discord.audio_gaps")
-                .with_description("Digital-silence holes (>= 40 ms) inside speech, per segment")
-                .with_boundaries(vec![0.0, 1.0, 2.0, 3.0, 5.0, 8.0, 13.0, 21.0])
-                .build(),
-            audio_longest_gap_ms: meter
-                .f64_histogram("trunk.discord.audio_longest_gap_ms")
-                .with_description("Longest digital-silence hole inside speech, per segment (ms)")
-                .with_boundaries(vec![40.0, 60.0, 80.0, 120.0, 200.0, 400.0, 800.0])
                 .build(),
             transcript_first_text_offset: meter
                 .f64_histogram("trunk.discord.transcript_first_text_offset_seconds")

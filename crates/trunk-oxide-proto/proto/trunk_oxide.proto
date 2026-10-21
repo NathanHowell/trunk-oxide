@@ -251,6 +251,20 @@ message Transmission {
   int64 error_count = 9;
   double freq = 10;
   reserved 11; // was length, now computed in Rust
+  // The shape of the audio sent downstream for this transmission; absent when
+  // none was (nothing audible).
+  optional AudioShape shape = 12;
+}
+
+// How a transmission's audio starts, ends and holds together, measured as it
+// leaves the radio: a clipped tail, a trimmed lead-in or a dropped voice
+// frame shows up as numbers here.
+message AudioShape {
+  double onset_s = 1;            // seconds before the first voiced frame
+  double trailing_silence_s = 2; // seconds after the last
+  double end_level_db = 3;       // last voiced frame vs the loudest (<= 0); a cut stays loud
+  uint32 gaps = 4;               // digital-silence holes inside speech
+  double longest_gap_s = 5;
 }
 
 message CallSegment {

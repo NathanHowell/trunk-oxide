@@ -416,7 +416,7 @@ impl ControlChannelDecoder {
 /// opcode (AABB-B §6.1 Fig. 6.1-2): in the unconfirmed format octet 7 is the
 /// pad octet count (Fig. 6.1-1), and one read as an OSP is made of unrelated
 /// fields. Every MBT OSP of AABC-B is the alternate format.
-fn carries_osp_opcode(h: &[u8; BLOCK_BYTES]) -> bool {
+const fn carries_osp_opcode(h: &[u8; BLOCK_BYTES]) -> bool {
     h[0] & 0x1f == FORMAT_MBT_ALTERNATE
 }
 

@@ -335,7 +335,7 @@ impl Conditioner {
         self
     }
 
-    pub fn has_squelch(&self) -> bool {
+    pub const fn has_squelch(&self) -> bool {
         self.squelch.is_some()
     }
 
@@ -345,7 +345,7 @@ impl Conditioner {
         }
     }
 
-    pub fn set_squelch_mode(&mut self, mode: SquelchMode) {
+    pub const fn set_squelch_mode(&mut self, mode: SquelchMode) {
         if let Some(sq) = &mut self.squelch {
             sq.mode = mode;
         }

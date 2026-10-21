@@ -214,7 +214,7 @@ impl NoiseModel {
 /// not yet retained, so it never constrains the result today; it is wired in
 /// [`select_gain`] such that it can only ever *lower* the selected gain.
 #[must_use]
-pub fn spur_overload_gain(_points: &[GainPoint]) -> Option<f64> {
+pub const fn spur_overload_gain(_points: &[GainPoint]) -> Option<f64> {
     None
 }
 

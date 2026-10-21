@@ -91,7 +91,7 @@ impl Default for CalibrationPolicy {
 }
 
 impl CalibrationPolicy {
-    fn measure_params(&self) -> MeasureParams {
+    const fn measure_params(&self) -> MeasureParams {
         MeasureParams {
             fft_size: self.fft_size,
             noise_floor_percentile: self.noise_floor_percentile,
@@ -99,7 +99,7 @@ impl CalibrationPolicy {
         }
     }
 
-    fn select_params(&self) -> SelectParams {
+    const fn select_params(&self) -> SelectParams {
         SelectParams {
             sat_limit: self.sat_limit,
             penalty_budget_db: self.penalty_budget_db,

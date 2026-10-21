@@ -114,7 +114,7 @@ pub struct SlotStats {
 }
 
 impl SlotStats {
-    fn new() -> Self {
+    const fn new() -> Self {
         Self {
             freq_error_hz: AtomicI32::new(0),
             power_db: AtomicU64::new(f64::NAN.to_bits()),

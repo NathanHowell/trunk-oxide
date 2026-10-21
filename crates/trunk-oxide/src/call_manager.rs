@@ -162,6 +162,8 @@ pub struct CallManager {
     freq_correction_gauge: Gauge<f64>,
     calls_started: Counter<u64>,
     calls_ended: Counter<u64>,
+    /// In-band signalling decoded from analog audio, by scheme and alert.
+    signalling_heard: Counter<u64>,
     /// Errored / spiked voice codewords reported by the P25 voice decoder,
     /// summed per call. High rates — especially on TDMA — indicate decode loss
     /// (the cause of P25 audio clipping), typically driven by frequency error.
@@ -305,6 +307,10 @@ impl CallManager {
             calls_ended: meter
                 .u64_counter("trunk.oxide.calls_ended")
                 .with_description("Total calls ended")
+                .build(),
+            signalling_heard: meter
+                .u64_counter("trunk.oxide.signalling")
+                .with_description("In-band signalling decoded from analog audio")
                 .build(),
             voice_frame_errors: meter
                 .u64_counter("trunk.oxide.voice_frame_errors")
@@ -1290,6 +1296,38 @@ impl CallManager {
         self.process_effects(effects);
     }
 
+    /// An analog channel decoded in-band signalling in a call's audio. Counted
+    /// and traced as heard; the call keeps it for its end, and a unit it
+    /// names is credited with the transmission.
+    pub fn handle_signalling(&mut self, call_id: CallId, heard: trunk_radio::Heard) {
+        if let Some(view) = self.state.get_call_view(call_id) {
+            let signal = heard.signal;
+            self.signalling_heard.add(
+                1,
+                &[
+                    KeyValue::new("short_name", view.short_name().to_string()),
+                    KeyValue::new("scheme", signal.scheme()),
+                    KeyValue::new("alert", signal.alert().map_or("none", |a| a.as_str())),
+                ],
+            );
+            if let Some(span) = self.call_spans.get(&call_id) {
+                let at_s = heard.starts_at().as_secs_f64();
+                span.in_scope(|| {
+                    tracing::info!(
+                        scheme = signal.scheme(),
+                        signal = %signal,
+                        unit = signal.unit(),
+                        alert = signal.alert().map(trunk_radio::Alert::as_str),
+                        at_s,
+                        "in-band signalling heard"
+                    );
+                });
+            }
+        }
+        let effects = self.state.on_signalling(call_id, heard);
+        self.process_effects(effects);
+    }
+
     /// The voice channel confirmed a call's encryption (ESS `ALGID` /
     /// `KeyID`). Stored on the call so the `calls_ended` metric can facet by
     /// algorithm.
@@ -1504,6 +1542,11 @@ impl CallManager {
             phase2_tdma: view.phase2_tdma(),
             segments,
             is_conventional,
+            signalling: view
+                .heard()
+                .iter()
+                .map(|h| in_band_signal(&h.signal))
+                .collect(),
             ..Default::default()
         }
     }
@@ -1578,6 +1621,35 @@ fn prost_duration(d: std::time::Duration) -> prost_types::Duration {
 }
 
 /// A recording's accounting as the wire lists it.
+/// A decoded signal as the wire says it.
+fn in_band_signal(signal: &trunk_radio::Signal) -> proto::InBandSignal {
+    use proto::in_band_signal::Signal as Wire;
+    use trunk_radio::{MdcOp, Signal};
+    let signal = match *signal {
+        Signal::Mdc { unit, op, arg } => {
+            let (op, other_op) = match op {
+                MdcOp::PttId => (proto::MdcOp::PttId, 0),
+                MdcOp::Emergency => (proto::MdcOp::Emergency, 0),
+                MdcOp::RadioCheck => (proto::MdcOp::RadioCheck, 0),
+                MdcOp::CallAlert => (proto::MdcOp::CallAlert, 0),
+                MdcOp::Other(code) => (proto::MdcOp::Other, u32::from(code)),
+            };
+            Wire::Mdc(proto::MdcPacket {
+                unit,
+                op: op.into(),
+                other_op,
+                arg: u32::from(arg),
+            })
+        }
+        Signal::Dtmf(key) => Wire::Dtmf(proto::DtmfKey {
+            key: key.to_string(),
+        }),
+    };
+    proto::InBandSignal {
+        signal: Some(signal),
+    }
+}
+
 fn proto_transmission(t: &trunk_radio::Transmission) -> proto::Transmission {
     proto::Transmission {
         talkgroup: i64::from(t.talkgroup),
@@ -1592,7 +1664,9 @@ fn proto_transmission(t: &trunk_radio::Transmission) -> proto::Transmission {
 
 #[cfg(test)]
 mod tests {
-    use super::{Ended, VoiceCounters};
+    use super::{Ended, VoiceCounters, in_band_signal};
+    use trunk_oxide_grpc::proto::{self, in_band_signal::Signal as Wire};
+    use trunk_radio::{MdcOp, Signal};
 
     fn tx(error_count: i64, spike_count: i64, sample_count: i64) -> trunk_radio::Transmission {
         trunk_radio::Transmission {
@@ -1607,6 +1681,31 @@ mod tests {
             after_term_samples: 0,
             freq: 0.0,
         }
+    }
+
+    #[test]
+    fn signals_go_on_the_wire_as_what_they_are() {
+        let packet = |op| match in_band_signal(&Signal::Mdc {
+            unit: 0x1234,
+            op,
+            arg: 7,
+        })
+        .signal
+        {
+            Some(Wire::Mdc(p)) => p,
+            other => panic!("{other:?}"),
+        };
+        let p = packet(MdcOp::Emergency);
+        assert_eq!(
+            (p.unit, p.op(), p.arg),
+            (0x1234, proto::MdcOp::Emergency, 7)
+        );
+        let p = packet(MdcOp::Other(0x61));
+        assert_eq!((p.op(), p.other_op), (proto::MdcOp::Other, 0x61));
+        assert_eq!(
+            in_band_signal(&Signal::Dtmf('#')).signal,
+            Some(Wire::Dtmf(proto::DtmfKey { key: "#".into() }))
+        );
     }
 
     #[test]

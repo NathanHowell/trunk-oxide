@@ -25,6 +25,7 @@ pub mod detect;
 pub mod fir;
 pub mod gate;
 pub mod io;
+pub mod signalling;
 
 use num_complex::Complex32;
 
@@ -33,6 +34,7 @@ pub use demod::{Deemphasis, QuadratureDemod};
 pub use detect::{Detector, Measurement, Tone};
 pub use fir::Fir;
 pub use gate::{CloseReason, Event, Gate};
+pub use signalling::{Alert, Heard, MdcOp, Signal};
 
 /// Peak deviation the demodulator is scaled to (`analog_recorder`'s
 /// `d_max_dev`).

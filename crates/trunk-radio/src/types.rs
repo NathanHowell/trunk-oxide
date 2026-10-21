@@ -319,6 +319,12 @@ pub enum RadioEvent {
     },
     /// An in-band P25 source change on a voice channel: `unit` is talking.
     SourceChange { call_id: CallId, unit: u32 },
+    /// In-band signalling (MDC-1200, DTMF, ...) heard in an analog
+    /// channel's audio during the call's transmission.
+    Signalling {
+        call_id: CallId,
+        heard: trunk_fm::Heard,
+    },
     /// In-band encryption parameters of a call we hold no key for.
     Crypto {
         call_id: CallId,

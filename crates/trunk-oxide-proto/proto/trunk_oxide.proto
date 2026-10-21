@@ -217,6 +217,37 @@ message CallData {
   repeated CallSegment segments = 35;
   bool is_conventional = 36;
   string kind = 37; // as CallInfo.kind
+  // In-band signalling heard in the transmission's audio, in order.
+  repeated InBandSignal signalling = 38;
+}
+
+// ── In-band signalling ──
+
+// One thing decoded from an analog channel's audio (not the control channel).
+message InBandSignal {
+  oneof signal {
+    MdcPacket mdc = 1;
+    DtmfKey dtmf = 2;
+  }
+}
+
+enum MdcOp {
+  MDC_OP_OTHER = 0; // see MdcPacket.other_op
+  MDC_OP_PTT_ID = 1;
+  MDC_OP_EMERGENCY = 2;
+  MDC_OP_RADIO_CHECK = 3;
+  MDC_OP_CALL_ALERT = 4;
+}
+
+message MdcPacket {
+  uint32 unit = 1;
+  MdcOp op = 2;
+  uint32 other_op = 3; // the opcode, when op is MDC_OP_OTHER
+  uint32 arg = 4;
+}
+
+message DtmfKey {
+  string key = 1; // one of 0-9 A-D * #
 }
 
 message Transmission {

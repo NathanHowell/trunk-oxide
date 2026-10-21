@@ -8,7 +8,8 @@ use crate::clock::Clock;
 use trunk_config::{SystemType, TalkgroupMode};
 
 use trunk_radio::{
-    Channel, ChannelNum, Encryption, OpenError, Opener, Squelch, TrunkMessage, Trunking, Voice,
+    Channel, ChannelNum, Encryption, Heard, OpenError, Opener, Squelch, TrunkMessage, Trunking,
+    Voice,
 };
 
 // ── Read-only view ──
@@ -110,6 +111,11 @@ impl<'a> CallView<'a> {
     }
     pub(crate) const fn is_trunked(&self) -> bool {
         self.0.is_trunked()
+    }
+
+    /// The in-band signalling heard during the current transmission.
+    pub(crate) fn heard(&self) -> &[Heard] {
+        &self.0.heard
     }
     pub(crate) const fn trunked_fields(&self) -> Option<&TrunkedFields> {
         self.0.trunked_fields()
@@ -584,6 +590,9 @@ pub(crate) struct CallEntry {
     pub(crate) idle_since: Option<Instant>,
     pub(crate) call_mode: CallMode,
     pub(crate) signal_detection: bool,
+    /// The in-band signalling (MDC-1200, DTMF, ...) heard during the current
+    /// transmission, in the order it was heard.
+    pub(crate) heard: Vec<Heard>,
 }
 
 impl Default for CallEntry {
@@ -619,6 +628,7 @@ impl Default for CallEntry {
             idle_since: None,
             call_mode: CallMode::Conventional,
             signal_detection: false,
+            heard: Vec::new(),
         }
     }
 }
@@ -684,6 +694,7 @@ impl CallEntry {
         self.segment_start = now;
         self.ptt_ended = false;
         self.refreshes = 0;
+        self.heard.clear();
     }
 
     /// Total time spent in the Recording state: completed segments + current segment.
@@ -1729,6 +1740,37 @@ impl TrunkStateMachine {
             source_id: source,
         });
         true
+    }
+
+    /// Record in-band signalling heard in a conventional channel's audio
+    /// (keyed by its [`CallId`]). It belongs to the transmission in progress:
+    /// one heard outside it is dropped rather than credited to the next. A
+    /// unit it names is the one talking; the squelch already cut this
+    /// transmission's boundary, so this only attributes it.
+    pub(crate) fn on_signalling(&mut self, call_id: CallId, heard: Heard) -> Effects {
+        let mut effects = Effects::new();
+        let Some(entry) = self.calls.iter_mut().find(|e| e.id == call_id) else {
+            return effects;
+        };
+        if entry.state != CallState::Recording {
+            return effects;
+        }
+        if let Some(unit) = heard.signal.unit()
+            && !entry.is_trunked()
+            && entry.current_source != Some(unit)
+        {
+            entry.current_source = Some(unit);
+            effects.push(Effect::SetSource {
+                call_id,
+                source_id: unit,
+            });
+            effects.push(Effect::EmitSignal {
+                call_id,
+                source_id: unit,
+            });
+        }
+        entry.heard.push(heard);
+        effects
     }
 
     /// Record the P25 encryption parameters (ESS `ALGID` / `KeyID`) decoded
@@ -3625,6 +3667,71 @@ mod tests {
         // a trunked call's are ignored
         let trunked = recording_trunked_call(&mut sm);
         assert!(sm.on_squelch(trunked, Squelch::Open, None).is_empty());
+    }
+
+    fn mdc(unit: u32, op: trunk_radio::MdcOp) -> Heard {
+        Heard {
+            span: 100..1_700,
+            signal: trunk_radio::Signal::Mdc { unit, op, arg: 0 },
+        }
+    }
+
+    #[test]
+    fn signalling_heard_in_a_transmission_is_kept_and_names_the_talker() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let call_id = add_conventional(&mut sm, false);
+        let _ = sm.on_squelch(call_id, Squelch::Open, None);
+
+        let effects = sm.on_signalling(call_id, mdc(0x1234, trunk_radio::MdcOp::PttId));
+        assert_eq!(names(&effects), ["SetSource", "EmitSignal"]);
+        assert_eq!(sm.get_call(call_id).unwrap().current_source, Some(0x1234));
+
+        // the same unit again (the post-amble) is logged, not announced twice
+        let effects = sm.on_signalling(call_id, mdc(0x1234, trunk_radio::MdcOp::PttId));
+        assert!(effects.is_empty());
+        assert_eq!(sm.get_call(call_id).unwrap().heard.len(), 2);
+
+        // a unit-less signal is logged and attributes nobody
+        let key = Heard {
+            span: 5..9,
+            signal: trunk_radio::Signal::Dtmf('7'),
+        };
+        assert!(sm.on_signalling(call_id, key).is_empty());
+        assert_eq!(sm.get_call(call_id).unwrap().heard.len(), 3);
+        assert_eq!(sm.get_call(call_id).unwrap().current_source, Some(0x1234));
+    }
+
+    #[test]
+    fn signalling_belongs_to_one_transmission() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let call_id = add_conventional(&mut sm, false);
+
+        // heard with nothing keyed: dropped rather than credited to the next
+        let effects = sm.on_signalling(call_id, mdc(1, trunk_radio::MdcOp::PttId));
+        assert!(effects.is_empty());
+        assert!(sm.get_call(call_id).unwrap().heard.is_empty());
+
+        let _ = sm.on_squelch(call_id, Squelch::Open, None);
+        let _ = sm.on_signalling(call_id, mdc(1, trunk_radio::MdcOp::Emergency));
+        assert_eq!(sm.get_call(call_id).unwrap().heard.len(), 1);
+
+        // the close ends the transmission; the next one starts with none
+        let effects = sm.on_squelch(call_id, Squelch::Close(CloseReason::Quieting), None);
+        exec(&mut sm, effects);
+        assert!(sm.get_call(call_id).unwrap().heard.is_empty());
+    }
+
+    #[test]
+    fn signalling_for_another_call_changes_nothing() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let call_id = add_conventional(&mut sm, false);
+        let _ = sm.on_squelch(call_id, Squelch::Open, None);
+        let stranger = CallId(u64::MAX);
+        assert!(
+            sm.on_signalling(stranger, mdc(1, trunk_radio::MdcOp::PttId))
+                .is_empty()
+        );
+        assert!(sm.get_call(call_id).unwrap().heard.is_empty());
     }
 
     #[test]

@@ -15,6 +15,7 @@ mod metrics;
 mod ogg_encoder;
 mod reactions;
 mod resampler;
+mod signalling;
 mod stats_chart;
 mod tone_detect;
 

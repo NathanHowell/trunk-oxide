@@ -3,6 +3,7 @@ use std::time::Duration;
 use proto::types::{Freq, SignalDb};
 use trunk_oxide_proto as proto;
 
+use crate::signalling::{self, Line};
 use crate::tone_detect::DetectedTone;
 
 /// Max chars for embed description before we truncate from the front.
@@ -107,6 +108,9 @@ pub struct CallState {
     transcription_text: String,
     detected_tones: Vec<DetectedTone>,
     events: Vec<String>,
+    /// What the call's transmissions carried in-band, and how many times each
+    /// was heard (a radio IDs itself at every key-up).
+    signalling: Vec<(Line, u32)>,
     call_ended: bool,
 
     /// Whether any audio segment cleared the silence gate (i.e. was kept for
@@ -165,6 +169,7 @@ impl CallState {
             transcription_text: String::new(),
             detected_tones: Vec::new(),
             events: Vec::new(),
+            signalling: Vec::new(),
             call_ended: false,
             audio_kept: false,
             pending_transcriptions: 0,
@@ -338,6 +343,7 @@ impl CallState {
         self.ptt_count += 1;
 
         if let Some(data) = call_data {
+            self.absorb_signalling(data);
             self.accumulated_duration += Duration::from_secs_f64(data.length);
             if let Some(signal) = data.signal {
                 self.accumulated_signal_sum += signal;
@@ -403,6 +409,7 @@ impl CallState {
 
         // Accumulate final PTT's data
         if let Some(data) = call_data {
+            self.absorb_signalling(data);
             self.accumulated_duration += Duration::from_secs_f64(data.length);
             if let Some(signal) = data.signal {
                 self.accumulated_signal_sum += signal;
@@ -492,6 +499,16 @@ impl CallState {
         effects
     }
 
+    /// Fold a transmission's in-band signalling into the call's.
+    fn absorb_signalling(&mut self, data: &proto::CallData) {
+        for line in signalling::fold(&data.signalling) {
+            match self.signalling.iter_mut().find(|(l, _)| *l == line) {
+                Some((_, heard)) => *heard += 1,
+                None => self.signalling.push((line, 1)),
+            }
+        }
+    }
+
     /// Are there non-CTCSS tones (dispatch tones, two-tone sequences)?
     fn has_interesting_tones(&self) -> bool {
         self.detected_tones
@@ -508,7 +525,10 @@ impl CallState {
     /// (`audio_kept`); a transcript over otherwise-silent audio is treated as a
     /// hallucination and does not count, so dead-air calls are still dropped.
     fn has_content(&self) -> bool {
-        self.audio_kept || self.has_interesting_tones() || !self.events.is_empty()
+        self.audio_kept
+            || self.has_interesting_tones()
+            || !self.events.is_empty()
+            || !self.signalling.is_empty()
     }
 
     /// Build a pure embed representation from current state.
@@ -619,6 +639,27 @@ impl CallState {
                 name: "Events".into(),
                 value: self.events.join("\n"),
                 inline: true,
+            });
+        }
+
+        if !self.signalling.is_empty() {
+            let lines: Vec<String> = self
+                .signalling
+                .iter()
+                .map(|(line, heard)| {
+                    let flag = if line.alert { "⚠️ " } else { "" };
+                    let times = if *heard > 1 {
+                        format!(" ×{heard}")
+                    } else {
+                        String::new()
+                    };
+                    format!("{flag}{}{times}", line.text)
+                })
+                .collect();
+            fields.push(EmbedField {
+                name: "Signalling".into(),
+                value: lines.join("\n"),
+                inline: false,
             });
         }
 
@@ -1365,6 +1406,77 @@ mod tests {
         let embed = s.build_embed();
         let ptts_field = embed.fields.iter().find(|f| f.name == "PTTs");
         assert_eq!(ptts_field.unwrap().value, "2");
+    }
+
+    fn heard_mdc(unit: u32, op: proto::MdcOp) -> proto::InBandSignal {
+        proto::InBandSignal {
+            signal: Some(proto::in_band_signal::Signal::Mdc(proto::MdcPacket {
+                unit,
+                op: op.into(),
+                other_op: 0,
+                arg: 0,
+            })),
+        }
+    }
+
+    fn with_signalling(heard: Vec<proto::InBandSignal>) -> proto::CallData {
+        proto::CallData {
+            length: 2.0,
+            signalling: heard,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn signalling_is_counted_across_the_coalesced_transmissions() {
+        let mut s = make_state();
+        s.on_start();
+        for _ in 0..2 {
+            let id = with_signalling(vec![heard_mdc(0x1234, proto::MdcOp::PttId)]);
+            s.on_ptt_boundary(Some(&id));
+            s.on_ptt_start(&test_call_info());
+        }
+        let embed = s.build_embed();
+        let field = embed
+            .fields
+            .iter()
+            .find(|f| f.name == "Signalling")
+            .unwrap();
+        assert_eq!(field.value, "MDC-1200 unit 1234 PTT ID ×2");
+    }
+
+    #[test]
+    fn an_alert_is_flagged_on_the_embed() {
+        let mut s = make_state();
+        s.on_start();
+        let data = with_signalling(vec![
+            heard_mdc(0x1234, proto::MdcOp::PttId),
+            heard_mdc(0x1234, proto::MdcOp::Emergency),
+        ]);
+        s.on_ptt_boundary(Some(&data));
+        let embed = s.build_embed();
+        let field = embed
+            .fields
+            .iter()
+            .find(|f| f.name == "Signalling")
+            .unwrap();
+        assert_eq!(
+            field.value,
+            "MDC-1200 unit 1234 PTT ID\n⚠️ MDC-1200 unit 1234 emergency"
+        );
+    }
+
+    #[test]
+    fn a_silent_call_that_carried_signalling_keeps_its_embed() {
+        let mut s = make_state();
+        s.on_start();
+        let data = with_signalling(vec![heard_mdc(0x1234, proto::MdcOp::PttId)]);
+        let effects = s.on_end(Some(&data), None);
+        assert!(
+            effects
+                .iter()
+                .any(|e| matches!(e, CallEffect::SendEmbed { .. }))
+        );
     }
 
     #[test]

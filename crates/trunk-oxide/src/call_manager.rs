@@ -1299,7 +1299,12 @@ impl CallManager {
     /// An analog channel decoded in-band signalling in a call's audio. Counted
     /// and traced as heard; the call keeps it for its end, and a unit it
     /// names is credited with the transmission.
-    pub fn handle_signalling(&mut self, call_id: CallId, heard: trunk_radio::Heard) {
+    pub fn handle_signalling(
+        &mut self,
+        call_id: CallId,
+        heard: trunk_radio::Heard,
+        muted: trunk_radio::Muted,
+    ) {
         if let Some(view) = self.state.get_call_view(call_id) {
             let signal = heard.signal;
             self.signalling_heard.add(
@@ -1308,6 +1313,8 @@ impl CallManager {
                     KeyValue::new("short_name", view.short_name().to_string()),
                     KeyValue::new("scheme", signal.scheme()),
                     KeyValue::new("alert", signal.alert().map_or("none", |a| a.as_str())),
+                    // "late": part of the burst was recorded before it was read
+                    KeyValue::new("muted", if muted.late == 0 { "yes" } else { "late" }),
                 ],
             );
             if let Some(span) = self.call_spans.get(&call_id) {
@@ -1319,8 +1326,20 @@ impl CallManager {
                         unit = signal.unit(),
                         alert = signal.alert().map(trunk_radio::Alert::as_str),
                         at_s,
+                        // taken out of the recording once its CRC held, not
+                        // on the preamble: a burst that fails stays in
+                        mute = "after-validation",
+                        mute_blanked = muted.blanked,
+                        mute_late = muted.late,
                         "in-band signalling heard"
                     );
+                    if muted.late > 0 {
+                        tracing::warn!(
+                            late = muted.late,
+                            blanked = muted.blanked,
+                            "signalling burst was read after part of it was recorded"
+                        );
+                    }
                 });
             }
         }

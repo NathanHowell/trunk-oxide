@@ -300,6 +300,15 @@ impl From<trunk_fm::gate::CloseReason> for CloseReason {
     }
 }
 
+/// What blanking a signalling burst from the recording came to, in samples.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Muted {
+    /// Blanked before they were recorded.
+    pub blanked: u64,
+    /// Already recorded: the burst was read too late to take them out.
+    pub late: u64,
+}
+
 /// Events from the DSP threads to the monitor loop.
 pub enum RadioEvent {
     /// Parsed trunk messages from the control channel decoded at
@@ -324,6 +333,8 @@ pub enum RadioEvent {
     Signalling {
         call_id: CallId,
         heard: trunk_fm::Heard,
+        /// What taking it out of the recording came to.
+        muted: Muted,
     },
     /// In-band encryption parameters of a call we hold no key for.
     Crypto {

@@ -26,6 +26,7 @@ pub mod fir;
 pub mod fleetsync;
 pub mod gate;
 pub mod io;
+pub mod mute;
 pub mod signalling;
 
 use num_complex::Complex32;
@@ -35,6 +36,7 @@ pub use demod::{Deemphasis, QuadratureDemod};
 pub use detect::{Detector, Measurement, Tone};
 pub use fir::Fir;
 pub use gate::{CloseReason, Event, Gate};
+pub use mute::Mute;
 pub use signalling::{Alert, Heard, MdcOp, Signal};
 
 /// Peak deviation the demodulator is scaled to (`analog_recorder`'s
@@ -137,6 +139,13 @@ impl FmDemod {
         self.low.process(&self.scratch2, &mut audio.voice);
     }
 
+    /// Samples the recording lags the raw audio by: the group delay of the
+    /// band-pass the recording is made through.
+    #[must_use]
+    pub const fn voice_delay(&self) -> usize {
+        (self.high.taps_len() - 1) / 2 + (self.low.taps_len() - 1) / 2
+    }
+
     /// Forget all signal history, as for a newly tuned channel.
     pub fn reset(&mut self) {
         self.demod.reset();
@@ -181,6 +190,33 @@ mod tests {
             .fold(0.0f32, |m, x| m.max(x.abs()));
         // 3 kHz of 5 kHz deviation is 0.6, de-emphasised at 1 kHz by ~0.9.
         assert!((0.4..0.7).contains(&peak), "peak {peak}");
+    }
+
+    #[test]
+    fn the_recording_lags_the_raw_audio_by_the_voice_delay() {
+        let mut fm = FmDemod::new(96_000.0, TAU_US, Decimation::AntiAliased);
+        // carrier alone for 0.5 s, then a 1500 Hz tone at 3 kHz deviation
+        let mut phase = 0.0f32;
+        let iq: Vec<Complex32> = (0..96_000)
+            .map(|n| {
+                if n >= 48_000 {
+                    let m = (TAU * 1_500.0 * (n - 48_000) as f32 / 96_000.0).sin();
+                    phase += TAU * 3_000.0 * m / 96_000.0;
+                }
+                Complex32::from_polar(1.0, phase)
+            })
+            .collect();
+        let mut audio = Audio::default();
+        fm.process(&iq, &mut audio);
+        // the sample at which a stream first reaches half its settled level
+        let onset = |s: &[f32]| {
+            let settled = s[12_000..].iter().fold(0.0f32, |m, x| m.max(x.abs()));
+            s.iter().position(|x| x.abs() > settled / 2.0).unwrap()
+        };
+        let lag = onset(&audio.voice) - onset(&audio.raw);
+        let delay = fm.voice_delay();
+        assert!(delay > 100, "{delay}");
+        assert!(lag.abs_diff(delay) <= 16, "lag {lag}, delay {delay}");
     }
 
     #[test]

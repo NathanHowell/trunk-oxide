@@ -11,19 +11,28 @@ use trunk_channelizer::{ChannelDecoder, ConditioningSpec, Reading, WIDE};
 use trunk_fm::denoise::Denoiser;
 use trunk_fm::fleetsync::FleetSync;
 use trunk_fm::gate::{Config as GateConfig, Event as GateEvent, Gate};
-use trunk_fm::{Audio, Decimation, Detector, FmDemod, Heard, Measurement, TAU_US, Tone};
+use trunk_fm::{Audio, Decimation, Detector, FmDemod, Heard, Measurement, Mute, TAU_US, Tone};
 
 use crate::fm;
 use crate::kind::{Cmd, Kind, OpenError, Opening, Tuning};
 use crate::p25_voice::EXCESS_BW;
 use crate::recording::Tape;
-use crate::types::{CallId, Decoded, RadioEvent, Squelch};
+use crate::types::{CallId, Decoded, Muted, RadioEvent, Squelch};
 
 /// Conditioned rate of an analog slot.
 pub const WIDE_RATE: f64 = 96_000.0;
 /// The analog channel's width, for its filter (cutoff `max_dev`,
 /// transition half of this).
 const BANDWIDTH_HZ: f64 = 12_000.0;
+
+/// Samples blanked ahead of a signalling burst's first symbol and after its
+/// last: the span the decoder reports is good to a symbol at the front and
+/// the burst's tail (the filters', and a codec's) runs a little past the end.
+const MUTE_BEFORE: u64 = 14;
+const MUTE_AFTER: u64 = 40;
+/// Samples faded to meet a blanked burst: 2 ms, below what is heard as a
+/// click and a fraction of a syllable.
+const MUTE_FADE: usize = 32;
 
 /// What an analog channel is opened with.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -75,13 +84,17 @@ impl Kind for AnalogFm {
     #[allow(clippy::cast_possible_truncation)]
     fn decoder(at: &Opening<'_, Self>, tape: Tape) -> Result<AnalogFmChannel, OpenError> {
         let tone = at.params.tone;
+        let demod = FmDemod::new(WIDE_RATE, TAU_US, Decimation::AntiAliased);
         Ok(AnalogFmChannel {
             call: at.call.id,
-            demod: FmDemod::new(WIDE_RATE, TAU_US, Decimation::AntiAliased),
+            voice_delay: demod.voice_delay() as u64,
+            demod,
             detector: Detector::new(),
             fleetsync: FleetSync::new(),
             raw_samples: 0,
+            gate_pos: 0,
             heard: Vec::new(),
+            mutes: Vec::new(),
             held: Vec::new(),
             gate: Gate::new(GateConfig::for_tone(tone)),
             audio: Audio::default(),
@@ -120,13 +133,22 @@ pub struct AnalogFmChannel {
     detector: Detector,
     /// In-band signalling is read from the same raw audio the detector sees.
     fleetsync: FleetSync,
+    /// Samples the recording lags the raw audio by.
+    voice_delay: u64,
     /// Samples of raw audio the signalling decoders have been fed.
     raw_samples: u64,
+    /// Samples of the recording given to the gate. The recording's samples
+    /// are counted as the raw audio's are, so a burst's span is a span of
+    /// the recording `voice_delay` later.
+    gate_pos: u64,
     heard: Vec<Heard>,
+    /// Bursts blanked so far from the audio that had come out of the
+    /// recording's filters, and still to be from what comes next.
+    mutes: Vec<Mute>,
     /// What was heard before the gate opened for it: the gate holds a
     /// transmission's first moments back, so a burst at key-up is decoded
     /// ahead of the open it belongs to.
-    held: Vec<Heard>,
+    held: Vec<(Heard, Muted)>,
     gate: Gate,
     audio: Audio,
     measurements: Vec<Measurement>,
@@ -160,10 +182,19 @@ impl ChannelDecoder for AnalogFmChannel {
         self.measurements.clear();
         self.detector
             .process(&self.audio.raw, &mut self.measurements);
+        let fresh = self.voice_pending.len();
+        self.voice_pending.extend_from_slice(&self.audio.voice);
+        // Bursts already read reach on into audio that has only now come
+        // out of the recording's filters.
+        let first_fresh = self.gate_pos + fresh as u64;
+        for mute in &self.mutes {
+            mute.apply(first_fresh, &mut self.voice_pending[fresh..]);
+        }
+        let total = first_fresh + self.audio.voice.len() as u64;
+        self.mutes.retain(|mute| mute.window().end > total);
         self.fleetsync.process(&self.audio.raw, &mut self.heard);
         self.raw_samples += self.audio.raw.len() as u64;
-        self.held.append(&mut self.heard);
-        self.voice_pending.extend_from_slice(&self.audio.voice);
+        self.blank_bursts(total);
         if self.measurements.is_empty() {
             return;
         }
@@ -175,6 +206,7 @@ impl ChannelDecoder for AnalogFmChannel {
             let end = (consumed + hop).min(self.voice_pending.len());
             let voice = &self.voice_pending[consumed..end];
             consumed = end;
+            self.gate_pos += voice.len() as u64;
             self.gate
                 .push(m, voice, &mut self.gated, &mut self.gate_events);
         }
@@ -205,16 +237,20 @@ impl ChannelDecoder for AnalogFmChannel {
             .iter()
             .any(|e| matches!(e, GateEvent::Open { .. }));
         if opened || self.gate.is_open() {
-            out.events
-                .extend(self.held.drain(..).map(|heard| RadioEvent::Signalling {
-                    call_id: self.call,
-                    heard,
-                }));
+            out.events.extend(
+                self.held
+                    .drain(..)
+                    .map(|(heard, muted)| RadioEvent::Signalling {
+                        call_id: self.call,
+                        heard,
+                        muted,
+                    }),
+            );
         } else {
             let oldest = self
                 .raw_samples
                 .saturating_sub((self.gate.delay_samples() + 2 * trunk_fm::detect::HOP) as u64);
-            self.held.retain(|h| h.span.end >= oldest);
+            self.held.retain(|(h, _)| h.span.end >= oldest);
         }
         let voice = if let Some(d) = &mut self.denoise {
             self.cleaned.clear();
@@ -242,9 +278,38 @@ impl ChannelDecoder for AnalogFmChannel {
         self.detector.reset();
         self.fleetsync.reset();
         self.raw_samples = 0;
+        self.gate_pos = 0;
+        self.mutes.clear();
         self.held.clear();
         self.gate.reset();
         self.voice_pending.clear();
+    }
+}
+
+impl AnalogFmChannel {
+    /// Takes each burst just read out of what is recorded. A burst is read
+    /// as its last bit ends, well ahead of its audio leaving the gate's delay
+    /// line, so it can be, whether or not the gate goes on to open for it.
+    /// `total` is the samples of the recording that exist.
+    fn blank_bursts(&mut self, total: u64) {
+        for heard in self.heard.drain(..) {
+            let mute = Mute {
+                span: (heard.span.start + self.voice_delay).saturating_sub(MUTE_BEFORE)
+                    ..heard.span.end + self.voice_delay + MUTE_AFTER,
+                fade: MUTE_FADE,
+            };
+            let late = self.gate.mute(&mute);
+            mute.apply(self.gate_pos, &mut self.voice_pending);
+            let length = mute.span.end - mute.span.start;
+            let muted = Muted {
+                blanked: length - late.min(length),
+                late: late.min(length),
+            };
+            self.held.push((heard, muted));
+            if mute.window().end > total {
+                self.mutes.push(mute);
+            }
+        }
     }
 }
 
@@ -264,6 +329,10 @@ mod tests {
         /// The open, the in-band signalling and the close, in the order the
         /// monitor loop would see them.
         events: Vec<String>,
+        /// What was recorded.
+        pcm: Vec<i16>,
+        /// What blanking the signalling came to.
+        muted: Vec<Muted>,
     }
 
     fn record_one_transmission(
@@ -376,6 +445,7 @@ mod tests {
         let mut out = Decoded::default();
         let (mut opened, mut closed, mut audio) = (0, 0, 0);
         let mut events = Vec::new();
+        let (mut recorded, mut muted) = (Vec::new(), Vec::new());
         for block in iq.chunks_exact(cfg.hop()) {
             chz.run(block, &mut out);
             for e in out.events.drain(..) {
@@ -396,9 +466,14 @@ mod tests {
                             }
                         }
                     }
-                    RadioEvent::Signalling { call_id, heard } => {
+                    RadioEvent::Signalling {
+                        call_id,
+                        heard,
+                        muted: m,
+                    } => {
                         assert_eq!(call_id, CallId(42));
                         events.push(heard.signal.to_string());
+                        muted.push(m);
                     }
                     _ => {}
                 }
@@ -406,6 +481,7 @@ mod tests {
             for (id, pcm) in out.audio.drain(..) {
                 assert_eq!(id, CallId(42));
                 audio += pcm.len();
+                recorded.extend_from_slice(&pcm);
             }
         }
         let st = fm::analog_channels()
@@ -419,7 +495,12 @@ mod tests {
         let (acct, tail) = tape.close().unwrap();
         assert_eq!(audio, acct.sample_count as usize);
         assert!(tail.is_empty());
-        Transmitted { audio, events }
+        Transmitted {
+            audio,
+            events,
+            pcm: recorded,
+            muted,
+        }
     }
 
     #[test]
@@ -443,6 +524,65 @@ mod tests {
         );
         // and a transmission without one reports none
         assert_eq!(transmit(None, 5, None).events, ["open", "close"]);
+    }
+
+    /// Energy at `hz`, summed over 10 ms windows so that a tone that comes
+    /// and goes (a burst of FSK) is counted wherever it falls.
+    fn tone_energy(pcm: &[i16], hz: f64) -> f64 {
+        pcm.as_chunks::<160>()
+            .0
+            .iter()
+            .map(|w| {
+                let (mut re, mut im) = (0.0, 0.0);
+                for (n, &x) in w.iter().enumerate() {
+                    let phase = std::f64::consts::TAU * hz * n as f64 / 16_000.0;
+                    re += f64::from(x) * phase.cos();
+                    im -= f64::from(x) * phase.sin();
+                }
+                re * re + im * im
+            })
+            .sum()
+    }
+
+    #[test]
+    fn a_decoded_burst_is_blanked_from_the_recording_and_the_speech_after_it_is_not() {
+        let burst: Vec<f32> =
+            include_bytes!("../../trunk-fm/tests/data/fleetsync_atherton_burst.s16")
+                .chunks_exact(2)
+                .map(|b| f32::from(i16::from_le_bytes([b[0], b[1]])) / 32768.0)
+                .collect();
+        // the same squawk played backwards: as much 1200/1800 Hz as before,
+        // and nothing a decoder can read
+        let reversed: Vec<f32> = burst.iter().rev().copied().collect();
+
+        let heard = transmit(None, 6, Some(&burst));
+        let unread = transmit(None, 7, Some(&reversed));
+        assert_eq!(heard.events.len(), 3, "{:?}", heard.events);
+        assert_eq!(unread.events, ["open", "close"]);
+        assert_eq!(
+            heard.muted.len(),
+            1,
+            "blanked before it was recorded: {:?}",
+            heard.muted
+        );
+        assert_eq!(heard.muted[0].late, 0);
+        assert!(heard.muted[0].blanked > 1_400, "{:?}", heard.muted);
+
+        // from the start-of-transmission thump (the first 50 ms, the same
+        // either way) to where the stand-in for speech comes in
+        let squawk = |t: &Transmitted| {
+            let pcm = &t.pcm[800..6_400];
+            tone_energy(pcm, 1_200.0) + tone_energy(pcm, 1_800.0)
+        };
+        let (left, kept) = (squawk(&heard), squawk(&unread));
+        assert!(kept > 0.0 && left < 0.005 * kept, "{left} of {kept} left");
+        // and the 800 Hz that follows it, the stand-in for speech, is whole
+        let (speech, original) = (
+            tone_energy(&heard.pcm, 800.0),
+            tone_energy(&unread.pcm, 800.0),
+        );
+        assert!(original > 0.0 && (speech / original - 1.0).abs() < 0.01);
+        assert_eq!(heard.pcm.len(), unread.pcm.len());
     }
 
     #[test]

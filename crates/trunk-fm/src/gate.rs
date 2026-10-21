@@ -13,6 +13,7 @@
 //! anything.
 
 use crate::detect::{HOP, Measurement, Tone};
+use crate::mute::Mute;
 
 /// Tunables; [`Config::default`] is what production runs.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -114,6 +115,8 @@ pub struct Gate {
     pos: usize,
     /// Hops fed so far; the hop being decided is `fed - attack`.
     fed: u64,
+    /// Samples fed so far.
+    fed_samples: u64,
     /// Passing hops in a row just before the one being decided.
     run_before: usize,
     open: bool,
@@ -132,6 +135,7 @@ impl Gate {
             audio: Vec::with_capacity(cfg.attack),
             pos: 0,
             fed: 0,
+            fed_samples: 0,
             run_before: 0,
             open: false,
         }
@@ -192,6 +196,7 @@ impl Gate {
             self.verdicts.push(v);
             self.audio.push(audio.to_vec());
             self.fed += 1;
+            self.fed_samples += audio.len() as u64;
             return;
         }
         // The ring holds the a hops before this one; the oldest is decided
@@ -265,6 +270,23 @@ impl Gate {
         slot.extend_from_slice(audio);
         self.pos = (self.pos + 1) % a;
         self.fed += 1;
+        self.fed_samples += audio.len() as u64;
+    }
+
+    /// Blanks `mute` from the audio the gate still holds, the last
+    /// [`Self::delay_samples`] fed, counted in samples fed since the last
+    /// reset. Returns how many of the span's samples had already come out.
+    pub fn mute(&mut self, mute: &Mute) -> u64 {
+        let held: u64 = self.audio.iter().map(|hop| hop.len() as u64).sum();
+        let oldest = self.fed_samples - held;
+        let mut at = oldest;
+        let hops = self.audio.len();
+        for k in 0..hops {
+            let hop = &mut self.audio[(self.pos + k) % hops];
+            mute.apply(at, hop);
+            at += hop.len() as u64;
+        }
+        mute.span.end.min(oldest).saturating_sub(mute.span.start)
     }
 
     /// Hops of audio the gate delays.
@@ -283,6 +305,7 @@ impl Gate {
         self.audio.clear();
         self.pos = 0;
         self.fed = 0;
+        self.fed_samples = 0;
         self.run_before = 0;
         self.open = false;
     }
@@ -290,7 +313,7 @@ impl Gate {
 
 /// Sample `i` of an `n`-sample raised-cosine fade in (0 to 1).
 #[allow(clippy::cast_precision_loss)]
-fn ramp(i: usize, n: usize) -> f32 {
+pub(crate) fn ramp(i: usize, n: usize) -> f32 {
     let x = std::f32::consts::PI * (i as f32 + 0.5) / n as f32;
     0.5 * (1.0 - x.cos())
 }
@@ -337,6 +360,52 @@ mod tests {
             tone_prominence: 0.0,
             rms: 0.0,
         }
+    }
+
+    #[test]
+    fn muting_blanks_what_the_gate_still_holds_and_counts_what_it_does_not() {
+        let cfg = Config {
+            fade: 0,
+            ..Config::default()
+        };
+        let mut g = Gate::new(cfg);
+        let (mut out, mut events) = (Vec::new(), Vec::new());
+        // ten 100-sample hops of carrier: hops 7 to 9 (samples 700..1000)
+        // are still in the delay line
+        for _ in 0..10 {
+            g.push(&carrier_no_tone(), &[1.0; 100], &mut out, &mut events);
+        }
+        assert_eq!(out.len(), 700);
+        let mute = |span| Mute { span, fade: 0 };
+        assert_eq!(g.mute(&mute(750..800)), 0);
+        // 650..700 has gone: 50 of its samples, and nothing else, were late
+        assert_eq!(g.mute(&mute(650..720)), 50);
+        for _ in 0..3 {
+            g.push(&noise(), &[-1.0; 100], &mut out, &mut events);
+        }
+        assert!(out[..650].iter().all(|&s| s == 1.0));
+        assert!(out[650..700].iter().all(|&s| s == 1.0), "already out");
+        assert!(out[700..720].iter().all(|&s| s == 0.0));
+        assert!(out[720..750].iter().all(|&s| s == 1.0));
+        assert!(out[750..800].iter().all(|&s| s == 0.0));
+        assert!(out[800..].iter().all(|&s| s == 1.0));
+    }
+
+    #[test]
+    fn muting_before_the_delay_line_is_full_reaches_what_has_been_fed() {
+        let mut g = Gate::new(Config::default());
+        let (mut out, mut events) = (Vec::new(), Vec::new());
+        g.push(&carrier_no_tone(), &[1.0; 100], &mut out, &mut events);
+        g.push(&carrier_no_tone(), &[1.0; 100], &mut out, &mut events);
+        let late = g.mute(&Mute {
+            span: 50..150,
+            fade: 0,
+        });
+        assert_eq!(late, 0);
+        for _ in 0..4 {
+            g.push(&carrier_no_tone(), &[1.0; 100], &mut out, &mut events);
+        }
+        assert!(out.len() >= 200 && out[50..150].iter().all(|&s| s == 0.0));
     }
 
     /// Runs `seq` through a gate, each hop's audio being its index as a

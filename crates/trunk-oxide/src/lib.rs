@@ -1034,8 +1034,12 @@ impl Scanner {
                         RadioEvent::SourceChange { call_id, unit } => {
                             call_mgr.handle_source_change(call_id, unit);
                         }
-                        RadioEvent::Signalling { call_id, heard } => {
-                            call_mgr.handle_signalling(call_id, heard);
+                        RadioEvent::Signalling {
+                            call_id,
+                            heard,
+                            muted,
+                        } => {
+                            call_mgr.handle_signalling(call_id, heard, muted);
                         }
                         RadioEvent::Crypto {
                             call_id,

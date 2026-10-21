@@ -41,11 +41,12 @@ const PERIOD: usize = 80;
 /// The last eight dotting bits and the sync word, as the search sees them.
 const SYNC: u32 = 0x00AA_23EB;
 const SYNC_BITS: u32 = 24;
-/// Samples the bits the sync search matches take, rounded down.
-const SYNC_SAMPLES: u64 = SYNC_BITS as u64 * 40 / 3;
 /// Bits of the sync that may be wrong. Noise makes a sync of this length a
 /// few times in a million per bit; the CRC then has to hold as well.
 const SYNC_ERRORS: u32 = 1;
+/// The sync's first eight bits alternate like the dotting before them, and
+/// end `SYNC_BITS - 8` bits before the sync does.
+const RUNS: usize = SYNC_BITS as usize - 8 + 1;
 const BLOCK_BYTES: usize = 6;
 /// A destination fleet is as long a message as is read.
 const MAX_BYTES: usize = 2 * BLOCK_BYTES;
@@ -237,7 +238,10 @@ enum Step {
 struct Phase {
     /// Samples until it next reads a bit.
     until: f64,
-    history: u32,
+    history: u64,
+    /// Length of the run of alternating bits ending at each of the last
+    /// [`RUNS`] bits, newest last.
+    runs: [u32; RUNS],
     stage: Stage,
 }
 
@@ -246,6 +250,7 @@ impl Phase {
         Self {
             until,
             history: 0,
+            runs: [0; RUNS],
             stage: Stage::Hunting,
         }
     }
@@ -253,6 +258,7 @@ impl Phase {
     /// Back to hunting, forgetting the bits it has seen.
     const fn park(&mut self) {
         self.history = 0;
+        self.runs = [0; RUNS];
         self.stage = Stage::Hunting;
     }
 
@@ -260,18 +266,22 @@ impl Phase {
     fn push(&mut self, high: bool, now: u64) -> Step {
         match &mut self.stage {
             Stage::Hunting => {
-                self.history = self.history << 1 | u32::from(high);
-                let seen = self.history & ((1 << SYNC_BITS) - 1);
+                let run = if (self.history & 1 == 1) != high {
+                    self.runs[RUNS - 1] + 1
+                } else {
+                    1
+                };
+                self.runs.rotate_left(1);
+                self.runs[RUNS - 1] = run;
+                self.history = self.history << 1 | u64::from(high);
                 for invert in [false, true] {
-                    let bits = if invert {
-                        !seen & ((1 << SYNC_BITS) - 1)
-                    } else {
-                        seen
-                    };
-                    if (bits ^ SYNC).count_ones() <= SYNC_ERRORS {
+                    let bits = self.history ^ if invert { u64::MAX } else { 0 };
+                    let seen = (bits & ((1 << SYNC_BITS) - 1)) as u32;
+                    if (seen ^ SYNC).count_ones() <= SYNC_ERRORS {
                         self.stage = Stage::Reading(Reading {
                             invert,
-                            start: now.saturating_sub(SYNC_SAMPLES),
+                            start: now
+                                .saturating_sub((u64::from(SYNC_BITS - 8 + self.runs[0])) * 40 / 3),
                             word: 0,
                             bits: 0,
                             word1: None,
@@ -561,12 +571,38 @@ mod tests {
     fn the_real_burst_from_atherton_pd_is_heard_once() {
         let heard = run(&mut FleetSync::new(), &atherton(), 6400);
         assert_eq!(messages(&heard), [atherton_message()]);
-        // the burst is at 0.16 s and lasts 0.09 s
+        // the burst's envelope rises at sample 2577 and falls by 4188, the
+        // last stretch of that being the codec's and the filters' tail
         let span = &heard[0].span;
-        assert!(
-            (2_000..3_200).contains(&span.start) && (3_800..4_400).contains(&span.end),
-            "{span:?}"
-        );
+        assert!(span.start.abs_diff(2_577) <= 24, "{span:?}");
+        assert!((4_000..4_200).contains(&span.end), "{span:?}");
+    }
+
+    #[test]
+    fn the_span_covers_the_whole_burst_whatever_its_dotting() {
+        for dots in [0usize, 8, 24, 40] {
+            // `dots` more alternating bits ahead of the packet's own, ending
+            // on the zero its first one follows
+            let mut bits: Vec<bool> = (0..dots).map(|i| (dots - i) % 2 == 0).collect();
+            bits.extend(packet(&[(ATHERTON_W1, ATHERTON_W2)]));
+            let lead = 1_000;
+            let audio = modulate(&bits, true, lead, 800);
+            let heard = run(&mut FleetSync::new(), &audio, 160);
+            let [one] = &heard[..] else {
+                panic!("dots {dots}: {heard:?}")
+            };
+            let end = lead + (bits.len() as f64 * SYMBOL) as usize;
+            assert!(
+                one.span.start.abs_diff(lead as u64) <= 20,
+                "dots {dots}: {:?} from {lead}",
+                one.span
+            );
+            assert!(
+                one.span.end.abs_diff(end as u64) <= 20,
+                "dots {dots}: {:?} to {end}",
+                one.span
+            );
+        }
     }
 
     #[test]

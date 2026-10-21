@@ -156,9 +156,13 @@ impl DemodStats {
 pub struct Demodulator {
     cfg: DemodConfig,
     sps: f64,
+    /// The receive filter, last tap first: output `i` is the dot product of
+    /// these with the `taps - 1` inputs before it and input `i`.
     taps: Vec<f32>,
+    /// The last `taps - 1` inputs, which the next block's first outputs need.
     hist: Vec<Complex32>,
-    hist_pos: usize,
+    /// `hist` then the block being filtered.
+    work: Vec<Complex32>,
     buf: Vec<Complex32>,
     t: f64,
     period_adj: f64,
@@ -178,16 +182,17 @@ impl Demodulator {
     pub fn new(cfg: DemodConfig) -> Self {
         let sps = cfg.sample_rate / cfg.symbol_rate;
         assert!(sps >= 2.0, "need at least 2 samples per symbol");
-        let taps = if let Some((cutoff, transition)) = cfg.lowpass {
+        let mut taps = if let Some((cutoff, transition)) = cfg.lowpass {
             lowpass_taps(cfg.sample_rate, cutoff, transition)
         } else {
             vec![1.0]
         };
+        taps.reverse();
         let (kp, ki) = loop_gains(f64::from(cfg.timing_bandwidth), TIMING_DAMPING);
         Self {
             sps,
-            hist: vec![Complex32::new(0.0, 0.0); taps.len()],
-            hist_pos: 0,
+            hist: vec![Complex32::new(0.0, 0.0); taps.len() - 1],
+            work: Vec::new(),
             taps,
             buf: Vec::new(),
             t: 2.0,
@@ -221,18 +226,28 @@ impl Demodulator {
         }
     }
 
-    fn filter(&mut self, x: Complex32) -> Complex32 {
-        if self.taps.len() == 1 {
-            return x;
-        }
+    /// Appends `input` through the receive filter to `buf`, with anything
+    /// not finite taken as zero.
+    fn filter(&mut self, input: &[Complex32]) {
+        let finite = |y: Complex32| {
+            if y.re.is_finite() && y.im.is_finite() {
+                y
+            } else {
+                Complex32::new(0.0, 0.0)
+            }
+        };
         let n = self.taps.len();
-        self.hist[self.hist_pos] = x;
-        self.hist_pos = (self.hist_pos + 1) % n;
-        let mut acc = Complex32::new(0.0, 0.0);
-        for (k, &tap) in self.taps.iter().enumerate() {
-            acc += self.hist[(self.hist_pos + n - 1 - k) % n] * tap;
+        if n == 1 {
+            self.buf.extend(input.iter().map(|&x| finite(x)));
+            return;
         }
-        acc
+        self.work.clear();
+        self.work.extend_from_slice(&self.hist);
+        self.work.extend_from_slice(input);
+        self.buf
+            .extend(self.work.windows(n).map(|w| finite(dot(w, &self.taps))));
+        let keep = self.work.len() - (n - 1);
+        self.hist.copy_from_slice(&self.work[keep..]);
     }
 
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -257,15 +272,7 @@ impl Demodulator {
         clippy::cast_precision_loss
     )]
     pub fn process(&mut self, input: &[Complex32], out: &mut Vec<f32>) {
-        for &x in input {
-            let y = self.filter(x);
-            let y = if y.re.is_finite() && y.im.is_finite() {
-                y
-            } else {
-                Complex32::new(0.0, 0.0)
-            };
-            self.buf.push(y);
-        }
+        self.filter(input);
         let half = self.sps / 2.0;
         while self.t.floor() as usize + 2 < self.buf.len() {
             if self.t - half < 1.0 {
@@ -335,6 +342,24 @@ impl Demodulator {
     }
 }
 
+/// Accumulators the filter sums in, so its adds do not wait on one another.
+const LANES: usize = 4;
+
+/// `Σ x[i] · t[i]`, summed in [`LANES`] lanes: within rounding of the
+/// sequential sum, and several times faster.
+fn dot(x: &[Complex32], t: &[f32]) -> Complex32 {
+    let mut lanes = [Complex32::new(0.0, 0.0); LANES];
+    let (xb, xr) = x.as_chunks::<LANES>();
+    let (tb, tr) = t.as_chunks::<LANES>();
+    for (x, t) in xb.iter().zip(tb) {
+        for ((l, x), t) in lanes.iter_mut().zip(x).zip(t) {
+            *l += x * t;
+        }
+    }
+    let tail: Complex32 = xr.iter().zip(tr).map(|(x, t)| x * t).sum();
+    lanes.iter().sum::<Complex32>() + tail
+}
+
 /// Proportional and integral gains of a second-order loop with noise
 /// bandwidth `bn_t` (normalised) and damping `zeta`, for unit detector gain.
 fn loop_gains(bn_t: f64, zeta: f64) -> (f64, f64) {
@@ -381,6 +406,36 @@ pub fn lowpass_taps(fs: f64, cutoff: f64, transition: f64) -> Vec<f32> {
 mod tests {
     use super::*;
     use crate::testgen::{self, Channel, Rng};
+
+    #[test]
+    #[allow(clippy::cast_possible_truncation)]
+    fn the_filter_is_the_direct_sum_to_within_rounding_in_blocks_of_any_size() {
+        let mut rng = Rng::new(7);
+        let x: Vec<Complex32> = (0..700)
+            .map(|_| Complex32::new(rng.gauss() as f32, rng.gauss() as f32))
+            .collect();
+        let mut d = Demodulator::new(DemodConfig::new(24_000.0, Modulation::Cqpsk));
+        let taps: Vec<f32> = d.taps.iter().rev().copied().collect();
+        let mut at = 0;
+        for size in [1usize, 5, 33, 64, 200, 397] {
+            let end = (at + size).min(x.len());
+            d.buf.clear();
+            d.filter(&x[at..end]);
+            for (i, y) in d.buf.iter().enumerate() {
+                let n = at + i;
+                let want =
+                    taps.iter()
+                        .enumerate()
+                        .fold(Complex32::new(0.0, 0.0), |acc, (k, &t)| {
+                            acc + n
+                                .checked_sub(k)
+                                .map_or(Complex32::new(0.0, 0.0), |m| x[m] * t)
+                        });
+                assert!((y - want).norm() < 2e-6, "sample {n}: {y} vs {want}");
+            }
+            at = end;
+        }
+    }
 
     fn random_dibits(rng: &mut Rng, n: usize) -> Vec<u8> {
         #[allow(clippy::cast_possible_truncation)]

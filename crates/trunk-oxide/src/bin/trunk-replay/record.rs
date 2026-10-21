@@ -342,6 +342,7 @@ impl Recorder {
                         "encrypted": d.encrypted, "tdma": d.phase2_tdma, "slot": d.tdma_slot,
                         "reason": reason, "channel": d.channel, "kind": d.kind,
                         "transmissions": d.transmissions.len(),
+                        "signalling": d.signalling.iter().map(|s| s.text.as_str()).collect::<Vec<_>>(),
                     }),
                 );
             }

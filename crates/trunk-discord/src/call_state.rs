@@ -313,6 +313,11 @@ impl CallState {
 
     /// Handle a signal or unit event during the call.
     pub fn on_event(&mut self, text: String) -> Vec<CallEffect> {
+        // The same thing said again straight away (a radio identifying
+        // itself at each key-up) adds nothing.
+        if self.events.last() == Some(&text) {
+            return Vec::new();
+        }
         self.events.push(text);
 
         if !self.has_embed {
@@ -1478,6 +1483,18 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, CallEffect::SendEmbed { .. }))
         );
+    }
+
+    #[test]
+    fn an_event_repeated_straight_away_is_not_posted_twice() {
+        let mut s = make_state();
+        s.on_start();
+        assert_eq!(s.on_event("**Signal**: unit 1202182".into()).len(), 1);
+        assert!(s.on_event("**Signal**: unit 1202182".into()).is_empty());
+        // but a different one between lets it be said again
+        assert_eq!(s.on_event("**Signal**: unit 7".into()).len(), 1);
+        assert_eq!(s.on_event("**Signal**: unit 1202182".into()).len(), 1);
+        assert_eq!(s.events.len(), 3);
     }
 
     #[test]

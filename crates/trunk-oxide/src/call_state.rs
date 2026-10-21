@@ -1930,6 +1930,9 @@ impl TrunkStateMachine {
         match &entry.call_mode {
             CallMode::Trunked(_) => entry.current_source = source.or(entry.current_source),
             CallMode::Conventional => {
+                // Whoever was talking is not known to be the next transmission's
+                // talker: it names itself, or it is nobody's.
+                entry.current_source = None;
                 entry.last_update = now;
                 entry.idle_since = None;
                 entry.state = match (wants, holds) {
@@ -3699,6 +3702,24 @@ mod tests {
         assert!(sm.on_signalling(call_id, key).is_empty());
         assert_eq!(sm.get_call(call_id).unwrap().heard.len(), 3);
         assert_eq!(sm.get_call(call_id).unwrap().current_source, Some(0x1234));
+    }
+
+    #[test]
+    fn the_next_transmission_does_not_inherit_the_last_ones_talker() {
+        let mut sm = TrunkStateMachine::new(test_config());
+        let call_id = add_conventional(&mut sm, false);
+        let _ = sm.on_squelch(call_id, Squelch::Open, None);
+        let _ = sm.on_signalling(call_id, mdc(0x1234, trunk_radio::MdcOp::PttId));
+        assert_eq!(sm.get_call(call_id).unwrap().current_source, Some(0x1234));
+
+        let effects = sm.on_squelch(call_id, Squelch::Close(CloseReason::Quieting), None);
+        exec(&mut sm, effects);
+        assert_eq!(sm.get_call(call_id).unwrap().current_source, None);
+
+        // and the same radio identifying itself again is announced again
+        let _ = sm.on_squelch(call_id, Squelch::Open, None);
+        let effects = sm.on_signalling(call_id, mdc(0x1234, trunk_radio::MdcOp::PttId));
+        assert_eq!(names(&effects), ["SetSource", "EmitSignal"]);
     }
 
     #[test]

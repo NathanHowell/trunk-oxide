@@ -12,6 +12,7 @@
 
 pub mod fetch;
 pub mod geo;
+pub mod occupancy;
 pub mod reach;
 pub mod records;
 pub mod report;

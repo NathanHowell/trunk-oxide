@@ -8,6 +8,7 @@ use zip::ZipArchive;
 use trunk_config::Config;
 use trunk_uls::Point;
 use trunk_uls::fetch;
+use trunk_uls::occupancy;
 use trunk_uls::reach::{link, profile, received_dbm};
 use trunk_uls::report::{band_of, render, systems_of, write_csv};
 use trunk_uls::select::{Query, find};
@@ -60,6 +61,36 @@ enum Command {
         /// Only sites at least this many dB over the floor
         #[arg(long, default_value_t = f64::NEG_INFINITY, allow_negative_numbers = true)]
         min_margin: f64,
+    },
+
+    /// How often each channel carries a signal, from an `rtl_power` sweep
+    /// (`rtl_power -f 769M:775.2M:3125 -i 2 -e 30m -c 20% -d SERIAL out.csv`,
+    /// on a dongle the scanner is not using)
+    Occupancy {
+        /// The `rtl_power` CSV
+        #[arg(long)]
+        sweep: PathBuf,
+
+        /// The CSV `sites --csv` wrote: which busy channels are licensed
+        #[arg(long)]
+        sites_csv: PathBuf,
+
+        /// Path to the TOML config file
+        #[arg(long, default_value = "config.toml")]
+        config: PathBuf,
+
+        /// A channel is busy when its strongest bin is this far over the
+        /// row's median bin, dB
+        #[arg(long, default_value_t = 6.0)]
+        threshold_db: f64,
+
+        /// Leave out channels busy less than this share of the time, %
+        #[arg(long, default_value_t = 1.0)]
+        min_busy: f64,
+
+        /// List at most this many channels with no licence
+        #[arg(long, default_value_t = 25)]
+        unlicensed_limit: usize,
     },
 }
 
@@ -164,6 +195,49 @@ fn main() -> Result<()> {
         } => {
             let found = around.find()?;
             print_reach(&found, rx_height, extra_loss_db, floor_dbm, min_margin)?;
+        }
+        Command::Occupancy {
+            sweep,
+            sites_csv,
+            config,
+            threshold_db,
+            min_busy,
+            unlicensed_limit,
+        } => {
+            let config = Config::load(config.to_str().context("the config path is not UTF-8")?)
+                .with_context(|| format!("reading the config {}", config.display()))?;
+            let systems = systems_of(&config);
+            let rows = occupancy::read_sweep(
+                File::open(&sweep).with_context(|| sweep.display().to_string())?,
+            )?;
+            let licences = occupancy::read_licences(
+                File::open(&sites_csv).with_context(|| sites_csv.display().to_string())?,
+            )?;
+            #[allow(clippy::cast_possible_truncation)]
+            let (low, high) = rows.iter().fold((i64::MAX, i64::MIN), |(l, h), r| {
+                (l.min(r.low_hz as i64), h.max(r.high_hz as i64))
+            });
+            let mut channels = occupancy::grid(low, high);
+            channels.extend(
+                licences
+                    .keys()
+                    .chain(systems.iter().flat_map(|s| &s.channels))
+                    .filter(|c| (low..=high).contains(c)),
+            );
+            let tallies = occupancy::measure(&rows, &channels, threshold_db);
+            print!(
+                "{}",
+                occupancy::render(
+                    &tallies,
+                    &systems,
+                    &licences,
+                    &occupancy::Options {
+                        threshold_db,
+                        min_busy,
+                        unlicensed_limit
+                    },
+                )
+            );
         }
     }
     Ok(())

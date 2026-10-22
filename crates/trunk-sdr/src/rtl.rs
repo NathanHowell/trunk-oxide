@@ -24,6 +24,18 @@ const BUF_NUM: u32 = 15;
 const BUF_LEN: u32 = 16 * 32 * 512;
 /// Transfers discarded at the start of a stream (stale samples).
 const BUF_SKIP: u64 = 1;
+/// The longest a transfer may take to fill. [`BUF_LEN`] is 0.5 s of a 240 kS/s
+/// stream, and with the first transfer discarded its first samples would
+/// arrive a second in, after the health check had called the source dead.
+const TRANSFER_SECS: f64 = 0.125;
+
+/// Bytes per USB transfer at `rate_hz`: [`BUF_LEN`] unless that takes longer
+/// than [`TRANSFER_SECS`] to fill, then as many 512-byte units as do.
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn transfer_len(rate_hz: f64) -> u32 {
+    let fits = (rate_hz * 2.0 * TRANSFER_SECS / 512.0).floor() as u32 * 512;
+    fits.clamp(512, BUF_LEN)
+}
 
 /// Which dongle. `rtl=SERIAL`, `serial=SERIAL`, a bare serial, or a bare
 /// small integer (a bus index, when no dongle has that serial).
@@ -234,13 +246,14 @@ impl Rtl {
     pub fn stream(self, block: usize, capacity: usize) -> Result<(Stream, Streaming)> {
         ensure!(block > 0 && capacity >= block, "bad stream geometry");
         let (producer, stream) = Stream::new(self.info.serial.clone(), capacity);
+        let buf_len = transfer_len(self.info.rate_hz);
         let stopping = Arc::new(AtomicBool::new(false));
         let dev = Arc::clone(&self.dev);
         let serial = self.info.serial.clone();
         let stop = Arc::clone(&stopping);
         let thread = std::thread::Builder::new()
             .name(format!("rtl-{serial}"))
-            .spawn(move || reader(&dev, &producer, block, &stop, &serial))
+            .spawn(move || reader(&dev, &producer, block, buf_len, &stop, &serial))
             .context("spawning the reader thread")?;
         Ok((
             stream,
@@ -253,11 +266,18 @@ impl Rtl {
     }
 }
 
-fn reader(dev: &Device, producer: &Producer, block: usize, stop: &AtomicBool, serial: &str) {
+fn reader(
+    dev: &Device,
+    producer: &Producer,
+    block: usize,
+    buf_len: u32,
+    stop: &AtomicBool,
+    serial: &str,
+) {
     let lut = Lut::new();
     let mut transfers = 0u64;
     let mut cur = producer.take_block();
-    let result = dev.read_async(BUF_NUM, BUF_LEN, |buf| {
+    let result = dev.read_async(BUF_NUM, buf_len, |buf| {
         producer.count_transfer();
         if stop.load(Ordering::Relaxed) {
             let _ = dev.cancel_async();
@@ -338,6 +358,18 @@ fn stop(dev: &Device, stopping: &AtomicBool, thread: &mut Option<JoinHandle<()>>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_transfer_is_the_default_unless_it_would_take_too_long_to_fill() {
+        // every rate the dongles run at today keeps gr-osmosdr's size
+        for rate in [1_152_000.0, 2_304_000.0, 2_352_000.0, 2_496_000.0] {
+            assert_eq!(transfer_len(rate), BUF_LEN, "{rate}");
+        }
+        // 240 kS/s: 124.8 ms of samples, a whole number of 512-byte units
+        assert_eq!(transfer_len(240_000.0), 59_904);
+        assert_eq!(59_904 % 512, 0);
+        assert_eq!(transfer_len(0.0), 512);
+    }
 
     #[test]
     fn device_specs_parse_like_osmosdr_arguments() {

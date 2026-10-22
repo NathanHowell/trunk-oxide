@@ -212,6 +212,17 @@ const PANELS: &[PanelSpec] = &[
         }],
     },
     PanelSpec {
+        title: "Rain at the station (mm/h, 10 min mean)",
+        y_desc: "mm/h",
+        zero_floor: true,
+        // trunk-weather's Tempest, set beside the receiver quality above to
+        // see whether the two move together.
+        queries: &[QuerySpec {
+            query: "sum(rate(trunk.weather.rain_mm[10m])) * 3600",
+            label: Label::Fixed("rain"),
+        }],
+    },
+    PanelSpec {
         title: "Active channels per source",
         y_desc: "channels",
         zero_floor: true,

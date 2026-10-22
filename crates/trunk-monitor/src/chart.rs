@@ -64,6 +64,10 @@ struct PanelSpec {
     /// Anchor the y-axis at zero (rates, counts, levels); off for dB panels.
     zero_floor: bool,
     queries: &'static [QuerySpec],
+    /// Lines drawn against a second y-axis on the right (never anchored at
+    /// zero), labelled `y2_desc`.
+    secondary: &'static [QuerySpec],
+    y2_desc: &'static str,
 }
 
 /// Dashboard panels, row-major in a [`COLUMNS`]-wide grid. Metric names keep
@@ -76,6 +80,8 @@ const PANELS: &[PanelSpec] = &[
         title: "Calls started / min",
         y_desc: "calls/min",
         zero_floor: true,
+        secondary: &[],
+        y2_desc: "",
         queries: &[QuerySpec {
             query: "sum by (short_name)(rate(trunk.oxide.calls_started{short_name!=\"\"}[5m]))*60",
             label: Label::Tagged {
@@ -88,6 +94,8 @@ const PANELS: &[PanelSpec] = &[
         title: "Channel load",
         y_desc: "channels / calls per min",
         zero_floor: true,
+        secondary: &[],
+        y2_desc: "",
         queries: &[
             QuerySpec {
                 query: "trunk.oxide.channels_held",
@@ -111,6 +119,8 @@ const PANELS: &[PanelSpec] = &[
         title: "RF power: signal vs noise floor (median)",
         y_desc: "dB",
         zero_floor: false,
+        secondary: &[],
+        y2_desc: "",
         queries: &[
             QuerySpec {
                 query: "histogram_quantile(0.5, sum by (le,short_name)(rate(trunk.oxide.signal_power_db_bucket[30m])))",
@@ -132,6 +142,8 @@ const PANELS: &[PanelSpec] = &[
         title: "Voice frame errors",
         y_desc: "errors/s",
         zero_floor: true,
+        secondary: &[],
+        y2_desc: "",
         queries: &[QuerySpec {
             query: "sum by (short_name)(rate(trunk.oxide.voice_frame_errors[10m]))",
             label: Label::Tagged {
@@ -144,6 +156,8 @@ const PANELS: &[PanelSpec] = &[
         title: "Channelizer DSP time per block (mean)",
         y_desc: "µs",
         zero_floor: true,
+        secondary: &[],
+        y2_desc: "",
         queries: &[QuerySpec {
             query: "sum by (source)(rate(trunk.oxide.channelizer.block_time_us_sum{stat=\"mean\"}[5m]))/sum by (source)(rate(trunk.oxide.channelizer.block_time_us_count{stat=\"mean\"}[5m]))",
             label: Label::Tagged {
@@ -156,6 +170,8 @@ const PANELS: &[PanelSpec] = &[
         title: "trunk-oxide CPU (cores)",
         y_desc: "cores",
         zero_floor: true,
+        secondary: &[],
+        y2_desc: "",
         queries: &[
             QuerySpec {
                 query: "sum(rate(process.cpu.time[5m]))",
@@ -174,6 +190,8 @@ const PANELS: &[PanelSpec] = &[
         title: "Clock correction per source",
         y_desc: "Hz",
         zero_floor: false,
+        secondary: &[],
+        y2_desc: "",
         queries: &[QuerySpec {
             query: "trunk.oxide.freq_correction_hz",
             label: Label::Tagged {
@@ -186,6 +204,8 @@ const PANELS: &[PanelSpec] = &[
         title: "Clock error at call end (mean)",
         y_desc: "Hz",
         zero_floor: false,
+        secondary: &[],
+        y2_desc: "",
         queries: &[QuerySpec {
             query: "sum by (source)(rate(trunk.oxide.freq_error_hz_sum[30m]))/sum by (source)(rate(trunk.oxide.freq_error_hz_count[30m]))",
             label: Label::Tagged {
@@ -198,6 +218,8 @@ const PANELS: &[PanelSpec] = &[
         title: "Receiver quality per source (100 = its channels' best, 0 = 16x the errors)",
         y_desc: "score",
         zero_floor: true,
+        secondary: &[],
+        y2_desc: "",
         // A channel's bit errors per frame against its own best: the 20th
         // percentile of its 30 min ratios over a week (never below 0.02).
         // 100 at that baseline, 25 points off per doubling, 0 at 16 times it;
@@ -212,20 +234,42 @@ const PANELS: &[PanelSpec] = &[
         }],
     },
     PanelSpec {
-        title: "Rain at the station (mm/h, 10 min mean)",
-        y_desc: "mm/h",
+        title: "Weather at the station",
+        y_desc: "rain mm/h, gust m/s",
         zero_floor: true,
         // trunk-weather's Tempest, set beside the receiver quality above to
-        // see whether the two move together.
-        queries: &[QuerySpec {
-            query: "sum(rate(trunk.weather.rain_mm[10m])) * 3600",
-            label: Label::Fixed("rain"),
-        }],
+        // see whether the two move together. Rain and wind on the left;
+        // temperature and the dew point it would have to fall to for fog on
+        // the right: the closer they are, the wetter everything outdoors.
+        queries: &[
+            QuerySpec {
+                query: "sum(rate(trunk.weather.rain_mm[10m])) * 3600",
+                label: Label::Fixed("rain mm/h"),
+            },
+            QuerySpec {
+                query: "max(trunk.weather.wind_gust_ms)",
+                label: Label::Fixed("gust m/s"),
+            },
+        ],
+        secondary: &[
+            QuerySpec {
+                query: "max(trunk.weather.temperature_c)",
+                label: Label::Fixed("temp C (right)"),
+            },
+            // Magnus formula; g is ln(RH) plus the saturation term
+            QuerySpec {
+                query: "WITH (g = ln(max(trunk.weather.humidity_pct) / 100) + 17.62 * max(trunk.weather.temperature_c) / (243.12 + max(trunk.weather.temperature_c))) 243.12 * g / (17.62 - g)",
+                label: Label::Fixed("dew point C (right)"),
+            },
+        ],
+        y2_desc: "temperature, dew point C",
     },
     PanelSpec {
         title: "Active channels per source",
         y_desc: "channels",
         zero_floor: true,
+        secondary: &[],
+        y2_desc: "",
         queries: &[QuerySpec {
             query: "trunk.oxide.channelizer.active_channels",
             label: Label::Tagged {
@@ -238,6 +282,8 @@ const PANELS: &[PanelSpec] = &[
         title: "Latency (mean)",
         y_desc: "seconds",
         zero_floor: true,
+        secondary: &[],
+        y2_desc: "",
         queries: &[
             QuerySpec {
                 query: "sum(rate(trunk.parakeet.transcription_duration_seconds_sum[10m]))/sum(rate(trunk.parakeet.transcription_duration_seconds_count[10m]))",
@@ -260,6 +306,8 @@ const PANELS: &[PanelSpec] = &[
         title: "Backlog and drops",
         y_desc: "count",
         zero_floor: true,
+        secondary: &[],
+        y2_desc: "",
         queries: &[
             QuerySpec {
                 query: "trunk.parakeet.queue.depth",
@@ -287,6 +335,8 @@ const PANELS: &[PanelSpec] = &[
         title: "Flagged calls",
         y_desc: "per 30 min",
         zero_floor: true,
+        secondary: &[],
+        y2_desc: "",
         queries: &[QuerySpec {
             query: "sum by (reason)(increase(trunk.discord.calls_flagged[30m]))",
             label: Label::Tagged {
@@ -309,6 +359,9 @@ struct Panel {
     y_desc: &'static str,
     zero_floor: bool,
     series: Vec<Series>,
+    /// Drawn against the right-hand axis, `y2_desc`.
+    secondary: Vec<Series>,
+    y2_desc: &'static str,
 }
 
 // ── VM JSON response ──────────────────────────────────────────────────────────
@@ -396,8 +449,19 @@ impl StatsClient {
     }
 
     async fn fetch_panel(&self, spec: &PanelSpec, start: i64, end: i64) -> Panel {
+        Panel {
+            title: spec.title,
+            y_desc: spec.y_desc,
+            zero_floor: spec.zero_floor,
+            series: self.fetch_series(spec.queries, start, end).await,
+            secondary: self.fetch_series(spec.secondary, start, end).await,
+            y2_desc: spec.y2_desc,
+        }
+    }
+
+    async fn fetch_series(&self, queries: &[QuerySpec], start: i64, end: i64) -> Vec<Series> {
         let mut series = Vec::new();
-        for q in spec.queries {
+        for q in queries {
             match self.query_range(q.query, start, end).await {
                 Ok(results) => {
                     for r in results {
@@ -423,12 +487,7 @@ impl StatsClient {
                 }
             }
         }
-        Panel {
-            title: spec.title,
-            y_desc: spec.y_desc,
-            zero_floor: spec.zero_floor,
-            series,
-        }
+        series
     }
 
     /// Fetch all panels and render the chart to PNG bytes.
@@ -538,6 +597,33 @@ fn series_color(label: &str, idx: usize) -> RGBAColor {
     base.mix(alpha)
 }
 
+/// The y-range of some series, from the data with a little padding (0..1 when
+/// there is none), anchored at zero when `zero_floor`.
+fn bounds(series: &[Series], zero_floor: bool) -> (f64, f64) {
+    let (mut min, mut max) = (f64::INFINITY, f64::NEG_INFINITY);
+    for s in series {
+        for &(_, v) in &s.points {
+            if v.is_finite() {
+                min = min.min(v);
+                max = max.max(v);
+            }
+        }
+    }
+    if !min.is_finite() {
+        min = 0.0;
+        max = 1.0;
+    }
+    if (max - min).abs() < f64::EPSILON {
+        max = min + 1.0;
+    }
+    let pad = (max - min) * 0.1;
+    if zero_floor {
+        (0.0, max + pad)
+    } else {
+        (min - pad, max + pad)
+    }
+}
+
 // Unix-second timestamps fit f64 exactly for any realistic epoch; the x-axis
 // formatter's cast back to i64 is likewise exact.
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation)]
@@ -552,37 +638,19 @@ where
     DB: DrawingBackend,
     DB::ErrorType: 'static,
 {
-    // y-bounds from the data, with a little padding; fall back to 0..1 when empty.
-    let (mut ymin, mut ymax) = (f64::INFINITY, f64::NEG_INFINITY);
-    for s in &panel.series {
-        for &(_, v) in &s.points {
-            if v.is_finite() {
-                ymin = ymin.min(v);
-                ymax = ymax.max(v);
-            }
-        }
-    }
-    if !ymin.is_finite() {
-        ymin = 0.0;
-        ymax = 1.0;
-    }
-    if (ymax - ymin).abs() < f64::EPSILON {
-        ymax = ymin + 1.0;
-    }
-    let pad = (ymax - ymin) * 0.1;
-    let (ymin, ymax) = if panel.zero_floor {
-        (0.0, ymax + pad)
-    } else {
-        (ymin - pad, ymax + pad)
-    };
+    let (ymin, ymax) = bounds(&panel.series, panel.zero_floor);
+    let (right_min, right_max) = bounds(&panel.secondary, false);
+    let has_secondary = !panel.secondary.is_empty();
 
     let mut chart = ChartBuilder::on(area)
         .caption(panel.title, ("sans-serif", 20))
         .margin(8)
         .x_label_area_size(28)
         .y_label_area_size(64)
+        .right_y_label_area_size(if has_secondary { 64 } else { 0 })
         .build_cartesian_2d(start as f64..end as f64, ymin..ymax)
-        .map_err(|e| anyhow::anyhow!("chart build: {e}"))?;
+        .map_err(|e| anyhow::anyhow!("chart build: {e}"))?
+        .set_secondary_coord(start as f64..end as f64, right_min..right_max);
 
     chart
         .configure_mesh()
@@ -595,6 +663,13 @@ where
         })
         .draw()
         .map_err(|e| anyhow::anyhow!("chart mesh: {e}"))?;
+    if has_secondary {
+        chart
+            .configure_secondary_axes()
+            .y_desc(panel.y2_desc)
+            .draw()
+            .map_err(|e| anyhow::anyhow!("chart secondary axis: {e}"))?;
+    }
 
     // A restart explains a step in anything: a thin grey line at each.
     for &t in restarts {
@@ -614,6 +689,20 @@ where
                 color.stroke_width(2),
             ))
             .map_err(|e| anyhow::anyhow!("chart series: {e}"))?
+            .label(s.label.clone())
+            .legend(move |(x, y)| {
+                PathElement::new(vec![(x, y), (x + 18, y)], color.stroke_width(2))
+            });
+    }
+    // dashed in spirit, by colour: the right-hand lines continue the palette
+    for (idx, s) in panel.secondary.iter().enumerate() {
+        let color = series_color(&s.label, panel.series.len() + idx);
+        chart
+            .draw_secondary_series(LineSeries::new(
+                s.points.iter().map(|&(t, v)| (t as f64, v)),
+                color.stroke_width(2),
+            ))
+            .map_err(|e| anyhow::anyhow!("chart secondary series: {e}"))?
             .label(s.label.clone())
             .legend(move |(x, y)| {
                 PathElement::new(vec![(x, y), (x + 18, y)], color.stroke_width(2))
@@ -708,6 +797,11 @@ mod tests {
                     label: "active".to_string(),
                     points: vec![(0, 1.0), (60, 3.0), (120, 2.0), (180, 5.0)],
                 }],
+                secondary: vec![Series {
+                    label: "temp (right)".to_string(),
+                    points: vec![(0, 15.0), (60, 15.5), (120, 14.0), (180, 13.5)],
+                }],
+                y2_desc: "C",
             },
             Panel {
                 title: "SDR Signal / Noise / Squelch",
@@ -717,6 +811,8 @@ mod tests {
                     label: "sig tg 1".to_string(),
                     points: vec![(0, -40.0), (60, -38.5), (120, -42.0)],
                 }],
+                secondary: Vec::new(),
+                y2_desc: "",
             },
         ];
 

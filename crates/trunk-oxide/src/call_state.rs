@@ -388,6 +388,9 @@ pub struct SystemPolicy {
     pub system_type: SystemType,
     pub short_name: String,
     pub record_unknown: bool,
+    /// Its control channels are followed for metrics only: voice grants are
+    /// ignored (see `SystemConfig::control_only`).
+    pub control_only: bool,
     pub hide_unknown: bool,
     pub hide_encrypted: bool,
     pub monitor_encrypted: bool,
@@ -1479,11 +1482,22 @@ impl TrunkStateMachine {
         }
     }
 
+    /// Whether `sys_num` is followed for its control channel metrics only.
+    fn is_control_only(&self, sys_num: i32) -> bool {
+        self.config
+            .systems
+            .get(&sys_num)
+            .is_some_and(|sys| sys.control_only)
+    }
+
     /// A grant (or, with `new_call_from_update`, an update) of a voice
     /// channel on system `sys_num`, heard with `nac`.
     fn on_grant(&mut self, sys_num: i32, nac: u16, v: &Voice, is_grant_message: bool) -> Effects {
         let now = self.clock.now();
         let mut effects = Effects::new();
+        if self.is_control_only(sys_num) {
+            return effects;
+        }
         if is_grant_message {
             self.end_reassigned_calls(sys_num, v, &mut effects);
         }
@@ -4151,6 +4165,18 @@ mod tests {
             state(&sm, unknown),
             CallState::Rejected(RejectReason::UnknownTg)
         );
+    }
+
+    #[test]
+    fn a_control_only_system_ignores_voice_grants() {
+        let mut config = test_config();
+        config.systems.get_mut(&1).unwrap().control_only = true;
+        let mut sm = TrunkStateMachine::new(config);
+        // not even a listed talkgroup starts a call, so nothing reaches
+        // Discord or the recorder
+        assert!(sm.on_message(&grant_msg(1, 851_000_000.0)).is_empty());
+        assert!(sm.on_message(&grant_msg(200, 851_000_000.0)).is_empty());
+        assert!(sm.calls.is_empty());
     }
 
     // ── Sysid / Status / UnitEvent messages ──

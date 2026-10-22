@@ -796,6 +796,7 @@ impl ScannerBuilder {
                     system_type: sys.system_type,
                     short_name: short_name.clone(),
                     record_unknown: sys.record_unknown,
+                    control_only: sys.control_only,
                     hide_unknown: sys.hide_unknown_talkgroups,
                     hide_encrypted: sys.hide_encrypted,
                     monitor_encrypted: sys.monitor_encrypted,

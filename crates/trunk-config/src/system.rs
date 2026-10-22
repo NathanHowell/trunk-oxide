@@ -73,6 +73,11 @@ pub struct SystemConfig {
     pub conversation_mode: bool,
     #[serde(default = "default_true")]
     pub record_unknown: bool,
+    /// Follow only the control channels, for their metrics: voice grants are
+    /// ignored, so nothing is recorded, posted or traced. Meant for far
+    /// systems received here, to tell a path change from a receiver fault.
+    #[serde(default)]
+    pub control_only: bool,
 
     // Talkgroups — CSV file (RadioReference export) with optional TOML overrides
     #[serde(default)]

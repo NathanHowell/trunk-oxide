@@ -12,8 +12,8 @@ pub const URL: &str = "https://data.fcc.gov/download/pub/uls/complete/l_LMpriv.z
 /// The FCC refreshes the file weekly.
 pub const MAX_AGE: Duration = Duration::from_hours(7 * 24);
 
-/// `$XDG_CACHE_HOME/trunk-oxide/uls`, or `~/.cache/trunk-oxide/uls`.
-pub fn cache_dir() -> Result<PathBuf> {
+/// `$XDG_CACHE_HOME/trunk-oxide`, or `~/.cache/trunk-oxide`.
+pub fn cache_root() -> Result<PathBuf> {
     let base = match std::env::var_os("XDG_CACHE_HOME") {
         Some(dir) if !dir.is_empty() => PathBuf::from(dir),
         _ => PathBuf::from(
@@ -21,7 +21,12 @@ pub fn cache_dir() -> Result<PathBuf> {
         )
         .join(".cache"),
     };
-    Ok(base.join("trunk-oxide").join("uls"))
+    Ok(base.join("trunk-oxide"))
+}
+
+/// Where the licence zip is kept.
+pub fn cache_dir() -> Result<PathBuf> {
+    Ok(cache_root()?.join("uls"))
 }
 
 fn fresh(path: &Path) -> bool {

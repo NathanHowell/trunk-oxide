@@ -12,9 +12,11 @@
 
 pub mod fetch;
 pub mod geo;
+pub mod reach;
 pub mod records;
 pub mod report;
 pub mod select;
+pub mod terrain;
 
 pub use geo::Point;
 pub use select::{Licensee, Query, Site};

@@ -3712,6 +3712,7 @@ dependencies = [
  "anyhow",
  "clap",
  "csv",
+ "flate2",
  "reqwest",
  "trunk-config",
  "zip",

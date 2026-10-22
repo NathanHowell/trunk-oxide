@@ -476,7 +476,9 @@ impl CallManager {
             call_chz: HashMap::new(),
             channel_open_failed: meter
                 .u64_counter("trunk.oxide.channel_open_failed")
-                .with_description("Channels that could not be opened, by reason")
+                .with_description(
+                    "Channels that could not be opened, by reason and the channel's frequency",
+                )
                 .build(),
             channel_waits: meter
                 .u64_counter("trunk.oxide.channel_waits")
@@ -769,6 +771,7 @@ impl CallManager {
                     KeyValue::new("short_name", self.short_name_of(call.sys_num)),
                     KeyValue::new("kind", recipe.kind()),
                     KeyValue::new("reason", crate::call_state::RejectReason::from(e).as_str()),
+                    KeyValue::new("freq_mhz", mhz_label(call.channel.freq_hz)),
                 ],
             );
         }
@@ -1717,6 +1720,12 @@ impl CallManager {
     }
 }
 
+/// A channel's frequency as a metric label: MHz to the 6.25 kHz grid's five
+/// places, so a channel is always the same series.
+fn mhz_label(freq_hz: f64) -> String {
+    format!("{:.5}", freq_hz / 1e6)
+}
+
 fn prost_duration(d: std::time::Duration) -> prost_types::Duration {
     prost_types::Duration {
         seconds: i64::try_from(d.as_secs()).unwrap_or(i64::MAX),
@@ -1765,6 +1774,13 @@ fn proto_transmission(t: &trunk_radio::Transmission) -> proto::Transmission {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_channel_is_labelled_by_its_frequency_in_mhz() {
+        assert_eq!(super::mhz_label(770_031_250.0), "770.03125");
+        assert_eq!(super::mhz_label(488_337_500.0), "488.33750");
+        assert_eq!(super::mhz_label(0.0), "0.00000");
+    }
+
     use super::{Ended, VoiceCounters, in_band_signal};
     use trunk_oxide_grpc::proto;
     use trunk_radio::{Heard, MdcOp, Signal};

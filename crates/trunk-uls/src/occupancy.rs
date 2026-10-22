@@ -269,12 +269,12 @@ pub fn render(
     unlicensed.sort_by(|a, b| b.1.busy_share().total_cmp(&a.1.busy_share()));
     let _ = write!(
         out,
-        "\nnot in the licence file, busy at least {}% of the time ({}):\n",
+        "\nno per-channel licence in the file, busy at least {}% of the time ({}); a state-wide 700 MHz state licence (service SL) can cover these:\n",
         options.min_busy,
         unlicensed.len()
     );
     for (&c, t) in unlicensed.into_iter().take(options.unlicensed_limit) {
-        out.push_str(&line(c, t, "no licence found"));
+        out.push_str(&line(c, t, "no per-channel licence"));
     }
     out
 }
@@ -388,6 +388,6 @@ mod tests {
         assert!(text.contains("770.02000  50.0% busy"), "{text}");
         assert!(text.contains("licensed: EBRCSA"), "{text}");
         assert!(text.contains("770.08000  50.0% busy"), "{text}");
-        assert!(text.contains("no licence found"), "{text}");
+        assert!(text.contains("no per-channel licence"), "{text}");
     }
 }

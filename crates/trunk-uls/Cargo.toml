@@ -1,0 +1,17 @@
+[package]
+name = "trunk-uls"
+description = "Reads the FCC's Universal Licensing System bulk file for the sites and channels licensed around the receiver, against what the config scans."
+edition.workspace = true
+version.workspace = true
+rust-version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+trunk-config.workspace = true
+anyhow.workspace = true
+clap.workspace = true
+csv.workspace = true
+reqwest = { workspace = true, features = ["blocking"] }
+zip.workspace = true

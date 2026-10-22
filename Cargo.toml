@@ -14,6 +14,7 @@ members = [
     "crates/trunk-monitor",
     "crates/trunk-weather",
     "crates/trunk-solver",
+    "crates/trunk-uls",
     "crates/trunk-channelizer",
     "crates/trunk-p25",
     "crates/trunk-fm",
@@ -34,6 +35,7 @@ default-members = [
     "crates/trunk-monitor",
     "crates/trunk-weather",
     "crates/trunk-solver",
+    "crates/trunk-uls",
 ]
 
 [workspace.package]
@@ -114,6 +116,7 @@ clap = { version = "4", features = ["derive"] }
 argfile = "0.2"
 wild = "2"
 csv = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 rusqlite = { version = "0.34", features = ["bundled"] }
 sha2 = "0.10"
 

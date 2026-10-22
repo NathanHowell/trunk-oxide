@@ -314,13 +314,81 @@ fn margins(asked: f64) -> Vec<f64> {
     let mut v = vec![asked.min(top)];
     v.extend(
         (1..)
-            .map(|step| asked + 0.05 * f64::from(step))
+            .map(|step| 0.05f64.mul_add(f64::from(step), asked))
             .take_while(|&m| m < top - 1e-9),
     );
     if v.last().is_none_or(|&last| last < top) {
         v.push(top);
     }
     v
+}
+
+/// Every sample rate a device supports that suits a `signal` channel: one
+/// the channelizer runs cheaply and whose channel needs no resampling. A rate
+/// whose decimation is a large prime (2.472 MS/s is 103 x 24 kHz) costs
+/// several times a neighbouring rate's FFT, and an analog channel is exactly
+/// 96 kS/s only at a multiple of 96 kHz.
+#[cfg(test)]
+fn valid_rates(device: &Device, signal: Signal) -> impl Iterator<Item = i64> + '_ {
+    supported_rates(device).filter(move |&rate| channelizer_suits(rate, signal))
+}
+
+#[allow(clippy::cast_precision_loss)]
+fn channelizer_suits(rate: i64, signal: Signal) -> bool {
+    use trunk_channelizer::{NARROW, WIDE};
+    trunk_channelizer::Config::standard(rate as f64).is_ok_and(|c| {
+        c.is_fast()
+            && c.is_exact(match signal {
+                Signal::Digital => NARROW,
+                Signal::Analog => WIDE,
+            })
+    })
+}
+
+/// Every sample rate a device supports.
+fn supported_rates(device: &Device) -> impl Iterator<Item = i64> + '_ {
+    device.sample_rates.iter().flat_map(move |sr| {
+        let mul = device.rate_multiple;
+        match *sr {
+            SampleRate::Exact(v) => {
+                let lo_mult = v / mul;
+                let hi_mult = lo_mult;
+                (lo_mult..=hi_mult)
+                    .map(move |m| m * mul)
+                    .filter(move |&r| r == v)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+            }
+            SampleRate::Range(lo, hi) => {
+                let lo_mult = (lo + mul - 1) / mul; // ceil division
+                let hi_mult = hi / mul;
+                (lo_mult..=hi_mult)
+                    .map(move |m| m * mul)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+            }
+        }
+    })
+}
+
+/// The `[recorder] max_channels` that lets every channel `sources` cover be
+/// open at once: control, voice and conventional channels alike, each
+/// frequency once however many sources cover it.
+#[must_use]
+pub fn max_channels(channels: &[Channel], sources: &[Source]) -> usize {
+    channels
+        .iter()
+        .filter(|c| {
+            sources.iter().any(|s| {
+                let guard = roll_off_guard(s.rate);
+                let lower = s.center - s.rate / 2 + guard;
+                let upper = s.center + s.rate / 2 - guard;
+                (lower..=upper).contains(&c.frequency)
+            })
+        })
+        .map(|c| c.frequency)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
 }
 
 /// Plan the sources for `channels` on `devices`.

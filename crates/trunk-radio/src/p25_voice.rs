@@ -94,12 +94,12 @@ pub struct VoicePipeline {
 impl VoicePipeline {
     /// `rate`: the conditioned channel rate.
     pub fn new(rate: f64) -> Self {
-        Self::for_channel(rate, None)
+        Self::for_channel(rate, None, None)
     }
 
-    /// For channel `channel`, whose decoder counters it reports
-    /// ([`crate::p25::voice_channels`]).
-    pub fn for_channel(rate: f64, channel: Option<ChannelNum>) -> Self {
+    /// For channel `channel` on source `source`, whose decoder counters it
+    /// reports ([`crate::p25::voice_channels`]).
+    pub fn for_channel(rate: f64, channel: Option<ChannelNum>, source: Option<i32>) -> Self {
         Self {
             rate,
             phase2: false,
@@ -115,7 +115,7 @@ impl VoicePipeline {
             counter: CallCounter::default(),
             crypto: EncryptionTracker::default(),
             crypto_pending: None,
-            shared: VoiceShared::register(channel),
+            shared: VoiceShared::register(channel, source),
             repeated: 0,
             muted: 0,
         }
@@ -315,10 +315,11 @@ pub struct P25VoiceHandle {
 }
 
 impl P25VoiceHandle {
-    /// For channel `channel` at the conditioned channel `rate`.
-    pub fn new(rate: f64, channel: Option<ChannelNum>) -> Self {
+    /// For channel `channel` on source `source` at the conditioned channel
+    /// `rate`.
+    pub fn new(rate: f64, channel: Option<ChannelNum>, source: Option<i32>) -> Self {
         Self {
-            pipeline: VoicePipeline::for_channel(rate, channel),
+            pipeline: VoicePipeline::for_channel(rate, channel, source),
             out: Vec::new(),
             terminated: false,
         }
@@ -461,7 +462,7 @@ impl Kind for P25Voice {
         if slot.is_some() && at.scrambler.is_none() {
             return Err(OpenError::NoScramblingMask);
         }
-        let mut voice = P25VoiceHandle::new(NARROW_RATE, Some(at.num));
+        let mut voice = P25VoiceHandle::new(NARROW_RATE, Some(at.num), Some(at.source));
         voice.start_call(
             at.system.qpsk,
             slot.is_some(),

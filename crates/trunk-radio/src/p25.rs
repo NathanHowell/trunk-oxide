@@ -286,6 +286,8 @@ impl RawLog {
 pub struct VoiceChannelReport {
     /// `None` for a decoder outside the radio (tests, tools).
     pub channel: Option<ChannelNum>,
+    /// The source it is on; `None` as `channel` is.
+    pub source: Option<i32>,
     /// The system of the call in progress (or last call).
     pub system: String,
     /// Where the call is (0 before one starts).
@@ -306,14 +308,16 @@ struct Snapshot {
 
 pub(crate) struct VoiceShared {
     channel: Option<ChannelNum>,
+    source: Option<i32>,
     snapshot: Mutex<Snapshot>,
 }
 
 impl VoiceShared {
     /// A voice decoder, registered for [`voice_channels`].
-    pub(crate) fn register(channel: Option<ChannelNum>) -> Arc<Self> {
+    pub(crate) fn register(channel: Option<ChannelNum>, source: Option<i32>) -> Arc<Self> {
         VOICE_REGISTRY.register(Self {
             channel,
+            source,
             snapshot: Mutex::new(Snapshot::default()),
         })
     }
@@ -362,6 +366,7 @@ pub fn voice_channels() -> Vec<Entry<VoiceChannelReport>> {
         let snap = s.snapshot().clone();
         VoiceChannelReport {
             channel: s.channel,
+            source: s.source,
             system: snap.system,
             freq_hz: snap.freq_hz,
             stats: snap.phase1,

@@ -195,6 +195,23 @@ const PANELS: &[PanelSpec] = &[
         }],
     },
     PanelSpec {
+        title: "Receiver quality per source (100 = its channels' best, 0 = 16x the errors)",
+        y_desc: "score",
+        zero_floor: true,
+        // A channel's bit errors per frame against its own best: the 20th
+        // percentile of its 30 min ratios over a week (never below 0.02).
+        // 100 at that baseline, 25 points off per doubling, 0 at 16 times it;
+        // a source scores the mean of its channels weighted by the frames each
+        // decoded. Call mix moves it a little, a bad receiver a lot.
+        queries: &[QuerySpec {
+            query: "sum by (source)((100 * clamp_min(clamp_max(1 - ln(clamp_min(((sum by (freq_hz, source)(increase({__name__=~\"trunk.oxide.p25voice.imbe_bit_errors|trunk.oxide.p25tdma.ambe_bit_errors\"}[30m]))) / (sum by (freq_hz, source)(increase({__name__=~\"trunk.oxide.p25voice.imbe_frames|trunk.oxide.p25tdma.ambe_frames\"}[30m])))) / on(freq_hz) group_left() (clamp_min(quantile_over_time(0.2, (sum by (freq_hz)(increase({__name__=~\"trunk.oxide.p25voice.imbe_bit_errors|trunk.oxide.p25tdma.ambe_bit_errors\"}[30m])) / sum by (freq_hz)(increase({__name__=~\"trunk.oxide.p25voice.imbe_frames|trunk.oxide.p25tdma.ambe_frames\"}[30m])))[7d:30m]), 0.02)), 1)) / ln(2) / 4, 1), 0)) * sum by (freq_hz, source)(increase({__name__=~\"trunk.oxide.p25voice.imbe_frames|trunk.oxide.p25tdma.ambe_frames\"}[30m]))) / sum by (source)(sum by (freq_hz, source)(increase({__name__=~\"trunk.oxide.p25voice.imbe_frames|trunk.oxide.p25tdma.ambe_frames\"}[30m])))",
+            label: Label::Tagged {
+                prefix: "source",
+                tag: "source",
+            },
+        }],
+    },
+    PanelSpec {
         title: "Active channels per source",
         y_desc: "channels",
         zero_floor: true,

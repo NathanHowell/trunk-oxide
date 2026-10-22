@@ -303,10 +303,13 @@ impl VoiceMetrics {
 
     #[allow(clippy::cast_possible_truncation)]
     fn export(&mut self, key: Key, r: &VoiceChannelReport) {
-        let base = [
+        let mut base = vec![
             KeyValue::new("system", r.system.clone()),
             KeyValue::new("freq_hz", r.freq_hz as i64),
         ];
+        if let Some(source) = r.source {
+            base.push(KeyValue::new("source", i64::from(source)));
+        }
         let was = self.prev.insert(key, r.stats).unwrap_or_default();
         let now = &r.stats;
         let d = |a: u64, b: u64| a.saturating_sub(b);
@@ -552,6 +555,7 @@ impl P25Metrics {
         let base = [
             KeyValue::new("system", r.channel.system.clone()),
             KeyValue::new("freq_hz", r.channel.freq_hz as i64),
+            KeyValue::new("source", i64::from(r.channel.source)),
         ];
         let (prev, prev_dropped) = self
             .prev

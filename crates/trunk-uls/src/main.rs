@@ -97,8 +97,18 @@ enum Command {
 #[derive(clap::Args)]
 struct Around {
     /// Where the receiver is, `lat,lon` in degrees
+    #[arg(
+        long,
+        required_unless_present = "home_file",
+        conflicts_with = "home_file"
+    )]
+    home: Option<String>,
+
+    /// A file holding `lat,lon`, so the position stays out of the command
+    /// line and shell history (the repo keeps it in the gitignored
+    /// `secrets/receiver_location`)
     #[arg(long)]
-    home: String,
+    home_file: Option<PathBuf>,
 
     /// Path to the TOML config file
     #[arg(long, default_value = "config.toml")]
@@ -126,7 +136,19 @@ struct Found {
 
 impl Around {
     fn find(&self) -> Result<Found> {
-        let home = Point::parse(&self.home)?;
+        let home = match (&self.home, &self.home_file) {
+            (Some(text), _) => Point::parse(text)?,
+            (None, Some(path)) => Point::parse(
+                std::fs::read_to_string(path)
+                    .with_context(|| format!("reading {}", path.display()))?
+                    .trim(),
+            )?,
+            (None, None) => bail!("give --home or --home-file"),
+        };
+        eprintln!(
+            "note: the distances in this output are to known towers; a few of them locate the \
+             receiver, so do not publish or commit them"
+        );
         let config = Config::load(
             self.config
                 .to_str()
@@ -255,9 +277,9 @@ fn print_reach(
     let mut terrain = Terrain::new(fetch::cache_root()?.join("srtm"));
     let rx_ground = terrain.height(found.home)?;
     println!(
-        "receiver at {:.4},{:.4}: ground {rx_ground:.0} m, antenna {rx_height:.0} m up, {extra_loss_db:.0} dB of unmodelled loss, floor {floor_dbm:.0} dBm\n\
+        "receiver: ground {:.0} m, antenna {rx_height:.0} m up, {extra_loss_db:.0} dB of unmodelled loss, floor {floor_dbm:.0} dBm\n\
          (terrain, earth curve and free space only: read the order and the diffraction column, not the absolute margins)\n",
-        found.home.lat, found.home.lon
+        (rx_ground / 10.0).round() * 10.0
     );
     let in_config: std::collections::BTreeSet<i64> = found
         .systems

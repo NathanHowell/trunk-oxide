@@ -13,6 +13,9 @@ pub struct Device {
     /// Sample rate must be a multiple of this value (driver requirement).
     /// For osmosdr sources, trunk-recorder requires a multiple of 24000.
     pub rate_multiple: i64,
+    /// The centre it runs at now, if it is already placed: of two plans that
+    /// cost the same, the one that moves the dongles least wins.
+    pub near: Option<i64>,
 }
 
 impl Device {
@@ -21,12 +24,13 @@ impl Device {
         Self {
             sample_rates: vec![
                 SampleRate::Range(225_001, 300_000),
-                SampleRate::Range(900_001, 2_560_000),
+                SampleRate::Range(900_001, 2_496_000),
             ],
             ppm: 1,
             driver: "osmosdr".into(),
             device_template: "rtl={}".into(),
             rate_multiple: 24_000,
+            near: None,
         }
     }
 
@@ -38,6 +42,7 @@ impl Device {
             driver: "osmosdr".into(),
             device_template: "airspy={}".into(),
             rate_multiple: 24_000,
+            near: None,
         }
     }
 

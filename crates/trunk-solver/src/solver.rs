@@ -1,9 +1,19 @@
+//! Plans the sources: the centre and rate each dongle runs so that every
+//! channel is covered, as far from the band edges as a margin asks.
+//!
+//! The channels one dongle covers are contiguous in frequency (one that
+//! skipped a channel between two it covers would cover that too), so a plan is
+//! the sorted channels cut into groups, one per dongle. That is a small exact
+//! search: for each group and dongle the cheapest rate and centre that hold
+//! every channel inside the margin, then a dynamic program over the cut
+//! points and the dongles in use. It replaced an SMT model that had to be
+//! told every disjunct and could only ask for the fewest dongles.
+
 use anyhow::{Result, bail};
 use trunk_channelizer::passband;
-use z3::ast::{Bool, Int};
 
 use crate::device::{Device, SampleRate};
-use crate::{CHANNEL_HALFWIDTH, Channel, Signal, Source};
+use crate::{CENTER_CLEARANCE, CHANNEL_HALFWIDTH, Channel, Signal, Source, Tag};
 
 /// The guard each side of a band sampled at `rate`: what lies past
 /// [`passband::USABLE`] of Nyquist, where the RTL's filter rolls off. A
@@ -13,275 +23,372 @@ fn roll_off_guard(rate: i64) -> i64 {
     rate / 2 - (passband::USABLE * rate as f64 / 2.0).floor() as i64
 }
 
-struct Problem {
-    ranges: Vec<Int>,
-    lower_freq: Vec<Int>,
-    upper_freq: Vec<Int>,
+/// What a plan is asked for.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Options {
+    /// How deep in a band a channel may sit, as a share of Nyquist
+    /// ([`passband::depth`]). Past [`passband::USABLE`] the RTL's filter
+    /// rolls off, and a plan that cannot hold every channel to the margin
+    /// loosens it toward that before it gives a channel up.
+    pub margin: f64,
 }
 
-fn build_problem(opt: &z3::Optimize, channels: &[Channel], devices: &[Device]) -> Problem {
-    let n = devices.len();
-
-    let lower_freq: Vec<Int> = (0..n)
-        .map(|i| Int::new_const(format!("lower_{i}")))
-        .collect();
-    let upper_freq: Vec<Int> = (0..n)
-        .map(|i| Int::new_const(format!("upper_{i}")))
-        .collect();
-
-    // Order constraint: lower_0 < lower_1 < ...
-    for w in lower_freq.windows(2) {
-        opt.assert(&w[0].lt(&w[1]));
+impl Default for Options {
+    /// What the live config is planned to: comfortably inside the roll-off
+    /// for a few thousandths of a core more than the bare limit.
+    fn default() -> Self {
+        Self { margin: 0.70 }
     }
+}
 
-    let ranges: Vec<Int> = lower_freq
-        .iter()
-        .zip(upper_freq.iter())
-        .map(|(l, u)| u - l)
-        .collect();
+/// Where a channel ended up.
+#[derive(Clone, Debug)]
+pub struct Placement {
+    pub channel: Channel,
+    /// The planned source that carries it most cleanly, and how deep in its
+    /// band it sits ([`passband::depth`]); `None` if no source reaches it.
+    pub carried: Option<(usize, f64)>,
+}
 
-    let zero = Int::from_i64(0);
+/// The sources a plan chose and what it made of each channel.
+#[derive(Clone, Debug)]
+pub struct Plan {
+    pub sources: Vec<Source>,
+    /// The margin the plan holds its covered channels to; looser than asked
+    /// when the asked one could not cover them all.
+    pub margin: f64,
+    /// Every channel, in the order given.
+    pub placements: Vec<Placement>,
+}
 
-    for (i, (r, device)) in ranges.iter().zip(devices.iter()).enumerate() {
-        // Rate constraint: 0 (unused) or within valid sample rate range
-        let mut rate_options: Vec<Bool> = vec![r.eq(&zero)];
-        for sr in &device.sample_rates {
-            match sr {
-                SampleRate::Exact(v) => {
-                    rate_options.push(r.eq(Int::from_i64(*v)));
-                }
-                SampleRate::Range(lo, hi) => {
-                    let lo_z3 = Int::from_i64(*lo);
-                    let hi_z3 = Int::from_i64(*hi);
-                    rate_options.push(Bool::and(&[r.ge(&lo_z3), r.le(&hi_z3)]));
-                }
-            }
-        }
-        opt.assert(&Bool::or(&rate_options));
-
-        // Rate must be a multiple of the device's required rate multiple
-        // (e.g. osmosdr requires multiples of 24,000 Hz)
-        let rate_mul = Int::from_i64(device.rate_multiple);
-        let mult = Int::new_const(format!("mult_{i}"));
-        opt.assert(&r.eq(&(&rate_mul * &mult)));
-    }
-
-    // Frequency coverage constraints.
-    //
-    // A channel must sit inside the usable band, clear of the roll-off
-    // (trunk_channelizer::passband). The guard depends on the sample rate,
-    // a Z3 variable, so every valid rate of each device is enumerated with
-    // its own guard.
-    for channel in channels {
-        let freq = Int::from_i64(channel.frequency);
-        let hw = Int::from_i64(CHANNEL_HALFWIDTH);
-
-        let in_range_options: Vec<Bool> = lower_freq
+impl Plan {
+    /// Channels no source carries inside the roll-off limit: alternate control
+    /// channels the plan left out for want of a dongle (one a source happens
+    /// to reach cleanly anyway is not among them).
+    pub fn uncovered(&self) -> impl Iterator<Item = &Channel> {
+        self.placements
             .iter()
-            .zip(upper_freq.iter())
-            .zip(ranges.iter())
-            .zip(devices.iter())
-            .map(|(((l, u), r), device)| {
-                // Per-rate disjuncts, each with its rate's guard.
-                let rate_disjuncts: Vec<Bool> = valid_rates(device, channel.signal)
-                    .map(|rate| {
-                        let guard = Int::from_i64(roll_off_guard(rate));
-                        let rate_z3 = Int::from_i64(rate);
+            .filter(|p| p.carried.is_none_or(|(_, d)| d > passband::USABLE))
+            .map(|p| &p.channel)
+    }
+}
 
-                        // rate == this candidate
-                        let rate_match = r.eq(&rate_z3);
-                        // freq >= lower + guard + CHANNEL_HALFWIDTH
-                        let lower_bound = freq.ge(&(l + &guard + &hw));
-                        // freq <= upper - guard - CHANNEL_HALFWIDTH
-                        let upper_bound = freq.le(&(u - &guard - &hw));
+/// A frequency to cover: one entry per distinct channel frequency.
+#[derive(Clone, Copy, Debug)]
+struct Site {
+    freq: i64,
+    analog: bool,
+    digital: bool,
+    /// Only alternate control channels may be left out.
+    skippable: bool,
+}
 
-                        // Center avoidance: SDR center frequency doesn't land on a channel.
-                        // center = (upper + lower) / 2, avoid integer division:
-                        //   2*(freq - CHANNEL_HALFWIDTH) >= upper + lower  OR
-                        //   2*(freq + CHANNEL_HALFWIDTH) <= upper + lower
-                        let center_times_2 = u + l;
-                        let avoid_above =
-                            Int::from_i64(2 * (channel.frequency - CHANNEL_HALFWIDTH))
-                                .ge(&center_times_2);
-                        let avoid_below =
-                            Int::from_i64(2 * (channel.frequency + CHANNEL_HALFWIDTH))
-                                .le(&center_times_2);
+fn sites(channels: &[Channel]) -> Vec<Site> {
+    let mut sorted: Vec<&Channel> = channels.iter().collect();
+    sorted.sort_by_key(|c| c.frequency);
+    let mut out: Vec<Site> = Vec::new();
+    for c in sorted {
+        let alternate = c.tag == Some(Tag::Alternate);
+        match out.last_mut() {
+            Some(site) if site.freq == c.frequency => {
+                site.analog |= c.signal == Signal::Analog;
+                site.digital |= c.signal == Signal::Digital;
+                site.skippable &= alternate;
+            }
+            _ => out.push(Site {
+                freq: c.frequency,
+                analog: c.signal == Signal::Analog,
+                digital: c.signal == Signal::Digital,
+                skippable: alternate,
+            }),
+        }
+    }
+    out
+}
 
-                        Bool::and(&[
-                            rate_match,
-                            lower_bound,
-                            upper_bound,
-                            Bool::or(&[avoid_above, avoid_below]),
-                        ])
-                    })
-                    .collect();
+/// A dongle's rates, ascending, with the signals each suits.
+struct Rates(Vec<(i64, bool, bool)>);
 
-                Bool::or(&rate_disjuncts)
+impl Rates {
+    fn of(device: &Device) -> Self {
+        let mut v: Vec<(i64, bool, bool)> = supported_rates(device)
+            .map(|r| {
+                (
+                    r,
+                    channelizer_suits(r, Signal::Analog),
+                    channelizer_suits(r, Signal::Digital),
+                )
             })
             .collect();
-
-        let coverage = Bool::or(&in_range_options);
-        if channel.tag == Some(crate::Tag::Alternate) {
-            // Alternate control channels are covered if possible but not required.
-            opt.assert_soft(&coverage, 1, None);
-        } else {
-            opt.assert(&coverage);
-        }
-    }
-
-    Problem {
-        ranges,
-        lower_freq,
-        upper_freq,
+        v.sort_unstable();
+        v.dedup();
+        Self(v)
     }
 }
 
-/// Every sample rate a device supports that suits a `signal` channel: one
-/// the channelizer runs cheaply and whose channel needs no resampling. A rate
-/// whose decimation is a large prime (2.472 MS/s is 103 x 24 kHz) costs
-/// several times a neighbouring rate's FFT, and an analog channel is exactly
-/// 96 kS/s only at a multiple of 96 kHz.
-fn valid_rates(device: &Device, signal: Signal) -> impl Iterator<Item = i64> + '_ {
-    supported_rates(device).filter(move |&rate| channelizer_suits(rate, signal))
+/// A group of channels on one dongle.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct Group {
+    rate: i64,
+    center: i64,
+    /// The deepest any of its channels sits.
+    depth: f64,
 }
 
+/// How deep a channel at `freq` sits in the band of `center` and `rate`.
 #[allow(clippy::cast_precision_loss)]
-fn channelizer_suits(rate: i64, signal: Signal) -> bool {
-    use trunk_channelizer::{NARROW, WIDE};
-    trunk_channelizer::Config::standard(rate as f64).is_ok_and(|c| {
-        c.is_fast()
-            && c.is_exact(match signal {
-                Signal::Digital => NARROW,
-                Signal::Analog => WIDE,
-            })
-    })
+fn depth(freq: i64, center: i64, rate: i64) -> f64 {
+    ((freq - center).abs() + CHANNEL_HALFWIDTH) as f64 / (rate as f64 / 2.0)
 }
 
-/// Every sample rate a device supports.
-fn supported_rates(device: &Device) -> impl Iterator<Item = i64> + '_ {
-    device.sample_rates.iter().flat_map(move |sr| {
-        let mul = device.rate_multiple;
-        match *sr {
-            SampleRate::Exact(v) => {
-                let lo_mult = v / mul;
-                let hi_mult = lo_mult;
-                (lo_mult..=hi_mult)
-                    .map(move |m| m * mul)
-                    .filter(move |&r| r == v)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-            }
-            SampleRate::Range(lo, hi) => {
-                let lo_mult = (lo + mul - 1) / mul; // ceil division
-                let hi_mult = hi / mul;
-                (lo_mult..=hi_mult)
-                    .map(move |m| m * mul)
-                    .collect::<Vec<_>>()
-                    .into_iter()
-            }
+/// The cheapest rate, and the centre for it, with which one dongle holds
+/// every site of `group` within `cap` of Nyquist and its centre
+/// [`CENTER_CLEARANCE`] off them all.
+#[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+fn best_group(rates: &Rates, group: &[Site], cap: f64) -> Option<Group> {
+    let (lo, hi) = (group[0].freq, group[group.len() - 1].freq);
+    let mid = i64::midpoint(lo, hi);
+    let analog = group.iter().any(|s| s.analog);
+    let digital = group.iter().any(|s| s.digital);
+    for &(rate, ok_analog, ok_digital) in &rates.0 {
+        if (analog && !ok_analog) || (digital && !ok_digital) {
+            continue;
         }
-    })
-}
-
-/// The `[recorder] max_channels` that lets every channel `sources` cover be
-/// open at once: control, voice and conventional channels alike, each
-/// frequency once however many sources cover it.
-#[must_use]
-pub fn max_channels(channels: &[Channel], sources: &[Source]) -> usize {
-    channels
-        .iter()
-        .filter(|c| {
-            sources.iter().any(|s| {
-                let guard = roll_off_guard(s.rate);
-                let lower = s.center - s.rate / 2 + guard;
-                let upper = s.center + s.rate / 2 - guard;
-                (lower..=upper).contains(&c.frequency)
-            })
-        })
-        .map(|c| c.frequency)
-        .collect::<std::collections::BTreeSet<_>>()
-        .len()
-}
-
-pub fn solve(channels: &[Channel], devices: &[Device]) -> Result<Vec<Source>> {
-    let opt = z3::Optimize::new();
-
-    let problem = build_problem(&opt, channels, devices);
-
-    if opt.check(&[]) != z3::SatResult::Sat {
-        bail!("No valid assignment possible, add more devices");
-    }
-
-    // Iteratively eliminate devices from highest to lowest index.
-    // Each successful elimination keeps its constraint (no pop).
-    // On failure, pop and stop.
-    for r in problem.ranges.iter().rev() {
-        opt.push();
-        opt.assert(&r.eq(Int::from_i64(0)));
-        if opt.check(&[]) != z3::SatResult::Sat {
-            opt.pop();
-            break;
+        // every channel within `reach` of the centre
+        let reach = (cap * rate as f64 / 2.0).floor() as i64 - CHANNEL_HALFWIDTH;
+        let (first, last) = (hi - reach, lo + reach);
+        if first > last {
+            continue;
         }
-    }
-
-    // Minimize sum of ranges
-    let sum_ranges: Int = problem.ranges.iter().sum();
-    opt.minimize(&sum_ranges);
-
-    // Minimize sum of lower frequencies for deterministic results
-    let sum_lower: Int = problem.lower_freq.iter().sum();
-    opt.minimize(&sum_lower);
-
-    let sat = opt.check(&[]);
-    if sat != z3::SatResult::Sat {
-        bail!("Optimization failed: {sat:?}");
-    }
-
-    let model = opt
-        .get_model()
-        .ok_or_else(|| anyhow::anyhow!("Failed to get model"))?;
-
-    extract_sources(&model, &problem, devices)
-}
-
-fn extract_sources(
-    model: &z3::Model,
-    problem: &Problem,
-    devices: &[Device],
-) -> Result<Vec<Source>> {
-    let mut sources = Vec::new();
-
-    for (i, ((l, u), device)) in problem
-        .lower_freq
-        .iter()
-        .zip(problem.upper_freq.iter())
-        .zip(devices.iter())
-        .enumerate()
-    {
-        let lower = model
-            .eval(l, true)
-            .and_then(|v| v.as_i64())
-            .ok_or_else(|| anyhow::anyhow!("Failed to evaluate lower_{i}"))?;
-        let upper = model
-            .eval(u, true)
-            .and_then(|v| v.as_i64())
-            .ok_or_else(|| anyhow::anyhow!("Failed to evaluate upper_{i}"))?;
-
-        if lower != upper {
-            let rate = upper - lower;
-            sources.push(Source {
-                center: i64::midpoint(upper, lower),
+        // the allowed centre nearest the middle: the middle, or the edge of
+        // the zone around a channel that holds it
+        let allowed = |c: i64| {
+            (first..=last).contains(&c)
+                && group.iter().all(|s| (s.freq - c).abs() >= CENTER_CLEARANCE)
+        };
+        let center = std::iter::once(mid)
+            .chain(
+                group
+                    .iter()
+                    .flat_map(|s| [s.freq - CENTER_CLEARANCE, s.freq + CENTER_CLEARANCE]),
+            )
+            .filter(|&c| allowed(c))
+            .min_by_key(|&c| ((c - mid).abs(), c));
+        if let Some(center) = center {
+            let depth = group
+                .iter()
+                .map(|s| depth(s.freq, center, rate))
+                .fold(0.0, f64::max);
+            return Some(Group {
                 rate,
-                ppm: device.ppm,
-                driver: device.driver.clone(),
-                device: device.device_template.replace("{}", &i.to_string()),
-                error: 0,
+                center,
+                depth,
             });
         }
     }
+    None
+}
 
-    eprintln!("Devices required: {}", sources.len());
-    Ok(sources)
+/// What a plan costs, compared in this order: alternates left out, total
+/// rate, how deep the channels sit, how far the dongles move from where they
+/// are now.
+type Cost = (u32, i64, i64, i64);
+
+#[derive(Clone, Copy)]
+enum Back {
+    Skip,
+    Group {
+        mask: usize,
+        from: usize,
+        device: usize,
+        group: Group,
+    },
+}
+
+type Table = Vec<Vec<Option<(Cost, Back)>>>;
+
+/// Keep `cost` at `(mask, i)` if it beats what is there.
+fn offer(best: &mut Table, (mask, i): (usize, usize), cost: Cost, back: Back) {
+    if best[mask][i].is_none_or(|(c, _)| cost < c) {
+        best[mask][i] = Some((cost, back));
+    }
+}
+
+struct Found {
+    skipped: u32,
+    groups: Vec<(usize, Group)>,
+}
+
+/// The best way to cover `sites` with `devices` holding every channel within
+/// `cap`, or `None`.
+#[allow(clippy::cast_possible_truncation)]
+fn search(sites: &[Site], devices: &[Device], rates: &[Rates], cap: f64) -> Option<Found> {
+    let (n, d) = (sites.len(), devices.len());
+    // the group of sites[i..j] on each device
+    let mut groups: Vec<Option<Group>> = vec![None; d * n * (n + 1)];
+    let at = |dev: usize, i: usize, j: usize| (dev * n + i) * (n + 1) + j;
+    for (dev, r) in rates.iter().enumerate() {
+        for i in 0..n {
+            for j in i + 1..=n {
+                groups[at(dev, i, j)] = best_group(r, &sites[i..j], cap);
+            }
+        }
+    }
+
+    let masks = 1usize << d;
+    let mut best: Table = vec![vec![None; n + 1]; masks];
+    best[0][0] = Some(((0, 0, 0, 0), Back::Skip));
+    for mask in 0..masks {
+        for i in 0..=n {
+            let Some((cost, _)) = best[mask][i] else {
+                continue;
+            };
+            if i < n && sites[i].skippable {
+                offer(
+                    &mut best,
+                    (mask, i + 1),
+                    (cost.0 + 1, cost.1, cost.2, cost.3),
+                    Back::Skip,
+                );
+            }
+            for dev in (0..d).filter(|dev| mask & (1 << dev) == 0) {
+                for j in i + 1..=n {
+                    let Some(g) = groups[at(dev, i, j)] else {
+                        continue;
+                    };
+                    let away = devices[dev]
+                        .near
+                        .map_or(0, |near| (g.center - near).abs() / 1000);
+                    let next = (
+                        cost.0,
+                        cost.1 + g.rate,
+                        cost.2 + (g.depth * 1000.0).round() as i64,
+                        cost.3 + away,
+                    );
+                    offer(
+                        &mut best,
+                        (mask | (1 << dev), j),
+                        next,
+                        Back::Group {
+                            mask,
+                            from: i,
+                            device: dev,
+                            group: g,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    let (mut mask, (cost, _)) = (0..masks)
+        .filter_map(|m| best[m][n].map(|b| (m, b)))
+        .min_by_key(|&(_, (c, _))| c)?;
+    let mut found = Found {
+        skipped: cost.0,
+        groups: Vec::new(),
+    };
+    let mut i = n;
+    while i > 0 || mask != 0 {
+        match best[mask][i].map(|(_, b)| b)? {
+            Back::Skip => i -= 1,
+            Back::Group {
+                mask: prev,
+                from,
+                device,
+                group,
+            } => {
+                found.groups.push((device, group));
+                (mask, i) = (prev, from);
+            }
+        }
+    }
+    found.groups.sort_by_key(|&(device, _)| device);
+    Some(found)
+}
+
+/// The margins to try: the one asked for, then looser by 0.05 up to the
+/// roll-off.
+fn margins(asked: f64) -> Vec<f64> {
+    let top = passband::USABLE;
+    let mut v = vec![asked.min(top)];
+    v.extend(
+        (1..)
+            .map(|step| asked + 0.05 * f64::from(step))
+            .take_while(|&m| m < top - 1e-9),
+    );
+    if v.last().is_none_or(|&last| last < top) {
+        v.push(top);
+    }
+    v
+}
+
+/// Plan the sources for `channels` on `devices`.
+///
+/// The plan leaves out the fewest alternate control channels, at the tightest
+/// margin from [`Options::margin`] up to the roll-off that covers the rest,
+/// with the least total sample rate, and every dongle that helps in use.
+///
+/// # Errors
+/// If the primary channels cannot all be covered, even at the roll-off limit.
+pub fn plan(channels: &[Channel], devices: &[Device], options: &Options) -> Result<Plan> {
+    let sites = sites(channels);
+    if sites.is_empty() {
+        bail!("No channels to cover");
+    }
+    let rates: Vec<Rates> = devices.iter().map(Rates::of).collect();
+    let mut chosen = None;
+    for margin in margins(options.margin) {
+        let Some(found) = search(&sites, devices, &rates, margin) else {
+            continue;
+        };
+        let done = found.skipped == 0;
+        chosen = Some((margin, found));
+        if done {
+            break;
+        }
+    }
+    let Some((margin, found)) = chosen else {
+        bail!("No valid assignment possible, add more devices");
+    };
+
+    let sources: Vec<Source> = found
+        .groups
+        .iter()
+        .map(|&(i, g)| Source {
+            center: g.center,
+            rate: g.rate,
+            ppm: devices[i].ppm,
+            driver: devices[i].driver.clone(),
+            device: devices[i].device_template.replace("{}", &i.to_string()),
+            error: 0,
+        })
+        .collect();
+    let placements = channels
+        .iter()
+        .map(|c| Placement {
+            channel: c.clone(),
+            carried: sources
+                .iter()
+                .enumerate()
+                .map(|(n, s)| (n, depth(c.frequency, s.center, s.rate)))
+                .filter(|&(_, d)| d <= 1.0)
+                .min_by(|a, b| a.1.total_cmp(&b.1)),
+        })
+        .collect();
+    Ok(Plan {
+        sources,
+        margin,
+        placements,
+    })
+}
+
+/// [`plan`] with the default [`Options`], keeping only the sources.
+///
+/// # Errors
+/// As [`plan`].
+pub fn solve(channels: &[Channel], devices: &[Device]) -> Result<Vec<Source>> {
+    Ok(plan(channels, devices, &Options::default())?.sources)
 }
 
 #[cfg(test)]
@@ -346,6 +453,161 @@ mod tests {
         let upper = centre + rate / 2 - roll_off_guard(rate) - CHANNEL_HALFWIDTH;
         assert!(774_681_250 > upper);
         assert!(774_406_250 <= upper);
+    }
+
+    /// The channels of config.toml on 2026-10-21: 19 digital in two P25
+    /// systems and two conventional analog.
+    fn live_channels() -> Vec<Channel> {
+        let digital = |f: i64, tag| Channel {
+            frequency: f,
+            signal: Signal::Digital,
+            tag,
+            system: None,
+        };
+        let alt = Some(Tag::Alternate);
+        let pri = Some(Tag::Primary);
+        let mut channels = vec![
+            digital(772_031_250, alt),
+            digital(772_406_250, alt),
+            digital(772_706_250, alt),
+            digital(773_481_250, pri),
+            digital(771_856_250, alt),
+            digital(772_156_250, alt),
+            digital(772_306_250, pri),
+            digital(772_456_250, alt),
+        ];
+        channels.extend(
+            [
+                770_306_250,
+                771_281_250,
+                771_431_250,
+                771_581_250,
+                771_881_250,
+                772_606_250,
+                772_906_250,
+                773_181_250,
+                773_931_250,
+                774_406_250,
+                774_681_250,
+            ]
+            .map(|f| digital(f, None)),
+        );
+        channels.extend([488_337_500, 489_087_500].map(|f| Channel {
+            frequency: f,
+            signal: Signal::Analog,
+            tag: None,
+            system: None,
+        }));
+        channels
+    }
+
+    fn total_rate(sources: &[Source]) -> i64 {
+        sources.iter().map(|s| s.rate).sum()
+    }
+
+    #[test]
+    fn four_dongles_hold_every_live_channel_to_the_margin() {
+        let devices = vec![Device::rtlsdr(); 4];
+        let channels = live_channels();
+        let plan = plan(&channels, &devices, &Options::default()).expect("a plan");
+        assert!((plan.margin - 0.70).abs() < 1e-9, "{}", plan.margin);
+        assert_eq!(plan.sources.len(), 4);
+        for p in &plan.placements {
+            let (_, depth) = p.carried.expect("every channel is carried");
+            assert!(depth <= 0.70 + 1e-9, "{} at {depth}", p.channel.frequency);
+        }
+        assert_eq!(plan.uncovered().count(), 0);
+        // no more sample rate than the three wide sources it replaces
+        assert!(total_rate(&plan.sources) <= 5_952_000, "{:?}", plan.sources);
+        // the lone channel 1 MHz below the rest gets the narrowest dongle
+        assert!(plan.sources.iter().any(|s| s.rate == 240_000));
+    }
+
+    #[test]
+    fn no_centre_sits_on_a_channel_or_its_dc_spike() {
+        let plan = plan(
+            &live_channels(),
+            &vec![Device::rtlsdr(); 4],
+            &Options::default(),
+        )
+        .expect("a plan");
+        for s in &plan.sources {
+            for c in live_channels() {
+                assert!(
+                    (c.frequency - s.center).abs() >= CENTER_CLEARANCE,
+                    "centre {} is {} Hz from {}",
+                    s.center,
+                    (c.frequency - s.center).abs(),
+                    c.frequency
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn three_dongles_cannot_hold_the_margin_so_the_plan_gives_up_an_alternate_not_a_primary() {
+        let devices = vec![Device::rtlsdr(); 3];
+        let channels = live_channels();
+        let plan = plan(&channels, &devices, &Options::default()).expect("a plan");
+        assert_eq!(plan.sources.len(), 3);
+        // the margin loosened to the roll-off limit before anything was dropped
+        assert!(
+            (plan.margin - passband::USABLE).abs() < 1e-9,
+            "{}",
+            plan.margin
+        );
+        assert!(plan.uncovered().next().is_some());
+        for c in plan.uncovered() {
+            assert_eq!(c.tag, Some(Tag::Alternate), "{}", c.frequency);
+        }
+        for p in &plan.placements {
+            if p.channel.tag != Some(Tag::Alternate) {
+                let (_, d) = p.carried.expect("carried");
+                assert!(
+                    d <= passband::USABLE + 1e-9,
+                    "{} at {d}",
+                    p.channel.frequency
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_looser_margin_costs_less_sample_rate() {
+        let devices = vec![Device::rtlsdr(); 4];
+        let at = |margin| {
+            let plan = plan(&live_channels(), &devices, &Options { margin }).unwrap();
+            total_rate(&plan.sources)
+        };
+        assert!(at(0.85) < at(0.70));
+        assert!(at(0.70) < at(0.60));
+    }
+
+    #[test]
+    fn dongles_stay_where_they_are_when_the_plans_tie() {
+        // three identical dongles, one placed near each of three far-apart
+        // channels: any assignment costs the same, so each keeps its own
+        let channel = |f| Channel {
+            frequency: f,
+            signal: Signal::Digital,
+            tag: None,
+            system: None,
+        };
+        let channels = [770_000_000, 780_000_000, 790_000_000].map(channel);
+        let mut devices = vec![Device::rtlsdr(); 3];
+        for (device, near) in devices
+            .iter_mut()
+            .zip([790_000_000, 770_000_000, 780_000_000])
+        {
+            device.near = Some(near);
+        }
+        let sources = solve(&channels, &devices).unwrap();
+        let near = |s: &Source| (s.center + 5_000_000) / 10_000_000;
+        assert_eq!(
+            sources.iter().map(near).collect::<Vec<_>>(),
+            [79, 77, 78],
+            "{sources:?}"
+        );
     }
 
     #[test]

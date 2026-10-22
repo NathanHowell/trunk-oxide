@@ -33,8 +33,13 @@ impl SolverConfig {
             .source
             .iter()
             .map(|s| {
-                Device::from_source_config(&s.device, hz(s.ppm))
-                    .ok_or_else(|| anyhow::anyhow!("Unknown device type: {}", s.device))
+                let mut device = Device::from_source_config(&s.device, hz(s.ppm))
+                    .ok_or_else(|| anyhow::anyhow!("Unknown device type: {}", s.device))?;
+                // the dongle by its own name, not its place in the list, and
+                // where it sits now
+                device.device_template.clone_from(&s.device);
+                device.near = Some(hz(s.center));
+                Ok(device)
             })
             .collect()
     }

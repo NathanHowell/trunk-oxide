@@ -109,7 +109,6 @@ parakeet-rs = { git = "https://github.com/altunenes/parakeet-rs.git", rev = "5a4
 clap = { version = "4", features = ["derive"] }
 argfile = "0.2"
 wild = "2"
-z3 = { version = "0.19", features = ["gh-release"] }
 csv = "1"
 rusqlite = { version = "0.34", features = ["bundled"] }
 sha2 = "0.10"

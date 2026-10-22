@@ -8,6 +8,11 @@ pub mod solver;
 #[allow(clippy::cast_possible_truncation)]
 pub const CHANNEL_HALFWIDTH: i64 = trunk_channelizer::passband::CHANNEL_HALF_WIDTH_HZ as i64;
 
+/// How far a source's centre must stay from the middle of any channel: the
+/// channel's half width plus the dongle's DC spike, a few kHz either side of
+/// the centre that a channel on it would be smeared by.
+pub const CENTER_CLEARANCE: i64 = CHANNEL_HALFWIDTH + 5_000;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Signal {
     Analog,

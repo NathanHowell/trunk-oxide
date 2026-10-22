@@ -5,7 +5,7 @@ use clap::Parser;
 
 use trunk_solver::config::SolverConfig;
 use trunk_solver::device::Device;
-use trunk_solver::solver::solve;
+use trunk_solver::solver::{Options, plan};
 
 #[derive(Parser)]
 #[command(about = "Optimally assign SDR devices to cover radio frequencies")]
@@ -22,8 +22,14 @@ struct Cli {
     /// Number of devices (only when a single device type is specified)
     #[arg(long = "count")]
     count: Option<usize>,
+
+    /// How deep in a source's band a channel may sit, as a share of Nyquist.
+    /// Loosened toward the roll-off (0.85) when it cannot cover every channel.
+    #[arg(long, default_value_t = Options::default().margin)]
+    margin: f64,
 }
 
+#[allow(clippy::cast_precision_loss)]
 fn main() -> Result<()> {
     let cli = Cli::parse();
 
@@ -55,9 +61,42 @@ fn main() -> Result<()> {
             .join(", ")
     );
 
-    let sources = solve(&channels, &devices)?;
+    let plan = plan(&channels, &devices, &Options { margin: cli.margin })?;
+    let sources = &plan.sources;
 
-    for source in &sources {
+    eprintln!(
+        "\nMargin {:.2} (asked {:.2}); depth is the share of Nyquist a channel's far edge reaches:",
+        plan.margin, cli.margin
+    );
+    for p in &plan.placements {
+        let tag = match p.channel.tag {
+            Some(trunk_solver::Tag::Primary) => " [primary]",
+            Some(trunk_solver::Tag::Alternate) => " [alternate]",
+            None => "",
+        };
+        match p.carried {
+            Some((n, d)) => eprintln!(
+                "  {:>11.5} MHz  source {n}  depth {d:.2}{}{tag}",
+                p.channel.frequency as f64 / 1e6,
+                if d > trunk_channelizer::passband::USABLE {
+                    "  IN THE ROLL-OFF"
+                } else {
+                    ""
+                },
+            ),
+            None => eprintln!(
+                "  {:>11.5} MHz  NOT COVERED{tag}",
+                p.channel.frequency as f64 / 1e6
+            ),
+        }
+    }
+    eprintln!(
+        "Total {:.3} MS/s on {} device(s)\n",
+        sources.iter().map(|s| s.rate).sum::<i64>() as f64 / 1e6,
+        sources.len()
+    );
+
+    for source in sources {
         println!(
             "center={}.{:06} MHz  rate={}  device={}",
             source.center / 1_000_000,
@@ -68,7 +107,7 @@ fn main() -> Result<()> {
     }
     println!(
         "[recorder] max_channels = {}",
-        trunk_solver::solver::max_channels(&channels, &sources)
+        trunk_solver::solver::max_channels(&channels, sources)
     );
 
     Ok(())

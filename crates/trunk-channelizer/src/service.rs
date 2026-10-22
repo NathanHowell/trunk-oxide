@@ -52,6 +52,9 @@ pub struct ConditioningSpec {
     pub out_rate: f64,
     /// Power squelch before the AGC.
     pub squelch: Option<SquelchMode>,
+    /// Run the AGC and FLL. A decoder that reads the carrier offset itself
+    /// (see [`ChannelDecoder::freq_error_hz`]) turns them off.
+    pub carrier_lock: bool,
 }
 
 /// Consumes a slot's conditioned output on the DSP thread.
@@ -69,6 +72,13 @@ pub trait ChannelDecoder: Send + std::fmt::Debug {
     /// One block of the slot's conditioned output, with what the
     /// conditioner measured on it.
     fn process(&mut self, iq: &[Complex32], reading: &Reading, out: &mut Self::Output);
+    /// The carrier's offset from the slot's tuning as the decoder measured
+    /// it (Hz, signed like the FLL's: a carrier below the tuning is
+    /// positive), for a slot that does not run the FLL. `None` leaves the
+    /// conditioner's reading.
+    fn freq_error_hz(&self) -> Option<i32> {
+        None
+    }
     /// A command from the control side.
     fn command(&mut self, _cmd: Self::Command) {}
     /// The slot was retuned to another channel: drop timing and lock state.
@@ -156,6 +166,10 @@ impl SlotStats {
     }
 
     /// Queue a block's squelch transitions for [`Self::next_event`].
+    fn set_freq_error_hz(&self, hz: i32) {
+        self.freq_error_hz.store(hz, Ordering::Relaxed);
+    }
+
     fn record_events(&self, ev: impl Iterator<Item = SquelchEvent>) {
         let mut ev = ev.peekable();
         if ev.peek().is_some() {
@@ -681,6 +695,9 @@ impl<O, C: Send> SharedChannelizer<O, C> {
             };
             if let Some(d) = s.decoder.as_mut() {
                 d.process(&dst[..n], &reading, decoded);
+                if let (Some(hz), Some((_, _, stats))) = (d.freq_error_hz(), s.cond.as_ref()) {
+                    stats.set_freq_error_hz(hz);
+                }
             }
             Some(n)
         };
@@ -715,6 +732,7 @@ impl<O, C: Send> SharedChannelizer<O, C> {
 fn build_conditioner(spec: &ConditioningSpec, params: ConditionerParams) -> Conditioner {
     #[allow(clippy::cast_possible_truncation)]
     let mut c = Conditioner::new(spec.sps, spec.excess_bw, params)
+        .with_carrier_lock(spec.carrier_lock)
         .with_resampler((spec.out_rate / spec.in_rate) as f32);
     if let Some(m) = spec.squelch {
         // callback_pwr_squelch_cc starts at 0 dB until the recorder sets it
@@ -846,6 +864,7 @@ mod tests {
                 in_rate: cfg.out_rate(NARROW),
                 out_rate: cfg.out_rate(NARROW),
                 squelch: None,
+                carrier_lock: true,
             },
         );
         sc.set_slot_decoder(1, Some(Box::new(Count(std::sync::Arc::clone(&blocks)))));
@@ -936,6 +955,7 @@ mod tests {
                 in_rate: cfg.out_rate(NARROW),
                 out_rate: cfg.out_rate(NARROW),
                 squelch: None,
+                carrier_lock: true,
             },
         );
         sc.set_slot(0, NARROW, 50_000.0);
@@ -968,6 +988,7 @@ mod tests {
                 in_rate,
                 out_rate: 96_000.0,
                 squelch: Some(SquelchMode::ANALOG),
+                carrier_lock: true,
             },
         );
         sc.set_slot_squelch_db(0, -40.0);

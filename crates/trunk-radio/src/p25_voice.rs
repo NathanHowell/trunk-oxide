@@ -48,6 +48,7 @@ pub(crate) fn p25_conditioning(
         in_rate: cfg.out_rate(NARROW),
         out_rate: NARROW_RATE,
         squelch: squelch.then_some(SquelchMode::DIGITAL),
+        carrier_lock: true,
     }
 }
 

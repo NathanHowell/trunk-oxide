@@ -61,10 +61,17 @@ pub struct Audio {
     pub raw: Vec<f32>,
     /// The recording: `raw` through the 300–3250 Hz band-pass.
     pub voice: Vec<f32>,
+    /// What the discriminator put out, before de-emphasis: its sum (1.0 is
+    /// [`MAX_DEV_HZ`] of deviation) and sample count. A carrier off the
+    /// tuning is the mean of it, as speech and tones have none.
+    pub discriminator_sum: f64,
+    pub discriminator_len: u64,
 }
 
 impl Audio {
     pub fn clear(&mut self) {
+        self.discriminator_sum = 0.0;
+        self.discriminator_len = 0;
         self.raw.clear();
         self.voice.clear();
     }
@@ -136,6 +143,8 @@ impl FmDemod {
     pub fn process(&mut self, iq: &[Complex32], audio: &mut Audio) {
         self.scratch.clear();
         self.demod.process(iq, &mut self.scratch);
+        audio.discriminator_sum += self.scratch.iter().map(|&v| f64::from(v)).sum::<f64>();
+        audio.discriminator_len += self.scratch.len() as u64;
         self.deemph.process(&mut self.scratch);
         let raw_start = audio.raw.len();
         self.decim.process(&self.scratch, &mut audio.raw);

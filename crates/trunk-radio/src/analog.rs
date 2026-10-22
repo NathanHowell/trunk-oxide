@@ -79,6 +79,9 @@ impl Kind for AnalogFm {
                 out_rate: WIDE_RATE,
                 // trunk-fm's own gate decides; the power probe still runs.
                 squelch: None,
+                // The discriminator reads the carrier offset (see
+                // `AnalogFmChannel::freq_error_hz`) and ignores amplitude.
+                carrier_lock: false,
             },
             filter: Some((f64::from(at.system.max_dev), BANDWIDTH_HZ / 2.0)),
             squelch_db: None,
@@ -125,6 +128,7 @@ impl Kind for AnalogFm {
             levels: at.system.analog_levels as f32,
             denoise: at.system.noise_suppression.map(Denoiser::new),
             cleaned: Vec::new(),
+            carrier: Carrier::default(),
         })
     }
 }
@@ -132,6 +136,69 @@ impl Kind for AnalogFm {
 #[allow(clippy::cast_possible_truncation)]
 fn level(s: f32, k: f32) -> i16 {
     (s * k * 32767.0).round().clamp(-32768.0, 32767.0) as i16
+}
+
+/// The carrier's offset from the tuning, read off the discriminator over the
+/// hops that have a carrier in them: speech and tones average to nothing, so
+/// what is left is the carrier. It replaces the FLL, which at 2 samples per symbol looks at
+/// frequencies well outside a 12.5 kHz channel; against the same calls its
+/// readings spread four times as far.
+#[derive(Debug, Default)]
+struct Carrier {
+    /// The discriminator output since the last hop was judged, 1.0 being
+    /// the demodulator's full deviation.
+    pending: (f64, u64),
+    /// Its sum and length over the carrier hops of this transmission.
+    sum: f64,
+    len: u64,
+    /// The last transmission's reading, kept until the next one has enough
+    /// samples to replace it.
+    held: Option<i32>,
+}
+
+impl Carrier {
+    /// Samples (0.25 s) before a mean is worth reading.
+    const MIN_LEN: u64 = 24_000;
+
+    /// A block's discriminator output.
+    const fn block(&mut self, sum: f64, len: u64) {
+        self.pending.0 += sum;
+        self.pending.1 += len;
+    }
+
+    /// A hop was measured: what came since the last one counts if it had a
+    /// carrier. Without one, and with no transmission going on (`keep`
+    /// false), what was gathered was noise and starts over; the gate lags
+    /// the carrier, so inside a transmission a quiet hop only adds nothing.
+    const fn hop(&mut self, carrier: bool, keep: bool) {
+        if carrier {
+            self.sum += self.pending.0;
+            self.len += self.pending.1;
+        } else if !keep {
+            self.sum = 0.0;
+            self.len = 0;
+        }
+        self.pending = (0.0, 0);
+    }
+
+    /// The reading so far, if enough: the FLL's sign, positive when the
+    /// carrier is below the tuning.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_precision_loss)]
+    fn now(&self) -> Option<i32> {
+        (self.len >= Self::MIN_LEN)
+            .then(|| (-self.sum / self.len as f64 * trunk_fm::MAX_DEV_HZ).round() as i32)
+    }
+
+    fn error_hz(&self) -> Option<i32> {
+        self.now().or(self.held)
+    }
+
+    /// The transmission is over.
+    fn end(&mut self) {
+        self.held = self.error_hz();
+        self.sum = 0.0;
+        self.len = 0;
+    }
 }
 
 /// An analog channel's decoder, recording one call.
@@ -170,6 +237,7 @@ pub struct AnalogFmChannel {
     /// Noise suppression on the gated voice, when the system asks for it.
     denoise: Option<Denoiser>,
     cleaned: Vec<f32>,
+    carrier: Carrier,
 }
 
 impl std::fmt::Debug for AnalogFmChannel {
@@ -187,9 +255,15 @@ impl ChannelDecoder for AnalogFmChannel {
     fn process(&mut self, iq: &[Complex32], reading: &Reading, out: &mut Decoded) {
         self.audio.clear();
         self.demod.process(iq, &mut self.audio);
+        self.carrier
+            .block(self.audio.discriminator_sum, self.audio.discriminator_len);
         self.measurements.clear();
         self.detector
             .process(&self.audio.raw, &mut self.measurements);
+        for m in &self.measurements {
+            let carrier = m.quieting_db >= self.gate.config().close_db;
+            self.carrier.hop(carrier, self.gate.is_open());
+        }
         let fresh = self.voice_pending.len();
         self.voice_pending.extend_from_slice(&self.audio.voice);
         // Bursts already read reach on into audio that has only now come
@@ -233,7 +307,10 @@ impl ChannelDecoder for AnalogFmChannel {
         for e in &self.gate_events {
             let squelch = match e {
                 GateEvent::Open { .. } => Squelch::Open,
-                GateEvent::Close { reason, .. } => Squelch::Close((*reason).into()),
+                GateEvent::Close { reason, .. } => {
+                    self.carrier.end();
+                    Squelch::Close((*reason).into())
+                }
             };
             out.events.push(RadioEvent::Squelch {
                 call_id: self.call,
@@ -285,7 +362,12 @@ impl ChannelDecoder for AnalogFmChannel {
         }
     }
 
+    fn freq_error_hz(&self) -> Option<i32> {
+        self.carrier.error_hz()
+    }
+
     fn retune(&mut self) {
+        self.carrier = Carrier::default();
         self.demod.reset();
         self.detector.reset();
         for tap in &mut self.taps {
@@ -347,6 +429,8 @@ mod tests {
         pcm: Vec<i16>,
         /// What blanking the signalling came to.
         muted: Vec<Muted>,
+        /// The channel's reading of the carrier's offset when it was over.
+        freq_error_hz: i32,
     }
 
     fn record_one_transmission(
@@ -370,6 +454,22 @@ mod tests {
         noise_suppression: Option<crate::NoiseSuppression>,
         port: usize,
         burst: Option<&[f32]>,
+    ) -> Transmitted {
+        transmit_off(noise_suppression, port, burst, 0.0)
+    }
+
+    /// [`transmit`] with the carrier `offset_hz` above the slot's tuning.
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        clippy::too_many_lines
+    )]
+    fn transmit_off(
+        noise_suppression: Option<crate::NoiseSuppression>,
+        port: usize,
+        burst: Option<&[f32]>,
+        offset_hz: f64,
     ) -> Transmitted {
         let cfg = trunk_channelizer::Config::standard(912_000.0).unwrap();
         let chz: Chz = SharedChannelizer::new(cfg.clone()).unwrap();
@@ -450,7 +550,7 @@ mod tests {
                         }
                         None => 2_000.0 * (std::f64::consts::TAU * 800.0 * t).sin(),
                     };
-                phase += std::f64::consts::TAU * (100_000.0 + m) / rate;
+                phase += std::f64::consts::TAU * (100_000.0 + offset_hz + m) / rate;
             } else {
                 phase += std::f64::consts::TAU * f64::from(rnd() - 0.5);
             }
@@ -514,6 +614,7 @@ mod tests {
             events,
             pcm: recorded,
             muted,
+            freq_error_hz: chz.slot_freq_error_hz(port),
         }
     }
 
@@ -522,6 +623,41 @@ mod tests {
         let plain = record_one_transmission(None, 1);
         // about 2 s of 16 kHz audio came out under the call id
         assert!((28_000..=36_000).contains(&plain), "{plain}");
+    }
+
+    #[test]
+    fn an_analog_channel_reads_its_carriers_offset_from_the_discriminator() {
+        // a carrier 120 Hz above the tuning reads as the FLL would: -120
+        let above = transmit_off(None, 10, None, 120.0).freq_error_hz;
+        assert!((-130..=-110).contains(&above), "{above}");
+        let below = transmit_off(None, 11, None, -75.0).freq_error_hz;
+        assert!((65..=85).contains(&below), "{below}");
+    }
+
+    #[test]
+    fn a_carrier_reads_only_once_it_has_enough_samples_and_is_held_after() {
+        let mut c = Carrier::default();
+        assert_eq!(c.error_hz(), None);
+        // 0.1 s at +40 Hz (0.008 of the deviation): too short
+        c.block(0.008 * 9_600.0, 9_600);
+        c.hop(true, false);
+        assert_eq!(c.error_hz(), None);
+        // 0.3 s in, it reads, and the sign is the FLL's
+        c.block(0.008 * 19_200.0, 19_200);
+        c.hop(true, false);
+        assert_eq!(c.error_hz(), Some(-40));
+        // noise inside the transmission adds nothing, whatever it averages to
+        c.block(4_000.0, 96_000);
+        c.hop(false, true);
+        assert_eq!(c.error_hz(), Some(-40));
+        c.end();
+        // the next transmission's first moments do not wipe the reading,
+        // and noise before it never counts
+        c.block(0.5, 100);
+        c.hop(false, false);
+        c.block(0.5, 100);
+        c.hop(true, false);
+        assert_eq!(c.error_hz(), Some(-40));
     }
 
     #[test]

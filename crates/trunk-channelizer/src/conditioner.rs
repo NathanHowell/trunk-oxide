@@ -288,6 +288,8 @@ pub struct Conditioner {
     lower: Fir,
     resampler: Option<ArbResampler>,
     squelch: Option<Squelch>,
+    /// Whether the AGC and FLL run.
+    carrier_lock: bool,
     events: Vec<SquelchEvent>,
     scratch: Vec<Complex32>,
 }
@@ -313,6 +315,7 @@ impl Conditioner {
             lower: Fir::new(lower),
             resampler: None,
             squelch: None,
+            carrier_lock: true,
             events: Vec::new(),
             scratch: Vec::new(),
         };
@@ -332,6 +335,15 @@ impl Conditioner {
     #[must_use]
     pub fn with_squelch(mut self, mode: SquelchMode, threshold_db: f64) -> Self {
         self.squelch = Some(Squelch::new(mode, threshold_db));
+        self
+    }
+
+    /// Run the AGC and FLL (the default), or pass the samples on as the
+    /// resampler and squelch leave them. An FM discriminator wants neither:
+    /// it ignores amplitude and reads a carrier offset as its own mean.
+    #[must_use]
+    pub const fn with_carrier_lock(mut self, on: bool) -> Self {
+        self.carrier_lock = on;
         self
     }
 
@@ -453,14 +465,20 @@ impl Conditioner {
         let n = n.min(out.len());
         out[..n].copy_from_slice(&buf[..n]);
         self.scratch = buf;
-        self.agc_fll(&mut out[..n]);
+        self.lock(&mut out[..n]);
         n
     }
 
     /// Condition `buf` in place (no resampler or squelch).
     pub fn process(&mut self, buf: &mut [Complex32]) {
         self.probe(buf);
-        self.agc_fll(buf);
+        self.lock(buf);
+    }
+
+    fn lock(&mut self, buf: &mut [Complex32]) {
+        if self.carrier_lock {
+            self.agc_fll(buf);
+        }
     }
 
     fn agc_fll(&mut self, buf: &mut [Complex32]) {
@@ -505,6 +523,17 @@ mod tests {
         (0..n)
             .map(|i| Complex32::from_polar(amp, (TAU * f * i as f64 / rate) as f32))
             .collect()
+    }
+
+    #[test]
+    fn without_carrier_lock_the_samples_pass_unchanged_and_the_fll_stays_put() {
+        let mut c = Conditioner::new(2, 0.2, ConditionerParams::default()).with_carrier_lock(false);
+        let x = tone(300.0, 96_000.0, 4_000, 0.03);
+        let mut y = x.clone();
+        c.process(&mut y);
+        assert_eq!(x, y);
+        assert_eq!(c.freq_error_hz(96_000.0), 0);
+        assert!(c.power_db().is_some(), "the probe still runs");
     }
 
     #[test]

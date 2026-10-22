@@ -1,0 +1,37 @@
+# trunk-weather: streams a Tempest weather station into VictoriaMetrics
+# the websocket and HTTP clients use rustls — the binary is statically linked
+#
+# Requires BuildKit (default in modern Docker / `docker buildx`). Cargo's
+# registry, git, and target dirs are persisted across builds via cache mounts,
+# so only changed crates recompile — no per-crate stub scaffolding needed.
+
+FROM rust:trixie AS builder
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libprotobuf-dev \
+    protobuf-compiler \
+    cmake \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+COPY . .
+
+RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry \
+    --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git \
+    --mount=type=cache,target=/build/target,id=target-weather \
+    cargo build --release -p trunk-weather -p trunk-sh \
+    && cp target/release/trunk-weather /usr/local/bin/trunk-weather \
+    && cp target/release/sh /usr/local/bin/trunk-sh
+
+# Runtime — distroless for minimal attack surface.
+FROM ghcr.io/grpc-ecosystem/grpc-health-probe:v0.4.45 AS health-probe
+
+FROM gcr.io/distroless/cc-debian13:nonroot
+
+COPY --from=health-probe /ko-app/grpc-health-probe /usr/local/bin/grpc_health_probe
+COPY --from=builder /usr/local/bin/trunk-weather /usr/local/bin/trunk-weather
+# podman-compose runs every healthcheck through /bin/sh -c; trunk-sh is just enough of one
+COPY --from=builder /usr/local/bin/trunk-sh /bin/sh
+
+ENTRYPOINT ["/usr/local/bin/trunk-weather"]

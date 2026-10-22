@@ -12,6 +12,7 @@ members = [
     "crates/trunk-config",
     "crates/trunk-discord",
     "crates/trunk-monitor",
+    "crates/trunk-weather",
     "crates/trunk-solver",
     "crates/trunk-channelizer",
     "crates/trunk-p25",
@@ -31,6 +32,7 @@ default-members = [
     "crates/trunk-config",
     "crates/trunk-discord",
     "crates/trunk-monitor",
+    "crates/trunk-weather",
     "crates/trunk-solver",
 ]
 
@@ -93,6 +95,8 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
 tokio-stream = "0.1"
+tokio-tungstenite = { version = "0.21", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
+futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 toml = "0.8"
 tower = { version = "0.4", features = ["util"] }
 hyper-util = "0.1"

@@ -3675,6 +3675,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "trunk-weather"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "argfile",
+ "clap",
+ "futures-util",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "pid1",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-stream",
+ "tokio-tungstenite",
+ "tonic",
+ "tonic-health",
+ "tracing",
+ "tracing-subscriber",
+ "wild",
+]
+
+[[package]]
 name = "trunk-whisperer"
 version = "0.1.0"
 dependencies = [

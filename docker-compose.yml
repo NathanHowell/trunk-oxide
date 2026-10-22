@@ -249,6 +249,30 @@ services:
       retries: 3
       start_period: 15s
 
+  # Streams the Tempest weather station into VictoriaMetrics, to line rain and
+  # temperature up with the radio's decode quality. Reports healthy while
+  # observations keep arriving.
+  trunk-weather:
+    restart: unless-stopped
+    build:
+      context: .
+      dockerfile: Dockerfile.weather
+    user: "0:0"
+    volumes:
+      - weather-socket:/run/service
+    secrets:
+      - tempest_token
+    command: ["--tempest-token", "@/run/secrets/tempest_token"]
+    environment:
+      - OTEL_EXPORTER_OTLP_METRICS_ENDPOINT=http://victoriametrics:8428/opentelemetry/api/v1/push
+      - RUST_LOG=info
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/grpc_health_probe", "-addr", "unix:///run/service/grpc.sock"]
+      interval: 5s
+      timeout: 3s
+      retries: 3
+      start_period: 15s
+
   jaeger:
     image: cr.jaegertracing.io/jaegertracing/jaeger:2.15.0
     # Badger storage on a volume (48h TTL) instead of the in-memory default.
@@ -274,6 +298,8 @@ services:
 secrets:
   discord_token:
     file: ./secrets/discord_token
+  tempest_token:
+    file: ./secrets/tempest_token
 
 volumes:
   # trunk-oxide's state across restarts (each dongle's last gain calibration).
@@ -281,6 +307,7 @@ volumes:
   oxide-socket:
   whisperer-socket:
   discord-socket:
+  weather-socket:
   monitor-socket:
   whisper-models:
   parakeet-models:

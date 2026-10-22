@@ -8,14 +8,16 @@ description: Build and deploy trunk-oxide and trunk-discord to the running podma
 Everything is a `just` recipe (see `justfile`); run `just --list`. The stack
 is rootless podman-compose, project `trunk-oxide`, working dir `~/trunk-oxide`.
 Only `trunk-oxide` (recorder, `Dockerfile.trunk-recorder`), `trunk-discord`
-(`Dockerfile.discord`) and `trunk-monitor` (the #monitoring dashboard,
-`Dockerfile.monitor`) carry our code. The transcriber (`trunk-parakeet`, the
+(`Dockerfile.discord`), `trunk-monitor` (the #monitoring dashboard,
+`Dockerfile.monitor`) and `trunk-weather` (the Tempest weather station into
+VictoriaMetrics, `Dockerfile.weather`; needs `secrets/tempest_token`) carry
+our code. The transcriber (`trunk-parakeet`, the
 `parakeet` profile), jaeger and victoriametrics are not touched by a deploy.
 
 ## The deploy
 
 ```
-just deploy                      # snapshot, build, up, verify: all three
+just deploy                      # snapshot, build, up, verify: all four
 just build trunk-monitor         # or just some of them,
 just up trunk-monitor            # so a change to one does not
 just verify trunk-monitor        # take the scanner off the air

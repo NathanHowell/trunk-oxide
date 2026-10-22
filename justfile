@@ -6,7 +6,7 @@
 set shell := ["bash", "-euo", "pipefail", "-c"]
 
 # The services whose images come from this tree.
-services := "trunk-oxide trunk-discord trunk-monitor"
+services := "trunk-oxide trunk-discord trunk-monitor trunk-weather"
 
 # How long `verify` waits for both to report healthy.
 healthy_within := "180"

@@ -603,3 +603,52 @@ pub(crate) fn resolve_channels(
     channels.sort_by_key(|ch| ch.id);
     Ok(channels)
 }
+
+#[cfg(test)]
+mod talkgroup_file_tests {
+    use super::*;
+
+    fn load(name: &str) -> HashMap<i64, TalkgroupConfig> {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(name);
+        load_talkgroups_csv(&path).unwrap_or_else(|e| panic!("{name}: {e:#}"))
+    }
+
+    fn rows(name: &str) -> usize {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .join(name);
+        std::fs::read_to_string(path).unwrap().lines().count() - 1
+    }
+
+    #[test]
+    fn the_checked_in_talkgroup_files_load_every_row() {
+        for name in [
+            "smco-talkgroups.csv",
+            "svrcs-talkgroups.csv",
+            "ebrcs-talkgroups.csv",
+            "cris-talkgroups.csv",
+        ] {
+            assert_eq!(
+                load(name).len(),
+                rows(name),
+                "{name}: a row was lost or duplicated"
+            );
+        }
+    }
+
+    #[test]
+    fn the_scraped_systems_keep_their_encryption() {
+        let ebrcs = load("ebrcs-talkgroups.csv");
+        assert_eq!(
+            ebrcs.values().filter(|t| t.mode.is_encrypted()).count(),
+            180
+        );
+        let cris = load("cris-talkgroups.csv");
+        assert_eq!(cris.values().filter(|t| t.mode.is_encrypted()).count(), 48);
+        // an EBRCS interop talkgroup and Oakland PD dispatch
+        assert_eq!(ebrcs[&1002].alpha_tag, "EB INT 1");
+        assert!(ebrcs[&3405].mode.is_encrypted());
+    }
+}

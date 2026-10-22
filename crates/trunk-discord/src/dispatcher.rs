@@ -354,6 +354,8 @@ impl DispatchPump {
                         system = %call.short_name,
                         freq = call.freq,
                         encrypted = call.encrypted,
+                        discord.channel_id = tracing::field::Empty,
+                        discord.message_id = tracing::field::Empty,
                     );
                     tokio::spawn(run_call(ctx, call, rx, key, dead_call_tx).instrument(span));
                 }

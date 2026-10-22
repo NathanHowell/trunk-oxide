@@ -453,6 +453,11 @@ impl CallHandler {
                     // create bucket, so this is brief.
                     let msg_id = self.writer.send_embed(embed).await?;
                     self.embed_message_id = Some(msg_id);
+                    // The embed and its audio reply are found from the trace by
+                    // these (the audio is a reply to the embed).
+                    let span = tracing::Span::current();
+                    span.record("discord.channel_id", self.post_channel.get());
+                    span.record("discord.message_id", msg_id.get());
                     // Remember the call so a reaction on this embed can be
                     // attributed (ground truth for clipping / lead-in loss).
                     crate::reactions::FLAGS.register(

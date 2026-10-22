@@ -11,7 +11,8 @@
 //!   pages);
 //! - a **warble**: two tones alternating, four or more changes and at least
 //!   four a second;
-//! - a **long tone**: any one tone held more than two seconds.
+//! - a **tone**: one tone on its own for a third of a second or more, or any
+//!   tone held more than two seconds in a longer chain.
 //!
 //! None can be known until it ends, which is after the start of it has gone
 //! into the recording; the span says where it was.
@@ -54,8 +55,11 @@ const MAX_GAP: u64 = 2 * HOP as u64;
 /// Seconds of a two-tone page's first tone and its second.
 const FIRST_TONE_S: (f64, f64) = (0.5, 2.0);
 const SECOND_TONE_S: (f64, f64) = (1.0, 5.0);
-/// Seconds past which one tone is a long tone.
+/// Seconds past which a tone that is part of a longer chain is reported.
 const LONG_TONE_S: f64 = 2.0;
+/// Seconds past which a tone standing alone is reported: shorter is a beep
+/// or a click.
+const LONE_TONE_S: f64 = 0.3;
 /// A warble's changes of tone, in all and per second.
 const WARBLE_CHANGES: usize = 4;
 const WARBLE_CHANGES_PER_S: f64 = 4.0;
@@ -312,12 +316,17 @@ fn read_link(link: &[Segment]) -> Option<Vec<Heard>> {
     if let Some(signal) = warble(link) {
         return Some(vec![heard(signal)]);
     }
+    let least = if link.len() == 1 {
+        LONE_TONE_S
+    } else {
+        LONG_TONE_S
+    };
     let long: Vec<Heard> = link
         .iter()
-        .filter(|seg| seg.seconds() > LONG_TONE_S)
+        .filter(|seg| seg.seconds() >= least)
         .map(|seg| Heard {
             span: seg.start()..seg.last_end,
-            signal: Signal::LongTone {
+            signal: Signal::Tone {
                 dhz: tenths(seg.hz()),
                 ms: (seg.seconds() * 1_000.0).round() as u32,
             },
@@ -442,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn a_page_whose_tones_do_not_follow_on_is_two_long_tones_not_a_page() {
+    fn a_page_whose_tones_do_not_follow_on_is_two_tones_not_a_page() {
         let audio = play(
             &[
                 sine(600.0, 0.4, 1.0),
@@ -456,17 +465,22 @@ mod tests {
             .iter()
             .map(|s| s.scheme())
             .collect();
-        assert_eq!(kinds, ["long_tone"]);
+        assert_eq!(kinds, ["tone", "tone"]);
     }
 
     #[test]
-    fn a_tone_held_longer_than_two_seconds_is_a_long_tone_and_a_shorter_one_is_not() {
+    fn a_tone_on_its_own_is_reported_from_a_third_of_a_second_and_a_blip_is_not() {
         let held = run(&play(&[sine(1_000.0, 0.4, 3.0)], 0.3, 0.3), 1_600);
-        let [Signal::LongTone { dhz, ms }] = signals(&held)[..] else {
+        let [Signal::Tone { dhz, ms }] = signals(&held)[..] else {
             panic!("{held:?}")
         };
         assert!(near(dhz, 10_000, 20) && near(ms, 3_000, 100), "{dhz} {ms}");
-        assert!(run(&play(&[sine(1_000.0, 0.4, 1.5)], 0.3, 0.3), 1_600).is_empty());
+        let short = run(&play(&[sine(1_000.0, 0.4, 0.65)], 0.3, 0.3), 1_600);
+        let [Signal::Tone { dhz, ms }] = signals(&short)[..] else {
+            panic!("{short:?}")
+        };
+        assert!(near(dhz, 10_000, 20) && near(ms, 650, 60), "{dhz} {ms}");
+        assert!(run(&play(&[sine(1_000.0, 0.4, 0.2)], 0.3, 0.3), 1_600).is_empty());
     }
 
     #[test]
@@ -560,8 +574,11 @@ mod tests {
         decoder.process(&audio[..30_000], &mut out);
         decoder.reset();
         decoder.process(&audio[30_000..], &mut out);
-        // what is left of the second tone is under a second and a half
-        assert!(out.is_empty(), "{out:?}");
+        // what is left of the second tone is no page, only a tone
+        assert!(
+            out.iter().all(|h| matches!(h.signal, Signal::Tone { .. })),
+            "{out:?}"
+        );
         assert_eq!(run(&audio, 800).len(), 1);
     }
 }

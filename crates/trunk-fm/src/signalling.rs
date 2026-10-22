@@ -69,8 +69,8 @@ pub enum Signal {
         first_ms: u32,
         second_ms: u32,
     },
-    /// One tone held for seconds.
-    LongTone { dhz: u32, ms: u32 },
+    /// One tone on its own.
+    Tone { dhz: u32, ms: u32 },
     /// Two tones taking turns, fast.
     Warble {
         high_dhz: u32,
@@ -88,7 +88,7 @@ impl Signal {
             Self::Dtmf(_) => "dtmf",
             Self::FleetSync(_) => "fleetsync",
             Self::TwoTone { .. } => "two_tone",
-            Self::LongTone { .. } => "long_tone",
+            Self::Tone { .. } => "tone",
             Self::Warble { .. } => "warble",
         }
     }
@@ -102,7 +102,7 @@ impl Signal {
             Self::Dtmf(_)
             | Self::FleetSync(_)
             | Self::TwoTone { .. }
-            | Self::LongTone { .. }
+            | Self::Tone { .. }
             | Self::Warble { .. } => None,
         }
     }
@@ -128,7 +128,7 @@ impl Signal {
             | Self::Dtmf(_)
             | Self::FleetSync(_)
             | Self::TwoTone { .. }
-            | Self::LongTone { .. }
+            | Self::Tone { .. }
             | Self::Warble { .. } => None,
         }
     }
@@ -174,7 +174,7 @@ impl fmt::Display for Signal {
                 seconds(*first_ms),
                 seconds(*second_ms)
             ),
-            Self::LongTone { dhz, ms } => write!(f, "Tone {} for {}", hz(*dhz), seconds(*ms)),
+            Self::Tone { dhz, ms } => write!(f, "Tone {} for {}", hz(*dhz), seconds(*ms)),
             Self::Warble {
                 high_dhz,
                 low_dhz,

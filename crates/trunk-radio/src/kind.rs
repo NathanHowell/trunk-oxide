@@ -79,6 +79,12 @@ pub trait Kind: Sized + 'static {
     const PROFILE: ProfileId;
     /// The rate of the audio its decoder records; `None` if it records none.
     const AUDIO_RATE: Option<f64>;
+    /// Whether a channel of this kind sits on a frequency the transmitter
+    /// holds true, so that its carrier's offset is the source's clock error
+    /// and the source's correction may follow it. A conventional analog
+    /// channel does not: every radio is off by its own ~100 Hz, in its own
+    /// direction.
+    const CLOCK_REFERENCE: bool;
 
     fn tuning(at: &Opening<'_, Self>) -> Tuning;
 

@@ -43,6 +43,7 @@ impl Kind for P25Control {
     type Decoder = ControlSlot;
     const NAME: &'static str = "p25-control";
     const PROFILE: trunk_channelizer::ProfileId = NARROW;
+    const CLOCK_REFERENCE: bool = true;
     const AUDIO_RATE: Option<f64> = None;
 
     fn tuning(at: &Opening<'_, Self>) -> Tuning {

@@ -103,6 +103,9 @@ struct Open {
     call: CallId,
     num: ChannelNum,
     kind: &'static str,
+    /// Whether the source's clock follows what this channel reads
+    /// ([`Kind::CLOCK_REFERENCE`]).
+    clock_reference: bool,
     profile: ProfileId,
     /// The channel's frequency (before the source's correction).
     freq_hz: f64,
@@ -470,6 +473,7 @@ impl Radio {
                 call: call.id,
                 num,
                 kind: K::NAME,
+                clock_reference: K::CLOCK_REFERENCE,
                 profile: K::PROFILE,
                 freq_hz,
                 tape,
@@ -491,7 +495,9 @@ impl Radio {
         slot.holder = None;
         let (src, port) = (slot.source, slot.port);
         i.sources[src].channelizer.release_slot(port);
-        i.track(src, &report);
+        if open.clock_reference {
+            i.track(src, &report);
+        }
         Some(report)
     }
 
@@ -504,7 +510,9 @@ impl Radio {
         let recording = self.finish(open, open.tape.rotate());
         let report = i.report(open, recording);
         let src = i.slot(open.num).source;
-        i.track(src, &report);
+        if open.clock_reference {
+            i.track(src, &report);
+        }
         Some(report)
     }
 

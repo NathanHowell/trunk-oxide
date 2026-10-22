@@ -437,6 +437,7 @@ impl Kind for P25Voice {
     type Decoder = P25VoiceChannel;
     const NAME: &'static str = "p25";
     const PROFILE: trunk_channelizer::ProfileId = NARROW;
+    const CLOCK_REFERENCE: bool = true;
     const AUDIO_RATE: Option<f64> = Some(AUDIO_RATE);
 
     fn tuning(at: &Opening<'_, Self>) -> Tuning {

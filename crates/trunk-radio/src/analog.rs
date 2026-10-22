@@ -68,6 +68,7 @@ impl Kind for AnalogFm {
     type Decoder = AnalogFmChannel;
     const NAME: &'static str = "analog";
     const PROFILE: trunk_channelizer::ProfileId = WIDE;
+    const CLOCK_REFERENCE: bool = false;
     const AUDIO_RATE: Option<f64> = Some(trunk_fm::AUDIO_RATE);
 
     fn tuning(at: &Opening<'_, Self>) -> Tuning {
@@ -623,6 +624,13 @@ mod tests {
         let plain = record_one_transmission(None, 1);
         // about 2 s of 16 kHz audio came out under the call id
         assert!((28_000..=36_000).contains(&plain), "{plain}");
+    }
+
+    #[test]
+    fn only_a_digital_channel_is_a_clock_reference() {
+        assert!(!AnalogFm::CLOCK_REFERENCE);
+        assert!(crate::P25Voice::CLOCK_REFERENCE);
+        assert!(crate::P25Control::CLOCK_REFERENCE);
     }
 
     #[test]

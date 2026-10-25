@@ -19,7 +19,9 @@ default:
 
 # Build the images from the working tree: all of them, or the services named.
 build *which=services:
-    podman-compose build {{ which }}
+    TARGET_CPU=$(rustc --print target-cpus | sed -n 's/.*currently \([a-z0-9_-]*\)).*/\1/p' | head -n1); \
+    echo "building for ${TARGET_CPU:=native}"; \
+    TARGET_CPU=$TARGET_CPU podman-compose build {{ which }}
 
 # trunk-oxide exits at startup unless the user slice outweighs terminal
 # scopes (deploy/systemd/user.slice.d). A restart of the user manager drops

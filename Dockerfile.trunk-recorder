@@ -16,15 +16,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     protobuf-compiler \
     && rm -rf /var/lib/apt/lists/*
 
-ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-Clink-arg=-fuse-ld=mold"
-ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-Clink-arg=-fuse-ld=mold"
+# The CPU this image runs on. `just build` resolves it to a name (znver3, ...)
+# rather than `native`: cargo fingerprints the flag text, so a bare `native`
+# would keep serving cached objects built for the previous CPU after a swap.
+# These env vars replace .cargo/config.toml's rustflags, so it is stated here.
+ARG TARGET_CPU=native
+ENV CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-Clink-arg=-fuse-ld=mold -Ctarget-cpu=${TARGET_CPU}"
+ENV CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_RUSTFLAGS="-Clink-arg=-fuse-ld=mold -Ctarget-cpu=${TARGET_CPU}"
 
 WORKDIR /build
 
 COPY . .
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry \
-    --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked,id=cargo-registry \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked,id=cargo-git \
     --mount=type=cache,target=/build/target,id=target-oxide \
     cargo build --release -p trunk-oxide \
     && cp target/release/trunk-oxide target/release/trunk-replay /usr/local/bin/

@@ -25,8 +25,8 @@ WORKDIR /build
 
 COPY . .
 
-RUN --mount=type=cache,target=/usr/local/cargo/registry,id=cargo-registry \
-    --mount=type=cache,target=/usr/local/cargo/git,id=cargo-git \
+RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked,id=cargo-registry \
+    --mount=type=cache,target=/usr/local/cargo/git,sharing=locked,id=cargo-git \
     --mount=type=cache,target=/build/target,id=target-parakeet \
     cargo build --release -p trunk-parakeet -p trunk-sh \
     && cp target/release/trunk-parakeet /usr/local/bin/trunk-parakeet \

@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile.trunk-recorder
+      args:
+        TARGET_CPU: ${TARGET_CPU:-native}
     restart: unless-stopped
     privileged: true
     group_add:

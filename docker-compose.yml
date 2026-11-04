@@ -276,6 +276,7 @@ services:
       start_period: 15s
 
   jaeger:
+    restart: unless-stopped
     image: cr.jaegertracing.io/jaegertracing/jaeger:2.15.0
     # Badger storage on a volume (48h TTL) instead of the in-memory default.
     command: ["--config=file:/etc/jaeger/config.yaml"]
@@ -288,6 +289,7 @@ services:
       - jaeger-data:/badger
 
   victoriametrics:
+    restart: unless-stopped
     image: victoriametrics/victoria-metrics:v1.115.0
     command:
       - -storageDataPath=/storage

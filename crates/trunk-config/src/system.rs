@@ -76,6 +76,7 @@ pub struct SystemConfig {
     /// Follow only the control channels, for their metrics: voice grants are
     /// ignored, so nothing is recorded, posted or traced. Meant for far
     /// systems received here, to tell a path change from a receiver fault.
+    /// Their control channels take only channels nothing that records wants.
     #[serde(default)]
     pub control_only: bool,
 

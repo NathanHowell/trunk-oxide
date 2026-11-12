@@ -457,16 +457,28 @@ const ACQUIRE_MESSAGES: u32 = 5;
 /// Silent ticks after which the followed control channel is taken as gone
 /// and the hunt starts again.
 const LOST_TICKS: u32 = 3;
+/// Candidates a hunt decodes at once: a lost far site must not take a
+/// channel per candidate it ever named.
+const HUNT_WIDTH: usize = 4;
+/// Ticks a hunt's decoders get to find the control channel before the ones
+/// that had a channel make way for candidates not yet tried.
+const HUNT_DWELL: u32 = 2;
 
 /// A system's control channel: which of its candidates it is on.
 ///
 /// A site keys one of its control channels at a time and names the others
 /// (SCCB, and its own in the network status broadcast) without saying when
 /// it will move. One decoder follows the live one; when it falls silent,
-/// every candidate is opened until one carries the control channel again.
-/// The configured channels are the first candidates and the announced ones
-/// join them.
+/// up to [`HUNT_WIDTH`] candidates are decoded until one carries the control
+/// channel again, and every [`HUNT_DWELL`] ticks the ones that had a channel
+/// and heard nothing make way for the next. The configured channels are the
+/// first candidates and the announced ones join them.
+///
+/// Making way matters as much as the width: when there are fewer channels
+/// to spare than candidates, the decoders holding them would keep them, and
+/// the others would never be listened to (`spec/ChannelHunt.tla`).
 struct ControlHunt {
+    /// In the order they are tried: one that made way goes to the back.
     candidates: Vec<Freq>,
     /// Candidates no source could carry, not tried again.
     unreachable: Vec<Freq>,
@@ -474,6 +486,8 @@ struct ControlHunt {
     live: Option<CallId>,
     /// Ticks the followed one has gone without a message.
     quiet: u32,
+    /// Ticks the hunt has gone without finding it.
+    dwell: u32,
 }
 
 // ── Patch Table ──
@@ -1080,62 +1094,44 @@ impl TrunkStateMachine {
                 )
             })
             .collect();
-        let mut systems: Vec<_> = config.systems.iter().collect();
-        systems.sort_by_key(|(sys_num, _)| **sys_num);
-        let mut controls = BTreeMap::new();
-        let mut wants = BTreeMap::new();
-        let mut hunts = BTreeMap::new();
-        let now = clock.now();
-        for (&sys_num, sp) in systems {
-            if sp.control_recipe.is_none() {
-                continue;
-            }
-            let mut candidates: Vec<Freq> = Vec::new();
-            for &freq in &sp.control_channels {
-                if candidates.contains(&freq) {
-                    continue;
+        let hunts = config
+            .systems
+            .iter()
+            .filter(|(_, sp)| sp.control_recipe.is_some())
+            .map(|(&sys_num, sp)| {
+                let mut candidates: Vec<Freq> = Vec::new();
+                for &freq in &sp.control_channels {
+                    if !candidates.contains(&freq) {
+                        candidates.push(freq);
+                    }
                 }
-                candidates.push(freq);
-                let id = next_call_id();
-                controls.insert(
-                    id,
-                    ControlChannel {
-                        sys_num,
-                        freq,
-                        channel: None,
-                        heard: 0,
-                    },
-                );
-                wants.insert(
-                    id,
-                    Want {
-                        priority: sp.control_priority,
-                        since: now,
-                    },
-                );
-            }
-            hunts.insert(
-                sys_num,
-                ControlHunt {
+                let hunt = ControlHunt {
                     candidates,
                     unreachable: Vec::new(),
                     live: None,
                     quiet: 0,
-                },
-            );
-        }
-        Self {
+                    dwell: 0,
+                };
+                (sys_num, hunt)
+            })
+            .collect();
+        let mut sm = Self {
             clock,
             calls: Vec::new(),
             config,
             patch_tables,
             system_identities,
             known_alg_ids: HashMap::new(),
-            controls,
+            controls: BTreeMap::new(),
             hunts,
-            wants,
+            wants: BTreeMap::new(),
             held: BTreeSet::new(),
+        };
+        let systems: Vec<i32> = sm.hunts.keys().copied().collect();
+        for sys_num in systems {
+            sm.fill_hunt(sys_num);
         }
+        sm
     }
 
     // ── Channels ──
@@ -1188,10 +1184,19 @@ impl TrunkStateMachine {
     fn evict(&mut self, id: CallId, effects: &mut Effects) {
         effects.push(Effect::Close { call_id: id });
         if let Some(cc) = self.controls.get(&id) {
-            tracing::warn!(
-                sys_num = cc.sys_num, freq = %cc.freq,
-                "control channel evicted by calls that outrank it"
-            );
+            // A control-only system's giving way is what it is there for.
+            if self
+                .wants
+                .get(&id)
+                .is_some_and(|w| w.priority.is_background())
+            {
+                tracing::debug!(sys_num = cc.sys_num, freq = %cc.freq, "control channel gave way");
+            } else {
+                tracing::warn!(
+                    sys_num = cc.sys_num, freq = %cc.freq,
+                    "control channel evicted by calls that outrank it"
+                );
+            }
             return;
         }
         let Some(entry) = self.calls.iter_mut().find(|e| e.id == id) else {
@@ -1307,6 +1312,7 @@ impl TrunkStateMachine {
                 hunt.unreachable.push(cc.freq);
             }
             tracing::warn!(sys_num = cc.sys_num, freq = %cc.freq, %error, "cannot open the control channel; skipping");
+            self.fill_hunt(cc.sys_num);
         } else if let Some(entry) = self.calls.iter_mut().find(|e| e.id == id) {
             tracing::error!(
                 talkgroup = entry.talkgroup.0,
@@ -2032,11 +2038,11 @@ impl TrunkStateMachine {
                     p = ptgp.priority;
                 }
             }
-            Priority(p)
+            Priority::new(p)
         });
 
         // 4. Priority -1 means never.
-        if priority == Priority(-1) {
+        if priority == Priority::new(-1) {
             tracing::info!(
                 talkgroup = tg.0,
                 sys_num,
@@ -2226,9 +2232,31 @@ impl TrunkStateMachine {
         if !hunt.candidates.contains(&freq) && !hunt.unreachable.contains(&freq) {
             tracing::info!(sys_num, %freq, "control channel announced");
             hunt.candidates.push(freq);
-            if hunt.live.is_none() {
-                self.open_control(sys_num, freq);
-            }
+            self.fill_hunt(sys_num);
+        }
+    }
+
+    /// While system `sys_num` hunts, decode up to [`HUNT_WIDTH`] of its
+    /// candidates, the first in line that are not decoded yet.
+    fn fill_hunt(&mut self, sys_num: i32) {
+        let Some(hunt) = self.hunts.get(&sys_num).filter(|h| h.live.is_none()) else {
+            return;
+        };
+        let decoded: Vec<Freq> = self
+            .controls
+            .values()
+            .filter(|cc| cc.sys_num == sys_num)
+            .map(|cc| cc.freq)
+            .collect();
+        let next: Vec<Freq> = hunt
+            .candidates
+            .iter()
+            .copied()
+            .filter(|f| !decoded.contains(f))
+            .take(HUNT_WIDTH.saturating_sub(decoded.len()))
+            .collect();
+        for freq in next {
+            self.open_control(sys_num, freq);
         }
     }
 
@@ -2256,8 +2284,10 @@ impl TrunkStateMachine {
     }
 
     /// Each system: while hunting, take the candidate that carried the
-    /// control channel this second and close the rest; while following,
-    /// hunt again once the followed one has been silent [`LOST_TICKS`].
+    /// control channel this second and close the rest, or after
+    /// [`HUNT_DWELL`] ticks without one, try the next candidates; while
+    /// following, hunt again once the followed one has been silent
+    /// [`LOST_TICKS`].
     fn tick_hunts(&mut self, effects: &mut Effects) {
         let systems: Vec<i32> = self.hunts.keys().copied().collect();
         for sys_num in systems {
@@ -2279,14 +2309,21 @@ impl TrunkStateMachine {
             };
             match hunt.live {
                 None => {
-                    let Some(&(best, heard)) = mine.iter().max_by_key(|(_, h)| *h) else {
+                    let best = mine
+                        .iter()
+                        .max_by_key(|(_, h)| *h)
+                        .filter(|(_, heard)| *heard >= ACQUIRE_MESSAGES);
+                    let Some(&(best, _)) = best else {
+                        hunt.dwell += 1;
+                        if hunt.dwell >= HUNT_DWELL {
+                            hunt.dwell = 0;
+                            self.make_way(sys_num, &mine, effects);
+                        }
                         continue;
                     };
-                    if heard < ACQUIRE_MESSAGES {
-                        continue;
-                    }
                     hunt.live = Some(best);
                     hunt.quiet = 0;
+                    hunt.dwell = 0;
                     if let Some(cc) = self.controls.get(&best) {
                         tracing::info!(sys_num, freq = %cc.freq, "control channel acquired");
                     }
@@ -2303,27 +2340,41 @@ impl TrunkStateMachine {
                     }
                     hunt.live = None;
                     hunt.quiet = 0;
-                    let followed: Vec<Freq> = mine
-                        .iter()
-                        .filter_map(|(id, _)| self.controls.get(id).map(|cc| cc.freq))
-                        .collect();
-                    let rest: Vec<Freq> = hunt
-                        .candidates
-                        .iter()
-                        .copied()
-                        .filter(|f| !followed.contains(f))
-                        .collect();
                     tracing::warn!(
                         sys_num,
-                        candidates = rest.len() + followed.len(),
+                        candidates = hunt.candidates.len(),
                         "control channel lost: hunting"
                     );
-                    for freq in rest {
-                        self.open_control(sys_num, freq);
-                    }
+                    self.fill_hunt(sys_num);
                 }
             }
         }
+    }
+
+    /// System `sys_num`'s decoders `mine` that had a channel and found
+    /// nothing close and go to the back of the line, as many as there are
+    /// candidates waiting their turn, and the next are opened.
+    fn make_way(&mut self, sys_num: i32, mine: &[(CallId, u32)], effects: &mut Effects) {
+        let Some(hunt) = self.hunts.get(&sys_num) else {
+            return;
+        };
+        let waiting = hunt.candidates.len().saturating_sub(mine.len());
+        let tried: Vec<CallId> = mine
+            .iter()
+            .map(|&(id, _)| id)
+            .filter(|id| self.held.contains(id))
+            .take(waiting)
+            .collect();
+        for id in tried {
+            self.unwant(id, effects);
+            if let Some(cc) = self.controls.remove(&id)
+                && let Some(hunt) = self.hunts.get_mut(&sys_num)
+            {
+                hunt.candidates.retain(|&f| f != cc.freq);
+                hunt.candidates.push(cc.freq);
+            }
+        }
+        self.fill_hunt(sys_num);
     }
 
     fn tick_conventional(&mut self) -> Effects {
@@ -2677,8 +2728,8 @@ mod tests {
                 short_name: "test".into(),
                 record_unknown: true,
                 default_recipe: Some(p25()),
-                default_priority: Priority(5),
-                emergency_priority: Priority(0),
+                default_priority: Priority::new(5),
+                emergency_priority: Priority::new(0),
                 talkgroups: [(Talkgroup(1), talkgroup(1)), (Talkgroup(3), talkgroup(3))]
                     .into_iter()
                     .collect(),
@@ -3140,7 +3191,7 @@ mod tests {
         let sys = config.systems.get_mut(&1).unwrap();
         sys.control_channels = vec![Freq::from_hz(851_012_500.0), Freq::from_hz(851_037_500.0)];
         sys.control_recipe = Some(Recipe::<P25Control>::opener(()));
-        sys.control_priority = Priority(0);
+        sys.control_priority = Priority::new(0);
         let mut sm = TrunkStateMachine::new(config);
         let effects = sm.start();
         let ccs: Vec<CallId> = channel_effects(&effects)
@@ -3173,7 +3224,7 @@ mod tests {
         let sys = config.systems.get_mut(&1).unwrap();
         sys.control_channels = freqs.iter().map(|&f| Freq::from_hz(f)).collect();
         sys.control_recipe = Some(Recipe::<P25Control>::opener(()));
-        sys.control_priority = Priority(0);
+        sys.control_priority = Priority::new(0);
         config
     }
 
@@ -3256,6 +3307,111 @@ mod tests {
         assert_eq!(control_freqs(&sm), [772.03e6, 773.48e6]);
     }
 
+    /// Candidate `i` of the watch system.
+    fn watch_freq(i: u32) -> Freq {
+        Freq::from_hz(25_000.0f64.mul_add(f64::from(i), 770.0e6))
+    }
+
+    /// `config` with system 2, control-only, naming `n` candidates.
+    fn with_watch(mut config: CallManagerConfig, n: u32) -> CallManagerConfig {
+        config.systems.insert(
+            2,
+            SystemPolicy {
+                short_name: "watch".into(),
+                control_only: true,
+                control_channels: (0..n).map(watch_freq).collect(),
+                control_recipe: Some(Recipe::<P25Control>::opener(())),
+                control_priority: Priority::new(0).background(),
+                ..Default::default()
+            },
+        );
+        config
+    }
+
+    /// The candidates of system `sys_num` decoded on a channel.
+    fn decoding(sm: &TrunkStateMachine, sys_num: i32) -> Vec<Freq> {
+        sm.controls
+            .iter()
+            .filter(|(id, cc)| cc.sys_num == sys_num && sm.held.contains(id))
+            .map(|(_, cc)| cc.freq)
+            .collect()
+    }
+
+    /// trunk-oxide-86n: a control-only system that lost its control channel
+    /// hunted on every channel and recording stopped. Its hunt takes only
+    /// channels nothing that records wants, and gives them up to any call.
+    #[test]
+    fn a_watch_hunt_gives_way_to_every_call() {
+        let mut config = with_watch(test_config(), 18);
+        config.max_channels = 4;
+        let mut sm = TrunkStateMachine::new(config);
+        let effects = sm.start();
+        exec(&mut sm, effects);
+        assert_eq!(decoding(&sm, 2).len(), HUNT_WIDTH, "spare channels hunt");
+        let calls: Vec<CallId> = [1, 3, 100, 101]
+            .into_iter()
+            .zip(0..)
+            .map(|(tg, i)| {
+                start(
+                    &mut sm,
+                    &grant_msg(tg, 25_000.0f64.mul_add(f64::from(i), 852.0e6)),
+                )
+            })
+            .collect();
+        assert!(decoding(&sm, 2).is_empty());
+        for _ in 0..3 * HUNT_DWELL {
+            let effects = sm.tick();
+            assert_eq!(channel_effects(&effects), [], "the hunt takes nothing back");
+            exec(&mut sm, effects);
+        }
+        for call in calls {
+            assert_eq!(state(&sm, call), CallState::Recording);
+        }
+    }
+
+    /// A hunt decodes [`HUNT_WIDTH`] candidates at a time and moves on to the
+    /// next every [`HUNT_DWELL`] ticks, until it has tried them all.
+    #[test]
+    fn a_hunt_tries_a_few_candidates_at_a_time() {
+        let mut sm = TrunkStateMachine::new(with_watch(test_config(), 10));
+        let effects = sm.start();
+        exec(&mut sm, effects);
+        let mut tried = Vec::new();
+        for _ in 0..3 * HUNT_DWELL {
+            let now = decoding(&sm, 2);
+            assert!(now.len() <= HUNT_WIDTH, "{now:?}");
+            tried.extend(now);
+            tried.sort_by(|a: &Freq, b| a.as_hz().total_cmp(&b.as_hz()));
+            tried.dedup();
+            let effects = sm.tick();
+            exec(&mut sm, effects);
+        }
+        assert_eq!(tried.len(), 10);
+    }
+
+    /// With one channel to spare, the decoder holding it makes way for the
+    /// others in turn, so the hunt still reaches the candidate carrying the
+    /// control channel (WatchFollows in `spec/ChannelHunt.tla`, which fails
+    /// if the hunt only caps how many it decodes).
+    #[test]
+    fn with_one_channel_to_spare_a_hunt_still_reaches_every_candidate() {
+        let mut config = with_watch(test_config(), 6);
+        config.max_channels = 1;
+        let mut sm = TrunkStateMachine::new(config);
+        let effects = sm.start();
+        exec(&mut sm, effects);
+        let live = watch_freq(5);
+        for _ in 0..8 * HUNT_DWELL {
+            if decoding(&sm, 2).contains(&live) {
+                sm.on_control_heard(2, live.as_hz(), 20);
+            }
+            let effects = sm.tick();
+            exec(&mut sm, effects);
+        }
+        assert_eq!(decoding(&sm, 2), [live]);
+        assert!(sm.hunts[&2].live.is_some());
+    }
+
     #[test]
     fn a_control_channel_outranked_by_calls_is_evicted_and_comes_back() {
         let mut config = test_config();
@@ -3263,7 +3419,7 @@ mod tests {
         let sys = config.systems.get_mut(&1).unwrap();
         sys.control_channels = vec![Freq::from_hz(851_012_500.0)];
         sys.control_recipe = Some(Recipe::<P25Control>::opener(()));
-        sys.control_priority = Priority(2);
+        sys.control_priority = Priority::new(2);
         let mut sm = TrunkStateMachine::new(config);
         let cc = channel_effects(&sm.start())[0].1;
         let effects = sm.on_message(&grant_msg(1, 852_000_000.0));
@@ -3609,7 +3765,7 @@ mod tests {
         ConventionalChannel {
             talkgroup: Talkgroup(1),
             freq: Freq::from_hz(488_000_000.0),
-            priority: Priority(1),
+            priority: Priority::new(1),
             signal_detection,
             squelch_db: -50.0,
             recipe: Recipe::<AnalogFm>::opener(AnalogParams::default()),

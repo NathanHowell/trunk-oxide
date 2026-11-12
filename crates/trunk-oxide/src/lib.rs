@@ -744,7 +744,7 @@ impl ScannerBuilder {
                         talkgroup_id(short_name, tg.id)?,
                         TalkgroupPolicy {
                             mode: tg.mode,
-                            priority: tg.priority.map_or(default_priority, Priority).0,
+                            priority: tg.priority.map_or(default_priority, Priority::new).level(),
                             preferred_nac: tg.preferred_nac,
                             recipe: Arc::clone(if tg.mode == trunk_config::TalkgroupMode::Analog {
                                 &analog
@@ -780,7 +780,7 @@ impl ScannerBuilder {
                         priority: ch
                             .priority
                             .or_else(|| row.and_then(|tg| tg.priority))
-                            .map_or(default_priority, Priority),
+                            .map_or(default_priority, Priority::new),
                         signal_detection: ch.signal_detection,
                         squelch_db,
                         recipe,
@@ -810,8 +810,14 @@ impl ScannerBuilder {
                         .map(|&f| Freq::from_hz(f))
                         .collect(),
                     control_recipe: trunked.then(|| Recipe::<P25Control>::opener(())),
-                    control_priority: Priority(sys.control_channel_priority),
-                    emergency_priority: Priority(sys.emergency_priority),
+                    // Followed for metrics only, they give way to anything
+                    // that records.
+                    control_priority: if sys.control_only {
+                        Priority::new(sys.control_channel_priority).background()
+                    } else {
+                        Priority::new(sys.control_channel_priority)
+                    },
+                    emergency_priority: Priority::new(sys.emergency_priority),
                     default_recipe: trunked.then(|| {
                         if default_mode == DefaultMode::Analog {
                             Arc::clone(&analog)

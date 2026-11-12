@@ -2,10 +2,10 @@
 //!
 //! Every call that wants a channel, and every control channel, is a
 //! [`Want`]. There are `budget` channels. The allocation is the prefix of
-//! the wants in rank order: lower priority number first; at equal
-//! priority, a holder before a newcomer (so nothing is evicted for an
-//! equal); then the longest waiting; then the lowest id, so the order is
-//! total. The executor applies the difference between one allocation and
+//! the wants in rank order: lower [`Priority`] first (a background claim
+//! after every other); at equal priority, a holder before a newcomer (so
+//! nothing is evicted for an equal); then the longest waiting; then the
+//! lowest id, so the order is total. The executor applies the difference between one allocation and
 //! the next: a want that falls out of the prefix is evicted, one that
 //! enters is admitted.
 //!
@@ -19,9 +19,17 @@ use std::time::Instant;
 
 use crate::call_state::CallId;
 
-/// A channel claim's priority: the lower number wins.
+/// A channel claim's priority: the lower wins.
+///
+/// A background claim comes after every other, whatever its level: a
+/// control-only system's control channels, followed for their metrics, take
+/// only channels nothing that records wants.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct Priority(pub i32);
+pub struct Priority {
+    // The order of the fields is the order of the claims.
+    background: bool,
+    level: i32,
+}
 
 impl Default for Priority {
     fn default() -> Self {
@@ -31,15 +39,42 @@ impl Default for Priority {
 
 impl Priority {
     /// After every configured priority.
-    pub const UNSET: Self = Self(i32::MAX);
+    pub const UNSET: Self = Self::new(i32::MAX);
+
+    #[must_use]
+    pub const fn new(level: i32) -> Self {
+        Self {
+            background: false,
+            level,
+        }
+    }
 
     /// The configured value, or [`Self::UNSET`].
     #[must_use]
     pub const fn or_unset(p: Option<i32>) -> Self {
         match p {
-            Some(p) => Self(p),
+            Some(p) => Self::new(p),
             None => Self::UNSET,
         }
+    }
+
+    /// The same level, behind every claim that is not in the background.
+    #[must_use]
+    pub const fn background(self) -> Self {
+        Self {
+            background: true,
+            ..self
+        }
+    }
+
+    #[must_use]
+    pub const fn level(self) -> i32 {
+        self.level
+    }
+
+    #[must_use]
+    pub const fn is_background(self) -> bool {
+        self.background
     }
 }
 
@@ -99,14 +134,18 @@ mod tests {
     use proptest::prelude::*;
     use std::time::Duration;
 
-    fn wants(spec: &[(u64, i32, u64)]) -> BTreeMap<CallId, Want> {
+    const fn p(level: i32) -> Priority {
+        Priority::new(level)
+    }
+
+    fn wants(spec: &[(u64, Priority, u64)]) -> BTreeMap<CallId, Want> {
         let t0 = Instant::now();
         spec.iter()
             .map(|&(id, p, at)| {
                 (
                     CallId(id),
                     Want {
-                        priority: Priority(p),
+                        priority: p,
                         since: t0 + Duration::from_millis(at),
                     },
                 )
@@ -121,7 +160,7 @@ mod tests {
     #[test]
     fn lower_priority_numbers_win_and_holders_beat_equal_newcomers() {
         // 1: public works (3), 2: dispatch (1), 3: another public works call (3)
-        let w = wants(&[(1, 3, 0), (2, 1, 5), (3, 3, 1)]);
+        let w = wants(&[(1, p(3), 0), (2, p(1), 5), (3, p(3), 1)]);
         assert_eq!(allocate(&w, &ids(&[]), 2), ids(&[1, 2]), "oldest of equals");
         assert_eq!(
             allocate(&w, &ids(&[3]), 2),
@@ -143,14 +182,35 @@ mod tests {
                 open: vec![CallId(2)]
             }
         );
-        assert!(Priority(3) < Priority::UNSET);
+        assert!(p(3) < Priority::UNSET);
         assert_eq!(Priority::or_unset(None), Priority::UNSET);
+    }
+
+    #[test]
+    fn a_background_claim_comes_after_every_other() {
+        let watch = p(0).background();
+        assert!(watch.is_background() && !Priority::UNSET.is_background());
+        assert!(Priority::UNSET < watch);
+        assert!(watch < p(1).background());
+        // a watch decoder holding the only channel gives it up to a call
+        // nobody gave a priority
+        let w = wants(&[(1, watch, 0), (2, Priority::UNSET, 5)]);
+        assert_eq!(allocate(&w, &ids(&[1]), 1), ids(&[2]));
+    }
+
+    /// Priorities on a small range, some in the background.
+    fn priority() -> impl Strategy<Value = Priority> {
+        (any::<bool>(), 0i32..4).prop_map(
+            |(bg, level)| {
+                if bg { p(level).background() } else { p(level) }
+            },
+        )
     }
 
     /// Wants on a small id space, with some of them held.
     fn scenario() -> impl Strategy<Value = (BTreeMap<CallId, Want>, BTreeSet<CallId>, usize)> {
         (
-            prop::collection::btree_map(0u64..24, (0i32..4, 0u64..50), 0..16),
+            prop::collection::btree_map(0u64..24, (priority(), 0u64..50), 0..16),
             prop::collection::btree_set(0u64..24, 0..12),
             0usize..10,
         )
@@ -190,7 +250,7 @@ mod tests {
         fn one_want_changed_moves_at_most_one_in_and_one_out(
             (w, held, budget) in scenario(),
             id in 0u64..24,
-            change in prop::option::of((0i32..4, 0u64..50)),
+            change in prop::option::of((priority(), 0u64..50)),
         ) {
             let settled = allocate(&w, &held, budget);
             let mut w2 = w.clone();
@@ -215,14 +275,14 @@ mod tests {
         fn a_holder_is_never_evicted_for_an_equal_or_lower_claim(
             (w, held, budget) in scenario(),
             id in 100u64..124,
-            p in 0i32..4,
+            claim in priority(),
         ) {
             let settled = allocate(&w, &held, budget);
             let mut w2 = w.clone();
-            w2.insert(CallId(id), wants(&[(id, p, 0)])[&CallId(id)]);
+            w2.insert(CallId(id), wants(&[(id, claim, 0)])[&CallId(id)]);
             let next = allocate(&w2, &settled, budget);
             for gone in settled.difference(&next) {
-                prop_assert!(w2[gone].priority > Priority(p));
+                prop_assert!(w2[gone].priority > claim);
             }
         }
     }

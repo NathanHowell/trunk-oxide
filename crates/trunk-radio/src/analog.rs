@@ -536,6 +536,14 @@ mod tests {
             s ^= s << 17;
             (s >> 11) as f32 / (1u64 << 53) as f32
         };
+        // The stand-in for speech: 800 and 1100 Hz together. Neither holds
+        // the share of the power a tone needs, so the dispatch-tone decoder
+        // does not take it for a tone, and they are no DTMF key.
+        let speech = |t: f64| {
+            1_400.0
+                * ((std::f64::consts::TAU * 800.0 * t).sin()
+                    + (std::f64::consts::TAU * 1_100.0 * t).sin())
+        };
         let mut phase = 0.0f64;
         let mut iq = Vec::new();
         for n in 0..(4.0 * rate) as usize {
@@ -545,11 +553,7 @@ mod tests {
                 let m = 700.0 * (std::f64::consts::TAU * 162.2 * t).sin()
                     + match burst {
                         Some(b) if at < b.len() => 2_000.0 * f64::from(b[at]),
-                        Some(b) => {
-                            let _ = b;
-                            2_000.0 * (std::f64::consts::TAU * 800.0 * t).sin()
-                        }
-                        None => 2_000.0 * (std::f64::consts::TAU * 800.0 * t).sin(),
+                        _ => speech(t),
                     };
                 phase += std::f64::consts::TAU * (100_000.0 + offset_hz + m) / rate;
             } else {
@@ -734,7 +738,7 @@ mod tests {
         };
         let (left, kept) = (squawk(&heard), squawk(&unread));
         assert!(kept > 0.0 && left < 0.005 * kept, "{left} of {kept} left");
-        // and the 800 Hz that follows it, the stand-in for speech, is whole
+        // and the 800 Hz of the stand-in for speech that follows it is whole
         let (speech, original) = (
             tone_energy(&heard.pcm, 800.0),
             tone_energy(&unread.pcm, 800.0),

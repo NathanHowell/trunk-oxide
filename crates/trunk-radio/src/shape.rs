@@ -118,8 +118,8 @@ impl ShapeMeter {
         // Dropouts strictly inside the speech span.
         let loud = |i: usize| rms[i] >= peak * LOUD_NEIGHBOR_REL;
         let (mut gaps, mut longest, mut run) = (0u32, 0usize, 0usize);
-        for i in first..=last {
-            if self.silent[i] {
+        for (i, &silent) in self.silent.iter().enumerate().take(last + 1).skip(first) {
+            if silent {
                 run += 1;
             } else {
                 // `first` is voiced, so a run always has a frame before it.

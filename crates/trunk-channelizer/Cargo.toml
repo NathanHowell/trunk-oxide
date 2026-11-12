@@ -9,7 +9,7 @@ rust-version.workspace = true
 
 [dependencies]
 num-complex = { workspace = true }
-rayon = "1"
+rayon.workspace = true
 rustfft = { workspace = true }
 anyhow = { workspace = true }
 

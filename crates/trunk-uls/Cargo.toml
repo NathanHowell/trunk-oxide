@@ -17,4 +17,4 @@ clap.workspace = true
 csv.workspace = true
 reqwest = { workspace = true, features = ["blocking"] }
 zip.workspace = true
-flate2 = "1"
+flate2.workspace = true

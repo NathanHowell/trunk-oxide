@@ -68,7 +68,6 @@ assert_is_empty = "allow"
 proptest = "1.11"
 rand = "0.9"
 rand_chacha = "0.9"
-trunk-oxide = { path = "crates/trunk-oxide" }
 trunk-oxide-proto = { path = "crates/trunk-oxide-proto" }
 trunk-fm = { path = "crates/trunk-fm" }
 trunk-rtlsdr-sys = { path = "crates/trunk-rtlsdr-sys" }
@@ -95,6 +94,7 @@ prost = "0.14"
 prost-types = "0.14"
 pkg-config = "0.3"
 rustfft = "6"
+rayon = "1"
 sonora-ns = "0.2"
 num-complex = "0.4"
 rubato = "0.16"
@@ -123,6 +123,7 @@ argfile = "0.2"
 wild = "2"
 csv = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+flate2 = "1"
 rusqlite = { version = "0.34", features = ["bundled"] }
 sha2 = "0.10"
 

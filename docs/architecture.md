@@ -435,6 +435,6 @@ Other conventions: frequencies are Hz as `f64` in config and on the wire (`Freq(
 | Transcribers | `crates/trunk-whisperer/`, `crates/trunk-parakeet/`, `crates/trunk-whistle/` |
 | Source planning | `crates/trunk-solver/src/` |
 | Replay and sweeps | `crates/trunk-oxide/src/bin/trunk-replay/`, `crates/trunk-oxide/REPLAY.md` |
-| Golden and noise tools | `crates/trunk-p25/tests/golden.rs`, `crates/trunk-p25/examples/`, `crates/trunk-channelizer/examples/`, `crates/trunk-fm/examples/`, `tests/generate_test_iq.py` |
+| Golden and noise tools | `crates/trunk-p25/tests/golden.rs`, `crates/trunk-p25/examples/`, `crates/trunk-channelizer/examples/`, `crates/trunk-fm/examples/` |
 | Deployment | `docker-compose.yml`, `Dockerfile.*`, `deploy/systemd/user.slice.d/50-trunk-oxide-cpu.conf`, `rtl-sdr.rules`, `jaeger-config.yaml`, `.github/workflows/docker.yml` |
 | Per-service configs | `config-discord.toml`, `config-whisperer.toml`, `config-parakeet.toml`, `config-whistle.toml` |

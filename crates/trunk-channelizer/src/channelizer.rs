@@ -303,7 +303,7 @@ impl Channelizer {
             Some(pool) => pool.install(|| {
                 self.channels
                     .par_iter_mut()
-                    .for_each(|c| extract(shared, spec, frame_start, c))
+                    .for_each(|c| extract(shared, spec, frame_start, c));
             }),
             None => self
                 .channels

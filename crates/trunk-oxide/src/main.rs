@@ -1,6 +1,6 @@
 //! trunk-oxide: the scanner. Reads the TOML config, builds the radio and the
 //! call state machine ([`trunk_oxide::ScannerBuilder`]), and serves calls,
-//! audio and events over the gRPC EventBridge to downstream consumers.
+//! audio and events over the gRPC `EventBridge` to downstream consumers.
 
 use std::sync::Arc;
 
@@ -409,7 +409,7 @@ fn main() -> Result<()> {
     }
 
     // Spawn gRPC server as a background task on the runtime
-    let socket_path = config.grpc.listen_path.clone();
+    let socket_path = config.grpc.listen_path;
     rt.spawn(trunk_oxide_grpc::serve_grpc(socket_path, stream_tx));
 
     tracing::info!("scanner running, press Ctrl+C to stop");

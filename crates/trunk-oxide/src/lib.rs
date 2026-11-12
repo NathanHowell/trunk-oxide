@@ -2,7 +2,7 @@
 //! ([`trunk_radio::Radio`]) and runs the call state machine over its events.
 //!
 //! Events flow: SDR → trunk-radio (channelizer, decoders) → `RadioEvent` →
-//! call state machine → EventBridge (gRPC)
+//! call state machine → `EventBridge` (gRPC)
 
 mod allocation;
 pub mod calibrate;
@@ -49,7 +49,7 @@ pub struct ConventionalChannelMetrics {
 }
 
 /// Snapshot of conventional-channel metrics, updated on the monitor thread
-/// and read by OTel observable callbacks.
+/// and read by `OTel` observable callbacks.
 #[derive(Default)]
 pub struct ConventionalMetricsSnapshot {
     pub channels: Vec<ConventionalChannelMetrics>,
@@ -298,43 +298,42 @@ fn calibrate_sources_parallel(
     let mut gains = HashMap::new();
     let mut swept = false;
     for handle in handles {
-        match handle.join() {
-            Ok((idx, device, mut c)) => {
-                if let Some(sweep) = &c.swept
-                    && sweep.selection.reason != calibrate::SelectReason::Fallback
-                {
-                    let sel = sweep.selection;
-                    cache.put(
-                        &device,
-                        calibrate::cache::Cached {
-                            gain_db: sel.gain_db,
-                            noise_floor_db: sel.noise_floor_db,
-                            reason: sel.reason.label().to_owned(),
-                            at: std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .map_or(0, |d| d.as_secs()),
-                            algorithm: calibrate::cache::ALGORITHM,
-                            sweep: sweep
-                                .points
-                                .iter()
-                                .map(|p| calibrate::cache::SweepPoint {
-                                    gain_db: p.gain_db,
-                                    noise_floor_db: p.measurement.noise_floor_db,
-                                    sat_frac: p.measurement.sat_frac,
-                                })
-                                .collect(),
-                        },
-                    );
-                    swept = true;
-                    c.model = cache
-                        .get(&device)
-                        .and_then(|k| calibrate::model(&policy, k));
-                }
-                gains.insert(idx, c);
+        if let Ok((idx, device, mut c)) = handle.join() {
+            if let Some(sweep) = &c.swept
+                && sweep.selection.reason != calibrate::SelectReason::Fallback
+            {
+                let sel = sweep.selection;
+                cache.put(
+                    &device,
+                    calibrate::cache::Cached {
+                        gain_db: sel.gain_db,
+                        noise_floor_db: sel.noise_floor_db,
+                        reason: sel.reason.label().to_owned(),
+                        at: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map_or(0, |d| d.as_secs()),
+                        algorithm: calibrate::cache::ALGORITHM,
+                        sweep: sweep
+                            .points
+                            .iter()
+                            .map(|p| calibrate::cache::SweepPoint {
+                                gain_db: p.gain_db,
+                                noise_floor_db: p.measurement.noise_floor_db,
+                                sat_frac: p.measurement.sat_frac,
+                            })
+                            .collect(),
+                    },
+                );
+                swept = true;
+                c.model = cache
+                    .get(&device)
+                    .and_then(|k| calibrate::model(&policy, k));
             }
-            Err(_) => tracing::error!(
+            gains.insert(idx, c);
+        } else {
+            tracing::error!(
                 "a gain calibration thread panicked; that source will use its configured gain"
-            ),
+            );
         }
     }
     if swept && let Err(e) = cache.save() {
@@ -510,7 +509,7 @@ pub struct Scanner {
     /// it starts: (system, channel index).
     pending_conventional_calls: Vec<(i32, usize)>,
     /// Shared snapshot of conventional-channel metrics, updated on the
-    /// monitor thread and read by OTel observable callbacks.
+    /// monitor thread and read by `OTel` observable callbacks.
     conv_metrics: Arc<Mutex<ConventionalMetricsSnapshot>>,
 }
 
@@ -935,7 +934,7 @@ impl Scanner {
         Arc::clone(&self.conv_metrics)
     }
 
-    /// Run the monitor loop until ctrl_c is received.
+    /// Run the monitor loop until `ctrl_c` is received.
     ///
     /// Must be called from within a tokio runtime context (e.g. via
     /// `Handle::block_on`).

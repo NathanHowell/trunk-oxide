@@ -224,14 +224,14 @@ pub struct CallCounts {
 }
 
 /// Something said in band, at a sample of the decoded audio.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VoiceTag {
     /// Into the audio the same `process` call appended.
     pub offset: u32,
     pub kind: VoiceTagKind,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VoiceTagKind {
     /// The unit talking.
     Source(u32),

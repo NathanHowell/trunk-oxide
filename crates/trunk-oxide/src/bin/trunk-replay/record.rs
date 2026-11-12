@@ -249,11 +249,7 @@ impl Recorder {
     fn on_event(&mut self, ev: Event) {
         match ev {
             Event::TrunkMessage(tm) => {
-                let sys = tm
-                    .system
-                    .as_ref()
-                    .map(|s| s.short_name.clone())
-                    .unwrap_or_default();
+                let sys = tm.system.as_ref().map_or_default(|s| s.short_name.clone());
                 for m in &tm.messages {
                     let name = message_type_name(m.message_type);
                     *self
@@ -353,11 +349,7 @@ impl Recorder {
                 );
             }
             Event::Unit(u) => {
-                let sys = u
-                    .system
-                    .as_ref()
-                    .map(|s| s.short_name.clone())
-                    .unwrap_or_default();
+                let sys = u.system.as_ref().map_or_default(|s| s.short_name.clone());
                 self.emit(
                     "unit",
                     json!({"system": sys, "event": u.r#type, "source": u.source_id, "talkgroup": u.talkgroup}),

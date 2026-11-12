@@ -209,7 +209,7 @@ fn mixed(quick: bool) {
             let span = fs * 0.85 - cfg.out_rate(WIDE);
             let total = nn + nw;
             for i in 0..total {
-                let f = -span / 2.0 + span * (i as f64 + 0.37) / total as f64;
+                let f = -span / 2.0 + span * (f64::from(i) + 0.37) / f64::from(total);
                 ch.add_channel(if i < nn { NARROW } else { WIDE }, f)
                     .unwrap();
             }

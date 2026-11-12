@@ -335,8 +335,7 @@ pub(crate) fn load_talkgroups_csv(path: &Path) -> Result<HashMap<i64, TalkgroupC
 
         let get = |col: Option<usize>| -> String {
             col.and_then(|i| record.get(i))
-                .map(|s| s.trim().to_string())
-                .unwrap_or_default()
+                .map_or_default(|s| s.trim().to_string())
         };
 
         let mode = {
@@ -504,8 +503,7 @@ pub(crate) fn load_channels_csv(path: &Path) -> Result<HashMap<i64, ChannelConfi
 
         let get = |col: Option<usize>| -> String {
             col.and_then(|i| record.get(i))
-                .map(|s| s.trim().to_string())
-                .unwrap_or_default()
+                .map_or_default(|s| s.trim().to_string())
         };
 
         let tone: f64 = col_tone

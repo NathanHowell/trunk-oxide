@@ -565,12 +565,7 @@ impl<O, C: Send> SharedChannelizer<O, C> {
                             Err(_) => false,
                         }
                     };
-                    if !applied {
-                        counters.rejected += 1;
-                        if let Some(id) = s.id.take() {
-                            ch.remove_channel(id);
-                        }
-                    } else {
+                    if applied {
                         s.freq_hz = freq_hz;
                         let reset = match self.cond.reset {
                             ResetPolicy::Never => false,
@@ -582,6 +577,11 @@ impl<O, C: Send> SharedChannelizer<O, C> {
                         }
                         if let (true, Some(d)) = (jumped, s.decoder.as_mut()) {
                             d.retune();
+                        }
+                    } else {
+                        counters.rejected += 1;
+                        if let Some(id) = s.id.take() {
+                            ch.remove_channel(id);
                         }
                     }
                 }
@@ -676,22 +676,19 @@ impl<O, C: Send> SharedChannelizer<O, C> {
 
         let mut run_slot = |s: &mut Slot<O, C>, dst: &mut [Complex32]| -> Option<usize> {
             let o = ch.output(s.id?)?;
-            let (n, reading) = match s.cond.as_mut() {
-                Some((c, _, stats)) => {
-                    let n = c.process_into(o, dst);
-                    let r = Reading {
-                        power_db: c.power_db().unwrap_or(f64::NAN),
-                        freq_error_hz: c.freq_error_hz(FREQ_ERROR_RATE),
-                        squelch_open: c.squelch_open(),
-                    };
-                    stats.record(&r);
-                    stats.record_events(c.take_events());
-                    (n, r)
-                }
-                None => {
-                    dst[..o.len()].copy_from_slice(o);
-                    (o.len(), Reading::default())
-                }
+            let (n, reading) = if let Some((c, _, stats)) = s.cond.as_mut() {
+                let n = c.process_into(o, dst);
+                let r = Reading {
+                    power_db: c.power_db().unwrap_or(f64::NAN),
+                    freq_error_hz: c.freq_error_hz(FREQ_ERROR_RATE),
+                    squelch_open: c.squelch_open(),
+                };
+                stats.record(&r);
+                stats.record_events(c.take_events());
+                (n, r)
+            } else {
+                dst[..o.len()].copy_from_slice(o);
+                (o.len(), Reading::default())
             };
             if let Some(d) = s.decoder.as_mut() {
                 d.process(&dst[..n], &reading, decoded);
@@ -701,23 +698,20 @@ impl<O, C: Send> SharedChannelizer<O, C> {
             }
             Some(n)
         };
-        match sink {
-            Some((out, produced)) => {
-                produced.fill(0);
-                for (slot, s) in slots.iter_mut().enumerate().take(produced.len()) {
-                    let dst = &mut out[slot * stride..(slot + 1) * stride];
-                    if let Some(n) = run_slot(s, dst) {
-                        produced[slot] = u32::try_from(n).unwrap_or(u32::MAX);
-                    }
+        if let Some((out, produced)) = sink {
+            produced.fill(0);
+            for (slot, s) in slots.iter_mut().enumerate().take(produced.len()) {
+                let dst = &mut out[slot * stride..(slot + 1) * stride];
+                if let Some(n) = run_slot(s, dst) {
+                    produced[slot] = u32::try_from(n).unwrap_or(u32::MAX);
                 }
             }
-            None => {
-                if scratch.len() < stride {
-                    scratch.resize(stride, Complex32::ZERO);
-                }
-                for s in slots.iter_mut() {
-                    run_slot(s, scratch);
-                }
+        } else {
+            if scratch.len() < stride {
+                scratch.resize(stride, Complex32::ZERO);
+            }
+            for s in slots.iter_mut() {
+                run_slot(s, scratch);
             }
         }
 
@@ -965,7 +959,12 @@ mod tests {
             sc.process(&x, &mut out, &mut produced, &mut ());
         }
         let n = produced[0] as usize;
-        let rms = (out[..n].iter().map(|c| c.norm_sqr()).sum::<f32>() / n as f32).sqrt();
+        let rms = (out[..n]
+            .iter()
+            .map(num_complex::Complex::norm_sqr)
+            .sum::<f32>()
+            / n as f32)
+            .sqrt();
         assert!((rms - 0.85).abs() < 0.05, "AGC output rms {rms}");
         let db = sc.slot_power_db(0);
         // the probe's average is slow (alpha 1e-4), so it is still settling

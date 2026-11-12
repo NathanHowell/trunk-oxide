@@ -658,8 +658,7 @@ where
         .x_labels(6)
         .x_label_formatter(&|x| {
             chrono::DateTime::from_timestamp(*x as i64, 0)
-                .map(|dt| dt.format("%H:%M").to_string())
-                .unwrap_or_default()
+                .map_or_default(|dt| dt.format("%H:%M").to_string())
         })
         .draw()
         .map_err(|e| anyhow::anyhow!("chart mesh: {e}"))?;

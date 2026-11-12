@@ -17,9 +17,9 @@ use trunk_radio::{
 /// Read-only view of a [`CallEntry`], exposed to the executor during effect
 /// processing.  All field access goes through getters — no direct mutation
 /// is possible.
-pub(crate) struct CallView<'a>(&'a CallEntry);
+pub struct CallView<'a>(&'a CallEntry);
 
-impl<'a> CallView<'a> {
+impl CallView<'_> {
     pub(crate) const fn id(&self) -> CallId {
         self.0.id
     }
@@ -141,12 +141,12 @@ const STUCK_RECORDING_BACKSTOP: Duration = Duration::from_secs(30);
 /// allowed to cut a new per-speaker boundary. Rapid P25 dispatch hand-offs
 /// (A→B→A within a second) would otherwise fragment one exchange into many
 /// sub-second transmissions; below this floor the source change only re-routes
-/// (SetSource + EmitSignal) without ending the transmission.
+/// (`SetSource` + `EmitSignal`) without ending the transmission.
 const MIN_TRANSMISSION: Duration = Duration::from_millis(700);
 
 // ── Newtypes ──
 
-pub(crate) use trunk_radio::CallId;
+pub use trunk_radio::CallId;
 
 static NEXT_CALL_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
@@ -158,11 +158,11 @@ fn next_call_id() -> CallId {
 /// Monotonic call number counter.
 static NEXT_CALL_NUM: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
 
-pub(crate) fn next_call_num() -> i64 {
+pub fn next_call_num() -> i64 {
     NEXT_CALL_NUM.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
-pub(crate) fn system_time_to_unix(t: SystemTime) -> i64 {
+pub fn system_time_to_unix(t: SystemTime) -> i64 {
     crate::clock::unix_seconds(t)
 }
 
@@ -205,7 +205,7 @@ impl std::fmt::Display for Freq {
 // ── Call State ──
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CallState {
+pub enum CallState {
     /// On its channel, a transmission on.
     Recording,
     /// On its channel, nothing on (a conventional channel between
@@ -220,7 +220,7 @@ pub(crate) enum CallState {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RejectReason {
+pub enum RejectReason {
     UnknownTg,
     IgnoredTg,
     /// No source covers its channel.
@@ -246,39 +246,27 @@ impl From<&OpenError> for RejectReason {
 impl CallState {
     pub(crate) const fn as_str(self) -> &'static str {
         match self {
-            CallState::Recording => "Recording",
-            CallState::Idle => "Idle",
-            CallState::Disabled => "Disabled",
-            CallState::Waiting => "Waiting",
-            CallState::Rejected(_) => "Rejected",
+            Self::Recording => "Recording",
+            Self::Idle => "Idle",
+            Self::Disabled => "Disabled",
+            Self::Waiting => "Waiting",
+            Self::Rejected(_) => "Rejected",
         }
     }
 
     pub(crate) const fn to_proto(self) -> i32 {
         use trunk_oxide_grpc::proto::CallState as ProtoCallState;
         match self {
-            CallState::Recording => ProtoCallState::Recording as i32,
-            CallState::Idle | CallState::Disabled => ProtoCallState::Idle as i32,
-            CallState::Waiting => ProtoCallState::Waiting as i32,
-            CallState::Rejected(RejectReason::UnknownTg) => {
-                ProtoCallState::RejectedUnknownTg as i32
-            }
-            CallState::Rejected(RejectReason::IgnoredTg) => {
-                ProtoCallState::RejectedIgnoredTg as i32
-            }
-            CallState::Rejected(RejectReason::NoSource) => ProtoCallState::RejectedNoSource as i32,
-            CallState::Rejected(RejectReason::NoChannel) => {
-                ProtoCallState::RejectedNoChannel as i32
-            }
-            CallState::Rejected(RejectReason::Encrypted) => {
-                ProtoCallState::RejectedEncrypted as i32
-            }
-            CallState::Rejected(RejectReason::Duplicate) => {
-                ProtoCallState::RejectedDuplicate as i32
-            }
-            CallState::Rejected(RejectReason::Superseded) => {
-                ProtoCallState::RejectedSuperseded as i32
-            }
+            Self::Recording => ProtoCallState::Recording as i32,
+            Self::Idle | Self::Disabled => ProtoCallState::Idle as i32,
+            Self::Waiting => ProtoCallState::Waiting as i32,
+            Self::Rejected(RejectReason::UnknownTg) => ProtoCallState::RejectedUnknownTg as i32,
+            Self::Rejected(RejectReason::IgnoredTg) => ProtoCallState::RejectedIgnoredTg as i32,
+            Self::Rejected(RejectReason::NoSource) => ProtoCallState::RejectedNoSource as i32,
+            Self::Rejected(RejectReason::NoChannel) => ProtoCallState::RejectedNoChannel as i32,
+            Self::Rejected(RejectReason::Encrypted) => ProtoCallState::RejectedEncrypted as i32,
+            Self::Rejected(RejectReason::Duplicate) => ProtoCallState::RejectedDuplicate as i32,
+            Self::Rejected(RejectReason::Superseded) => ProtoCallState::RejectedSuperseded as i32,
         }
     }
 }
@@ -286,11 +274,11 @@ impl CallState {
 impl std::fmt::Display for CallState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CallState::Recording => write!(f, "Recording"),
-            CallState::Idle => write!(f, "Idle"),
-            CallState::Disabled => write!(f, "Disabled"),
-            CallState::Waiting => write!(f, "Waiting"),
-            CallState::Rejected(r) => write!(f, "Rejected: {r}"),
+            Self::Recording => write!(f, "Recording"),
+            Self::Idle => write!(f, "Idle"),
+            Self::Disabled => write!(f, "Disabled"),
+            Self::Waiting => write!(f, "Waiting"),
+            Self::Rejected(r) => write!(f, "Rejected: {r}"),
         }
     }
 }
@@ -313,20 +301,20 @@ impl RejectReason {
 impl std::fmt::Display for RejectReason {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            RejectReason::UnknownTg => write!(f, "UNKNOWN TG"),
-            RejectReason::IgnoredTg => write!(f, "IGNORED TG"),
-            RejectReason::NoSource => write!(f, "NO SOURCE"),
-            RejectReason::NoChannel => write!(f, "NO CHANNEL"),
-            RejectReason::Encrypted => write!(f, "ENCRYPTED"),
-            RejectReason::Duplicate => write!(f, "DUPLICATE"),
-            RejectReason::Superseded => write!(f, "SUPERSEDED"),
+            Self::UnknownTg => write!(f, "UNKNOWN TG"),
+            Self::IgnoredTg => write!(f, "IGNORED TG"),
+            Self::NoSource => write!(f, "NO SOURCE"),
+            Self::NoChannel => write!(f, "NO CHANNEL"),
+            Self::Encrypted => write!(f, "ENCRYPTED"),
+            Self::Duplicate => write!(f, "DUPLICATE"),
+            Self::Superseded => write!(f, "SUPERSEDED"),
         }
     }
 }
 
 // ── Segments ──
 
-pub(crate) struct CallSegment {
+pub struct CallSegment {
     pub(crate) freq: Freq,
     pub(crate) start: Instant,
     /// When it closed. (It used to be measured to "now", so a call's earlier
@@ -343,7 +331,7 @@ impl CallSegment {
 
 // ── Mode ──
 
-pub(crate) struct TrunkedFields {
+pub struct TrunkedFields {
     pub(crate) multi_site: bool,
     pub(crate) wacn: u64,
     pub(crate) rfss: i32,
@@ -352,7 +340,7 @@ pub(crate) struct TrunkedFields {
     pub(crate) conversation_mode: bool,
 }
 
-pub(crate) enum CallMode {
+pub enum CallMode {
     Trunked(TrunkedFields),
     Conventional,
 }
@@ -419,7 +407,7 @@ pub struct SystemPolicy {
     pub nac: u64,
 }
 
-pub(crate) static DEFAULT_POLICY: LazyLock<SystemPolicy> = LazyLock::new(SystemPolicy::default);
+pub static DEFAULT_POLICY: LazyLock<SystemPolicy> = LazyLock::new(SystemPolicy::default);
 
 #[derive(Clone, Debug)]
 pub struct CallManagerConfig {
@@ -433,7 +421,7 @@ pub struct CallManagerConfig {
     pub systems: HashMap<i32, SystemPolicy>,
 }
 
-pub(crate) struct SystemIdentity {
+pub struct SystemIdentity {
     pub(crate) sys_id: u64,
     pub(crate) wacn: u64,
     pub(crate) nac: u64,
@@ -442,7 +430,7 @@ pub(crate) struct SystemIdentity {
 }
 
 /// A control channel: a standing claim on a channel for its system.
-pub(crate) struct ControlChannel {
+pub struct ControlChannel {
     pub(crate) sys_num: i32,
     pub(crate) freq: Freq,
     pub(crate) channel: Option<ChannelNum>,
@@ -494,7 +482,7 @@ struct ControlHunt {
 
 /// Talkgroups patched into supergroups, each member with when the control
 /// channel last said so.
-pub(crate) struct PatchTable {
+pub struct PatchTable {
     patches: HashMap<Talkgroup, HashMap<Talkgroup, Instant>>,
 }
 
@@ -558,14 +546,13 @@ impl PatchTable {
         self.patches
             .values()
             .find(|patch| patch.contains_key(&talkgroup))
-            .map(|patch| patch.keys().copied().collect())
-            .unwrap_or_default()
+            .map_or_default(|patch| patch.keys().copied().collect())
     }
 }
 
 // ── Call Entry ──
 
-pub(crate) struct CallEntry {
+pub struct CallEntry {
     pub(crate) id: CallId,
     pub(crate) call_num: i64,
     pub(crate) talkgroup: Talkgroup,
@@ -749,7 +736,7 @@ struct Admission {
 
 // ── Multisite result ──
 
-pub(crate) struct MultiSiteResult {
+pub struct MultiSiteResult {
     pub(crate) is_duplicate: bool,
     pub(crate) is_superseding: bool,
     pub(crate) original_idx: Option<usize>,
@@ -762,7 +749,7 @@ pub(crate) struct MultiSiteResult {
 /// suspect is [`CallEndReason::GrantTimeout`] (an active recording concluded
 /// only because grant-updates went stale for `call_timeout`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum CallEndReason {
+pub enum CallEndReason {
     /// Recording-state call ended because no grant-update arrived within
     /// `call_timeout` (the likely cause of fragmented/cut-short trunked calls).
     GrantTimeout,
@@ -854,7 +841,7 @@ impl CallEndReason {
 /// current one on the wire and starts the next; what differs is who said
 /// so, and whether the channel's recording goes with it.
 #[derive(Debug, Clone, Copy)]
-pub(crate) enum Cut {
+pub enum Cut {
     /// In band, another unit is talking (trunked). Logical: the recording
     /// runs on, the source is re-routed, the next transmission opens at
     /// once.
@@ -863,7 +850,7 @@ pub(crate) enum Cut {
     KeyUp { source: Option<u32> },
     /// A conventional channel's carrier dropped: its recording ends with
     /// the transmission and the next starts; the next squelch open begins
-    /// the next transmission as its own CallStart.
+    /// the next transmission as its own `CallStart`.
     Carrier,
 }
 
@@ -879,7 +866,7 @@ impl Cut {
 }
 
 #[derive(Debug)]
-pub(crate) enum Effect {
+pub enum Effect {
     // ── Channels ──
     /// The call (or control channel) was given a channel: open it, then
     /// report with [`TrunkStateMachine::on_opened`].
@@ -952,7 +939,7 @@ pub(crate) enum Effect {
 /// doing so is a compile error under the workspace's `unused_must_use = "deny"`.
 #[must_use = "effects must be processed via process_effects()"]
 #[derive(Debug)]
-pub(crate) struct Effects(Vec<Effect>);
+pub struct Effects(Vec<Effect>);
 
 impl Effects {
     pub(crate) const fn new() -> Self {
@@ -1002,7 +989,7 @@ impl std::ops::Deref for Effects {
     }
 }
 
-pub(crate) use trunk_radio::UnitEventType;
+pub use trunk_radio::UnitEventType;
 
 // ── What the state machine reads off a voice grant or update ──
 
@@ -1038,7 +1025,7 @@ impl VoiceExt for Voice {
 // State Machine
 // ══════════════════════════════════════════════════════════════════════
 
-pub(crate) struct TrunkStateMachine {
+pub struct TrunkStateMachine {
     calls: Vec<CallEntry>,
     pub(crate) config: CallManagerConfig,
     pub(crate) patch_tables: HashMap<i32, PatchTable>,
@@ -1455,8 +1442,7 @@ impl TrunkStateMachine {
         let patched = self
             .patch_tables
             .get(&sys_num)
-            .map(|pt| pt.get_patch(v.tg()))
-            .unwrap_or_default();
+            .map_or_default(|pt| pt.get_patch(v.tg()));
         let ended: Vec<CallId> = self
             .calls
             .iter()
@@ -1985,8 +1971,7 @@ impl TrunkStateMachine {
         let patch_tgs = self
             .patch_tables
             .get(&sys_num)
-            .map(|pt| pt.get_patch(tg))
-            .unwrap_or_default();
+            .map_or_default(|pt| pt.get_patch(tg));
 
         let entry = &mut self.calls[entry_idx];
 
@@ -2845,7 +2830,7 @@ mod tests {
             .collect()
     }
 
-    /// Return the CallId from a CreateCall effect.
+    /// Return the `CallId` from a `CreateCall` effect.
     fn extract_create_call_id(effects: &[Effect]) -> CallId {
         effects
             .iter()
@@ -2963,7 +2948,8 @@ mod tests {
         assert_eq!(state(&sm, w), CallState::Waiting);
         // an equal that has waited longer than the holder has held
         let held_since = sm.wants[&a].since;
-        sm.wants.get_mut(&w).unwrap().since = held_since - Duration::from_secs(1);
+        sm.wants.get_mut(&w).unwrap().since =
+            held_since.checked_sub(Duration::from_secs(1)).unwrap();
         // the holder moves: it keeps its channel
         let effects = sm.on_message(&grant_msg(3, 852_000_000.0));
         assert_eq!(channel_effects(&effects), [("Close", a), ("Open", a)]);
@@ -3094,7 +3080,7 @@ mod tests {
         assert_eq!((sm.channels_held(), sm.waiting()), (1, 1));
         exec(&mut sm, effects);
         // the holder's call ends: the waiting one gets its channel
-        sm.calls[0].last_update = Instant::now() - Duration::from_secs(10);
+        sm.calls[0].last_update = Instant::now().checked_sub(Duration::from_secs(10)).unwrap();
         sm.calls[1].last_update = Instant::now();
         let effects = sm.tick();
         assert_eq!(channel_effects(&effects), [("Close", a), ("Open", b)]);
@@ -3391,7 +3377,7 @@ mod tests {
 
     /// With one channel to spare, the decoder holding it makes way for the
     /// others in turn, so the hunt still reaches the candidate carrying the
-    /// control channel (WatchFollows in `spec/ChannelHunt.tla`, which fails
+    /// control channel (`WatchFollows` in `spec/ChannelHunt.tla`, which fails
     /// if the hunt only caps how many it decodes).
     #[test]
     fn with_one_channel_to_spare_a_hunt_still_reaches_every_candidate() {
@@ -3433,7 +3419,7 @@ mod tests {
             "a control channel has no call to end"
         );
         exec(&mut sm, effects);
-        sm.calls[0].last_update = Instant::now() - Duration::from_secs(10);
+        sm.calls[0].last_update = Instant::now().checked_sub(Duration::from_secs(10)).unwrap();
         let effects = sm.tick();
         assert_eq!(
             channel_effects(&effects),
@@ -3502,7 +3488,7 @@ mod tests {
         let mut sm = TrunkStateMachine::new(test_config());
         let call_id = recording_trunked_call(&mut sm);
         // Past MIN_TRANSMISSION so a real boundary is cut.
-        sm.calls[0].segment_start = Instant::now() - Duration::from_secs(2);
+        sm.calls[0].segment_start = Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
 
         // A different unit keys up mid-call: end this transmission, start the next.
         let effects = sm.on_source_change(call_id, 2002);
@@ -3550,7 +3536,7 @@ mod tests {
     fn a_grant_naming_another_handset_cuts_a_transmission() {
         let mut sm = TrunkStateMachine::new(test_config());
         let call_id = recording_trunked_call(&mut sm);
-        sm.calls[0].segment_start = Instant::now() - Duration::from_secs(2);
+        sm.calls[0].segment_start = Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
         assert!(cut_at_key_up(&key_up(&mut sm, 2002), 2002));
         assert_eq!(sm.calls[0].current_source, Some(2002));
         // The in-band source change that follows matches and adds nothing.
@@ -3561,7 +3547,7 @@ mod tests {
     fn the_same_handset_keying_again_cuts_only_after_its_transmission_ended() {
         let mut sm = TrunkStateMachine::new(test_config());
         let call_id = recording_trunked_call(&mut sm);
-        sm.calls[0].segment_start = Instant::now() - Duration::from_secs(2);
+        sm.calls[0].segment_start = Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
         // A repeated grant within one key-up: no boundary.
         assert!(!has(&key_up(&mut sm, 100), "EmitCallEnd"));
         // The voice channel saw a terminator; the next grant is a new key-up.
@@ -3577,14 +3563,14 @@ mod tests {
     fn a_key_up_granted_on_another_channel_cuts_as_it_moves() {
         let mut sm = TrunkStateMachine::new(test_config());
         let call_id = recording_trunked_call(&mut sm);
-        sm.calls[0].segment_start = Instant::now() - Duration::from_secs(2);
+        sm.calls[0].segment_start = Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
         // Moved mid-transmission, the same unit, nothing ended: one transmission.
         let moved = sm.on_message(&from_source(&grant_msg(100, 852_000_000.0), 100));
         assert!(!has(&moved, "EmitCallEnd"), "{:?}", names(&moved));
         exec(&mut sm, moved);
 
         // The transmission ended; the next key-up is granted elsewhere.
-        sm.calls[0].segment_start = Instant::now() - Duration::from_secs(2);
+        sm.calls[0].segment_start = Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
         sm.on_ptt_ended(call_id);
         let effects = sm.on_message(&from_source(&grant_msg(100, 853_000_000.0), 2002));
         let order: Vec<_> = names(&effects)
@@ -3688,7 +3674,7 @@ mod tests {
     fn source_change_ignored_when_not_recording() {
         let mut sm = TrunkStateMachine::new(test_config());
         let call_id = recording_trunked_call(&mut sm);
-        sm.calls[0].segment_start = Instant::now() - Duration::from_secs(2);
+        sm.calls[0].segment_start = Instant::now().checked_sub(Duration::from_secs(2)).unwrap();
         sm.calls[0].state = CallState::Idle;
         assert!(sm.on_source_change(call_id, 2002).is_empty());
     }
@@ -3699,7 +3685,7 @@ mod tests {
     fn tick_closes_the_channel_and_ends_the_call_before_removing_it() {
         let mut sm = TrunkStateMachine::new(test_config());
         let call_id = recording_trunked_call(&mut sm);
-        sm.calls[0].last_update = Instant::now() - Duration::from_secs(10);
+        sm.calls[0].last_update = Instant::now().checked_sub(Duration::from_secs(10)).unwrap();
 
         let effects = sm.tick();
 
@@ -3718,7 +3704,7 @@ mod tests {
     fn a_rejected_call_times_out_without_a_channel() {
         let mut sm = TrunkStateMachine::new(test_config());
         let call_id = start(&mut sm, &encrypted(&grant_msg(100, 851_000_000.0)));
-        sm.calls[0].last_update = Instant::now() - Duration::from_secs(10);
+        sm.calls[0].last_update = Instant::now().checked_sub(Duration::from_secs(10)).unwrap();
 
         let effects = sm.tick();
 
@@ -3795,7 +3781,7 @@ mod tests {
     fn tick_skips_conventional_calls() {
         let mut sm = TrunkStateMachine::new(test_config());
         let call_id = add_conventional(&mut sm, false);
-        sm.calls[0].last_update = Instant::now() - Duration::from_secs(10);
+        sm.calls[0].last_update = Instant::now().checked_sub(Duration::from_secs(10)).unwrap();
         assert!(!has(&sm.tick(), "RemoveCall"));
         assert!(sm.get_call(call_id).is_some());
     }
@@ -3985,7 +3971,7 @@ mod tests {
         exec(&mut sm, effects);
         assert_eq!(state(&sm, call_id), CallState::Waiting);
         // the emergency ends: the channel comes back, waiting for a carrier
-        sm.calls[1].last_update = Instant::now() - Duration::from_secs(10);
+        sm.calls[1].last_update = Instant::now().checked_sub(Duration::from_secs(10)).unwrap();
         let effects = sm.tick();
         assert_eq!(
             channel_effects(&effects),
@@ -4149,8 +4135,9 @@ mod tests {
         let mut sm = TrunkStateMachine::new(test_config());
         let _ = add_conventional(&mut sm, false);
         sm.calls[0].state = CallState::Recording;
-        sm.calls[0].segment_start =
-            Instant::now() - STUCK_RECORDING_BACKSTOP - Duration::from_secs(1);
+        sm.calls[0].segment_start = Instant::now()
+            .checked_sub(STUCK_RECORDING_BACKSTOP + Duration::from_secs(1))
+            .unwrap();
         assert!(has(&sm.tick(), "Rotate"));
     }
 
@@ -4161,11 +4148,12 @@ mod tests {
         // Recording for longer than backstop, BUT has completed segments
         // (meaning squelch has been cycling normally).
         sm.calls[0].state = CallState::Recording;
-        sm.calls[0].segment_start =
-            Instant::now() - STUCK_RECORDING_BACKSTOP - Duration::from_secs(1);
+        sm.calls[0].segment_start = Instant::now()
+            .checked_sub(STUCK_RECORDING_BACKSTOP + Duration::from_secs(1))
+            .unwrap();
         sm.calls[0].segments.push(CallSegment {
-            start: Instant::now() - Duration::from_secs(60),
-            end: Instant::now() - Duration::from_secs(30),
+            start: Instant::now().checked_sub(Duration::from_secs(60)).unwrap(),
+            end: Instant::now().checked_sub(Duration::from_secs(30)).unwrap(),
             freq: Freq::from_hz(488_000_000.0),
             channel: Some(ChannelNum(5)),
         });

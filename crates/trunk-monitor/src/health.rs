@@ -152,15 +152,15 @@ mod tests {
 
     #[test]
     fn the_limits_are_a_few_refreshes_and_never_under_a_quarter_hour() {
-        assert_eq!(limits().stale, Duration::from_secs(15 * 60));
-        assert_eq!(limits().stalled, Duration::from_secs(20 * 60));
+        assert_eq!(limits().stale, Duration::from_mins(15));
+        assert_eq!(limits().stalled, Duration::from_mins(20));
         // a slow refresh stretches them
-        let slow = Limits::for_refresh(Duration::from_secs(900), Duration::from_secs(240));
-        assert_eq!(slow.stale, Duration::from_secs(45 * 60));
-        assert_eq!(slow.stalled, Duration::from_secs(2_940));
+        let slow = Limits::for_refresh(Duration::from_mins(15), Duration::from_secs(240));
+        assert_eq!(slow.stale, Duration::from_mins(45));
+        assert_eq!(slow.stalled, Duration::from_mins(49));
         // a fast one does not shrink them
         let fast = Limits::for_refresh(Duration::from_secs(30), Duration::from_secs(20));
-        assert_eq!(fast.stale, Duration::from_secs(15 * 60));
+        assert_eq!(fast.stale, Duration::from_mins(15));
     }
 
     #[test]

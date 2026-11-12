@@ -541,7 +541,12 @@ mod tests {
         let mut c = Conditioner::new(5, 0.2, ConditionerParams::default());
         let mut x = tone(0.0, 24_000.0, 2_000, 0.03);
         c.process(&mut x);
-        let rms = (x[1_000..].iter().map(|v| v.norm_sqr()).sum::<f32>() / 1_000.0).sqrt();
+        let rms = (x[1_000..]
+            .iter()
+            .map(num_complex::Complex::norm_sqr)
+            .sum::<f32>()
+            / 1_000.0)
+            .sqrt();
         assert!((rms - 0.85).abs() < 0.02, "rms {rms}");
     }
 
@@ -602,7 +607,12 @@ mod tests {
         // 250 Hz at 18 kHz reads as 333 Hz
         let e = c.freq_error_hz(24_000.0);
         assert!((-450..=-200).contains(&e), "FLL freq {e} Hz");
-        let rms = (out[n - 10_000..n].iter().map(|v| v.norm_sqr()).sum::<f32>() / 10_000.0).sqrt();
+        let rms = (out[n - 10_000..n]
+            .iter()
+            .map(num_complex::Complex::norm_sqr)
+            .sum::<f32>()
+            / 10_000.0)
+            .sqrt();
         assert!((rms - 0.85).abs() < 0.05, "rms {rms}");
     }
 

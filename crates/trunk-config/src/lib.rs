@@ -73,8 +73,7 @@ impl Config {
                         .and_then(|s| s.get(name))
                         .and_then(|v| v.get("talkgroup"))
                         .and_then(|v| v.as_array())
-                        .map(std::vec::Vec::as_slice)
-                        .unwrap_or_default();
+                        .map_or_default(std::vec::Vec::as_slice);
 
                     sys.talkgroup = system::resolve_talkgroups(
                         config_dir,
@@ -88,8 +87,7 @@ impl Config {
                         .and_then(|s| s.get(name))
                         .and_then(|v| v.get("channel"))
                         .and_then(|v| v.as_array())
-                        .map(std::vec::Vec::as_slice)
-                        .unwrap_or_default();
+                        .map_or_default(std::vec::Vec::as_slice);
 
                     sys.channel = system::resolve_channels(
                         config_dir,

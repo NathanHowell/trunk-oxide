@@ -12,7 +12,7 @@ mod tests {
     use super::*;
     use prost::Message;
 
-    /// Check that encoded_len() matches actual encode() output for a message.
+    /// Check that `encoded_len()` matches actual `encode()` output for a message.
     fn check_encoded_len(msg: &impl Message, label: &str) {
         let predicted = msg.encoded_len();
         let mut buf = Vec::new();
@@ -315,7 +315,7 @@ mod tests {
         }
     }
 
-    /// Test batch of multiple TrunkMessages (mimics real trunk_message callback
+    /// Test batch of multiple `TrunkMessages` (mimics real `trunk_message` callback
     /// which sends a batch of messages for each control channel decode).
     #[test]
     fn trunk_message_batch_encoded_len() {

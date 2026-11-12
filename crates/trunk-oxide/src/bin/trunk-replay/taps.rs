@@ -46,8 +46,7 @@ pub fn index(dir: &Path) -> Result<String> {
         let base = sc.with_extension("");
         let name = base
             .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_default();
+            .map_or_default(|n| n.to_string_lossy().into_owned());
         let out_rate = meta["out_rate"].as_f64().unwrap_or(0.0);
         #[allow(clippy::cast_precision_loss)]
         let seconds = size(&base, "out.cf32").map(|b| b as f64 / 8.0 / out_rate.max(1.0));

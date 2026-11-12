@@ -2,7 +2,7 @@
 //! it emits to a raw file (int16 little-endian mono), for offline comparison
 //! of DSP paths (e.g. `shared_channelizer` on/off against an `iqfile` source).
 //!
-//!   cargo run -p trunk-discord --example audio_tap -- <socket> <out.raw> [seconds]
+//!   cargo run -p trunk-discord --example `audio_tap` -- <socket> <out.raw> [seconds]
 //!
 //! Prints `sample_rate` and the number of samples written on exit.
 

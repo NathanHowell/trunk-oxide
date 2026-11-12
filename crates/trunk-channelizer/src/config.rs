@@ -117,7 +117,7 @@ impl Config {
                 spec.target_rate
             );
         }
-        let mut best: Option<(f64, Config)> = None;
+        let mut best: Option<(f64, Self)> = None;
         let mut pick = vec![0usize; specs.len()];
         loop {
             let profiles: Vec<Profile> = specs
@@ -136,7 +136,7 @@ impl Config {
             {
                 best = Some((
                     score,
-                    Config {
+                    Self {
                         sample_rate,
                         n,
                         overlap_in,

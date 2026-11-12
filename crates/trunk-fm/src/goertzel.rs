@@ -6,7 +6,7 @@ use crate::AUDIO_RATE;
 /// a sine of that frequency (a Goertzel filter at exactly `hz`, not at the
 /// nearest of the window's 25 Hz bins, which would lose half of a tone
 /// that falls between two).
-pub(crate) fn tone_power(samples: &[f32], hz: f64) -> f64 {
+pub fn tone_power(samples: &[f32], hz: f64) -> f64 {
     let n = samples.len() as f64;
     let w = std::f64::consts::TAU * hz / AUDIO_RATE;
     let coeff = 2.0 * w.cos();

@@ -174,11 +174,7 @@ impl AggregatorState {
                 }
             }
             AggMessage::SetupSystem(e) => {
-                let key = e
-                    .system
-                    .as_ref()
-                    .map(|s| s.short_name.clone())
-                    .unwrap_or_default();
+                let key = e.system.as_ref().map_or_default(|s| s.short_name.clone());
                 let text = e.format_embed();
                 if self.last_setup_system.get(&key) != Some(&text) {
                     self.last_setup_system.insert(key, text.clone());

@@ -463,7 +463,7 @@ mod tests {
         );
         let kinds: Vec<_> = signals(&run(&audio, 1_600))
             .iter()
-            .map(|s| s.scheme())
+            .map(super::super::signalling::Signal::scheme)
             .collect();
         assert_eq!(kinds, ["tone", "tone"]);
     }
@@ -511,7 +511,7 @@ mod tests {
             .collect();
         let kinds: Vec<_> = signals(&run(&play(&slow, 0.3, 0.3), 1_600))
             .iter()
-            .map(|s| s.scheme())
+            .map(super::super::signalling::Signal::scheme)
             .collect();
         assert!(!kinds.contains(&"warble"), "{kinds:?}");
     }

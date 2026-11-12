@@ -147,7 +147,7 @@ mod tests {
         let mut r = ArbResampler::new(rate, &xlat_arb_taps(rate), 32);
         let n = 101_333;
         let x: Vec<Complex32> = (0..n)
-            .map(|i| Complex32::from_polar(1.0, (TAU * 2_000.0 * i as f64 / fin) as f32))
+            .map(|i| Complex32::from_polar(1.0, (TAU * 2_000.0 * f64::from(i) / fin) as f32))
             .collect();
         let mut out = Vec::new();
         for c in x.chunks(777) {
@@ -158,7 +158,7 @@ mod tests {
         let mean = mid.iter().map(|c| c.norm()).sum::<f32>() / mid.len() as f32;
         assert!((mean - 1.0).abs() < 0.02, "gain {mean}");
         // frequency is preserved: phase advance per output sample
-        let ph = (mid[1] * mid[0].conj()).arg() as f64;
+        let ph = f64::from((mid[1] * mid[0].conj()).arg());
         assert!((ph - TAU * 2_000.0 / fout).abs() < 2e-3, "{ph}");
     }
 }

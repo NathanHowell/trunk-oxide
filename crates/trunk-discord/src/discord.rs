@@ -13,7 +13,7 @@ use crate::call_state::EmbedData;
 
 /// Convert pure [`EmbedData`] to a serenity [`CreateEmbed`]. Shared by the
 /// per-channel writer and any other embed sender.
-pub(crate) fn embed_data_to_serenity(data: &EmbedData) -> CreateEmbed {
+pub fn embed_data_to_serenity(data: &EmbedData) -> CreateEmbed {
     let mut embed = CreateEmbed::new()
         .title(&data.title)
         .colour(data.colour)

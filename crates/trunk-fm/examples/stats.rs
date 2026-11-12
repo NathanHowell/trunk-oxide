@@ -74,7 +74,7 @@ fn main() -> std::io::Result<()> {
                     *hop as f64 / 10.0
                 ),
                 Event::Close { hop, reason } => {
-                    println!("{:.1} close {reason:?}", *hop as f64 / 10.0)
+                    println!("{:.1} close {reason:?}", *hop as f64 / 10.0);
                 }
             }
         }

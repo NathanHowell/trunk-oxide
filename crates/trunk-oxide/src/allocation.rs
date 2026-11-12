@@ -80,7 +80,7 @@ impl Priority {
 
 /// A claim on a channel.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct Want {
+pub struct Want {
     pub(crate) priority: Priority,
     /// When it was first made.
     pub(crate) since: Instant,
@@ -96,7 +96,7 @@ struct Rank {
 }
 
 /// The wants that get one of `budget` channels, given who `held` them.
-pub(crate) fn allocate(
+pub fn allocate(
     wants: &BTreeMap<CallId, Want>,
     held: &BTreeSet<CallId>,
     budget: usize,
@@ -116,12 +116,12 @@ pub(crate) fn allocate(
 
 /// What changes from one allocation to the next.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub(crate) struct Diff {
+pub struct Diff {
     pub(crate) close: Vec<CallId>,
     pub(crate) open: Vec<CallId>,
 }
 
-pub(crate) fn diff(before: &BTreeSet<CallId>, after: &BTreeSet<CallId>) -> Diff {
+pub fn diff(before: &BTreeSet<CallId>, after: &BTreeSet<CallId>) -> Diff {
     Diff {
         close: before.difference(after).copied().collect(),
         open: after.difference(before).copied().collect(),
@@ -253,7 +253,7 @@ mod tests {
             change in prop::option::of((priority(), 0u64..50)),
         ) {
             let settled = allocate(&w, &held, budget);
-            let mut w2 = w.clone();
+            let mut w2 = w;
             match change {
                 Some((p, t)) => {
                     w2.insert(CallId(id), wants(&[(id, p, t)])[&CallId(id)]);
@@ -278,7 +278,7 @@ mod tests {
             claim in priority(),
         ) {
             let settled = allocate(&w, &held, budget);
-            let mut w2 = w.clone();
+            let mut w2 = w;
             w2.insert(CallId(id), wants(&[(id, claim, 0)])[&CallId(id)]);
             let next = allocate(&w2, &settled, budget);
             for gone in settled.difference(&next) {

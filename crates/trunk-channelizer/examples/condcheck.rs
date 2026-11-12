@@ -2,7 +2,7 @@
 //! run --tap`: feeds `<base>.in.cf32` through [`Conditioner`] and measures it
 //! against `<base>.out.cf32` (the GNU Radio chain's output).
 //!
-//!   cargo run --release -p trunk-channelizer --example condcheck -- <base> [sps] [excess_bw]
+//!   cargo run --release -p trunk-channelizer --example condcheck -- <base> [sps] [`excess_bw`]
 
 use std::fs;
 

@@ -157,8 +157,7 @@ pub fn compare(dir: &Path) -> Result<String> {
         let text = std::fs::read_to_string(p.join("summary.json"))?;
         rows.push((
             p.file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
+                .map_or_default(|n| n.to_string_lossy().into_owned()),
             serde_json::from_str(&text)?,
         ));
     }

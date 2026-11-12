@@ -59,6 +59,10 @@ missing_errors_doc = "allow"
 missing_panics_doc = "allow"
 module_name_repetitions = "allow"
 must_use_candidate = "allow"
+# Its rewrite of `assert!(v.is_empty())` for a collection spells out the
+# element type (`assert_eq!(v, [] as [T; 0])`), which is noisier than the
+# assert and breaks where `T` is not in scope.
+assert_is_empty = "allow"
 
 [workspace.dependencies]
 proptest = "1.11"

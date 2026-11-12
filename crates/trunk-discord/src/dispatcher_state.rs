@@ -65,7 +65,7 @@ pub enum DispatchEffect {
 // ── Config ───────────────────────────────────────────────────────────────────
 
 /// Maximum time a call can be active before being reaped.
-const MAX_CALL_AGE: Duration = Duration::from_secs(10 * 60);
+const MAX_CALL_AGE: Duration = Duration::from_mins(10);
 
 /// The line an evicted call's embed gets.
 const EVICTED: &str = "✂️ cut short: a higher-priority call took the channel";
@@ -720,9 +720,7 @@ mod tests {
         let event = proto::PluginEvent {
             event: Some(proto::plugin_event::Event::Unit(proto::UnitEvent {
                 talkgroup: 0,
-                system: Some(proto::SystemInfo {
-                    ..Default::default()
-                }),
+                system: Some(Default::default()),
                 ..Default::default()
             })),
         };
@@ -745,7 +743,9 @@ mod tests {
         };
         s.active_calls.insert(
             key.clone(),
-            Instant::now() - std::time::Duration::from_secs(700),
+            Instant::now()
+                .checked_sub(std::time::Duration::from_secs(700))
+                .unwrap(),
         );
 
         let effects = s.on_reap_tick();
@@ -888,8 +888,12 @@ mod tests {
             talkgroup: Talkgroup(12345),
         };
         // Simulate an entry that's already expired
-        s.coalescing_calls
-            .insert(key.clone(), Instant::now() - Duration::from_millis(200));
+        s.coalescing_calls.insert(
+            key.clone(),
+            Instant::now()
+                .checked_sub(Duration::from_millis(200))
+                .unwrap(),
+        );
 
         let effects = s.on_coalesce_tick();
         assert!(
@@ -922,8 +926,12 @@ mod tests {
             talkgroup: Talkgroup(12345),
         };
         // This shouldn't happen in practice, but verify it's safe
-        s.coalescing_calls
-            .insert(key, Instant::now() - Duration::from_secs(100));
+        s.coalescing_calls.insert(
+            key,
+            Instant::now()
+                .checked_sub(Duration::from_secs(100))
+                .unwrap(),
+        );
         let effects = s.on_coalesce_tick();
         assert!(effects.is_empty());
     }

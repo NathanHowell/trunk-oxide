@@ -256,10 +256,10 @@ impl Phase {
     fn push(&mut self, high: bool, now: u64) -> Step {
         match &mut self.stage {
             Stage::Hunting => {
-                let run = if (self.history & 1 == 1) != high {
-                    self.runs[RUNS - 1] + 1
-                } else {
+                let run = if (self.history & 1 == 1) == high {
                     1
+                } else {
+                    self.runs[RUNS - 1] + 1
                 };
                 self.runs.rotate_left(1);
                 self.runs[RUNS - 1] = run;

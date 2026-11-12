@@ -448,19 +448,19 @@ impl CallState {
         if self.config.audio_attachment
             && let Some(ogg_data) = ogg_data
         {
-            if !self.audio_kept {
-                tracing::debug!(
-                    talkgroup = self.talkgroup,
-                    ogg_bytes = ogg_data.len(),
-                    "skipping audio attachment (no audible segment)"
-                );
-            } else {
+            if self.audio_kept {
                 let filename = format!(
                     "call_{}_{}.ogg",
                     self.talkgroup,
                     self.start_time.format("%Y%m%dT%H%M%SZ"),
                 );
                 effects.push(CallEffect::AttachAudio { ogg_data, filename });
+            } else {
+                tracing::debug!(
+                    talkgroup = self.talkgroup,
+                    ogg_bytes = ogg_data.len(),
+                    "skipping audio attachment (no audible segment)"
+                );
             }
         }
 

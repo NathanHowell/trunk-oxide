@@ -29,7 +29,7 @@ pub struct FlagInfo {
     pub tdma: bool,
     pub talkgroup: i64,
     /// Trace id of the embed (shared with its first transmission). Later
-    /// transmissions are attached to the embed's span as OTel links.
+    /// transmissions are attached to the embed's span as `OTel` links.
     pub trace_id: String,
     /// The later transmissions' trace ids, so a flag names every trace.
     pub transmission_traces: Vec<String>,

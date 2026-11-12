@@ -43,7 +43,7 @@ fn traceparent_of(span: &tracing::Span) -> String {
 use trunk_oxide_grpc::AudioMeta;
 
 /// A system's type as the wire says it.
-pub(crate) const fn proto_system_type(st: SystemType) -> ProtoSystemType {
+pub const fn proto_system_type(st: SystemType) -> ProtoSystemType {
     match st {
         SystemType::Conventional => ProtoSystemType::Conventional,
         SystemType::ConventionalP25 => ProtoSystemType::ConventionalP25,
@@ -58,7 +58,7 @@ pub(crate) const fn proto_system_type(st: SystemType) -> ProtoSystemType {
 /// samples) summed over a call's transmissions. A channel's recording runs
 /// across a trunked call's per-speaker boundaries, so they are cumulative;
 /// each boundary reports the change since the last (see [`Tally`]) so each
-/// per-speaker CallEnd carries only its own slice and the slices still sum to
+/// per-speaker `CallEnd` carries only its own slice and the slices still sum to
 /// the call total.
 #[derive(Default, Clone, Copy)]
 struct VoiceCounters {
@@ -152,9 +152,9 @@ pub struct CallManager {
     radio: Arc<Radio>,
     /// Recorder-side tracing spans, opened at `EmitCallStart` and closed at
     /// conclude. Held (not entered) so each span's lifetime tracks the call's
-    /// real duration; its context is serialized into the CallStart event so the
-    /// downstream (discord) call span parents to it, and its stop_reason /
-    /// recording_length / segments are recorded at close.
+    /// real duration; its context is serialized into the `CallStart` event so the
+    /// downstream (discord) call span parents to it, and its `stop_reason` /
+    /// `recording_length` / segments are recorded at close.
     call_spans: HashMap<CallId, tracing::Span>,
     /// What each call's channels recorded, until its end reports it.
     tallies: HashMap<CallId, Tally>,
@@ -1625,13 +1625,12 @@ impl CallManager {
                 .state
                 .patch_tables
                 .get(&view.sys_num())
-                .map(|pt| {
+                .map_or_default(|pt| {
                     pt.get_patch(view.talkgroup())
                         .into_iter()
                         .map(|t| u64::from(t.0))
                         .collect()
-                })
-                .unwrap_or_default(),
+                }),
             call_num: view.call_num(),
             freq: view.freq().as_hz(),
             channel: view.channel().map(|c| c.0),

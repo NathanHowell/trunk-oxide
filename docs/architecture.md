@@ -335,7 +335,7 @@ Persisted: `<state_dir>/gain-calibration.json` (default `state_dir` `/var/lib/tr
 
 Logging: `tracing` with the `fmt` layer (its default writer, stdout), filtered by `RUST_LOG` (`EnvFilter::from_default_env`), plus the OTel layer when tracing is enabled. `trunk-discord` additionally keeps `serenity`'s spans out of exported traces.
 
-The consumers are separate processes, joined by Unix sockets on shared volumes (`oxide-socket`, `whisperer-socket` in `docker-compose.yml`): `trunk-discord` (`main.rs`, `dispatcher.rs`), one transcriber (profiles `whisper`, `parakeet`, `whistle`), and the Jaeger and VictoriaMetrics containers the metrics and traces go to. Images are built by `Dockerfile.oxide` (the scanner), `Dockerfile.discord`, `Dockerfile.whisperer`, `Dockerfile.parakeet`, `Dockerfile.whistle`; CI (`.github/workflows/docker.yml`) builds the first three.
+The consumers are separate processes, joined by Unix sockets on shared volumes (`oxide-socket`, `whisperer-socket` in `docker-compose.yml`): `trunk-discord` (`main.rs`, `dispatcher.rs`), one transcriber (profiles `whisper`, `parakeet`, `whistle`), and the Jaeger and VictoriaMetrics containers the metrics and traces go to. Images are built by `Dockerfile.oxide` (the scanner), `Dockerfile.discord`, `Dockerfile.whisperer`, `Dockerfile.parakeet`, `Dockerfile.whistle`. CI (`.github/workflows/ci.yml`) checks formatting, clippy, the tests and the 1.94 MSRV on every push and pull request; it builds no images.
 
 ## 6. Other binaries
 
@@ -436,5 +436,5 @@ Other conventions: frequencies are Hz as `f64` in config and on the wire (`Freq(
 | Source planning | `crates/trunk-solver/src/` |
 | Replay and sweeps | `crates/trunk-oxide/src/bin/trunk-replay/`, `crates/trunk-oxide/REPLAY.md` |
 | Golden and noise tools | `crates/trunk-p25/tests/golden.rs`, `crates/trunk-p25/examples/`, `crates/trunk-channelizer/examples/`, `crates/trunk-fm/examples/` |
-| Deployment | `docker-compose.yml`, `Dockerfile.*`, `deploy/systemd/user.slice.d/50-trunk-oxide-cpu.conf`, `rtl-sdr.rules`, `jaeger-config.yaml`, `.github/workflows/docker.yml` |
+| Deployment | `docker-compose.yml`, `Dockerfile.*`, `deploy/systemd/user.slice.d/50-trunk-oxide-cpu.conf`, `rtl-sdr.rules`, `jaeger-config.yaml` |
 | Per-service configs | `config-discord.toml`, `config-whisperer.toml`, `config-parakeet.toml`, `config-whistle.toml` |

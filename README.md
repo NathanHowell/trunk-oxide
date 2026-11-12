@@ -1,5 +1,7 @@
 # trunk-oxide
 
+[![CI](https://github.com/NathanHowell/trunk-oxide/actions/workflows/ci.yml/badge.svg)](https://github.com/NathanHowell/trunk-oxide/actions/workflows/ci.yml)
+
 A Rust SDR scanner for P25 trunked and conventional analog radio systems. It opens RTL-SDR dongles with librtlsdr, channelizes each one with a shared FFT channelizer, decodes P25 control and voice channels (trunk-p25) and analog FM (trunk-fm), runs the call state machine, and publishes calls and audio over gRPC. It began as a Rust driver for [trunk-recorder](https://github.com/robotastic/trunk-recorder); the C++/GNU Radio stack has since been replaced entirely.
 
 Recorded calls are streamed over gRPC to companion services for transcription and Discord integration.

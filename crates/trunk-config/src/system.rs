@@ -644,5 +644,4 @@ mod talkgroup_file_tests {
         assert!(tgs[&105].mode.is_encrypted());
         assert!(!tgs[&104].mode.is_encrypted());
     }
-
 }

@@ -1,5 +1,4 @@
 /target
-/crates/trunk-recorder-sys/compat
 /secrets
 
 # Beads / Dolt files (added by bd init)

@@ -74,8 +74,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: apt-get update && apt-get install -y --no-install-recommends librtlsdr-dev libprotobuf-dev protobuf-compiler libclang-dev cmake
-      - uses: dtolnay/rust-toolchain@1.94
+      - uses: dtolnay/rust-toolchain@1.100
       - uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1-generic-cpu
-      - run: cargo +1.94 check --workspace $EXCLUDE --all-targets
+      - run: cargo +1.100 check --workspace $EXCLUDE --all-targets

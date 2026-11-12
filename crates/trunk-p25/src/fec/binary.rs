@@ -63,7 +63,7 @@ const fn mask(n: u32) -> u32 {
 
 /// Next larger integer with the same number of set bits (Gosper's hack).
 const fn next_combination(x: u64) -> u64 {
-    let c = x & x.wrapping_neg();
+    let c = x.isolate_lowest_one();
     let r = x + c;
     (((r ^ x) >> 2) / c) | r
 }

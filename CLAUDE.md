@@ -60,7 +60,7 @@ cargo fmt
 
 ## Key Conventions
 
-- Rust edition 2024, MSRV 1.94, resolver = "3"
+- Rust edition 2024, MSRV 1.100, resolver = "3"
 - `unsafe_code = "deny"` and `unused_must_use = "deny"` workspace-wide
 - clippy::all is denied; pedantic and nursery are warnings. Make a function `const fn` whenever it can be: `missing_const_for_fn` (nursery) names the ones that can, and the workspace is kept at zero of them
 - The only native library is librtlsdr (hand-written extern decls in trunk-rtlsdr-sys, no bindgen)

@@ -335,7 +335,7 @@ Persisted: `<state_dir>/gain-calibration.json` (default `state_dir` `/var/lib/tr
 
 Logging: `tracing` with the `fmt` layer (its default writer, stdout), filtered by `RUST_LOG` (`EnvFilter::from_default_env`), plus the OTel layer when tracing is enabled. `trunk-discord` additionally keeps `serenity`'s spans out of exported traces.
 
-The consumers are separate processes, joined by Unix sockets on shared volumes (`oxide-socket`, `whisperer-socket` in `docker-compose.yml`): `trunk-discord` (`main.rs`, `dispatcher.rs`), one transcriber (profiles `whisper`, `parakeet`, `whistle`), and the Jaeger and VictoriaMetrics containers the metrics and traces go to. Images are built by `Dockerfile.oxide` (the scanner), `Dockerfile.discord`, `Dockerfile.whisperer`, `Dockerfile.parakeet`, `Dockerfile.whistle`. CI (`.github/workflows/ci.yml`) checks formatting, clippy, the tests and the 1.94 MSRV on every push and pull request; it builds no images.
+The consumers are separate processes, joined by Unix sockets on shared volumes (`oxide-socket`, `whisperer-socket` in `docker-compose.yml`): `trunk-discord` (`main.rs`, `dispatcher.rs`), one transcriber (profiles `whisper`, `parakeet`, `whistle`), and the Jaeger and VictoriaMetrics containers the metrics and traces go to. Images are built by `Dockerfile.oxide` (the scanner), `Dockerfile.discord`, `Dockerfile.whisperer`, `Dockerfile.parakeet`, `Dockerfile.whistle`. CI (`.github/workflows/ci.yml`) checks formatting, clippy, the tests and the 1.100 MSRV on every push and pull request; it builds no images.
 
 ## 6. Other binaries
 

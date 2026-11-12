@@ -106,7 +106,7 @@ Services use health checks to enforce startup ordering and report readiness.
 
 ## Building from Source
 
-Requires Rust 1.94+ (edition 2024).
+Requires Rust 1.100+ (edition 2024).
 
 ```bash
 cargo build -p trunk-oxide

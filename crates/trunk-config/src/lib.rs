@@ -110,10 +110,10 @@ mod tests {
 
     #[test]
     fn parse_minimal_discord_config() {
-        let toml = r#"
+        let toml = r"
 [discord]
 channel_id = 123456789
-"#;
+";
         let config: Config = toml::from_str(toml).unwrap();
         let discord = config.discord.unwrap();
         assert_eq!(discord.channel_id.get(), 123_456_789);
@@ -123,17 +123,17 @@ channel_id = 123456789
 
     #[test]
     fn parse_monitor() {
-        let toml = r#"
+        let toml = r"
 [monitor]
 channel_id = 555
-"#;
+";
         let config: Config = toml::from_str(toml).unwrap();
         let monitor = config.monitor.unwrap();
         assert_eq!(monitor.channel_id.get(), 555);
         // the rest is what the compose network has
         assert_eq!(monitor.victoriametrics_url, "http://victoriametrics:8428");
         assert_eq!(monitor.refresh_secs, 300);
-        assert!(monitor.bot_token.is_empty());
+        assert_eq!(monitor.bot_token, "");
     }
 
     #[test]
@@ -193,10 +193,10 @@ talkgroups = [
 
     #[test]
     fn parse_channel_id_zero_fails() {
-        let toml = r#"
+        let toml = r"
 [discord]
 channel_id = 0
-"#;
+";
         let result: Result<Config, _> = toml::from_str(toml);
         assert!(result.is_err());
     }

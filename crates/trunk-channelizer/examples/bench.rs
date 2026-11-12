@@ -87,7 +87,7 @@ fn run(
     let hop = cfg.hop();
     let mut ch = Channelizer::new(cfg.clone()).unwrap();
     // spread channels across the passband, avoiding the DC bin
-    let span = fs * 0.9 - cfg.out_rate(NARROW);
+    let span = fs.mul_add(0.9, -cfg.out_rate(NARROW));
     for i in 0..nch {
         let f = -span / 2.0 + span * (i as f64 + 0.37) / nch as f64;
         ch.add_channel(NARROW, f).unwrap();
@@ -206,7 +206,7 @@ fn mixed(quick: bool) {
             let cfg = Config::standard(fs).unwrap();
             let hop = cfg.hop();
             let mut ch = Channelizer::new(cfg.clone()).unwrap();
-            let span = fs * 0.85 - cfg.out_rate(WIDE);
+            let span = f64::mul_add(fs, 0.85, -cfg.out_rate(WIDE));
             let total = nn + nw;
             for i in 0..total {
                 let f = -span / 2.0 + span * (f64::from(i) + 0.37) / f64::from(total);

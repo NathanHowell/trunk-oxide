@@ -93,7 +93,7 @@ mod tests {
             .map(|i| TrunkMessage {
                 message_type: MessageType::Grant as i32,
                 meta: format!("{i}C"),
-                freq: 772_000_000.0 + i as f64 * 100_000.0,
+                freq: (i as f64).mul_add(100_000.0, 772_000_000.0),
                 talkgroup: 1000 + i,
                 encrypted: i % 2 == 0,
                 emergency: false,
@@ -327,7 +327,7 @@ mod tests {
                     MessageType::Status as i32
                 },
                 meta: format!("{:02X}", i * 17),
-                freq: 770_000_000.0 + i as f64 * 500_000.0,
+                freq: (i as f64).mul_add(500_000.0, 770_000_000.0),
                 talkgroup: 1000 + i,
                 source: if i % 2 == 0 { -1 } else { 10000 + i },
                 sys_id: 0x1234,

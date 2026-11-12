@@ -69,7 +69,11 @@ fn welch_psd(iq: &[Complex32], fft_size: usize) -> Vec<f64> {
         }
         fft.process(&mut scratch);
         for (a, c) in acc.iter_mut().zip(scratch.iter()) {
-            *a += f64::from(c.re) * f64::from(c.re) + f64::from(c.im) * f64::from(c.im);
+            *a += f64::mul_add(
+                f64::from(c.im),
+                f64::from(c.im),
+                f64::from(c.re) * f64::from(c.re),
+            );
         }
         segments += 1;
         start += hop;
@@ -169,7 +173,7 @@ mod tests {
             s ^= s >> 7;
             s ^= s << 17;
             // map to [-1, 1)
-            (s >> 11) as f32 / (1u64 << 52) as f32 * 2.0 - 1.0
+            ((s >> 11) as f32 / (1u64 << 52) as f32).mul_add(2.0, -1.0)
         };
         (0..n)
             .map(|_| Complex32::new(next() * amp, next() * amp))

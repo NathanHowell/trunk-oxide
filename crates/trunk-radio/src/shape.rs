@@ -90,7 +90,7 @@ impl ShapeMeter {
     pub fn push(&mut self, audio: &[i16]) {
         for &s in audio {
             let x = f64::from(s) / 32_768.0;
-            self.squares += x * x;
+            self.squares = f64::mul_add(x, x, self.squares);
             self.peak = self.peak.max(x.abs());
             self.filled += 1;
             if self.filled == self.frame {

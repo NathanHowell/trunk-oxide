@@ -550,14 +550,16 @@ mod tests {
             let t = n as f64 / rate;
             if (1.0..3.0).contains(&t) {
                 let at = ((t - 1.0) * 16_000.0) as usize;
-                let m = 700.0 * (std::f64::consts::TAU * 162.2 * t).sin()
-                    + match burst {
+                let m = 700.0f64.mul_add(
+                    (std::f64::consts::TAU * 162.2 * t).sin(),
+                    match burst {
                         Some(b) if at < b.len() => 2_000.0 * f64::from(b[at]),
                         _ => speech(t),
-                    };
+                    },
+                );
                 phase += std::f64::consts::TAU * (100_000.0 + offset_hz + m) / rate;
             } else {
-                phase += std::f64::consts::TAU * f64::from(rnd() - 0.5);
+                phase = std::f64::consts::TAU.mul_add(f64::from(rnd() - 0.5), phase);
             }
             iq.push(Complex32::from_polar(0.3, phase as f32));
         }
@@ -700,10 +702,10 @@ mod tests {
                 let (mut re, mut im) = (0.0, 0.0);
                 for (n, &x) in w.iter().enumerate() {
                     let phase = std::f64::consts::TAU * hz * n as f64 / 16_000.0;
-                    re += f64::from(x) * phase.cos();
-                    im -= f64::from(x) * phase.sin();
+                    re = f64::mul_add(f64::from(x), phase.cos(), re);
+                    im = f64::mul_add(f64::from(x), -phase.sin(), im);
                 }
-                re * re + im * im
+                f64::mul_add(im, im, re * re)
             })
             .sum()
     }

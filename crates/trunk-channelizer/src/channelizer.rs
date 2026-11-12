@@ -193,7 +193,7 @@ impl Channelizer {
         let df = self.bin_hz();
         let b = (freq_hz / df).round();
         let bin0 = (b as i64).rem_euclid(self.shared.n as i64) as usize;
-        Ok((bin0, freq_hz - b * df))
+        Ok((bin0, b.mul_add(-df, freq_hz)))
     }
 
     /// Add a channel of `profile` centred `freq_hz` from the source centre,

@@ -18,8 +18,10 @@ env:
   # .cargo/config.toml builds for the host CPU (target-cpu=native), which is
   # right for the scanner but not for a cache shared between runners: a
   # proc-macro built on one runner's CPU dies with SIGILL on an older one.
-  # An empty value does not override the config, so name a baseline CPU.
-  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C target-cpu=x86-64-v2"
+  # An empty value does not override the config, so name a baseline CPU:
+  # x86-64-v3 (Haswell on, which every GitHub x86 runner is) has FMA, so
+  # mul_add is one instruction rather than a call into libm's fma().
+  CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUSTFLAGS: "-C target-cpu=x86-64-v3"
   # trunk-whistle needs the prebuilt libneedle.a (NEEDLE_LIB_DIR); it is built
   # only by Dockerfile.whistle.
   EXCLUDE: --exclude trunk-whistle
@@ -47,7 +49,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-generic-cpu
+          prefix-key: v2-x86-64-v3
       # clippy::all is denied in the workspace lints, so it fails the job;
       # pedantic and nursery stay warnings.
       - run: cargo clippy --workspace $EXCLUDE --all-targets
@@ -63,7 +65,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-generic-cpu
+          prefix-key: v2-x86-64-v3
       - run: cargo test --workspace $EXCLUDE
 
   msrv:
@@ -77,5 +79,5 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.100
       - uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-generic-cpu
+          prefix-key: v2-x86-64-v3
       - run: cargo +1.100 check --workspace $EXCLUDE --all-targets

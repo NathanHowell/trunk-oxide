@@ -209,7 +209,7 @@ impl Inner {
             recording,
             power_db: (!power.is_nan()).then_some(power),
             freq_error,
-            preferred_ppm: source.ppm + f64::from(freq_error) / open.freq_hz * 1e6,
+            preferred_ppm: (f64::from(freq_error) / open.freq_hz).mul_add(1e6, source.ppm),
         }
     }
 

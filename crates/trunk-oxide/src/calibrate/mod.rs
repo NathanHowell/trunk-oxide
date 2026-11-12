@@ -306,7 +306,7 @@ mod tests {
             s ^= s << 13;
             s ^= s >> 7;
             s ^= s << 17;
-            (s >> 11) as f32 / (1u64 << 52) as f32 * 2.0 - 1.0
+            ((s >> 11) as f32 / (1u64 << 52) as f32).mul_add(2.0, -1.0)
         };
         (0..n)
             .map(|_| Complex32::new(next() * amp, next() * amp))

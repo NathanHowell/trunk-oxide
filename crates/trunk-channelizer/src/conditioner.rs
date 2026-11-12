@@ -93,8 +93,8 @@ impl Squelch {
         let mut j = 0;
         for i in 0..buf.len() {
             let x = buf[i];
-            let mag2 = f64::from(x.re * x.re + x.im * x.im);
-            self.pwr = a * mag2 + (1.0 - a) * self.pwr;
+            let mag2 = f64::from(x.im.mul_add(x.im, x.re * x.re));
+            self.pwr = (1.0 - a).mul_add(self.pwr, a * mag2);
             let mute = self.pwr < self.threshold;
             match self.state {
                 SqState::Muted => {
@@ -214,10 +214,10 @@ fn design_taps(sps: f32, rolloff: f32, filter_size: usize) -> (Vec<Complex32>, V
     let mut power = 0.0f32;
     let mut bb = Vec::with_capacity(filter_size);
     for i in 0..filter_size {
-        let k = -m + i as f32 * half_sps_inv;
+        let k = (i as f32).mul_add(half_sps_inv, -m);
         let position = rolloff * k;
         let tap = sinc(position - 0.5) + sinc(position + 0.5);
-        power += tap * tap;
+        power = tap.mul_add(tap, power);
         bb.push(tap);
     }
     let n = (filter_size as isize - 1) / 2;
@@ -378,7 +378,7 @@ impl Conditioner {
         let bw = (TAU / f64::from(self.sps) / 250.0 * self.p.fll_bw_scale) as f32;
         let damping = (2.0f32).sqrt() / 2.0;
         let (d, b) = (f64::from(damping), f64::from(bw));
-        let denom = 1.0 + 2.0 * d * b + b * b;
+        let denom = f64::mul_add(b, b, f64::mul_add(2.0 * d, b, 1.0));
         self.alpha = ((4.0 * d * b) / denom) as f32;
         self.beta = ((4.0 * b * b) / denom) as f32;
     }
@@ -434,8 +434,12 @@ impl Conditioner {
     fn probe(&mut self, input: &[Complex32]) {
         let pa = self.p.probe_alpha;
         for s in input {
-            let mag2 = f64::from(s.re) * f64::from(s.re) + f64::from(s.im) * f64::from(s.im);
-            self.probe = pa * mag2 + (1.0 - pa) * self.probe;
+            let mag2 = f64::mul_add(
+                f64::from(s.im),
+                f64::from(s.im),
+                f64::from(s.re) * f64::from(s.re),
+            );
+            self.probe = (1.0 - pa).mul_add(self.probe, pa * mag2);
         }
     }
 
@@ -486,11 +490,15 @@ impl Conditioner {
         let inv_ref = (1.0 / self.p.agc_reference) as f32;
         let aa = self.p.agc_alpha;
         for s in buf {
-            let mag2 = f64::from(s.re) * f64::from(s.re) + f64::from(s.im) * f64::from(s.im);
+            let mag2 = f64::mul_add(
+                f64::from(s.im),
+                f64::from(s.im),
+                f64::from(s.re) * f64::from(s.re),
+            );
 
             // rms_agc: x / (rms / ref + 1e-18)
-            self.agc_avg = (1.0 - aa) * self.agc_avg + aa * mag2;
-            let g = (self.agc_avg.sqrt() as f32) * inv_ref + 1e-18;
+            self.agc_avg = aa.mul_add(mag2, (1.0 - aa) * self.agc_avg);
+            let g = (self.agc_avg.sqrt() as f32).mul_add(inv_ref, 1e-18);
             let x = Complex32::new(s.re / g, s.im / g);
 
             // fll_band_edge_cc
@@ -499,8 +507,8 @@ impl Conditioner {
             let out_upper = self.lower.push(y);
             let out_lower = self.upper.push(y);
             let error = out_lower.norm_sqr() - out_upper.norm_sqr();
-            self.freq += self.beta * error;
-            self.phase += self.freq + self.alpha * error;
+            self.freq = self.beta.mul_add(error, self.freq);
+            self.phase += self.alpha.mul_add(error, self.freq);
             while self.phase > two_pi {
                 self.phase -= two_pi;
             }

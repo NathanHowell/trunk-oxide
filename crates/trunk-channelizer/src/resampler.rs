@@ -19,8 +19,13 @@ fn low_pass_2_bh(gain: f64, fs: f64, cutoff: f64, transition: f64, atten_db: f64
         .map(|n| {
             let n = n as f32;
             let two_pi = (2.0 * PI) as f32;
-            0.35875 - 0.48829 * (two_pi * n / m).cos() + 0.14128 * (2.0 * two_pi * n / m).cos()
-                - 0.01168 * (3.0 * two_pi * n / m).cos()
+            0.01168f32.mul_add(
+                -(3.0 * two_pi * n / m).cos(),
+                0.14128f32.mul_add(
+                    (2.0 * two_pi * n / m).cos(),
+                    0.48829f32.mul_add(-(two_pi * n / m).cos(), 0.35875),
+                ),
+            )
         })
         .collect();
     let half = (ntaps - 1) / 2;
@@ -37,7 +42,7 @@ fn low_pass_2_bh(gain: f64, fs: f64, cutoff: f64, transition: f64, atten_db: f64
     }
     let mut fmax = f64::from(taps[half]);
     for t in &taps[half + 1..] {
-        fmax += 2.0 * f64::from(*t);
+        fmax = 2.0f64.mul_add(f64::from(*t), fmax);
     }
     let g = gain / fmax;
     for t in &mut taps {

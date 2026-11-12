@@ -33,7 +33,7 @@ pub fn lowpass_taps(rate: f64, cutoff_hz: f64, transition_hz: f64, atten_db: f64
     let beta = if atten_db > 50.0 {
         0.1102 * (atten_db - 8.7)
     } else if atten_db >= 21.0 {
-        0.5842 * (atten_db - 21.0).powf(0.4) + 0.07886 * (atten_db - 21.0)
+        0.07886f64.mul_add(atten_db - 21.0, 0.5842 * (atten_db - 21.0).powf(0.4))
     } else {
         0.0
     };
@@ -50,7 +50,7 @@ pub fn lowpass_taps(rate: f64, cutoff_hz: f64, transition_hz: f64, atten_db: f64
                 (wc * x).sin() / (PI * x)
             };
             let r = x / mid.max(1.0);
-            sinc * i0(beta * (1.0 - r * r).max(0.0).sqrt()) / denom
+            sinc * i0(beta * r.mul_add(-r, 1.0).max(0.0).sqrt()) / denom
         })
         .collect();
     let sum: f64 = taps.iter().sum();

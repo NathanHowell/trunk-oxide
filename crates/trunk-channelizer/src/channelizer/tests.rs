@@ -20,8 +20,10 @@ fn synth(fs: f64, centre: f64, tones: &[Tone], start: usize, len: usize) -> Vec<
             let t = n as f64 / fs;
             let mut acc = Complex64::new(0.0, 0.0);
             for tone in tones {
-                acc +=
-                    Complex64::from_polar(tone.amp, TAU * (centre + tone.off_hz) * t + tone.phase);
+                acc += Complex64::from_polar(
+                    tone.amp,
+                    (TAU * (centre + tone.off_hz)).mul_add(t, tone.phase),
+                );
             }
             Complex32::new(acc.re as f32, acc.im as f32)
         })

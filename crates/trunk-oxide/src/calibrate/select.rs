@@ -141,9 +141,9 @@ impl NoiseModel {
                 let (mut s00, mut s01, mut s11, mut r0, mut r1) = (0.0, 0.0, 0.0, 0.0, 0.0);
                 for &(g, floor) in points {
                     let (u, v) = (1.0 / lin(floor), lin(slope * g) / lin(floor));
-                    s00 += u * u;
-                    s01 += u * v;
-                    s11 += v * v;
+                    s00 = f64::mul_add(u, u, s00);
+                    s01 = f64::mul_add(u, v, s01);
+                    s11 = f64::mul_add(v, v, s11);
                     r0 += u;
                     r1 += v;
                 }
@@ -364,7 +364,7 @@ mod tests {
     fn modelled(a: f64, equal_at: f64, s: f64) -> Vec<GainPoint> {
         STEPS
             .iter()
-            .map(|&g| point(g, db(lin(a) + lin(a + s * (g - equal_at))), 0.0))
+            .map(|&g| point(g, db(lin(a) + lin(s.mul_add(g - equal_at, a))), 0.0))
             .collect()
     }
 

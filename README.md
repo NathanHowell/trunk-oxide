@@ -119,27 +119,62 @@ development package is absent) and protobuf (`protobuf-compiler`,
 
 ## Architecture
 
-```
-RTL-SDR dongles (librtlsdr)        IQ captures (replay)
-    |                                   |
-    v  trunk-sdr: one sample stream per source
-trunk-channelizer: shared FFT channelizer per source, one DSP thread each
-    |
-    v  slot decoders: trunk-p25 (control + voice), trunk-fm (analog)
-trunk-radio: channels opened per call (P25 voice, analog FM, P25 control)
-    |
-    v  RadioEvents + audio
-trunk-oxide: call state machine, EventBridge
-    |
-    v  gRPC over Unix socket
-trunk-discord ------> Discord
-    |
-    v  gRPC over Unix socket
-trunk-whisperer / trunk-parakeet ----> speech to text
+```mermaid
+flowchart LR
+    subgraph inputs[" "]
+        direction TB
+        rtl[RTL-SDR dongles<br/>librtlsdr]
+        iq[IQ captures<br/>replay]
+    end
+
+    subgraph oxide["trunk-oxide"]
+        direction LR
+        subgraph dsp["one DSP thread per source"]
+            direction TB
+            sdr[trunk-sdr<br/>sample stream]
+            chan[trunk-channelizer<br/>shared FFT channelizer]
+            dec["slot decoders<br/>trunk-p25 control + voice<br/>trunk-fm analog"]
+            sdr --> chan --> dec
+        end
+        csm["call state machine<br/>+ channel allocation<br/>(tokio monitor loop)"]
+        bridge[EventBridge<br/>gRPC server]
+        dec -- RadioEvents --> csm
+        csm -- "open / close channels<br/>(trunk-radio)" --> chan
+        csm -- call events --> bridge
+        dec -- audio --> bridge
+    end
+
+    rtl --> sdr
+    iq --> sdr
+
+    discord[trunk-discord]
+    stt["trunk-whisperer / trunk-parakeet /<br/>trunk-whistle<br/>speech to text"]
+    db[(SQLite<br/>trunk-database)]
+    dc((Discord))
+
+    bridge -- gRPC over Unix socket --> discord
+    discord -- Transcriber gRPC --> stt
+    discord --> db
+    discord --> dc
+
+    vm[(VictoriaMetrics)]
+    jaeger[(Jaeger)]
+    monitor[trunk-monitor]
+    weather[trunk-weather]
+
+    oxide -. OTel metrics + traces .-> vm
+    oxide -.-> jaeger
+    discord -.-> jaeger
+    weather -. Tempest observations .-> vm
+    vm --> monitor --> dc
 ```
 
-Each source runs its own DSP thread; the call state machine runs on a tokio
-monitor loop fed by an async channel of radio events.
+Each source runs its own DSP thread: it reads its stream, runs the shared
+channelizer and every decoder on its slots, sends radio events to the call
+state machine and audio straight to the EventBridge. The state machine runs on
+a tokio monitor loop, decides which calls hold one of the `max_channels`
+channels, and opens and closes them on the radio. See
+[docs/architecture.md](docs/architecture.md) for the details.
 
 ## License
 

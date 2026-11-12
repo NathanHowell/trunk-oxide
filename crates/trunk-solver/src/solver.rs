@@ -592,6 +592,25 @@ mod tests {
     }
 
     #[test]
+    fn a_plan_names_the_driver_trunk_oxide_opens_and_rates_it_can_channelize() {
+        let plan = plan(
+            &live_channels(),
+            &vec![Device::rtlsdr(); 4],
+            &Options::default(),
+        )
+        .expect("a plan");
+        for s in &plan.sources {
+            assert_eq!(s.driver, "rtlsdr", "{s:?}");
+            assert_eq!(s.rate % 24_000, 0, "{s:?}");
+            assert!(
+                trunk_channelizer::Config::standard(f64::from(i32::try_from(s.rate).unwrap()))
+                    .is_ok(),
+                "{s:?}"
+            );
+        }
+    }
+
+    #[test]
     fn no_centre_sits_on_a_channel_or_its_dc_spike() {
         let plan = plan(
             &live_channels(),

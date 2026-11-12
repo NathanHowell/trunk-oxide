@@ -344,7 +344,7 @@ There is no web, WASM or mobile build. `.cargo/config.toml` sets `target-cpu=znv
 | Binary | Purpose | Limits |
 |---|---|---|
 | `trunk-replay` (`crates/trunk-oxide/src/bin/trunk-replay/`) | runs the real pipeline on recorded IQ (`run`, `sweep`, `compare`, `taps`); see [`REPLAY.md`](../crates/trunk-oxide/REPLAY.md) | `iqfile` sources only, cu8 or cf32; speed `1x` is wall-clock and must be a release build to keep up, `max` is deterministic and uses `Pacer` + `Clock::manual` |
-| `trunk-solver` | Z3-based plan of device centres and rates covering all configured channels; prints `[recorder] max_channels` | knows `rtl` and `airspy` device templates (`device.rs`), though the scanner drives RTL-SDRs only; plans with `passband::USABLE` |
+| `trunk-solver` | exact search for the dongle centres and rates that cover every configured channel; prints `[recorder] max_channels` | RTL-SDRs only (`device.rs`), rates a multiple of 24 kHz; plans with `passband::USABLE` |
 | `trunk-discord ab` | blind A/B listening posts and tallies (`ab.rs`) | needs a Discord guild |
 | `examples/` in `trunk-p25`, `trunk-fm`, `trunk-channelizer`, `trunk-sdr`, `trunk-discord` | golden scorers, benchmarks, probes | development tools |
 

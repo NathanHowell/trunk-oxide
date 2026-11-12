@@ -10,8 +10,8 @@ pub struct Device {
     pub ppm: i64,
     pub driver: String,
     pub device_template: String,
-    /// Sample rate must be a multiple of this value (driver requirement).
-    /// For osmosdr sources, trunk-recorder requires a multiple of 24000.
+    /// Sample rate must be a multiple of this value: the channelizer
+    /// decimates to its 24 kHz narrow channels by a whole number.
     pub rate_multiple: i64,
     /// The centre it runs at now, if it is already placed: of two plans that
     /// cost the same, the one that moves the dongles least wins.
@@ -27,20 +27,8 @@ impl Device {
                 SampleRate::Range(900_001, 2_496_000),
             ],
             ppm: 1,
-            driver: "osmosdr".into(),
+            driver: "rtlsdr".into(),
             device_template: "rtl={}".into(),
-            rate_multiple: 24_000,
-            near: None,
-        }
-    }
-
-    #[must_use]
-    pub fn airspy() -> Self {
-        Self {
-            sample_rates: vec![SampleRate::Exact(2_500_000), SampleRate::Exact(10_000_000)],
-            ppm: 1,
-            driver: "osmosdr".into(),
-            device_template: "airspy={}".into(),
             rate_multiple: 24_000,
             near: None,
         }
@@ -50,20 +38,17 @@ impl Device {
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "rtlsdr" => Some(Self::rtlsdr()),
-            "airspy" => Some(Self::airspy()),
             _ => None,
         }
     }
 
-    /// Infer device type from a trunk-recorder source `device` string
-    /// (e.g. `"rtl=0"`, `"airspy=1"`), overriding ppm with the value from
-    /// the existing config.
+    /// Infer the device type from a source's `device` string (`"rtl=SERIAL"`),
+    /// overriding ppm with the value from the existing config.
     #[must_use]
     pub fn from_source_config(device_str: &str, ppm: i64) -> Option<Self> {
         let prefix = device_str.split('=').next()?;
         let mut device = match prefix {
             "rtl" => Self::rtlsdr(),
-            "airspy" => Self::airspy(),
             _ => return None,
         };
         device.ppm = ppm;

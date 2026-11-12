@@ -5,12 +5,14 @@ use crate::Tunable;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SourceDriver {
-    /// gr-osmosdr inside GNU Radio (any device it supports).
+    /// The old gr-osmosdr source: still parsed so trunk-oxide can say it is
+    /// no longer supported.
     Osmosdr,
     /// An RTL-SDR dongle opened and streamed by trunk-oxide itself (librtlsdr,
     /// no GNU Radio source block). `device` is the serial, with or without
     /// the `rtl=` prefix.
     Rtlsdr,
+    /// The old UHD source: parsed only to be refused, like `Osmosdr`.
     Usrp,
     /// A raw IQ file (`device` is its path, `iq_format` its sample
     /// format) played at `rate` by trunk-oxide.

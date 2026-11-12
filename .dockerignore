@@ -1,12 +1,7 @@
 target/
 .git/
 .claude/
-trunk-recorder/.git/
-trunk-recorder/build/
-trunk-recorder.old/
 secrets/
-# build.rs-generated osmosdr/uhd compat stubs (host-specific; must be
-# regenerated against the build image's real headers, never copied in)
 *.tar.xz
 *.dsc
 # Build artifacts and editor cruft never needed in the build context

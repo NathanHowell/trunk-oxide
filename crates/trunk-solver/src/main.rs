@@ -14,7 +14,7 @@ struct Cli {
     #[arg(long, default_value = "config.toml")]
     config: PathBuf,
 
-    /// Device types to use (e.g., rtlsdr, airspy). Repeat for multiple devices.
+    /// Device types to use (only rtlsdr). Repeat for multiple devices.
     /// If omitted, inferred from the existing sources in the config file.
     #[arg(long = "device")]
     devices: Vec<String>,

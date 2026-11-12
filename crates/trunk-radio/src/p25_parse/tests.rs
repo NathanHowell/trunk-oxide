@@ -420,7 +420,7 @@ fn typed_messages_parse_as_their_op25_form() {
 }
 
 /// Every message trunk-p25 decodes from a capture's control channel taps
-/// (`*.out.cf32`): `TRUNK_P25_TAPS=<dir> cargo test -p trunk-recorder-sys
+/// (`*.out.cf32`): `TRUNK_P25_TAPS=<dir> cargo test -p trunk-radio
 /// --release --lib typed_capture -- --ignored --nocapture`.
 #[test]
 #[ignore = "needs TRUNK_P25_TAPS"]

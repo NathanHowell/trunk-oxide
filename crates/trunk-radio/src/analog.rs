@@ -632,9 +632,11 @@ mod tests {
 
     #[test]
     fn only_a_digital_channel_is_a_clock_reference() {
-        assert!(!AnalogFm::CLOCK_REFERENCE);
-        assert!(crate::P25Voice::CLOCK_REFERENCE);
-        assert!(crate::P25Control::CLOCK_REFERENCE);
+        const {
+            assert!(!AnalogFm::CLOCK_REFERENCE);
+            assert!(crate::P25Voice::CLOCK_REFERENCE);
+            assert!(crate::P25Control::CLOCK_REFERENCE);
+        }
     }
 
     #[test]

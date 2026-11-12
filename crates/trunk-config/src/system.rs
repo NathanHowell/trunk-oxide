@@ -629,32 +629,20 @@ mod talkgroup_file_tests {
     }
 
     #[test]
-    fn the_checked_in_talkgroup_files_load_every_row() {
-        for name in [
-            "smco-talkgroups.csv",
-            "svrcs-talkgroups.csv",
-            "ebrcs-talkgroups.csv",
-            "cris-talkgroups.csv",
-        ] {
-            assert_eq!(
-                load(name).len(),
-                rows(name),
-                "{name}: a row was lost or duplicated"
-            );
-        }
+    fn the_example_talkgroup_file_loads_every_row() {
+        let name = "talkgroups.csv.example";
+        assert_eq!(load(name).len(), rows(name), "a row was lost or duplicated");
     }
 
     #[test]
-    fn the_scraped_systems_keep_their_encryption() {
-        let ebrcs = load("ebrcs-talkgroups.csv");
-        assert_eq!(
-            ebrcs.values().filter(|t| t.mode.is_encrypted()).count(),
-            180
-        );
-        let cris = load("cris-talkgroups.csv");
-        assert_eq!(cris.values().filter(|t| t.mode.is_encrypted()).count(), 48);
-        // an EBRCS interop talkgroup and Oakland PD dispatch
-        assert_eq!(ebrcs[&1002].alpha_tag, "EB INT 1");
-        assert!(ebrcs[&3405].mode.is_encrypted());
+    fn the_example_talkgroups_keep_their_encryption() {
+        let tgs = load("talkgroups.csv.example");
+        // TE and DE are encrypted; RadioReference's partial "Te" is not known
+        // and loads as unencrypted.
+        assert_eq!(tgs.values().filter(|t| t.mode.is_encrypted()).count(), 2);
+        assert!(tgs[&103].mode.is_encrypted());
+        assert!(tgs[&105].mode.is_encrypted());
+        assert!(!tgs[&104].mode.is_encrypted());
     }
+
 }

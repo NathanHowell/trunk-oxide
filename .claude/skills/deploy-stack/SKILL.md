@@ -7,7 +7,7 @@ description: Build and deploy trunk-oxide and trunk-discord to the running podma
 
 Everything is a `just` recipe (see `justfile`); run `just --list`. The stack
 is rootless podman-compose, project `trunk-oxide`, working dir `~/trunk-oxide`.
-Only `trunk-oxide` (recorder, `Dockerfile.trunk-recorder`), `trunk-discord`
+Only `trunk-oxide` (recorder, `Dockerfile.oxide`), `trunk-discord`
 (`Dockerfile.discord`), `trunk-monitor` (the #monitoring dashboard,
 `Dockerfile.monitor`) and `trunk-weather` (the Tempest weather station into
 VictoriaMetrics, `Dockerfile.weather`; needs `secrets/tempest_token`) carry

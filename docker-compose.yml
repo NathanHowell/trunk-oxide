@@ -2,7 +2,7 @@ services:
   trunk-oxide:
     build:
       context: .
-      dockerfile: Dockerfile.trunk-recorder
+      dockerfile: Dockerfile.oxide
       args:
         TARGET_CPU: ${TARGET_CPU:-native}
     restart: unless-stopped

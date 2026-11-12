@@ -334,30 +334,21 @@ channel_id = 123456789
         use std::path::Path;
         let csv_path = Path::new(concat!(
             env!("CARGO_MANIFEST_DIR"),
-            "/../../smco-talkgroups.csv"
+            "/../../talkgroups.csv.example"
         ));
         let tgs = crate::system::load_talkgroups_csv(csv_path).unwrap();
-        assert!(tgs.len() > 50, "expected 50+ talkgroups, got {}", tgs.len());
+        assert_eq!(tgs.len(), 7);
 
-        let tg865 = &tgs[&865];
-        assert_eq!(tg865.id, 865);
-        assert_eq!(tg865.mode, crate::TalkgroupMode::Digital);
-        assert_eq!(tg865.alpha_tag, "SMC SO PatPri 1");
-        assert_eq!(tg865.tag, "Law Dispatch");
-        assert_eq!(tg865.group, "County Sheriff");
-        assert_eq!(tg865.priority, Some(1));
+        let tg101 = &tgs[&101];
+        assert_eq!(tg101.id, 101);
+        assert_eq!(tg101.mode, crate::TalkgroupMode::Digital);
+        assert_eq!(tg101.alpha_tag, "PD Dispatch");
+        assert_eq!(tg101.tag, "Law Dispatch");
+        assert_eq!(tg101.group, "City Police");
+        assert_eq!(tg101.priority, Some(1));
 
-        let csv_path = Path::new(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../svrcs-talkgroups.csv"
-        ));
-        let tgs = crate::system::load_talkgroups_csv(csv_path).unwrap();
-        assert!(
-            tgs.len() > 400,
-            "expected 400+ talkgroups, got {}",
-            tgs.len()
-        );
-        assert_eq!(tgs[&1551].mode, crate::TalkgroupMode::TrunkedEncrypted);
+        assert_eq!(tgs[&103].mode, crate::TalkgroupMode::TrunkedEncrypted);
+        assert_eq!(tgs[&103].priority, None);
     }
 
     #[test]
@@ -574,26 +565,32 @@ alpha_tag = "Custom Ch"
     }
 
     #[test]
-    fn parse_real_discord_config() {
-        let toml = std::fs::read_to_string(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../config-discord.toml"
-        ))
-        .unwrap();
-        let config: Config = toml::from_str(&toml).unwrap();
-        let discord = config.discord.expect("missing discord section");
-        assert!(!discord.groups.is_empty());
+    fn the_example_configs_parse() {
+        let read = |name: &str| {
+            let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../..")
+                .join(name);
+            let text = std::fs::read_to_string(&path).unwrap();
+            toml::from_str::<Config>(&text).unwrap_or_else(|e| panic!("{name}: {e}"))
+        };
 
-        let total_tgs: usize = discord
+        let oxide = read("config.toml.example");
+        assert!(oxide.recorder.is_some());
+        assert_eq!(oxide.source.len(), 1);
+        assert_eq!(oxide.system.len(), 2);
+
+        let discord = read("config-discord.toml.example")
+            .discord
+            .expect("missing discord section");
+        let mapped: usize = discord
             .groups
             .iter()
             .flat_map(|g| &g.channels)
             .flat_map(|c| &c.talkgroups)
             .map(|s| s.ids.len())
             .sum();
-        assert!(
-            total_tgs > 100,
-            "expected 100+ mapped talkgroups, got {total_tgs}"
-        );
+        assert_eq!(mapped, 5);
+
+        assert!(read("config-monitor.toml.example").monitor.is_some());
     }
 }

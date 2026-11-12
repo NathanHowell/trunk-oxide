@@ -3,6 +3,8 @@ name = "trunk-p25"
 description = "P25 Phase 1 control-channel receiver: differential demodulator, frame sync, NID, soft-decision trellis and TSBK/MBT extraction."
 edition.workspace = true
 version.workspace = true
+license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]

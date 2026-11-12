@@ -8,23 +8,39 @@ Recorded calls are streamed over gRPC to companion services for transcription an
 
 **trunk-oxide** -- The core scanner. Reads TOML config, calibrates and opens the SDR sources, builds the radio (trunk-radio) and exposes a gRPC event stream for call data and audio.
 
-**trunk-discord** -- Discord bot that subscribes to trunk-oxide events. Posts call recordings with metadata (talkgroup, unit IDs, duration) as embeds in organized Discord channels, with optional transcriptions from trunk-whisperer.
+**trunk-discord** -- Discord bot that subscribes to trunk-oxide events. Posts call recordings with metadata (talkgroup, unit IDs, duration) as embeds in organized Discord channels, with optional transcriptions.
 
-**trunk-whisperer** -- Speech-to-text service powered by [whisper.cpp](https://github.com/ggerganov/whisper.cpp). Transcribes call audio on demand via gRPC.
+**trunk-whisperer** / **trunk-parakeet** / **trunk-whistle** -- Interchangeable speech-to-text backends serving the same `Transcriber` gRPC service: [whisper.cpp](https://github.com/ggerganov/whisper.cpp) (optional CUDA), NVIDIA Parakeet via ONNX Runtime, and the CPU-only Cactus Whistle model. Pick one at the container level.
 
-**trunk-solver** -- Offline optimization tool that uses a Z3 SMT solver to compute optimal SDR device assignments (center frequencies, sample rates, gains) to cover all configured channels with minimal hardware.
+**trunk-monitor** -- Keeps a metrics dashboard (a chart drawn from VictoriaMetrics) up to date in a Discord channel.
+
+**trunk-weather** -- Streams a Tempest weather station's observations into VictoriaMetrics, to line up with decode quality. Optional.
+
+**trunk-solver** -- Plans which dongle runs which center frequency and sample rate so every configured channel is covered, using as few dongles as possible.
+
+**trunk-uls** -- Reads the FCC's land-mobile licence data for the sites licensed around the receiver, compares them with what the config scans, and turns an `rtl_power` sweep into channel occupancy.
 
 ## Configuration
 
 All services are configured with TOML files. Talkgroup and channel databases can be defined inline or loaded from CSV files (compatible with [RadioReference](https://www.radioreference.com/) exports), with TOML entries acting as overlays to selectively override CSV fields.
 
-Example `config.toml` for trunk-oxide:
+Copy the examples and edit them for your system; the live files are gitignored:
+
+| Example | Copy to | Used by |
+|---|---|---|
+| `config.toml.example` | `config.toml` | trunk-oxide |
+| `talkgroups.csv.example`, `conventional-channels.csv.example` | named by `talkgroup_file` / `channel_file` | trunk-oxide |
+| `config-discord.toml.example` | `config-discord.toml` | trunk-discord |
+| `config-monitor.toml.example` | `config-monitor.toml` | trunk-monitor |
+
+`config-whisperer.toml`, `config-parakeet.toml` and `config-whistle.toml` are generic and checked in.
+
+A `config.toml` for trunk-oxide:
 
 ```toml
 [recorder]
 temp_dir = "/dev/shm"
 call_timeout = 3.0
-soft_vocoder = true
 max_channels = 8       # channels open at once, across every source (see below)
 
 [[source]]
@@ -38,7 +54,7 @@ gain = 40.0
 type = "p25"
 control_channels = [772031250.0, 772406250.0]
 modulation = "qpsk"
-talkgroup_file = "smco-talkgroups.csv"
+talkgroup_file = "talkgroups.csv"
 # control_channel_priority = 0   # the control channels' claim (default 0)
 # emergency_priority = 0         # an emergency's claim, if better than its talkgroup's
 # default_priority = 4           # talkgroups without one (default: after every listed one)
@@ -63,14 +79,19 @@ Every control channel, trunked call and conventional channel holds one channel w
 The system is designed to run as a set of Docker containers communicating over gRPC via Unix domain sockets:
 
 ```
-docker compose up --build
+docker compose --profile whisper up --build
 ```
 
 This starts:
 - **trunk-oxide** -- scanner with access to USB SDR devices
-- **trunk-whisperer** -- transcription service (auto-downloads the Whisper model on first run)
+- **a transcriber**, when a profile picks one: `--profile whisper`, `--profile parakeet` or `--profile whistle` (a one-shot container downloads the model on first run)
 - **trunk-discord** -- Discord bot (requires a token in `secrets/discord_token`)
+- **trunk-monitor** -- the Discord metrics dashboard
+- **trunk-weather** -- Tempest weather metrics (requires a token in `secrets/tempest_token`)
 - **Jaeger** -- distributed tracing UI at `http://localhost:16686`
+- **VictoriaMetrics** -- metrics store for the OpenTelemetry metrics, queried by trunk-monitor
+
+`docker-compose.yml` bind-mounts `config.toml`, the talkgroup/channel CSVs and the service configs from the checkout; edit the CSV mounts to match the files your `config.toml` names.
 
 Services use health checks to enforce startup ordering and report readiness.
 
@@ -83,7 +104,7 @@ Services use health checks to enforce startup ordering and report readiness.
 
 ## Building from Source
 
-Requires Rust 1.93+ (edition 2024).
+Requires Rust 1.94+ (edition 2024).
 
 ```bash
 cargo build -p trunk-oxide
@@ -120,4 +141,12 @@ monitor loop fed by an async channel of radio events.
 
 ## License
 
-The P25 vocoders and the Motorola alias algorithm are ports of op25 and trunk-recorder code (GPL); librtlsdr is GPL-2. See their repositories for license details.
+trunk-oxide is licensed under the GNU General Public License v3.0 or later; see [LICENSE](LICENSE).
+
+Parts of it are ports of GPL code, and keep its terms:
+
+- The P25 decoders and IMBE/AMBE vocoders follow [op25](https://github.com/boatbod/op25) (GPL-3.0-or-later).
+- The Motorola alias algorithm and the call handling it grew from follow [trunk-recorder](https://github.com/robotastic/trunk-recorder) (GPL-3.0).
+- [librtlsdr](https://github.com/osmocom/rtl-sdr), linked at run time, is GPL-2.0-or-later.
+
+This software decodes radio traffic. Receiving, recording and redistributing public-safety communications is regulated differently in each jurisdiction; check the law where you are before you publish what you receive. trunk-oxide does not decrypt encrypted traffic.

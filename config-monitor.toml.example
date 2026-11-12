@@ -1,0 +1,12 @@
+# trunk-monitor: copy to config-monitor.toml. The metrics dashboard, edited
+# in place in one Discord channel.
+
+[monitor]
+channel_id = 100000000000000002
+victoriametrics_url = "http://victoriametrics:8428"
+# Seconds between refreshes. It reports unhealthy after three missed ones
+# (at least 15 minutes), and exits for a restart when wedged.
+refresh_secs = 300
+
+[grpc]
+listen_path = "/run/service/grpc.sock"

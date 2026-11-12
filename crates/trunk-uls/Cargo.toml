@@ -3,6 +3,8 @@ name = "trunk-uls"
 description = "Reads the FCC's Universal Licensing System bulk file for the sites and channels licensed around the receiver, against what the config scans."
 edition.workspace = true
 version.workspace = true
+license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 
 [lints]

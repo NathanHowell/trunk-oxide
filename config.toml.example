@@ -1,9 +1,44 @@
+# trunk-oxide: copy to config.toml and fill in your own system.
+# The real config.toml, the talkgroup/channel CSVs and config-discord.toml
+# are gitignored: they describe your receiver, not the project.
+
+[recorder]
+temp_dir = "/dev/shm"
+call_timeout = 3.0
+max_channels = 8          # channels open at once, across every source
+
+[[source]]
+driver = "rtlsdr"         # an RTL-SDR opened with librtlsdr; "iqfile" replays a capture
+device = "rtl=00000001"   # the dongle's USB serial (rtl_test lists it)
+center = 771496500.0
+rate = 2496000.0
+gain = 40.0
+ppm = 0.0
+
+# A P25 trunked system. Talkgroups come from a CSV (RadioReference's export
+# format) and/or [[system.NAME.talkgroup]] overlays.
+[system.p25]
+type = "p25"
+control_channels = [772031250.0, 772406250.0]
+modulation = "qpsk"       # simulcast: "qpsk" (CQPSK); a single site: "fsk4" (C4FM)
+talkgroup_file = "talkgroups.csv"
+# control_channel_priority = 0   # the control channels' claim (default 0)
+# emergency_priority = 0         # an emergency's claim, if better than its talkgroup's
+# default_priority = 4           # talkgroups without one (default: after every listed one)
+
+[[system.p25.talkgroup]]
+id = 101
+priority = 1
+
+# Analog conventional channels.
+[system.conv]
+type = "conventional"
+squelch = -50.0
+channel_file = "conventional-channels.csv"
+
+[[system.conv.channel]]
+id = 1
+priority = 2
+
 [grpc]
-listen_path = "/var/run/trunk-oxide/trunk-oxide.sock"
-
-[discord]
-bot_token = ""
-channel_id = 0
-
-[whisper]
-model_path = "/models/ggml-base.en.bin"
+listen_path = "/run/service/grpc.sock"

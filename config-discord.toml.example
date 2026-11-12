@@ -1,0 +1,48 @@
+# trunk-discord: copy to config-discord.toml. The bot token is passed with
+# --discord-token (docker-compose reads it from secrets/discord_token).
+
+[oxide]
+socket_path = "/run/trunk-oxide/grpc.sock"
+
+[whisperer]
+socket_path = "/run/trunk-whisperer/grpc.sock"
+
+[discord]
+channel_id = 100000000000000001   # the fallback channel for unmapped talkgroups
+guild_id = 100000000000000000
+# jaeger_url = "http://jaeger.example:16686"   # call embeds link to their trace
+
+[grpc]
+listen_path = "/run/service/grpc.sock"
+
+[audio]
+transcription_timeout_s = 60
+# Consecutive transmissions on one talkgroup within this window share an embed.
+coalesce_timeout_ms = 10000
+
+# Groups become Discord categories, channels become text channels, matched by
+# name on startup and created when missing.
+[[discord.groups]]
+name = "Police"
+
+[[discord.groups.channels]]
+name = "police-dispatch"
+talkgroups = [
+    { system = "p25", ids = [101, 102] },
+    { system = "conv", ids = [1] },
+]
+
+[[discord.groups.channels]]
+name = "police-tac"
+talkgroups = [
+    { system = "p25", ids = [103] },
+]
+
+[[discord.groups]]
+name = "Fire"
+
+[[discord.groups.channels]]
+name = "fire-dispatch"
+talkgroups = [
+    { system = "p25", ids = [201] },
+]

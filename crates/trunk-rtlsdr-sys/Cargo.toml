@@ -3,6 +3,8 @@ name = "trunk-rtlsdr-sys"
 description = "librtlsdr bindings: the RTL2832U dongle as a device handle, with a safe wrapper around every call trunk-oxide makes."
 edition.workspace = true
 version.workspace = true
+license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 links = "rtlsdr"
 

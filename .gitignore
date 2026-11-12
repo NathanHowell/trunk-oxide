@@ -7,3 +7,13 @@
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# Site data: the live configs and talkgroup/channel tables describe one
+# receiver. Copy the *.example files instead.
+/config.toml
+/config-discord.toml
+/config-discord.*.toml
+/config-monitor.toml
+/*.csv
+/.claude/skills/spectrum-survey/
+.beads.gate.lock

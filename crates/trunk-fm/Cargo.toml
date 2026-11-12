@@ -3,6 +3,8 @@ name = "trunk-fm"
 description = "Analog FM voice channel: demodulator, de-emphasis, audio filters, CTCSS and noise detectors, and the transmission gate."
 edition.workspace = true
 version.workspace = true
+license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]

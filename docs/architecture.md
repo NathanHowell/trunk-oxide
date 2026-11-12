@@ -335,7 +335,7 @@ Persisted: `<state_dir>/gain-calibration.json` (default `state_dir` `/var/lib/tr
 
 Logging: `tracing` with the `fmt` layer (its default writer, stdout), filtered by `RUST_LOG` (`EnvFilter::from_default_env`), plus the OTel layer when tracing is enabled. `trunk-discord` additionally keeps `serenity`'s spans out of exported traces.
 
-The consumers are separate processes, joined by Unix sockets on shared volumes (`oxide-socket`, `whisperer-socket` in `docker-compose.yml`): `trunk-discord` (`main.rs`, `dispatcher.rs`), one transcriber (profiles `whisper`, `parakeet`, `whistle`), and the Jaeger and VictoriaMetrics containers the metrics and traces go to. Images are built by `Dockerfile.trunk-recorder` (the scanner), `Dockerfile.discord`, `Dockerfile.whisperer`, `Dockerfile.parakeet`, `Dockerfile.whistle`; CI (`.github/workflows/docker.yml`) builds the first three.
+The consumers are separate processes, joined by Unix sockets on shared volumes (`oxide-socket`, `whisperer-socket` in `docker-compose.yml`): `trunk-discord` (`main.rs`, `dispatcher.rs`), one transcriber (profiles `whisper`, `parakeet`, `whistle`), and the Jaeger and VictoriaMetrics containers the metrics and traces go to. Images are built by `Dockerfile.oxide` (the scanner), `Dockerfile.discord`, `Dockerfile.whisperer`, `Dockerfile.parakeet`, `Dockerfile.whistle`; CI (`.github/workflows/docker.yml`) builds the first three.
 
 ## 6. Other binaries
 
@@ -409,8 +409,8 @@ Other conventions: frequencies are Hz as `f64` in config and on the wire (`Freq(
 | Concern | File(s) |
 |---|---|
 | Workspace members, lints, MSRV | `Cargo.toml`, `rust-toolchain.toml`, `.cargo/config.toml` |
-| Config schema and CSV overlay | `crates/trunk-config/src/lib.rs` (`Config::load`), `system.rs`, `source.rs`, `recorder.rs`, `service.rs`, `discord.rs`; examples `config.toml.example`, `config.toml` |
-| Talkgroup and channel tables | `smco-talkgroups.csv`, `svrcs-talkgroups.csv`, `conventional-channels.csv` (RadioReference-style CSV) |
+| Config schema and CSV overlay | `crates/trunk-config/src/lib.rs` (`Config::load`), `system.rs`, `source.rs`, `recorder.rs`, `service.rs`, `discord.rs`; examples `config.toml.example`, `config-discord.toml.example`, `config-monitor.toml.example` |
+| Talkgroup and channel tables | `talkgroups.csv.example`, `conventional-channels.csv.example` (RadioReference-style CSV; the live ones are gitignored) |
 | Startup, source and system wiring | `crates/trunk-oxide/src/main.rs`, `src/lib.rs` |
 | Call state machine, allocation, effects | `crates/trunk-oxide/src/call_state.rs`, `allocation.rs`, `call_manager.rs` |
 | Message dedup, clock, CPU weight | `dedup.rs`, `clock.rs`, `cpu_weight.rs` |

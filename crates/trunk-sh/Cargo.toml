@@ -3,6 +3,8 @@ name = "trunk-sh"
 description = "A /bin/sh for the distroless images that runs `sh -c COMMAND` and nothing else, so podman-compose's shell-wrapped healthchecks work."
 edition.workspace = true
 version.workspace = true
+license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 
 [[bin]]

@@ -3,6 +3,8 @@ name = "trunk-sdr"
 description = "SDR sources for the channelizer: an RTL-SDR dongle opened by serial, tuned and streamed as complex baseband, with the same sample scale as gr-osmosdr."
 edition.workspace = true
 version.workspace = true
+license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]

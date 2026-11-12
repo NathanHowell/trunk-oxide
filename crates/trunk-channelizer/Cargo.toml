@@ -3,6 +3,8 @@ name = "trunk-channelizer"
 description = "Shared overlap-save FFT channelizer (Borgerding / ka9q-radio style) on rustfft. wxt.1 spike."
 edition.workspace = true
 version.workspace = true
+license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 
 [dependencies]

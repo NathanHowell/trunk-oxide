@@ -3,6 +3,8 @@ name = "trunk-monitor"
 description = "Keeps a live metrics dashboard (a chart of VictoriaMetrics) up to date in a Discord channel."
 edition.workspace = true
 version.workspace = true
+license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 
 [lints]

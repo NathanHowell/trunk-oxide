@@ -14,7 +14,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - dockerfile: Dockerfile.trunk-recorder
+          - dockerfile: Dockerfile.oxide
             image: nathanhowell/trunk-oxide
           - dockerfile: Dockerfile.whisperer
             image: nathanhowell/trunk-whisperer

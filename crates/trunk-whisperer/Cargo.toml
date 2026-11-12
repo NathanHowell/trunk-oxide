@@ -2,6 +2,8 @@
 name = "trunk-whisperer"
 edition.workspace = true
 version.workspace = true
+license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 
 [lints]

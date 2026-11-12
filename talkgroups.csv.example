@@ -1,0 +1,8 @@
+Decimal,Hex,Mode,Alpha Tag,Description,Tag,Category,Priority
+101,65,D,PD Dispatch,Police Dispatch,Law Dispatch,City Police,1
+102,66,T,PD Tac 1,Police Tactical 1,Law Tac,City Police,2
+103,67,TE,PD Tac 2,"Police Tactical 2 - Districts A, B",Law Tac,City Police,
+104,68,Te,PD Admin,Police Administration,Law Talk,City Police,
+105,69,DE,PD Investigations,Investigations,Law Talk,City Police,3
+201,c9,D,FD Dispatch,Fire Dispatch,Fire Dispatch,County Fire,1
+202,ca,T,FD Command,Fire Command,Fire-Tac,County Fire,

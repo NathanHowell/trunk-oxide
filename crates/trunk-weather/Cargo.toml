@@ -3,6 +3,8 @@ name = "trunk-weather"
 description = "Streams a Tempest weather station's observations into VictoriaMetrics, to line up with the radio's decode quality."
 edition.workspace = true
 version.workspace = true
+license.workspace = true
+repository.workspace = true
 rust-version.workspace = true
 
 [lints]

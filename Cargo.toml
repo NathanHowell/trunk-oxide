@@ -42,6 +42,8 @@ default-members = [
 edition = "2024"
 version = "0.1.0"
 rust-version = "1.94"
+license = "GPL-3.0-or-later"
+repository = "https://github.com/NathanHowell/trunk-oxide"
 
 [workspace.lints.rust]
 unsafe_code = "deny"
